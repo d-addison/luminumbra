@@ -2,13 +2,19 @@
 
 #include <charconv>
 #include <cmath>
+#include <cstddef>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <ios>
 #include <limits>
 #include <sstream>
+#include <string>
 #include <system_error>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
@@ -21,7 +27,7 @@ namespace {
 // "terrain.shaping.enabled" -> json_pointer "/generation_params/terrain/shaping/enabled".
 nlohmann::json::json_pointer PointerFor(const std::string& dotted_path) {
     std::string ptr = "/generation_params/";
-    for (char ch : dotted_path)
+    for (const char ch : dotted_path)
         ptr += (ch == '.') ? '/' : ch;
     return nlohmann::json::json_pointer(ptr);
 }
@@ -100,9 +106,9 @@ bool RenameUserPreset(const std::filesystem::path& source,
 CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                                      const std::vector<WorldGenParam>& params) {
     CustomPresetResult result;
-    const auto resolved_base = Luminumbra::world::ResolveTerrainPresetDefaults(base);
+    const auto resolved_base = Luminumbra::world::ResolveEffectivePreset(
+        base, Luminumbra::world::TerrainPresetUse::NewWorld);
     result.json = resolved_base;
-    result.json["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
 
     for (const WorldGenParam& p : params) {
         if (p.path.empty()) {
@@ -179,6 +185,7 @@ KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
                                          const std::vector<WorldGenParam>& params) {
     using namespace Luminumbra::world;
     KnobPresetResult result;
+    const auto resolved_base = ResolveEffectivePreset(base, TerrainPresetUse::NewWorld);
 
     // 1. Split knob entries from raw advanced-panel override entries.
     KnobVector knobs = NeutralKnobVector();
@@ -208,7 +215,7 @@ KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
     }
 
     // 2. Apply the knob layer over the baseline (curated preset snapshot).
-    const nlohmann::json knob_applied = ApplyKnobLayer(base, knobs);
+    const nlohmann::json knob_applied = ApplyKnobLayer(resolved_base, knobs);
 
     // 3. The raw overrides are the SPARSE diff vs the KNOB-APPLIED base (so an
     //    advanced edit that merely matches the knob result records nothing). Reuse
@@ -221,7 +228,7 @@ KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
         if (p.path.empty())
             continue;
         std::string ptr = "/generation_params/";
-        for (char ch : p.path)
+        for (const char ch : p.path)
             ptr += (ch == '.') ? '/' : ch;
         const nlohmann::json::json_pointer jp(
             p.path == "biomes.enabled" ? "/generation_params/biomes/table" : ptr);
@@ -237,8 +244,8 @@ KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
 
     // 4. Persist BOTH layers: resolved generation_params (full) + the knob_layer
     //    (knobs + baseline snapshot + override diff) for exact reopen.
-    result.json = Luminumbra::world::ResolveTerrainPresetDefaults(base);
-    WriteKnobLayer(result.json, base, knobs, overrides);
+    result.json = resolved_base;
+    WriteKnobLayer(result.json, resolved_base, knobs, overrides);
     result.changed = knob_moved || !overrides.empty();
     return result;
 }

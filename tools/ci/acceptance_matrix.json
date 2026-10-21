@@ -3,6 +3,153 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "ci.ctest-shard-partitions",
+      "source": "tools/ci/test_ctest_shards.py",
+      "statement": "Eight disjoint CTest shard contract partitions retain every unittest case and the 30-second deadline with unchanged labels. Whole-case overrides balance the groups for Windows; Windows deadline qualification remains pending. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster and registration regressions pin exact coverage and reject invalid selections. Windows Python ci/tools contracts reserve four CTest slots in both engine and compiler-free local-check projects, with explicit costs prioritizing known slow cases. These scheduling properties add no shard relationship edges; Linux retains its existing slot policy. Python-only scheduler regressions check exclusive execution, cost ordering and progress with smaller parallelism.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart8"
+        }
+      ]
+    },
+    {
+      "id": "ci.workflow-policy-partitions",
+      "source": "tools/ci/test_workflow_policy.py",
+      "statement": "Ten disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for both new entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart8"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart9"
+        }
+      ]
+    },
+    {
+      "id": "ci.asan-fast-lane",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "Ready pull requests needing native validation run ChangedTranslationUnitsContract and OfflineDependenciesContract before ASan shards. A failed fast lane skips both shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "iss.500",
+      "source": "issue #500",
+      "statement": "Direct compile and tidy selection honors a nonempty LUMINUMBRA_BASE_REF, defaults to origin/devel when it is unset or empty, and gives explicit --base-ref priority. Unavailable or invalid refs fail without fallback or native work. The documented shell recipe uses the same environment default.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/ci/local-checks.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.scratch-preparation",
+      "source": "docs/ci/local-checks.md#worker-recipe",
+      "statement": "The documented prepare command checks original checkout and scratch components, fresh stage/init paths and all existing temporary, compiler-cache and build-tree entries before creating temporary/cache directories or exporting their paths. Redirects, non-directory components, special files and containment escapes refuse without writes; ordinary nested trees are allowed and checks repeat on every call.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContractPart2"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/ci/local-checks.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "iss.482",
       "source": "issue #482",
       "statement": "Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities.",
@@ -1586,7 +1733,7 @@
     {
       "id": "contract.dw.vertical.02",
       "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
-      "statement": "Acceptance obligations: the band-limited field is the recorded fallback. / Whatever is chosen, openings, overhangs and arches remain silhouette features to the full radius, and the acceptance stations include deep interiors and distant mouths beyond the noise-cave cutoff, not only within it. / Qualification must pin the cave-dense revision and identity. / The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7; / the revision-6 fixture is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. / See the shipping preset identities under \"Shipping defaults\" in the [engine guide](engine-guide.md) before comparing captures or synchronizing the game repository's fixture and identity sidecar.",
+      "statement": "Acceptance obligations: the band-limited field is the recorded fallback. / Whatever is chosen, openings, overhangs and arches remain silhouette features to the full radius, and the acceptance stations include deep interiors and distant mouths beyond the noise-cave cutoff, not only within it. / Qualification must pin the cave-dense revision and identity. / The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8; / the revision-6 fixture is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. / See the shipping preset identities under \"Shipping defaults\" in the [engine guide](engine-guide.md) before comparing captures or synchronizing the game repository's fixture and identity sidecar.",
       "status": "planned",
       "requirements": [
         "dw.vertical.007",
@@ -2347,7 +2494,7 @@
     {
       "id": "contract.ar.file.01",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "status": "planned",
       "requirements": [
         "ar.file.001",
@@ -2984,218 +3131,30 @@
       ]
     },
     {
-      "id": "iss.385",
-      "source": "issue #385",
-      "statement": "Complete saves use per-file atomic writes for chunks, plants and energy before the metadata phase in both region modes. Required state-writer failures retain the previous metadata and pending dirty chunks. Regions-disabled incremental saves preserve devel file layout and metadata bytes, including plant-only containers and unchanged server shutdowns. Explicit full snapshots provide complete save-as exports and retain canonical dirty flags and save stamps, including destinations with trailing separators. Plant, region and manifest writers stage outside the strict region scan and reclaim their abandoned staging before replacement; plant cleanup also runs for an empty roster. Client preset and settings writers check durable atomic publication before reporting success or removing a renamed source. Registered regressions cover writer failures, malformed presets, interrupted replacement, retries and partial chunk writes. Native execution remains required. The shared region staging calculation preserves Windows UNC roots while recognizing dot and parent components; path diagnostics require no network access, and native Windows durable-save qualification remains required. Bare relative container destinations reclaim abandoned staging in the current directory. All persistence writers serialize within the process through reclamation and publication, including region merges and empty-layer removal. Shared writes, metadata and empty energy and ledger saves reclaim abandoned staging while holding that ownership. Barrier-based overlapping region reclamation and shared empty-layer cleanup regressions are registered; native execution remains required.",
-      "status": "needs-native-run",
-      "evidence": [
-        {
-          "kind": "ctest",
-          "ref": "SnapshotEnergyFailure.FailureKeepsDirtyChunksAndRetryPersistsAllState"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses"
-        },
-        {
-          "kind": "ctest",
-          "ref": "CompleteSaveFailure.SiblingWriterFailureKeepsMetadataAndDirtyChunksPending"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.PartialChunkReplacementKeepsMetadataAndDirtyChunksPending"
-        },
-        {
-          "kind": "ctest",
-          "ref": "PlantPersistence.EmptyRosterRemovalErrorIsReportedAndCanRetry"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.EmptyEnergyRemovalFailureKeepsMetadataInBothRegionModes"
-        },
-        {
-          "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldDeathTest.TerminatedLedgerStagingLeavesLoadableAndSavableWorld"
-        },
-        {
-          "kind": "ctest",
-          "ref": "RuntimeConfigSourceContract"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.EmptyLegacyEnergySavePreservesRebasedCadence"
-        },
-        {
-          "kind": "ctest",
-          "ref": "HostSchedulerFault.ClientMetadataSaveFailureSuppressesSuccessAndAllowsRetry"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits"
-        },
-        {
-          "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
-        },
-        {
-          "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettle"
-        },
-        {
-          "kind": "ctest",
-          "ref": "PlantSaveRecovery.AbandonedStagingDoesNotBlockLoadsAndIsReclaimedOnEverySave"
-        },
-        {
-          "kind": "ctest",
-          "ref": "PlantSaveRecovery.InterruptedReplacementPreservesRosterAndRetryLeavesNoRegionDebris"
-        },
-        {
-          "kind": "ctest",
-          "ref": "UserPresetPersistence.InterruptedRenamePreservesSourceAndDestinationThenRetries"
-        },
-        {
-          "kind": "ctest",
-          "ref": "UserPresetPersistence.InvalidSourceAndPublicationFailurePreserveExistingFiles"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldgenOverrideTest.NumericOverridesRejectPartialNonfiniteAndOutOfRangeValues"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldgenOverrideTest.NumericBaselineComparisonIsExactAndRangeChecked"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldgenOverrideTest.KnobsRejectInvalidNumbersAndRetainFiniteClamping"
-        },
-        {
-          "kind": "ctest",
-          "ref": "UserPresetPersistence.AliasedDestinationKeepsThePublishedPreset"
-        },
-        {
-          "kind": "ctest",
-          "ref": "UserPresetPersistence.SourceRemovalFailureKeepsBothCompletePresets"
-        },
-        {
-          "kind": "ctest",
-          "ref": "RuntimeSystemConfig.OverlayReplacementFailurePreservesBytesAndRetryOverwrites"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.AbandonedRegionAndManifestStagingAllowsLoadAndIsReclaimedOnRetry"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.StandaloneContainerReclaimsAdjacentStagingAndPreservesRecords"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.ClientExitCompleteSavePublishesCapturedSpawnInBothRegionModes"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.ContainerStagingRecognizesNormalizedRegionPaths"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.RegionStagingPreservesRootsAndStandaloneSpelling"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.DurableContainerStagingHandlesParentComponentsAndInterruptedRetry"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.OverlappingRegionReclaimWaitsUntilStagedOwnerCompletes"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.OverlappingRegionMergesRetainBothWritersRecords"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.SharedWritesAndEmptyRemovalReclaimStagingOnEverySave"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldSaveService.EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop"
-        },
-        {
-          "kind": "native",
-          "ref": "tools/ci/check_acceptance_matrix.py",
-          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json>",
-          "receipt_schema": "luminumbra.acceptance_execution.v1"
-        },
-        {
-          "kind": "doc",
-          "ref": "docs/v0.3-acceptance.md"
-        }
-      ]
-    },
-    {
-      "id": "iss.429",
-      "source": "issue #429",
-      "statement": "Client defaults, server boot and network admission load systems configuration from the runtime root with native filesystem paths. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required. Directory watches retain RML and RCSS filters together and discover nested additions; registered regressions also cover duplicate registration, wildcards and removed directories.",
-      "status": "needs-native-run",
-      "evidence": [
-        {
-          "kind": "ctest",
-          "ref": "RuntimeSystemConfig.DefaultsAndUserOverlayComeFromRuntimeRoot"
-        },
-        {
-          "kind": "ctest",
-          "ref": "RuntimeSystemConfig.UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory"
-        },
-        {
-          "kind": "ctest",
-          "ref": "RuntimeConfigStartup.HostAndNetworkAdmissionIgnoreConflictingLaunchDefaults"
-        },
-        {
-          "kind": "ctest",
-          "ref": "RuntimeConfigSourceContract"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorldOpenRefusal.DirectoryWatchWildcardAndMissingDirectoryRemainSafe"
-        },
-        {
-          "kind": "native",
-          "ref": "tools/ci/check_acceptance_matrix.py",
-          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json>",
-          "receipt_schema": "luminumbra.acceptance_execution.v1"
-        },
-        {
-          "kind": "doc",
-          "ref": "docs/v0.3-acceptance.md"
-        }
-      ]
-    },
-    {
-      "id": "graphics.horizon-authority",
-      "source": "docs/engine-guide.md#world-generation-and-streaming",
-      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "id": "render.committed-residency-handoff",
+      "source": "docs/far-volume-memory.md#serving-and-target-handoff",
+      "statement": "The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Bounded retired-key history permits traversal beyond descriptor capacity while preserving serving/target span checks and global publication checks. Controller, renderer and diagnostic regressions using a fake GPU driver cover software behaviour for result-slot backpressure, overlap admission, supersession, upload failure and drain ownership. Native rendering qualification is still outstanding.",
       "status": "covered",
       "evidence": [
         {
           "kind": "ctest",
-          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+          "ref": "FarVolumeHandoff.*"
         },
         {
           "kind": "ctest",
-          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+          "ref": "FarVolumeHandoffArrivalTest.*"
         },
         {
           "kind": "ctest",
-          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+          "ref": "FarWorldHandoffRenderer.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldHandoffDiagnostics.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoffTraversal.*"
         }
       ]
     },
@@ -3608,6 +3567,104 @@
       ]
     },
     {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+        }
+      ]
+    },
+    {
+      "id": "shield.surface-work-admission",
+      "source": "docs/shield/sdf-contract.md#shield-sdf-contract",
+      "statement": "Synchronous surface and collision radii are bounded at 12 chunks (625 columns), with exact vertical work capped at 8192 chunks before allocation or chunk mutation. Replay decoding, recording, server boot and client scenario admission refuse unsupported radii before world creation or output. A refused preview candidate retains its live world and generation and permits another candidate. Existing accepted identities and encoding are preserved. Source checks are available; native boundary, overflow, refusal and identity regressions await execution.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ReplaySourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.CheckedColumnsAndExactVerticalBudget",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.DecimalAdmissionHasNoOverflowOrPartialFallback",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.HeaderDecodeAndWriterRefuseBothRadiiBeforeOutput",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.RunnerAndRecordingRefuseBeforeSessionOrFiles",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.RefusedWriterReopenRetainsQueuedRecordingAndPath",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.DirectSurfaceAndCollisionRefuseBeforeChunkMutation",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.TallSurfaceRefusesExactWorkBeforeCreatingChunks",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesInvalidRadiiAndAcceptsBoundariesInBothSpellings",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesBeforeCreatingSaveRootInEitherArgumentOrder",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.DirectScenarioConfigsRefuseBeforeWorldMutation",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "EffectivePresetIdentity.ReplayRadiusAdmissionPreservesBothIdentitiesAtBoundary",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenPreviewTest.RefusedFirstSurfaceKeepsWorldEmptyAndAcceptsNextCandidate",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenPreviewTest.RefusedSurfaceRetainsLiveWorldAndAllowsRecovery",
+          "planned": "registered native regression execution; owner: ac"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "net.receive-work",
       "source": "docs/engine-guide.md#persistence-replay-and-networking",
       "statement": "Each lockstep session entry point shares at most 1024 receive polls and a 256 KiB payload threshold plus one transport-bounded frame across nested drains. Saturation preserves pending messages and late checkpoint diagnostics; finite closure drains finish before storage release. Native regressions are registered; execution remains pending. Complete LREC1 streams remain version 3; diagnostic suffixes with an elided prefix use version 4.",
@@ -3722,6 +3779,246 @@
         {
           "kind": "doc",
           "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "iss.553-dependency-startup",
+      "source": "issue #553",
+      "statement": "A revision-bound Jolt startup patch uses a read-only source overlay and registered actual-dependency failure-injection regressions. Native ownership and platform qualification remain pending; first-party startup and world adoption are separate work.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "JoltStartupPatchContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/jolt-startup.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.MeasuredNullThrowAndUnwindSweep",
+          "planned": "Run actual-dependency failure and mutation controls with generated build owners; owner: physics"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "iss.563-build-inputs",
+      "source": "issue #563",
+      "statement": "Jolt overlay inputs retain exact LF bytes in autocrlf checkouts. Configuration requires Python 3.10 or newer even with BUILD_TESTING=OFF; compiler-free fixtures check interpreter discovery and overlay application. Zero-worker pool allocator and callback lifecycle qualification remains pending native execution.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "JoltStartupPatchContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.ZeroWorkersAcceptNullOnlyForZeroAllocatorAndExecuteBarrierJobs",
+          "planned": "Run the actual dependency regression with generated owners; owner: physics"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "iss.385",
+      "source": "issue #385",
+      "statement": "Complete saves use per-file atomic writes for chunks, plants and energy before the metadata phase in both region modes. Required state-writer failures retain the previous metadata and pending dirty chunks. Regions-disabled incremental saves preserve devel file layout and metadata bytes, including plant-only containers and unchanged server shutdowns. Explicit full snapshots provide complete save-as exports and retain canonical dirty flags and save stamps, including destinations with trailing separators. Plant, region and manifest writers stage outside the strict region scan and reclaim their abandoned staging before replacement; plant cleanup also runs for an empty roster. Client preset and settings writers check durable atomic publication before reporting success or removing a renamed source. Registered regressions cover writer failures, malformed presets, interrupted replacement, retries and partial chunk writes. Native execution remains required. The shared region staging calculation preserves Windows UNC roots while recognizing dot and parent components; path diagnostics require no network access, and native Windows durable-save qualification remains required. Bare relative container destinations reclaim abandoned staging in the current directory. All persistence writers serialize within the process through reclamation and publication, including region merges and empty-layer removal. Shared writes, metadata and empty energy and ledger saves reclaim abandoned staging while holding that ownership. Barrier-based overlapping region reclamation and shared empty-layer cleanup regressions are registered; native execution remains required.",
+      "status": "needs-native-run",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SnapshotEnergyFailure.FailureKeepsDirtyChunksAndRetryPersistsAllState"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CompleteSaveFailure.SiblingWriterFailureKeepsMetadataAndDirtyChunksPending"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.PartialChunkReplacementKeepsMetadataAndDirtyChunksPending"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PlantPersistence.EmptyRosterRemovalErrorIsReportedAndCanRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.EmptyEnergyRemovalFailureKeepsMetadataInBothRegionModes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldDeathTest.TerminatedLedgerStagingLeavesLoadableAndSavableWorld"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigSourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.EmptyLegacyEnergySavePreservesRebasedCadence"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.ClientMetadataSaveFailureSuppressesSuccessAndAllowsRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettle"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PlantSaveRecovery.AbandonedStagingDoesNotBlockLoadsAndIsReclaimedOnEverySave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PlantSaveRecovery.InterruptedReplacementPreservesRosterAndRetryLeavesNoRegionDebris"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.InterruptedRenamePreservesSourceAndDestinationThenRetries"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.InvalidSourceAndPublicationFailurePreserveExistingFiles"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.NumericOverridesRejectPartialNonfiniteAndOutOfRangeValues"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.NumericBaselineComparisonIsExactAndRangeChecked"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.KnobsRejectInvalidNumbersAndRetainFiniteClamping"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.AliasedDestinationKeepsThePublishedPreset"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.SourceRemovalFailureKeepsBothCompletePresets"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.OverlayReplacementFailurePreservesBytesAndRetryOverwrites"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.AbandonedRegionAndManifestStagingAllowsLoadAndIsReclaimedOnRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.StandaloneContainerReclaimsAdjacentStagingAndPreservesRecords"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ClientExitCompleteSavePublishesCapturedSpawnInBothRegionModes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.ContainerStagingRecognizesNormalizedRegionPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.RegionStagingPreservesRootsAndStandaloneSpelling"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.DurableContainerStagingHandlesParentComponentsAndInterruptedRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.OverlappingRegionReclaimWaitsUntilStagedOwnerCompletes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.OverlappingRegionMergesRetainBothWritersRecords"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.SharedWritesAndEmptyRemovalReclaimStagingOnEverySave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/ci/check_acceptance_matrix.py",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json>",
+          "receipt_schema": "luminumbra.acceptance_execution.v1"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/v0.3-acceptance.md"
+        }
+      ]
+    },
+    {
+      "id": "iss.429",
+      "source": "issue #429",
+      "statement": "Client defaults, server boot, network admission and replay preflight load systems configuration from the runtime root with native filesystem paths. Replay preflight freezes that configuration for identity matching and boot. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required. Directory watches retain RML and RCSS filters together and discover nested additions; registered regressions also cover duplicate registration, wildcards and removed directories.",
+      "status": "needs-native-run",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.DefaultsAndUserOverlayComeFromRuntimeRoot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigStartup.HostAndNetworkAdmissionIgnoreConflictingLaunchDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigSourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.DirectoryWatchWildcardAndMissingDirectoryRemainSafe"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/ci/check_acceptance_matrix.py",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json>",
+          "receipt_schema": "luminumbra.acceptance_execution.v1"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/v0.3-acceptance.md"
         }
       ]
     }

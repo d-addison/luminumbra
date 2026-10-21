@@ -5,38 +5,31 @@
 #include <glad/glad.h>
 
 #include "core/Log.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "core/RuntimeScenarioHarness.h"
-#include "core/scenarios/ScenarioCommon.h"
-#include "luminumbra_common/ai/CreatureSpeciesRegistry.h" //  species base_color -> creature tint
-#include "luminumbra_common/animation/AnimationRuntime.h"
-#include "luminumbra_common/components/CoreComponents.h"
-#include "luminumbra_common/components/InstinctComponents.h"
-#include "luminumbra_common/core/Environment.h"
-#include "luminumbra_common/core/JobSystem.h"
-#include "luminumbra_common/ecs/EntitySnapshot.h"
-#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
-#include "luminumbra_common/systems/CreatureProcgen.h" //  genome -> body-proportion build
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
-#include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
-#include "rendering/Camera.h"
-#include "rendering/LightningBolt.h"
-#include "rendering/passes/FoliagePass.h"
-#include "rendering/passes/ParticlePass.h"
+#include <atomic>
+#include <exception>
+#include <filesystem>
+#include <glm/geometric.hpp>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
+#include <vector>
 // lockstep transport seam (engine-generic; ILockstepTransport +
 // LoopbackTransport + LockstepSession). Named SendFrame/TryReceiveFrame to dodge
 // the <windows.h> SendMessage macro (see LockstepSession.h note).
-#include "luminumbra_common/net/LockstepSession.h"
 //  (AU1): atmosphere audio telemetry. The harness sweeps the replicated
 // weather/wind state through the REAL EnvironmentalAudioSystem atmosphere model +
 // the AudioPropagationSystem ambience bed and emits the AtmosphereAudio artifact.
 // Client-side dressing only -- no world_hash, no visual-gate dependency.
-#include "audio/AudioPropagationSystem.h"
-#include "audio/EnvironmentalAudioSystem.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -45,8 +38,6 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
-#include <limits>
-#include <sstream>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -137,6 +128,10 @@ PersistenceRoundtripPhaseResult
 RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
                                  Luminumbra::world::GameSession* game_session) {
     PersistenceRoundtripPhaseResult result;
+    if (!World::SurfaceRadiiSupported(config.horizon_radius, config.collision_radius)) {
+        result.failure_reason = "surface_radius_unsupported";
+        return result;
+    }
     if (!game_session || !game_session->GetWorldSystem()) {
         result.failure_reason = "world_system_missing";
         return result;
@@ -154,6 +149,14 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
     world_system->wait_for_streaming_jobs();
 
     const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
+    // Refuse unsupported surface work before carving or writing a save.
+    if (!world_system->EnsureSurfaceReadyNear(spawn,
+                                              game_session->GetPhysicsSystem(),
+                                              config.horizon_radius,
+                                              config.collision_radius)) {
+        result.failure_reason = "surface_not_ready";
+        return result;
+    }
     std::vector<std::shared_ptr<Luminumbra::Chunk>> edited_chunks;
     for (const CarveSphereSpec& sphere : kPersistenceCarveSpheres) {
         // Anchor each carve to the column's surface chunk exactly the way the
@@ -197,8 +200,13 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
         }
     }
 
-    world_system->EnsureSurfaceReadyNear(
-        spawn, game_session->GetPhysicsSystem(), config.horizon_radius, config.collision_radius);
+    if (!world_system->EnsureSurfaceReadyNear(spawn,
+                                              game_session->GetPhysicsSystem(),
+                                              config.horizon_radius,
+                                              config.collision_radius)) {
+        result.failure_reason = "surface_not_ready";
+        return result;
+    }
     world_system->wait_for_streaming_jobs();
 
     // Hash contract: only the edited (dirty-at-save) chunks are hashed; the
@@ -212,7 +220,7 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
     }
     std::sort(edited_chunk_ids.begin(), edited_chunk_ids.end());
 
-    Luminumbra::Persistence::WorldSaveService save_service;
+    const Luminumbra::Persistence::WorldSaveService save_service;
     const std::string world_hash = save_service.world_hash(restricted);
 
     Luminumbra::world::WorldStateSaveReport save_report;
@@ -320,7 +328,7 @@ RunPersistenceRoundtripLoadPhase(const RuntimeScenarioConfig& config,
     // Hash over a fresh WorldSaveService::load_world pass (the load path under
     // test) so post-adoption remeshing in the live world cannot skew the
     // comparison; restrict to exactly the chunk ids the save phase recorded.
-    Luminumbra::Persistence::WorldSaveService save_service;
+    const Luminumbra::Persistence::WorldSaveService save_service;
     Luminumbra::WorldStreamingState loaded;
     std::vector<std::string> load_errors;
     if (!save_service.load_world(loaded, config.persistence_session_dir, load_errors)) {

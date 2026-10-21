@@ -41,6 +41,17 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           source)
             self.assertNotIn('"data/common/systems.json"', source)
 
+    def test_replay_admission_freezes_runtime_defaults_before_identity_matching(self):
+        replay = self.admission[self.admission.index("ReplayRunnerConfigFrom("):]
+        load = ("options.systems_config_override?*options.systems_config_override:"
+                "luminumbra::core::SystemConfig::LoadFromRuntimeRoot(root);")
+        self.assertIn(load, replay)
+        self.assertLess(replay.index(load),
+                        replay.index("config.systems_config_override=systems_config;"))
+        self.assertLess(replay.index("config.systems_config_override=systems_config;"),
+                        replay.index("identity_session.ApplySystemConfig(systems_config);"))
+        self.assertNotIn("SystemConfig::LoadFromFile(", replay)
+
     def test_scenario_host_uses_runtime_defaults_unless_explicitly_overridden(self):
         host = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
                            .read_text(encoding="utf-8"))

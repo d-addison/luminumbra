@@ -151,9 +151,9 @@ tick_rate 30
 speed_mps 8
 seed 424242
 preset default
-preset_revision 6
-preset_identity 026f24207a8ffc7e
-content_identity 16636010052247870746
+preset_revision 8
+preset_identity 56ffbe1771cddfa6
+content_identity 7583622726659997707
 expected_ticks 1800
 cold_cache true
 points 3
@@ -171,7 +171,7 @@ rate must equal expected ticks. A 60-second script at 30 Hz therefore measures
 1800 frames and does **not** necessarily take 60 seconds of wall time. The achieved
 wall duration is recorded as an observation in `measured_duration_seconds`, not
 used to pace the workload. Only 30 Hz,
-preset revisions 6 and 7 and a fresh-process cold cache are supported. The
+preset revisions 6, 7 and 8 and a fresh-process cold cache are supported. The
 cache declaration concerns engine world/tile caches at launch, not driver shader
 caches or OS caches. Warmup subsequently populates the engine caches.
 Seed is a uint32; the preset is a nonempty lowercase identifier using letters,
@@ -497,9 +497,10 @@ wall timing has no cap wait because measurement always runs uncapped.
 
 Spatial parity, upscale seam and terrain AOV captures
 explicitly disable TAAU and record zero jitter; normal-default captures retain the
-temporal path. Validators accept preset revisions 6 and 7. The shipping hills
-traversal now declares revision 7; its pinned identities need recapture from CI
-after the terrain and preset changes.
+temporal path. Validators accept preset revisions 6, 7 and 8. The shipping hills traversal
+now declares revision 8 and sampling revision 2. Its preset identity was regenerated
+with the canonical checksum oracle; the terrain content identity is unchanged.
+See the provenance beside `surface-flight.traversal`.
 
 ## Continuous CPU attribution (issue #387)
 
@@ -517,15 +518,51 @@ cap; “uncapped” refers to the recording duration and number of rows.
 
 The frame interval runs from loop entry through buffer swap. Its exclusive
 buckets are sim, stream, render submission, present, foliage rebuilds,
-scatter input preparation, plant rebake, event polling, menu rendering and UI
-rendering. `other_ms` is the remainder; these buckets plus the remainder sum to
-`frame_ms`. Rebuilds from preview and QA callers also enter the foliage bucket;
-any nested rebuild time is subtracted from its render or menu parent. Menu
-rendering includes the menu's UI; `ui_ms` covers the separate
-in-game RmlUi and final ImGui render calls. SLOWFRAME preserves its existing
+scatter input preparation, plant rebake, event polling, residual menu work and
+residual UI work, together with the phases below. Rebuilds from preview and QA
+callers also enter the foliage bucket; any nested rebuild time is subtracted
+from its render, menu or poll parent. SLOWFRAME preserves its existing
 field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
 `other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
 remains rebuild time only.
+
+Issue #402 appends these CPU wall-time columns after `count_generation`, in order:
+
+| Column | Work measured |
+|---|---|
+| `ui_update_ms` | RmlUi layout/update |
+| `ui_render_ms` | RmlUi rendering, excluding nested phases |
+| `ui_filters_ms` | UI filter submission, including blur |
+| `menu_scene_ms` | Scenic menu and preview scene rendering or cached-image presentation |
+| `preview_adoption_ms` | Adopting a completed preview world |
+| `document_load_ms` | Synchronous UI document loading |
+| `texture_load_ms` | UI texture loading and upload |
+| `shader_load_ms` | Shader source loading, compilation and linking |
+| `shader_first_use_ms` | First program binding and first draw/dispatch submission, including raw compute programs |
+| `world_create_callback_ms` | Synchronous world-creation callback work |
+| `world_load_callback_ms` | Synchronous world-loading callback work |
+
+These phases are exclusive: an enclosing phase excludes its nested phases and
+direct foliage rebuild time. `render_ms`, `menu_ms`, `poll_ms` and `ui_ms` now
+exclude the phases completed inside each measured parent. `foliage_ms` likewise
+excludes shader load/first-use phases completed inside a rebuild. In particular,
+`menu_ms` no longer includes attributed scenic/preview or RmlUi work, `ui_ms`
+excludes the separate in-game RmlUi phases (and still includes final ImGui work),
+and `poll_ms` excludes attributed synchronous world callbacks. `other_ms` also
+excludes all appended phases. The corrected identity is:
+
+```text
+frame_ms = sim_ms + stream_ms + render_ms + present_ms + foliage_ms
+         + scatter_ms + rebake_ms + poll_ms + menu_ms + ui_ms
+         + ui_update_ms + ui_render_ms + ui_filters_ms + menu_scene_ms
+         + preview_adoption_ms + document_load_ms + texture_load_ms
+         + shader_load_ms + shader_first_use_ms
+         + world_create_callback_ms + world_load_callback_ms + other_ms
+```
+
+CSV rounding can introduce a small difference. The remainder is not clamped:
+a negative value exposes overlapping inputs. These are CPU submission costs;
+first-use collection adds no GPU waits or readbacks.
 
 Foliage stage times are CPU wall time, including GL submission calls, without
 GPU waits or new readbacks. `signature_ms` includes polling existing evidence

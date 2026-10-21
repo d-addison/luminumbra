@@ -1531,7 +1531,29 @@ TEST_P(RuntimeConfigStartup, HostAndNetworkAdmissionIgnoreConflictingLaunchDefau
     GameSession expected_session;
     expected_session.ApplySystemConfig(expected);
     const auto identity = expected_session.SystemConfigIdentity();
-    EXPECT_EQ(RuntimeHelloFrom(options).system_config_identity, identity);
+    const auto hello = RuntimeHelloFrom(options);
+    EXPECT_EQ(hello.system_config_identity, identity);
+    ASSERT_FALSE(hello.preset_content_hash.empty());
+    Luminumbra::Replay::ReplayHeader replay_header;
+    replay_header.seed_string = options.seed;
+    replay_header.preset = options.preset;
+    replay_header.surface_radius = 0;
+    replay_header.collision_radius = 0;
+    replay_header.system_config_identity = identity;
+    replay_header.preset_content_hash = hello.preset_content_hash;
+    const auto replay_config = ReplayRunnerConfigFrom(options, replay_header);
+    ASSERT_TRUE(replay_config.has_value());
+    if (!replay_config.has_value())
+        return;
+    ASSERT_TRUE(replay_config->systems_config_override.has_value());
+    if (!replay_config->systems_config_override.has_value())
+        return;
+    GameSession replay_identity;
+    replay_identity.ApplySystemConfig(*replay_config->systems_config_override);
+    EXPECT_EQ(replay_identity.SystemConfigIdentity(), identity);
+    auto mismatched_header = replay_header;
+    mismatched_header.system_config_identity = "invalid";
+    EXPECT_FALSE(ReplayRunnerConfigFrom(options, mismatched_header).has_value());
     Server::ServerWorldRunner runner(RunnerConfigFrom(options));
     ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
     ASSERT_NE(runner.Session(), nullptr);

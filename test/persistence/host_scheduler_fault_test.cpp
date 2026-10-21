@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
 #include "luminumbra_client/app/SessionExit.h"
@@ -8,7 +9,6 @@
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -169,10 +169,19 @@ public:
 
 // Headers are included above before substitution. Keep the mode control flow
 // verbatim so deleting its fault branch, Finalize guard or explicit shutdown
-// changes the behavior under test. These sources are not separately linked.
+// changes the behavior under test. Rename every included entry point: the
+// unadapted Replay.cpp is also linked for the identity roundtrip regressions.
 #define ServerWorldRunner SchedulerFaultTestRunner
+#define RunRecord RunSchedulerFaultRecord
+#define RunReplay RunSchedulerFaultReplay
+#define RunMutateReplayFixture RunSchedulerFaultMutateReplayFixture
+#define RunServer RunSchedulerFaultServer
 #include "../../src/luminumbra_server/modes/Replay.cpp"
 #include "../../src/luminumbra_server/modes/Server.cpp"
+#undef RunServer
+#undef RunMutateReplayFixture
+#undef RunReplay
+#undef RunRecord
 #undef ServerWorldRunner
 
 namespace {
@@ -184,16 +193,14 @@ protected:
     std::shared_ptr<spdlog::logger> previous_logger;
 
     void SetUp() override {
-        root = fs::temp_directory_path() /
-               ("luminumbra_host_fault_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        previous_logger = Log::GetCoreLogger();
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_host_fault_");
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
         Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         WriteHostFile(root / "data/common/systems.json",
                       R"({"sim":{"active_regions":{"enabled":true}}})");
-        previous_logger = Log::GetCoreLogger();
         auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_output);
         auto logger = std::make_shared<spdlog::logger>("host-fault-test", sink);
         logger->set_pattern("%v");
@@ -206,7 +213,8 @@ protected:
         HostObservation() = nullptr;
         Log::GetCoreLogger() = previous_logger;
         std::error_code error;
-        fs::remove_all(root, error);
+        if (!root.empty())
+            fs::remove_all(root, error);
     }
 
     ServerCliOptions Options() const {
@@ -245,7 +253,7 @@ protected:
 
 TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
     const auto options = Options();
-    EXPECT_EQ(RunServer(options), 3);
+    EXPECT_EQ(RunSchedulerFaultServer(options), 3);
     EXPECT_EQ(observation.ticks, kFaultTick);
     EXPECT_EQ(observation.frames, kFaultTick);
     // No streaming/trace publication after the faulting tick, including when a
@@ -264,7 +272,7 @@ TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
 
 TEST_F(HostSchedulerFault, RecordFaultAbortsWithoutPublishingReplayOrRegionTrace) {
     const auto options = Options();
-    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(RunSchedulerFaultRecord(options), 1);
     ASSERT_FALSE(observation.fault_message.empty());
     EXPECT_EQ(observation.ticks, kFaultTick);
     EXPECT_EQ(observation.frames, kFaultTick);
@@ -294,7 +302,7 @@ TEST_F(HostSchedulerFault, RecordFaultPreservesAnExistingReplayAndTraceByteForBy
         << error;
     const auto previous_replay = ReadHostFile(options.record_path);
     const auto previous_trace = ReadHostFile(options.record_path + ".regions.json");
-    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(RunSchedulerFaultRecord(options), 1);
     ASSERT_FALSE(observation.fault_message.empty());
     EXPECT_EQ(ReadHostFile(options.record_path), previous_replay);
     EXPECT_EQ(ReadHostFile(options.record_path + ".regions.json"), previous_trace);
@@ -308,7 +316,7 @@ TEST_F(HostSchedulerFault, HealthyRecordPublishesACompleteReplayAndRegionTrace) 
     observation.inject_fault = false;
     auto options = Options();
     options.ticks = 2;
-    ASSERT_EQ(RunRecord(options), 0);
+    ASSERT_EQ(RunSchedulerFaultRecord(options), 0);
     const auto recording = Luminumbra::Replay::ReadReplay(options.record_path);
     ASSERT_TRUE(recording.has_value());
     if (recording) {

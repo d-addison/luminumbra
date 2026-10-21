@@ -136,6 +136,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -148,6 +149,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -1377,7 +1379,13 @@ int main(int argc, char* argv[]) {
     std::string root_path_str = RuntimeRootString(root_dir);
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
-    RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+    RuntimeScenarioConfig scenario_config;
+    try {
+        scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+    } catch (const std::invalid_argument& error) {
+        LUMINUMBRA_CORE_ERROR("{}", error.what());
+        return 2;
+    }
     std::string override_error;
     if (!scenario_config.systems_config_path.empty() ||
         HasCommandLineFlag(argc, argv, "--systems-config") ||
@@ -2473,6 +2481,10 @@ int main(int argc, char* argv[]) {
                     scenario_config.horizon_radius,
                     scenario_config.collision_radius);
             }
+            if (!horizon_ready) {
+                refuse_world_entry("Surface preparation exceeds the supported work budget.", false);
+                return;
+            }
             g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                 gameSession->GetMetadata().spawnPoint);
             g_camera->MouseSensitivity =
@@ -2550,6 +2562,8 @@ int main(int argc, char* argv[]) {
                                     const std::string& seed,
                                     const std::string& worldType,
                                     const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+        const Luminumbra::Client::Attribution::PhaseScope callback_phase(
+            Luminumbra::Client::Attribution::Phase::WorldCreateCallback);
         // If the customize form changed any param from the base preset, build a resolved preset
         // (base + only the real deltas) and hand it to CreateWorld, which embeds it in THIS world's
         // own save dir. No global custom files, no collisions, no dangling references. If nothing
@@ -2636,6 +2650,8 @@ int main(int argc, char* argv[]) {
     };
 
     auto start_world_load = [&](const std::string& id) {
+        const Luminumbra::Client::Attribution::PhaseScope callback_phase(
+            Luminumbra::Client::Attribution::Phase::WorldLoadCallback);
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
@@ -3380,15 +3396,18 @@ int main(int argc, char* argv[]) {
     auto worldgenPreview = std::make_unique<Luminumbra::Client::WorldgenPreview>();
     // Preview orbit/drag bookkeeping consumed by the menu-branch renderer
     // (app/MenuScreens.cpp).
-    MenuPreviewState menuPreviewState;
+    MenuSceneState menuPreviewState;
 
     if (runtime_boot_recorder.enabled() &&
         gameStateManager.GetCurrentState() == GameState::IN_GAME) {
         LUMINUMBRA_CORE_INFO(
             "Runtime boot metrics mode: capturing fixed frames through streaming scheduler.");
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-            gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                gameSession->GetMetadata().spawnPoint, gameSession->GetPhysicsSystem(), 4, 2);
+            if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                    gameSession->GetMetadata().spawnPoint, gameSession->GetPhysicsSystem(), 4, 2)) {
+                LUMINUMBRA_CORE_ERROR("Runtime capture refused: surface preparation failed");
+                return 2;
+            }
         }
 
         constexpr float capture_delta_time = 1.0f / 60.0f;
@@ -3451,15 +3470,13 @@ int main(int argc, char* argv[]) {
             DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
             if (gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains") &&
                 gameSession->LoadWorldState()) {
-                if (auto* ws = gameSession->GetWorldSystem()) {
-                    // Surface-ready around the FIXED vantage (8,*,8), not the spawn point, so the
-                    // framed valley is streamed in before the first menu frame.
-                    if (gameSession->GetPhysicsSystem()) {
-                        ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(8.0f, 58.0f, 8.0f),
-                                                   gameSession->GetPhysicsSystem(),
-                                                   6,
-                                                   2);
-                    }
+                // Prepare the fixed vantage before publishing the backdrop as ready.
+                if (auto* ws = gameSession->GetWorldSystem();
+                    ws && gameSession->GetPhysicsSystem() &&
+                    ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(8.0f, 58.0f, 8.0f),
+                                               gameSession->GetPhysicsSystem(),
+                                               6,
+                                               2)) {
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                         glm::vec3(8.0f, 58.0f, 8.0f),
                         glm::vec3(0.0f, 1.0f, 0.0f),
@@ -3475,6 +3492,8 @@ int main(int argc, char* argv[]) {
                     g_app.loading.world_render_data_initialized = true;
                     g_app.menu.menu_backdrop_active = true;
                     LUMINUMBRA_CORE_INFO("Menu backdrop world ready (golden-hour mountain vista).");
+                } else {
+                    refuse_world_entry("Menu surface preparation failed.", false);
                 }
             }
         }
@@ -3571,6 +3590,7 @@ int main(int argc, char* argv[]) {
         frame_limiter.pace(pacing.frame_cap, frame_timing);
         const auto _frameStart = std::chrono::steady_clock::now();
         Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
+        Attribution::PhaseFrameScope phase_scope(frame_attribution_enabled);
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
         previousObservedFrame = observedFrame;
@@ -3695,12 +3715,16 @@ int main(int argc, char* argv[]) {
         }
 
         const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (runtime telemetry)
+        const double poll_phases_before = Attribution::phase_total_ms();
+        const double poll_foliage_before = foliage_scope.snapshot().rebuild_ms;
         RefreshInputOwnership(window);
         glfwPollEvents();
         RefreshInputOwnership(window);
         rb_poll_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                _rb_poll_t0)
                          .count();
+        rb_poll_ms -= Attribution::phase_total_ms() - poll_phases_before +
+                      foliage_scope.snapshot().rebuild_ms - poll_foliage_before;
 
         // --bake-tree-impostor: GL is ready at the loop top and the bake needs no world, so run the
         // octahedral atlas bake ONCE here (independent of game state), write the atlas + coverage
@@ -3953,11 +3977,20 @@ int main(int argc, char* argv[]) {
                 if (static_cast<size_t>(g_app.loading.generation_dispatch_index) >=
                     g_app.loading.initial_chunks_to_load.size()) {
                     if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                        gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                            gameSession->GetMetadata().spawnPoint,
-                            gameSession->GetPhysicsSystem(),
-                            12,
-                            4);
+                        if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                                gameSession->GetMetadata().spawnPoint,
+                                gameSession->GetPhysicsSystem(),
+                                12,
+                                4)) {
+                            if (g_loading_visualizer)
+                                g_loading_visualizer->EndVisualization();
+                            SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                            if (g_uiManager)
+                                g_uiManager->RequestLoadDocument("main_menu.rml");
+                            refuse_world_entry(
+                                "Surface preparation exceeds the supported work budget.", false);
+                            break;
+                        }
                     }
                     LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
@@ -4809,6 +4842,7 @@ int main(int argc, char* argv[]) {
                                            std::chrono::steady_clock::now() - _fb0)
                                            .count();
                     }
+                    const double render_phases_before = Attribution::phase_total_ms();
                     const double render_foliage_before = foliage_scope.snapshot().rebuild_ms;
                     const auto _rb_rcall_t0 =
                         std::chrono::steady_clock::now(); // always-on (runtime telemetry)
@@ -4831,6 +4865,7 @@ int main(int argc, char* argv[]) {
                         Attribution::exclusive_parent_ms(rb_render_call_ms,
                                                          render_foliage_before,
                                                          foliage_scope.snapshot().rebuild_ms);
+                    rb_render_bucket_ms -= Attribution::phase_total_ms() - render_phases_before;
 
                     // --scene-config: self-contained capture. Settle a few frames (world
                     // stream + atmosphere), then read the clean back buffer (BEFORE any UI
@@ -4867,14 +4902,16 @@ int main(int argc, char* argv[]) {
                         if (g_app.capture.survey_settle < 45) {
                             ++g_app.capture.survey_settle;
                         } else {
-                            Luminumbra::Rendering::RunSceneSurvey(
-                                window,
-                                *gameSession,
-                                renderPipeline,
-                                *g_camera,
-                                std::filesystem::path(g_app.capture.survey_dir),
-                                root_dir / "data/common/materials.json",
-                                g_app.overlay.wireframe_mode);
+                            if (!Luminumbra::Rendering::RunSceneSurvey(
+                                    window,
+                                    *gameSession,
+                                    renderPipeline,
+                                    *g_camera,
+                                    std::filesystem::path(g_app.capture.survey_dir),
+                                    root_dir / "data/common/materials.json",
+                                    g_app.overlay.wireframe_mode)) {
+                                exit_code = 2;
+                            }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
                     }
@@ -5096,6 +5133,7 @@ int main(int argc, char* argv[]) {
                 // Menu-branch rendering: thumbs capture, menu backdrop,
                 // create-world preview diorama, UI pass, and the
                 // --ui-screenshot batch (app/MenuScreens.cpp).
+                const double menu_phases_before = Attribution::phase_total_ms();
                 const double menu_foliage_before = foliage_scope.snapshot().rebuild_ms;
                 Attribution::StageTimer menu_timer(rb_menu_ms, frame_attribution_enabled);
                 RenderMenuScreens(g_app,
@@ -5112,10 +5150,13 @@ int main(int argc, char* argv[]) {
                 menu_timer.stop();
                 rb_menu_ms = Attribution::exclusive_parent_ms(
                     rb_menu_ms, menu_foliage_before, foliage_scope.snapshot().rebuild_ms);
+                rb_menu_ms -= Attribution::phase_total_ms() - menu_phases_before;
             }
         }
 
         if (currentState == GameState::IN_GAME) {
+            menuPreviewState.schedule = {};
+            menuPreviewState.last_menu_frame = {};
             // Ecology capture retains its explicit label override independently of preferences.
             if (g_app.capture.timelapse_creatures)
                 DrawCreatureNameplates(g_app, window, g_camera.get(), gameSession.get());
@@ -5146,6 +5187,7 @@ int main(int argc, char* argv[]) {
         //  render the RmlUi overlay in-game too (HUD / photo-mode / pause), over the scene and
         // under the ImGui debug layer. Menus still render via the else-branch above; this path
         // shows whatever in-game document is loaded (hud.rml on entry).
+        const double ui_phases_before = Attribution::phase_total_ms();
         const auto _rb_ui_t0 = std::chrono::steady_clock::now(); //
         if (currentState == GameState::IN_GAME && g_uiManager) {
             g_uiManager->Render();
@@ -5169,6 +5211,7 @@ int main(int argc, char* argv[]) {
             rb_ui_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                  _rb_ui_t0)
                            .count(); //
+        rb_ui_ms -= Attribution::phase_total_ms() - ui_phases_before;
 
         // Capture an additional, unmeasured frame before presentation. Hidden-window
         // front buffers are not a portable readback source (Mesa can return black).
@@ -5267,13 +5310,14 @@ int main(int argc, char* argv[]) {
                                            foliage_frame.capacity,
                                            foliage_frame.count_known,
                                            foliage_frame.generated_count,
-                                           foliage_frame.count_generation))
+                                           foliage_frame.count_generation,
+                                           phase_scope.snapshot()))
                     LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
             }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
                 const double _other =
                     frame_attribution_enabled
-                        ? buckets.other(_wallMs)
+                        ? buckets.other(_wallMs, phase_scope.snapshot())
                         : _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
                 LUMINUMBRA_CORE_WARN("SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} "
                                      "render={:.1f} present={:.1f} other={:.1f} | "
@@ -5293,6 +5337,14 @@ int main(int argc, char* argv[]) {
                                      foliage_frame.rebuild_ms,
                                      rb_menu_ms,
                                      rb_ui_ms);
+                if (frame_attribution_enabled) {
+                    const auto& phases = phase_scope.snapshot();
+                    for (std::size_t index = 0; index < Attribution::kPhaseCount; ++index)
+                        LUMINUMBRA_CORE_WARN(
+                            "  phase {}={:.3f}ms",
+                            Attribution::phase_name(static_cast<Attribution::Phase>(index)),
+                            phases.milliseconds()[index]);
+                }
                 if (frame_attribution_enabled)
                     LUMINUMBRA_CORE_WARN(
                         "  foliage-split: signature={:.3f} sort={:.3f} surface={:.3f} "
@@ -5784,6 +5836,8 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    if (menuPreviewState.capture_failed && exit_code == 0)
+        exit_code = 1;
     if (!frame_recorder.finish()) {
         LUMINUMBRA_CORE_ERROR("Frame attribution CSV finalization failed");
         if (exit_code == 0)
@@ -5882,6 +5936,7 @@ int main(int argc, char* argv[]) {
     }
     audioManager->Shutdown();
     mark_shutdown("audio_shutdown");
+    menuPreviewState.scene_image.release_scene_image();
     renderPipeline.shutdown();
     mark_shutdown("renderer_shutdown");
     developerLogAttachment.Detach();

@@ -1,4 +1,5 @@
 #include "FarWorldReplayGl.h"
+#include "rendering/AttributedGl.h"
 #include <array>
 #include <glad/glad.h>
 #include <string>
@@ -313,7 +314,7 @@ class GlAccess final : public ReplayStateAccess {
         return uniforms;
     }
     static void RestoreProgram(GLuint name, const std::vector<Uniform>& uniforms) noexcept {
-        glUseProgram(name);
+        Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, name);
         for (const auto& v : uniforms) {
             switch (v.type) {
                 case GL_FLOAT:
@@ -591,7 +592,7 @@ public:
         glDrawBuffers(static_cast<GLsizei>(draw_buffers_.size()), draw_buffers_.data());
         glBindFramebuffer(GL_READ_FRAMEBUFFER, read_);
         glReadBuffer(read_buffer_);
-        glUseProgram(program_);
+        Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, program_);
         glBindVertexArray(vao_);
         if (vao_)
             for (GLuint i = 0; i < attributes_.size(); ++i) {

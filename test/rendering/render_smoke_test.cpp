@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -4441,12 +4442,175 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
 
     EXPECT_NE(source.find("BuildFarLodWorkerTile"), std::string::npos);
     EXPECT_NE(source.find("rebase_authoritative_tile"), std::string::npos);
-    EXPECT_NE(source.find("GenerateChunkData(scratch, 1)"), std::string::npos);
     const std::size_t stale_check = source.find("const bool snapshot_stale");
     const std::size_t owner_save = source.find("save_tile(result.tile");
     ASSERT_NE(stale_check, std::string::npos);
     ASSERT_NE(owner_save, std::string::npos);
     EXPECT_LT(stale_check, owner_save);
+
+    // Scope the contract to the live definitions: an unrelated/dead helper's
+    // generation call cannot prove that the dispatched worker completes its
+    // halo. Each fixed fragment list walks only its bounded source section.
+    const auto section = [](std::string_view text, std::string_view begin, std::string_view end) {
+        const std::size_t first = text.find(begin);
+        EXPECT_NE(first, std::string_view::npos) << begin;
+        if (first == std::string_view::npos)
+            return std::string_view{};
+        const std::size_t last = text.find(end, first + begin.size());
+        EXPECT_NE(last, std::string_view::npos) << end;
+        if (last == std::string_view::npos)
+            return std::string_view{};
+        return text.substr(first, last - first);
+    };
+    const auto expect_ordered = [](std::string_view text,
+                                   std::initializer_list<std::string_view> fragments) {
+        std::size_t offset = 0;
+        for (const std::string_view fragment : fragments) {
+            const std::size_t found = text.find(fragment, offset);
+            ASSERT_NE(found, std::string_view::npos) << fragment;
+            offset = found + fragment.size();
+        }
+    };
+    const std::string world_source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
+    ASSERT_FALSE(world_source.empty());
+    const auto capture_body = section(world_source,
+                                      "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(",
+                                      "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(");
+    expect_ordered(
+        capture_body,
+        {("snapshot->capture_epoch = m_far_lod_capture_epoch.fetch_add(1u, "
+          "std::memory_order_acq_rel) + 1u;"),
+         "snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);",
+         ("snapshot->authority_revision = "
+          "m_far_lod_authority_revision.load(std::memory_order_acquire);"),
+         "snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);",
+         "entry.voxel_revision = chunk->voxel_revision();",
+         "entry.authority_durable = !chunk->is_voxel_data_dirty();",
+         "entry.sdf_data = chunk->sdf_data;",
+         "entry.material_data = chunk->material_data;",
+         "snapshot->entries.push_back(std::move(entry));"});
+
+    const auto worker = section(
+        source, "FarLodWorkerBuildOutcome BuildFarLodWorkerTile(", "FarLodSystem::FarLodSystem()");
+    expect_ordered(
+        worker,
+        {"tile.params_hash != snapshot.params_hash",
+         "world.acquire_worldgen_sample_scope();",
+         "rebase_authoritative_tile(world, std::move(tile), tier, rx, rz, snapshot.params_hash)",
+         "for (const Systems::FarLodSdfSnapshotEntry& entry : snapshot.entries)",
+         "entry.provenance != ChunkSdfProvenance::LoadedOrEdited ||",
+         "!is_halo_chunk(entry.coords.x, entry.coords.z, rx, rz)",
+         "continue;",
+         "entry.as_reduction_snapshot();",
+         "overlay_authority(reduction, belongs_to_region(entry, rx, rz),"});
+    expect_ordered(
+        worker,
+        {"if (!authority_spans.empty())",
+         "world.acquire_worldgen_sample_scope();",
+         "world.GetTerrainHeightAt(",
+         "for (const auto& [chunk_z, chunk_x, chunk_y] : required)",
+         "if (exists != pending.end())",
+         "continue;",
+         "Chunk generated_chunk(IVec3(chunk_x, chunk_y, chunk_z));",
+         "world.GenerateChunkData(generated_chunk, 1);",
+         "generated.source_kind = World::FarLodBrickSourceKind::RegenerableCache;",
+         "generated.sdf_data = std::move(generated_chunk.sdf_data);",
+         "generated.material_data = std::move(generated_chunk.material_data);",
+         "if (!reduce_world_brick(tier,",
+         "generated,",
+         "if (!add_or_overlay_world_brick(pending, std::move(incoming), false, outcome.error))",
+         "return outcome;",
+         "if (!finalize_assembly(assembly, pending, outcome.error))",
+         "return outcome;",
+         "if (!derive_assembly_water(tile, assembly, outcome.changed, outcome.error))",
+         "return outcome;",
+         "World::MarchingCubes::GenerateFarLodRegionMesh(tile, assembly, outcome.mesh);",
+         "outcome.ok = true;"});
+    EXPECT_EQ(worker.find("save_tile("), std::string_view::npos);
+    EXPECT_EQ(worker.find("find_streamed_chunk("), std::string_view::npos);
+    EXPECT_EQ(worker.find("snapshot_streamed_chunks("), std::string_view::npos);
+
+    const auto rebase = section(source, "rebase_authoritative_tile(", "u32 far_brick_crc(");
+    expect_ordered(
+        rebase,
+        {"World::BuildPristineFarLodTile(world, tier, rx, rz, params_hash)",
+         "descriptor.source_kind != Luminumbra::World::FarLodBrickSourceKind::Authoritative",
+         "continue;",
+         "fresh.sdf_bricks.push_back(descriptor);",
+         "fresh.sdf_density_q.insert(",
+         "fresh.sdf_material.insert(",
+         "fresh.edited = true;"});
+
+    const auto schedule =
+        section(source, "void FarLodSystem::update(", "void FarLodSystem::set_horizon(");
+    expect_ordered(
+        schedule,
+        {"shared_ptr<const Systems::FarLodSdfSnapshot> sdf_snapshot",
+         "world_system.capture_far_lod_sdf_snapshot(want.rx, want.rz);",
+         "if (!sdf_snapshot)",
+         "continue;",
+         "const bool persistence_allowed =",
+         "std::none_of(sdf_snapshot->entries.begin(),",
+         "return entry.provenance == ChunkSdfProvenance::LoadedOrEdited &&",
+         "!entry.authority_durable;",
+         "m_job_system->dispatch_batch(",
+         "[shared, world, sdf_snapshot, epoch, tier, rx, rz, save_dir, persistence_allowed]",
+         "BuildFarLodWorkerTile(*world, *sdf_snapshot, tier, rx, rz, save_dir);",
+         "result.epoch = epoch;",
+         "result.sdf_snapshot = sdf_snapshot;",
+         "result.capture_epoch = sdf_snapshot->capture_epoch;",
+         "result.params_hash = sdf_snapshot->params_hash;",
+         "result.authority_revision = sdf_snapshot->authority_revision;",
+         "result.region_authority_revision = sdf_snapshot->region_authority_revision;",
+         "result.persistence_allowed = persistence_allowed;",
+         "result.mesh = std::move(outcome.mesh);",
+         "result.tile = std::move(tile);",
+         "std::lock_guard<std::mutex> lock(shared->mutex);",
+         "shared->completed.push_back(std::move(result));"});
+
+    const auto integrate = section(
+        source, "void FarLodSystem::integrate_completed_builds()", "void FarLodSystem::update(");
+    expect_ordered(
+        integrate,
+        {"const bool snapshot_stale =",
+         "!m_world || !result.sdf_snapshot ||",
+         "result.capture_epoch != result.sdf_snapshot->capture_epoch ||",
+         "result.params_hash != result.sdf_snapshot->params_hash ||",
+         "result.params_hash != m_params_hash ||",
+         "result.authority_revision != result.sdf_snapshot->authority_revision ||",
+         "result.region_authority_revision != result.sdf_snapshot->region_authority_revision ||",
+         "result.region_authority_revision !=",
+         "m_world->far_lod_region_authority_revision(result.rx, result.rz) ||",
+         "!m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);",
+         "result.epoch != m_epoch || snapshot_stale || result.mesh.vertices.empty() ||",
+         "result.mesh.indices.empty())",
+         "++m_stats.builds_failed_total;",
+         "continue;",
+         "if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed)",
+         "save_tile(result.tile, &errors)",
+         "++m_stats.builds_failed_total;",
+         "continue;",
+         "persistence_pending = true;",
+         "glGenVertexArrays(1, &region.vao);",
+         "region.persistence_pending = persistence_pending;",
+         "m_residents.emplace(key, region);"});
+
+    const auto current = section(world_source,
+                                 "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(",
+                                 "SHIELD_WorldSystem::find_streamed_chunk(");
+    expect_ordered(current,
+                   {"snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||",
+                    "snapshot.authority_revision !=",
+                    "m_far_lod_authority_revision.load(std::memory_order_acquire)",
+                    "return false;",
+                    "current->voxel_revision() != entry.voxel_revision ||",
+                    "current->sdf_provenance() != entry.provenance",
+                    "return false;",
+                    "return true;"});
+    const auto drain = section(
+        source, "void FarLodSystem::prepare_world_swap()", "void FarLodSystem::release_region(");
+    expect_ordered(drain, {"wait_for_builds();", "m_world = nullptr;", "++m_epoch;"});
 }
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {

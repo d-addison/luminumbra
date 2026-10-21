@@ -2090,10 +2090,11 @@ TEST(WorldgenOverrideTest, NumericOverridesRejectPartialNonfiniteAndOutOfRangeVa
         {"generation_params", {{"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}}}}};
     const auto unchanged = BuildCustomPreset(base, {}).json;
     const auto knobs = NeutralKnobVector();
-    const auto baseline = ApplyKnobLayer(base, knobs);
+    const auto resolved_base = ResolveEffectivePreset(base, TerrainPresetUse::NewWorld);
+    const auto baseline = ApplyKnobLayer(resolved_base, knobs);
     const auto reopened = [&](const char* path, const char* value, const char* type) {
         nlohmann::json persisted;
-        WriteKnobLayer(persisted, base, knobs, {{path, value, type}});
+        WriteKnobLayer(persisted, resolved_base, knobs, {{path, value, type}});
         const auto layer = ReadKnobLayer(nlohmann::json::parse(persisted.dump()));
         return ResolveKnobLayer(layer.baseline, layer.knobs, layer.overrides);
     };
@@ -2210,6 +2211,22 @@ TEST(WorldgenOverrideTest, KnobsRejectInvalidNumbersAndRetainFiniteClamping) {
             base,
             {{"knob.mountainousness", value[0] == '-' || value[0] == '0' ? "0" : "1", "knob"}});
         EXPECT_EQ(result.json, expected.json);
+    }
+}
+
+TEST(WorldgenOverrideTest, CustomizationKeepsExplicitSamplingAndItsSchemaGate) {
+    for (const int revision : {1, 2}) {
+        const nlohmann::json base = {{"schema_rev", 7},
+                                     {"generation_params",
+                                      {{"terrain", {{"surface_sampling_revision", revision}}},
+                                       {"features", nlohmann::json::object()}}}};
+        const auto custom = Luminumbra::Client::BuildCustomPreset(base, {});
+        const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(base, {});
+        for (const auto* preset : {&custom.json, &knobs.json}) {
+            EXPECT_EQ(preset->at("schema_rev"), revision == 1 ? 7 : 8);
+            EXPECT_EQ(preset->at("generation_params").at("terrain").at("surface_sampling_revision"),
+                      revision);
+        }
     }
 }
 

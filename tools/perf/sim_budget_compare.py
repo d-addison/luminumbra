@@ -14,7 +14,7 @@ from propose_sim_budgets import format_json
 
 
 COMPARE_SCHEMA = "luminumbra.sim_budget_compare.v1"
-WORKLOAD_KEYS = ("seed", "ticks", "fixture_hash", "surface_radius", "collision_radius")
+WORKLOAD_KEYS = ("seed", "ticks", "fixture_hash", "preset_hash", "surface_radius", "collision_radius")
 
 
 def p99_ratio(before: float | None, after: float | None) -> float | None:
