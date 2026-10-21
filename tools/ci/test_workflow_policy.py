@@ -678,8 +678,11 @@ def value(block, key, indent):
 
 
 def aggregate_invalid_expression(producer):
-    return ("needs.changes.result != 'success' || "
-            f"(needs.{producer}.result != 'success' && needs.{producer}.result != 'skipped')")
+    expression = ("needs.changes.result != 'success' || "
+                  f"(needs.{producer}.result != 'success' && needs.{producer}.result != 'skipped')")
+    if producer == "asan-shard":
+        expression += " || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped')"
+    return expression
 
 
 def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None):
@@ -977,7 +980,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(value(job, "name", 4), check_name)
                 self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
                 self.assertEqual(value(job, "needs", 4),
-                                 "[changes, asan-shard]" if job_id == "asan" else
+                                 "[changes, fast-lane, asan-shard]" if job_id == "asan" else
+                                 "[changes, fast-lane]" if job_id == "asan-shard" else
                                  f"[changes, {job_id.removesuffix('-result')}]" if job_id.endswith("-result") else "changes")
                 condition = ("!cancelled() || " + aggregate_invalid_expression(
                     "asan-shard" if job_id == "asan" else job_id.removesuffix("-result"))
@@ -987,6 +991,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         " && ((github.event_name == 'pull_request' && "
                         "toJSON(github.event.pull_request.draft) != 'false') || "
                         "needs.changes.outputs.needs_cpp != 'false')"
+                    )
+                if job_id == "asan-shard":
+                    condition += (
+                        " && (github.event_name != 'pull_request' || "
+                        "toJSON(github.event.pull_request.draft) != 'false' || "
+                        "needs.fast-lane.result == 'success')"
                     )
                 self.assertEqual(value(job, "if", 4), "${{ " + condition + " }}")
                 self.assertIsNone(value(job, "continue-on-error", 4))
@@ -1086,14 +1096,123 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for job in (ci["lint"], ci["public-tree"]):
             self.assertIsNone(value(job, "if", 4))
 
+    def test_asan_fast_lane_runs_exact_registered_stdlib_contracts(self):
+        fast = jobs(self.workflows["asan.yml"])["fast-lane"]
+        self.assertEqual(value(fast, "needs", 4), "changes")
+        self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
+        self.assertEqual(value(fast, "timeout-minutes", 4), "5")
+        self.assertIsNone(value(fast, "continue-on-error", 4))
+        registered = (ROOT / "tools/ci/local_check_contracts.cmake").read_text(encoding="utf-8")
+        # The offline-dependency suite is registered once per partition; the fast lane runs the whole script once.
+        scripts = list(dict.fromkeys(re.findall(
+            r'COMMAND "\$\{Python3_EXECUTABLE\}" -I -B "\$\{_local_check_source_dir\}/([^"\n]+)"', registered)))
+        self.assertEqual(scripts, ["test_changed_tus.py", "test_offline_deps.py"])
+        commands = [value(step, "run", 8) for step in steps(fast)[1:]]
+        self.assertEqual(commands, [f"python3 -I -B tools/ci/{script}" for script in scripts])
+        checkout = steps(jobs(self.workflows["ci.yml"])["linux"])[1]
+        self.assertEqual(value(steps(fast)[0], "uses", 8), value(checkout, "uses", 8))
+        for step in steps(fast):
+            self.assertIsNone(value(step, "if", 8))
+            self.assertIsNone(value(step, "continue-on-error", 8))
+        contracts = (ROOT / "tools/ci/contracts/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("project(LocalCheckContracts LANGUAGES NONE)", contracts)
+        self.assertIn('include("${CMAKE_CURRENT_LIST_DIR}/../local_check_contracts.cmake")', contracts)
+
+    @staticmethod
+    def asan_route_condition(condition, event, draft, cpp, dependencies, cancelled=False):
+        for key, item in (("toJSON(github.event.pull_request.draft)", draft),
+                          ("github.event_name", event),
+                          ("needs.changes.outputs.needs_cpp", cpp)):
+            condition = condition.replace(key, repr(item))
+        return evaluate_condition(condition, dependencies, cancelled=cancelled)
+
+    def test_asan_fast_lane_gates_only_ready_native_pull_requests(self):
+        blocks = jobs(self.workflows["asan.yml"])
+        self.assertEqual(value(blocks["asan-shard"], "needs", 4), "[changes, fast-lane]")
+        # All combinations are finite, in-memory evaluations of the actual YAML.
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for draft in ("false", "true", "null", "", "unknown"):
+                for cpp in ("true", "false", "", "unknown"):
+                    for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                        for cancelled in (False, True):
+                            with self.subTest(event=event, draft=draft, cpp=cpp,
+                                              result=result, cancelled=cancelled):
+                                dependencies = {"changes": "success", "fast-lane": result}
+                                ready_pr = event == "pull_request" and draft == "false"
+                                routed = (event == "pull_request" and draft != "false") or cpp != "false"
+                                fast_runs = self.asan_route_condition(
+                                    value(blocks["fast-lane"], "if", 4), event, draft, cpp,
+                                    {"changes": "success"}, cancelled)
+                                self.assertEqual(fast_runs, not cancelled and ready_pr and cpp != "false")
+                                shard_runs = self.asan_route_condition(
+                                    value(blocks["asan-shard"], "if", 4), event, draft, cpp,
+                                    dependencies, cancelled)
+                                self.assertEqual(shard_runs, not cancelled and routed and
+                                                 (not ready_pr or result == "success"))
+        push = self.workflows["asan.yml"].split("  push:\n", 1)[1].split("  pull_request:", 1)[0]
+        self.assertEqual(value(push, "branches", 4), "[main, devel]")
+        self.assertIn("  workflow_dispatch:\n    inputs:\n      qualification_capture:", self.workflows["asan.yml"])
+
+    def test_asan_aggregate_refuses_failed_fast_lane_even_with_skipped_shards(self):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        self.assertEqual(value(aggregate, "needs", 4), "[changes, fast-lane, asan-shard]")
+        refusal = next(step for step in steps(aggregate) if "name: Reject invalid dependencies\n" in step)
+        route = next(step for step in steps(aggregate) if "name: Require all ASan shards to pass\n" in step)
+        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
+        for fast in results:
+            for classification in results:
+                for shard in results:
+                    for cancelled in (False, True):
+                        with self.subTest(fast=fast, classification=classification,
+                                          shard=shard, cancelled=cancelled):
+                            dependencies = {"changes": classification, "fast-lane": fast, "asan-shard": shard}
+                            invalid = classification != "success" or any(
+                                result not in ("success", "skipped") for result in (fast, shard))
+                            self.assertEqual(evaluate_condition(value(aggregate, "if", 4), dependencies,
+                                                                cancelled=cancelled), not cancelled or invalid)
+                            # always() must refuse even after checkout or the draft guard fails.
+                            self.assertEqual(evaluate_condition(value(refusal, "if", 8), dependencies,
+                                                                cancelled=cancelled, failed=True), invalid)
+        with tempfile.TemporaryDirectory() as directory:
+            for fast in results:
+                for cpp in ("true", "false", ""):
+                    with self.subTest(fast=fast, cpp=cpp):
+                        dependencies = {"changes": "success", "fast-lane": fast, "asan-shard": "skipped"}
+                        refuses = evaluate_condition(value(refusal, "if", 8), dependencies)
+                        script = (value(refusal, "run", 8) + "\n" if refuses else "") + value(route, "run", 8)
+                        process = subprocess.run(
+                            [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                            env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT="skipped",
+                                     CI_PATHS_RESULT="success", GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(process.returncode == 0,
+                                         cpp == "false" and fast in ("success", "skipped"), process.stderr)
+
+    def test_required_check_names_stay_unchanged(self):
+        expected = {
+            "ci.yml": {"linux-result": "Linux / GCC", "windows-msvc-result": "Windows / MSVC",
+                       "public-tree": "Public tree / inventory honesty", "lint": "Format changed files",
+                       "tidy": "Static analysis / clang-tidy", "gns-compile-probe": "GNS transport / compile probe",
+                       "diligent-rhi": "Diligent RHI / software GL"},
+            "asan.yml": {"asan": "Linux / GCC ASan"},
+            "docs.yml": {"doxygen": "Build Doxygen reference"},
+            "performance.yml": {"runner-contract": "Runner contract / ${{ matrix.os }}",
+                                "preview-frame": "Preview frame / software OpenGL"},
+        }
+        for filename, names in expected.items():
+            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            for job_id, name in names.items():
+                with self.subTest(workflow=filename, job=job_id):
+                    self.assertEqual(value(jobs(workflow)[job_id], "name", 4), name)
+
     def test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence(self):
         workflow = self.workflows["asan.yml"]
         blocks = jobs(workflow)
-        self.assertEqual(set(blocks), {"changes", "asan-shard", "asan"})
+        self.assertEqual(set(blocks), {"changes", "fast-lane", "asan-shard", "asan"})
         shard, aggregate = blocks["asan-shard"], blocks["asan"]
         self.assertEqual(value(shard, "name", 4), "Linux / GCC ASan shard ${{ matrix.shard }}/2")
-        self.assertEqual(value(shard, "needs", 4), "changes")
-        self.assertEqual(value(shard, "if", 4), "${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') }}")
+        self.assertEqual(value(shard, "needs", 4), "[changes, fast-lane]")
+        self.assertEqual(value(shard, "if", 4), "${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') && (github.event_name != 'pull_request' || toJSON(github.event.pull_request.draft) != 'false' || needs.fast-lane.result == 'success') }}")
         self.assertEqual(value(shard, "runs-on", 4), "ubuntu-24.04")
         self.assertEqual(value(shard, "timeout-minutes", 4), "60")
         self.assertEqual(value(shard, "fail-fast", 6), "false")
@@ -1780,6 +1899,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                 for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                     dependencies = {"changes": classification, producer: result}
+                    if producer == "asan-shard":
+                        dependencies["fast-lane"] = "success"
                     invalid = classification != "success" or result not in ("success", "skipped")
                     for cancelled in (False, True):
                         with self.subTest(producer=producer, classification=classification,
@@ -1801,6 +1922,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             # validation and uploads. A completed early guard offers no protection.
             for result in ("success", "skipped"):
                 dependencies = {"changes": "success", producer: result}
+                if producer == "asan-shard":
+                    dependencies["fast-lane"] = "success"
                 self.assertTrue(evaluate_condition(condition, dependencies))
                 for phase in steps(aggregate):
                     with self.subTest(producer=producer, phase=phase.splitlines()[0], result=result):
@@ -1887,7 +2010,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         results = ("success", "failure", "cancelled", "skipped", "", "unknown")
         for filename, job_id, shard_id in aggregates:
             aggregate = jobs(self.workflows[filename])[job_id]
-            self.assertEqual(value(aggregate, "needs", 4), f"[changes, {shard_id}]")
+            self.assertEqual(value(aggregate, "needs", 4),
+                             "[changes, fast-lane, asan-shard]" if shard_id == "asan-shard"
+                             else f"[changes, {shard_id}]")
             self.assertIsNone(value(aggregate, "continue-on-error", 4))
             refusal = next(step for step in steps(aggregate)
                            if step.startswith("      - name: Reject invalid dependencies\n"))
@@ -1928,6 +2053,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         rendered, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
                                  lambda match: str(status[match[1]]), expression)
         for key, item in (("needs.changes.result", changes), (f"needs.{shard_id}.result", shard),
+                          ("needs.fast-lane.result", "success"),
                           ("github.event_name", event), ("github.event.pull_request.draft", False)):
             rendered = rendered.replace(key, repr(item))
         rendered = re.sub(r"!(?!=)", "not ", rendered.replace("false", "False"))
@@ -1998,7 +2124,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                             with self.subTest(cancelled=cancelled, classification=classification,
                                               cpp=cpp, result=result):
-                                dependencies = {"changes": classification, "asan-shard": result}
+                                dependencies = {"changes": classification, "asan-shard": result,
+                                                "fast-lane": "success"}
                                 admitted = evaluate_condition(value(aggregate, "if", 4), dependencies,
                                                               cancelled=cancelled)
                                 if not admitted:

@@ -230,6 +230,15 @@ ASan also supports light and keeps both heavy cases balanced on the full route.
 Full native validation and the existing platform limits remain required after
 merge; offline policy tests do not establish hosted-runner qualification.
 
+For ready pull requests needing native validation, ASan first runs a Python-only
+fast lane with the `ChangedTranslationUnitsContract` and
+`OfflineDependenciesContract` suites registered by the compiler-free contracts
+project. Both shards wait for success; a failed fast lane skips the shards and
+fails the required `Linux / GCC ASan` aggregate. The fast lane skips drafts and
+non-C++ routes, preserving their existing rejection and successful path skip,
+respectively. Pushes to main/devel and manual dispatches skip the fast lane and
+retain their existing shard admission and full ASan build/test execution.
+
 The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
 `Linux / GCC ASan` checks are ordinary aggregates. Workflow cancellation stops
 aggregates with valid dependencies; invalid dependencies still reach an explicit
