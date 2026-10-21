@@ -34,16 +34,22 @@ class RegistrationTests(unittest.TestCase):
             discovery = json.loads(result.stdout)
             tests = {test["name"]: test for test in discovery["tests"]}
             self.assertEqual(set(tests), {
-                "ChangedTranslationUnitsContract", "OfflineDependenciesContract"})
-            for name, script in (("ChangedTranslationUnitsContract", "test_changed_tus.py"),
-                                 ("OfflineDependenciesContract", "test_offline_deps.py")):
+                "ChangedTranslationUnitsContract", "OfflineDependenciesContract",
+                "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"})
+            self.assertEqual(len(discovery["tests"]), len(tests))
+            for name, script, arguments in (
+                ("ChangedTranslationUnitsContract", "test_changed_tus.py", []),
+                ("OfflineDependenciesContract", "test_offline_deps.py", ["--partition", "0"]),
+                ("OfflineDependenciesContractPart1", "test_offline_deps.py", ["--partition", "1"]),
+                ("OfflineDependenciesContractPart2", "test_offline_deps.py", ["--partition", "2"]),
+            ):
                 with self.subTest(name=name):
                     test = tests[name]
                     command = test["command"]
                     self.assertEqual(Path(command[0]).resolve(), Path(sys.executable).resolve())
                     self.assertEqual(command[1:3], ["-I", "-B"])
                     self.assertEqual(Path(command[3]).resolve(), ROOT / "tools/ci" / script)
-                    self.assertEqual(len(command), 4)
+                    self.assertEqual(command[4:], arguments)
                     properties = {item["name"]: item["value"] for item in test["properties"]}
                     self.assertEqual(properties["TIMEOUT"], 30)
                     self.assertEqual(properties["LABELS"], ["ci", "tools"])
@@ -81,7 +87,7 @@ class RegistrationTests(unittest.TestCase):
                     configure,
                     "ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json",
                     'ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"',
-                    f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract',
+                    f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2',
                 ])
                 # With no step condition, false/empty classifier output cannot
                 # bypass CTest. Existing job-level draft guards still apply.
