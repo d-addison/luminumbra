@@ -896,7 +896,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && "
             "github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}",
         )
-        for job in (ci["lint"], ci["public-tree"], perf["runner-contract"]):
+        for job in (ci["lint"], ci["public-tree"]):
             self.assertIsNone(value(job, "if", 4))
 
     def test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence(self):
@@ -1717,7 +1717,87 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
         pr = self.events["pull_request"]
         self.assertEqual(value(pr, "branches", 4), "[devel]")
         self.assertEqual(value(pr, "types", 4), "[opened, synchronize, reopened, ready_for_review]")
+        # Preserve the diagnostic's narrow admission filter; routing must not
+        # introduce costly cohort runs on general engine changes.
         self.assertEqual(re.findall(r"^      - (.+)$", pr, re.MULTILINE), self.input_paths)
+        self.assertIsNone(value(pr, "paths-ignore", 4))
+
+    def test_side_lanes_reuse_the_trusted_classifier_and_required_skip_pattern(self):
+        performance = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
+        reference = jobs(performance)["changes"]
+        for filename in ("ci.yml", "asan.yml", "ucrt-attribution.yml"):
+            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            classifier = jobs(workflow)["changes"]
+            with self.subTest(workflow=filename):
+                # The layout reader includes comments preceding the next job.
+                self.assertEqual(classifier.split("\n  #", 1)[0].strip(), reference.strip())
+                for output in ("needs_cpp", "needs_python"):
+                    self.assertEqual(value(classifier, output, 6), value(reference, output, 6))
+        # Required checks already report path-routed skips without changing names.
+        ci = jobs((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        for job_id in ("gns-compile-probe", "diligent-rhi"):
+            self.assertEqual(value(ci[job_id], "needs", 4), "changes")
+            self.assertIn("needs.changes.outputs.needs_cpp != 'false'", value(ci[job_id], "if", 4))
+        runner = jobs(performance)["runner-contract"]
+        self.assertEqual(value(runner, "name", 4), "Runner contract / ${{ matrix.os }}")
+        self.assertEqual(value(runner, "os", 8), "[ubuntu-24.04, windows-2025, macos-15]")
+
+    def test_side_lane_conditions_fail_open_and_preserve_non_pr_routes(self):
+        performance = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
+        for workflow, job_id, python_inputs in (
+                (performance, "runner-contract", True), (self.workflow, "attribution", False)):
+            job = jobs(workflow)[job_id]
+            self.assertEqual(value(job, "needs", 4), "changes")
+            condition = value(job, "if", 4)
+            expected = "${{ !cancelled() && (github.event_name != 'pull_request' || "
+            if not python_inputs:
+                expected += "(github.event.pull_request.draft == false && ("
+            expected += "needs.changes.result != 'success' || needs.changes.outputs.needs_cpp != 'false'"
+            if python_inputs:
+                expected += " || needs.changes.outputs.needs_python != 'false'"
+            self.assertEqual(condition, expected + (") }}" if python_inputs else "))) }}"))
+            # Finite cross-product covers partial/unknown output and failed,
+            # skipped or cancelled classification, including stale false output.
+            for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
+                for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                    for cpp in ("true", "false", "", "unknown"):
+                        for python in ("true", "false", "", "unknown"):
+                            for cancelled in (False, True):
+                                rendered = condition
+                                for key, item in (("github.event_name", event),
+                                                  ("needs.changes.outputs.needs_cpp", cpp),
+                                                  ("needs.changes.outputs.needs_python", python)):
+                                    rendered = rendered.replace(key, repr(item))
+                                for draft in (True, False, None):
+                                    # GitHub's missing boolean property is not false.
+                                    draft_rendered = rendered.replace(
+                                        "github.event.pull_request.draft == false", repr(draft is False))
+                                    with self.subTest(job=job_id, event=event, result=result,
+                                                      cpp=cpp, python=python, cancelled=cancelled, draft=draft):
+                                        routed = (result != "success" or cpp != "false"
+                                                  or (python_inputs and python != "false"))
+                                        ready = python_inputs or draft is False
+                                        self.assertEqual(evaluate_condition(
+                                            draft_rendered, {"changes": result}, cancelled=cancelled),
+                                            not cancelled and (event != "pull_request" or (ready and routed)))
+
+    def test_side_lane_input_groups_cover_native_toolchain_and_python_contracts(self):
+        import ci_paths
+        for path in ("src/world.cpp", "include/world.hpp", "CMakeLists.txt", "CMakePresets.json",
+                     "cmake/toolchain.cmake", "vendor/library/source.c", "vcpkg.json",
+                     "vcpkg-configuration.json", "deps/packages.txt", "scripts/packages.txt",
+                     ".github/workflows/performance.yml", ".github/workflows/ucrt-attribution.yml",
+                     *self.input_paths, "tools/CMakeLists.txt", "test/CMakeLists.txt", "new-tool"):
+            with self.subTest(path=path):
+                self.assertTrue(ci_paths.needs_cpp(path))
+        for path in ("docs/development.md", "README.md", "docs/diagram.svg"):
+            with self.subTest(path=path):
+                self.assertFalse(ci_paths.needs_cpp(path))
+                self.assertFalse(ci_paths.needs_python(path))
+        # Covered performance modules can skip native work but must retain the
+        # runner's Python contract coverage on every OS.
+        self.assertFalse(ci_paths.needs_cpp("tools/perf/render_budget.py"))
+        self.assertTrue(ci_paths.needs_python("tools/perf/render_budget.py"))
 
     def test_devel_pushes_also_cover_probe_build_definitions(self):
         push = self.events["push"]

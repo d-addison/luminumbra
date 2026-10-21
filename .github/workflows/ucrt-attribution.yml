@@ -51,8 +51,51 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  # Reuse the trusted, conservative native-input classifier for PR routing.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
+      needs_python: ${{ steps.paths.outputs.needs_python }}
+    steps:
+      - name: Check out repository and PR history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify merge-base diff (all lanes for non-PR events)
+        id: paths
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Use already-fetched base history; never execute the PR's classifier.
+          # The explicit guard also handles bases predating the fail-open rules.
+          all_lanes() {
+            echo 'Classification uncertain or CI inputs changed; running all lanes'
+            printf 'needs_cpp=true\nneeds_python=true\n' >> "$GITHUB_OUTPUT"
+          }
+          if [ "$CI_EVENT" != pull_request ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+            all_lanes
+          elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
+            all_lanes
+          elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
+            if ! python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE"; then
+              all_lanes
+            fi
+          else
+            all_lanes
+          fi
+
   attribution:
     name: Toolchain package cohorts (UCRT64)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (github.event.pull_request.draft == false && (needs.changes.result != 'success' || needs.changes.outputs.needs_cpp != 'false'))) }}
     runs-on: windows-2025
     timeout-minutes: 150
     steps:
