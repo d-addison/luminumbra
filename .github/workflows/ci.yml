@@ -529,6 +529,7 @@ jobs:
           cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON"
           ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
           ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
+          CI_PYTHON="$(cygpath -u "$CI_PYTHON")"
           "$CI_PYTHON" -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract
       - name: Upload local-check deadline evidence
         if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}

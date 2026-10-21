@@ -2721,4 +2721,8 @@ class PchEntryIdentityTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    diagnostic_spec = importlib.util.spec_from_file_location(
+        "contract_case_diagnostics", ROOT / "tools/ci/contract_case_diagnostics.py")
+    diagnostics = importlib.util.module_from_spec(diagnostic_spec)
+    diagnostic_spec.loader.exec_module(diagnostics)
+    unittest.main(testRunner=diagnostics.CaseDiagnosticRunner)
