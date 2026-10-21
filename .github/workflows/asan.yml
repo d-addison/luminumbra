@@ -43,7 +43,7 @@ env:
   QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
 
 jobs:
-  # Classify every event; shards depend directly on this gate. The aggregate
+  # Classify every event; shards also use the PR-only fast lane. The aggregate
   # preserves the required result for drafts and path-routed skips.
   # !cancelled() and != false keep missing/failed classification on the build path.
   changes:
@@ -106,14 +106,30 @@ jobs:
             all_lanes
           fi
 
+  # Run the two stdlib suites registered by tools/ci/local_check_contracts.cmake
+  # before admitting expensive PR shards. No compiler, packages or build tree.
+  fast-lane:
+    name: ASan / Python contracts
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) == 'false' && needs.changes.outputs.needs_cpp != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check changed translation unit contracts
+        run: python3 -I -B tools/ci/test_changed_tus.py
+      - name: Check offline dependency contracts
+        run: python3 -I -B tools/ci/test_offline_deps.py
+
   # Drafts cannot merge. ready_for_review reruns this job on the same head;
   # maintainers must wait for that run's required checks to pass before merging.
   asan-shard:
     name: Linux / GCC ASan shard ${{ matrix.shard }}/2
     # Drafts, including missing metadata, must reach the guard even on docs-only
     # changes. Ready PRs can still skip this lane through the path gate.
-    needs: changes
-    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') }}
+    needs: [changes, fast-lane]
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') && (github.event_name != 'pull_request' || toJSON(github.event.pull_request.draft) != 'false' || needs.fast-lane.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -228,6 +244,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}
+          overwrite: true
           path: |
             build/debug-asan/ctest.junit.xml
             build/debug-asan/Testing/Temporary
@@ -237,13 +254,16 @@ jobs:
 
   asan:
     name: Linux / GCC ASan
-    needs: [changes, asan-shard]
-    # Cancellation must reach the refusal step, never a successful job skip.
+    needs: [changes, fast-lane, asan-shard]
+    # Invalid dependencies must reach the refusal step.
     # The first guard still rejects every draft (including docs-only drafts).
     # A successful classification with needs_cpp=false and a skipped shard
     # preserves the path gate's successful required check. Failed classification
-    # or missing output still requires successful shards.
-    if: ${{ always() }}
+    # is rejected even when the shards succeed. A failed fast lane must fail
+    # this required check even though its dependent shards are skipped.
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -262,18 +282,19 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped')) }}
+        run: |
+          echo "Aggregate dependencies did not pass" >&2
+          exit 1
       - name: Require all ASan shards to pass
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         env:
           ASAN_SHARD_RESULT: ${{ needs.asan-shard.result }}
           CI_PATHS_RESULT: ${{ needs.changes.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          ASAN_CANCELLED: ${{ cancelled() }}
         run: |
-          if [[ "$ASAN_CANCELLED" != 'false' ]]; then
-            echo "ASan workflow was cancelled or cancellation status is missing" >&2
-            exit 1
-          elif [[ "$CI_PATHS_RESULT" == 'success' && "$NEEDS_CPP" == 'false' && "$ASAN_SHARD_RESULT" == 'skipped' ]]; then
+          if [[ "$CI_PATHS_RESULT" == 'success' && "$NEEDS_CPP" == 'false' && "$ASAN_SHARD_RESULT" == 'skipped' ]]; then
             message="route: skipped (ASan not needed by Classify changed paths)"
             echo "$message"
             echo "$message" >> "$GITHUB_STEP_SUMMARY"

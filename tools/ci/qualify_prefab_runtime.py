@@ -70,7 +70,7 @@ def validate_ctest(root):
     if any(count != 1 for count in names.values()):
         raise ValueError("Duplicate prefab CTest cases")
     for case in cases:
-        if (case.get("status") != "run" or case.get("result") == "suppressed"
+        if (case.get("status") != "run" or case.get("result") not in (None, "completed")
                 or any(case.find(tag) is not None for tag in ("failure", "error", "skipped"))):
             raise ValueError("Unevaluated or failing prefab CTest case: " + case.get("name"))
     return sorted(names)

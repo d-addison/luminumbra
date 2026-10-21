@@ -4,6 +4,7 @@
 
 set(CLIENT_INTERNAL_SOURCES
     # App (pre-main() helpers + frame-loop regions peeled out of main_client.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/app/FrameAttribution.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/CaveFlourishes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/HangWatchdog.cpp
@@ -60,6 +61,9 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldReplayGl.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeHandoff.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldHandoffRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldHandoffDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDepthBias.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FarWorldPassUniforms.cpp
@@ -177,8 +181,14 @@ set(CLIENT_VENDOR_SOURCES)
 
 # Main client executable sources.
 set(CLIENT_APP_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/../startup/RuntimeEntry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
 )
+
+# Preserve the implementation TU's ISA while routing both client binaries
+# through the baseline startup wrapper before constructing engine state.
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
+    COMPILE_DEFINITIONS "main=LuminumbraApplicationMain")
 
 # Complete executable source set for legacy consumers that include this file
 # directly.

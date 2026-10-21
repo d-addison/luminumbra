@@ -1,8 +1,21 @@
+#include "luminumbra_client/rendering/FarVolumeResidency.h"
 #include "luminumbra_client/rendering/FarWorldDiagnostics.h"
+#include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
+#include "luminumbra_client/rendering/FarWorldWaterMesh.h"
+#include "world/FarHorizon.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeRuntime.h"
+#include "world/FarWantedSet.h"
 
+#include <bit>
+#include <cstddef>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <type_traits>
 #include <vector>
 
@@ -11,9 +24,8 @@ using namespace Luminumbra::Rendering;
 using namespace Luminumbra::World;
 static_assert(std::is_trivially_copyable_v<FarWorldDiagnosticSnapshot>);
 
-struct Station {
-    FarWorldDiagnosticSnapshot snapshot;
-    std::vector<FarTileKey> expected;
+class Station {
+public:
     Station() {
         EXPECT_EQ(ComputeFarWantedSet(-512, 1024, expected), FarWantedError::None);
         snapshot.selection = {
@@ -52,14 +64,30 @@ struct Station {
     bool Ready(double seconds = 1) const {
         return FarWorldStationReady(snapshot, expected, seconds);
     }
+    FarWorldDiagnosticSnapshot& Snapshot() noexcept {
+        return snapshot;
+    }
+    const FarWorldDiagnosticSnapshot& Snapshot() const noexcept {
+        return snapshot;
+    }
+    std::vector<FarTileKey>& Expected() noexcept {
+        return expected;
+    }
+    const std::vector<FarTileKey>& Expected() const noexcept {
+        return expected;
+    }
+
+private:
+    FarWorldDiagnosticSnapshot snapshot;
+    std::vector<FarTileKey> expected;
 };
 
 TEST(FarWorldDiagnostics, EmptyCoverageDoesNotRequireGpuStoresOrSubmission) {
     const Station station;
     ASSERT_TRUE(station.Ready(90));
-    EXPECT_EQ(station.snapshot.draws, 0u);
-    EXPECT_FALSE(station.snapshot.submission_occurred);
-    EXPECT_EQ(station.snapshot.tiers[0].resident.memory.bytes_gpu, 0u);
+    EXPECT_EQ(station.Snapshot().draws, 0u);
+    EXPECT_FALSE(station.Snapshot().submission_occurred);
+    EXPECT_EQ(station.Snapshot().tiers[0].resident.memory.bytes_gpu, 0u);
     EXPECT_FALSE(station.Ready(90.001));
     EXPECT_FALSE(station.Ready(-1));
     EXPECT_FALSE(station.Ready(std::numeric_limits<double>::quiet_NaN()));
@@ -67,64 +95,64 @@ TEST(FarWorldDiagnostics, EmptyCoverageDoesNotRequireGpuStoresOrSubmission) {
 
 TEST(FarWorldDiagnostics, WetFixtureRequiresCombinedWaterAndActualSubmittedIndices) {
     Station station;
-    station.snapshot.water_capability = FarWorldWaterCapability::Wet;
+    station.Snapshot().water_capability = FarWorldWaterCapability::Wet;
     EXPECT_FALSE(station.Ready());
-    auto& tile = station.snapshot.tiles[0];
+    auto& tile = station.Snapshot().tiles[0];
     tile.coverage.state = FarTileState::Uploaded;
     tile.water_known_dry = false;
     tile.water_indices = 6;
-    auto& tier = station.snapshot.tiers[tile.desired.key.tier - 1];
+    auto& tier = station.Snapshot().tiers[tile.desired.key.tier - 1];
     --tier.resident.empty_pairs;
     ++tier.resident.uploaded_pairs;
     --tier.resident.water_known_dry_tiles;
     ++tier.resident.water_wet_tiles;
     tier.resident.retained_water_indices = 6;
-    tier.draws = station.snapshot.draws = 1;
-    tier.indices = station.snapshot.indices = 6;
-    station.snapshot.submission_occurred = true;
+    tier.draws = station.Snapshot().draws = 1;
+    tier.indices = station.Snapshot().indices = 6;
+    station.Snapshot().submission_occurred = true;
     EXPECT_FALSE(station.Ready());
     tier.resident.submitted_water_indices = 6;
     ASSERT_TRUE(station.Ready());
     for (int control = 0; control < 4; ++control) {
         auto invalid = station;
         if (control == 0)
-            invalid.snapshot.tiles[0].water_complete = false;
+            invalid.Snapshot().tiles[0].water_complete = false;
         if (control == 1)
-            invalid.snapshot.water_capability = FarWorldWaterCapability::ExplicitlyDry;
+            invalid.Snapshot().water_capability = FarWorldWaterCapability::ExplicitlyDry;
         if (control == 2)
-            invalid.snapshot.tiles[0].coverage.state = FarTileState::Empty;
+            invalid.Snapshot().tiles[0].coverage.state = FarTileState::Empty;
         if (control == 3)
-            invalid.snapshot.ladder_water_available = false;
+            invalid.Snapshot().ladder_water_available = false;
         EXPECT_FALSE(invalid.Ready());
     }
-    const auto on = FarWorldDiagnosticJson(station.snapshot);
+    const auto on = FarWorldDiagnosticJson(station.Snapshot());
     EXPECT_EQ(on["tiers"][0]["submitted_water_indices"], 6);
-    const auto off = FarWorldSubmissionOverride(station.snapshot.selection, false);
+    const auto off = FarWorldSubmissionOverride(station.Snapshot().selection, false);
     EXPECT_FALSE(off.submit);
-    EXPECT_EQ(FarWorldDiagnosticJson(station.snapshot), on);
+    EXPECT_EQ(FarWorldDiagnosticJson(station.Snapshot()), on);
 }
 
 TEST(FarWorldDiagnostics, MissingInvalidOrMismatchedCavePoliciesRefuseStation) {
     Station station;
-    station.snapshot.requested_cave_policy.reset();
-    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+    station.Snapshot().requested_cave_policy.reset();
+    EXPECT_EQ(CheckFarWorldStation(station.Snapshot(), station.Expected(), 1),
               FarWorldStationRefusal::InvalidBinding);
-    station.snapshot.requested_cave_policy = FarCaveMode::BoxFiltered;
-    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+    station.Snapshot().requested_cave_policy = FarCaveMode::BoxFiltered;
+    EXPECT_EQ(CheckFarWorldStation(station.Snapshot(), station.Expected(), 1),
               FarWorldStationRefusal::InvalidBinding);
-    station.snapshot.bound_cave_policy.reset();
-    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+    station.Snapshot().bound_cave_policy.reset();
+    EXPECT_EQ(CheckFarWorldStation(station.Snapshot(), station.Expected(), 1),
               FarWorldStationRefusal::InvalidBinding);
-    station.snapshot.requested_cave_policy = static_cast<FarCaveMode>(2);
-    station.snapshot.bound_cave_policy = static_cast<FarCaveMode>(2);
-    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+    station.Snapshot().requested_cave_policy = std::bit_cast<FarCaveMode>(std::uint8_t{2});
+    station.Snapshot().bound_cave_policy = std::bit_cast<FarCaveMode>(std::uint8_t{2});
+    EXPECT_EQ(CheckFarWorldStation(station.Snapshot(), station.Expected(), 1),
               FarWorldStationRefusal::InvalidBinding);
-    station.snapshot.requested_cave_policy = FarCaveMode::BoxFiltered;
-    station.snapshot.bound_cave_policy = FarCaveMode::BoxFiltered;
-    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+    station.Snapshot().requested_cave_policy = FarCaveMode::BoxFiltered;
+    station.Snapshot().bound_cave_policy = FarCaveMode::BoxFiltered;
+    EXPECT_EQ(CheckFarWorldStation(station.Snapshot(), station.Expected(), 1),
               FarWorldStationRefusal::StaleBinding);
-    for (std::size_t i = 0; i < station.snapshot.tile_count; ++i) {
-        auto& tile = station.snapshot.tiles[i];
+    for (std::size_t i = 0; i < station.Snapshot().tile_count; ++i) {
+        auto& tile = station.Snapshot().tiles[i];
         tile.desired.cave_policy = static_cast<std::uint8_t>(FarCaveMode::BoxFiltered);
         tile.built = tile.desired;
     }
@@ -152,17 +180,17 @@ TEST(FarWorldDiagnostics, SerializerDistinguishesRequestedBoundAndAbsentCavePoli
 
 TEST(FarWorldDiagnostics, MixedCoverageRequiresActualSuccessfulSubmission) {
     Station station;
-    auto& tile = station.snapshot.tiles[0];
+    auto& tile = station.Snapshot().tiles[0];
     tile.coverage.state = FarTileState::Uploaded;
     tile.terrain_indices = 6;
-    auto& tier = station.snapshot.tiers[tile.desired.key.tier - 1];
+    auto& tier = station.Snapshot().tiers[tile.desired.key.tier - 1];
     --tier.resident.empty_pairs;
     ++tier.resident.uploaded_pairs;
     tier.resident.retained_gpu_bytes = 144;
     EXPECT_FALSE(station.Ready());
-    station.snapshot.draws = 1;
-    station.snapshot.indices = 6;
-    station.snapshot.submission_occurred = true;
+    station.Snapshot().draws = 1;
+    station.Snapshot().indices = 6;
+    station.Snapshot().submission_occurred = true;
     tier.draws = 1;
     tier.indices = 6;
     EXPECT_TRUE(station.Ready());
@@ -172,9 +200,9 @@ TEST(FarWorldDiagnostics, MixedCoverageRequiresActualSuccessfulSubmission) {
 
 TEST(FarWorldDiagnostics, TooFewTriangleIndicesForDrawsRefusesStation) {
     Station station;
-    const auto tier_number = station.snapshot.tiles[0].desired.key.tier;
+    const auto tier_number = station.Snapshot().tiles[0].desired.key.tier;
     std::size_t uploaded = 0;
-    for (auto& tile : station.snapshot.tiles) {
+    for (auto& tile : station.Snapshot().tiles) {
         if (uploaded == 3)
             break;
         if (tile.has_pair && tile.desired.key.tier == tier_number) {
@@ -184,14 +212,14 @@ TEST(FarWorldDiagnostics, TooFewTriangleIndicesForDrawsRefusesStation) {
         }
     }
     ASSERT_EQ(uploaded, 3u);
-    auto& tier = station.snapshot.tiers[tier_number - 1];
+    auto& tier = station.Snapshot().tiers[tier_number - 1];
     tier.resident.empty_pairs -= 3;
-    tier.resident.uploaded_pairs = tier.draws = station.snapshot.draws = 3;
-    tier.indices = station.snapshot.indices = 6;
-    station.snapshot.submission_occurred = true;
-    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+    tier.resident.uploaded_pairs = tier.draws = station.Snapshot().draws = 3;
+    tier.indices = station.Snapshot().indices = 6;
+    station.Snapshot().submission_occurred = true;
+    EXPECT_EQ(CheckFarWorldStation(station.Snapshot(), station.Expected(), 1),
               FarWorldStationRefusal::TierCounters);
-    tier.indices = station.snapshot.indices = 9;
+    tier.indices = station.Snapshot().indices = 9;
     EXPECT_TRUE(station.Ready());
 }
 
@@ -210,7 +238,7 @@ TEST(FarWorldDiagnostics, WrongModeStaleGenerationSpanAndIncompleteStationRefuse
                              R::WrongPlane};
     for (int fault = 0; fault < 11; ++fault) {
         Station station;
-        auto& s = station.snapshot;
+        auto& s = station.Snapshot();
         switch (fault) {
             case 0:
                 s.selection.effective = FarWorldMode::Legacy;
@@ -246,29 +274,31 @@ TEST(FarWorldDiagnostics, WrongModeStaleGenerationSpanAndIncompleteStationRefuse
             case 10:
                 s.far_plane = kLegacyFarPlaneMeters;
                 break;
+            default:
+                FAIL() << "Unknown diagnostic fault: " << fault;
         }
         EXPECT_FALSE(station.Ready()) << fault;
-        EXPECT_EQ(CheckFarWorldStation(s, station.expected, 1), reasons[fault]) << fault;
+        EXPECT_EQ(CheckFarWorldStation(s, station.Expected(), 1), reasons[fault]) << fault;
     }
 }
 
 TEST(FarWorldDiagnostics, ExpectedSetDisagreementOrOmittedTierCannotSettle) {
     Station station;
-    station.expected[0].tx += 100;
+    station.Expected()[0].tx += 100;
     EXPECT_FALSE(station.Ready());
     Station omitted;
-    omitted.snapshot.tiers[0].resident.covering = 0;
+    omitted.Snapshot().tiers[0].resident.covering = 0;
     EXPECT_FALSE(omitted.Ready());
 }
 
 TEST(FarWorldDiagnostics, PairedOverridePreservesModePlaneAndOnSnapshot) {
-    Station station;
-    const auto on = FarWorldDiagnosticJson(station.snapshot);
-    const auto off = FarWorldSubmissionOverride(station.snapshot.selection, false);
+    Station const station;
+    const auto on = FarWorldDiagnosticJson(station.Snapshot());
+    const auto off = FarWorldSubmissionOverride(station.Snapshot().selection, false);
     EXPECT_EQ(off.effective, FarWorldMode::Ladder);
     EXPECT_EQ(off.requested, FarWorldMode::Ladder);
     EXPECT_EQ(off.refusal, FarWorldRefusal::None);
-    EXPECT_EQ(FarWorldPlane(off.effective), station.snapshot.far_plane);
+    EXPECT_EQ(FarWorldPlane(off.effective), station.Snapshot().far_plane);
     EXPECT_FALSE(off.advance);
     EXPECT_FALSE(off.submit);
     // A fake dispatch uses the same value snapshot and spends no allowance.
@@ -288,12 +318,12 @@ TEST(FarWorldDiagnostics, PairedOverridePreservesModePlaneAndOnSnapshot) {
     EXPECT_FALSE(advanced);
     EXPECT_FALSE(submitted);
     EXPECT_EQ(result.draws, 0u);
-    EXPECT_EQ(on, FarWorldDiagnosticJson(station.snapshot));
+    EXPECT_EQ(on, FarWorldDiagnosticJson(station.Snapshot()));
 }
 
 TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLogicalStoreLabels) {
     const Station station;
-    const auto json = FarWorldDiagnosticJson(station.snapshot);
+    const auto json = FarWorldDiagnosticJson(station.Snapshot());
     for (const char* field : {"requested_mode",
                               "effective_mode",
                               "refusal",
@@ -343,7 +373,7 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
                                   "retained_water_indices",
                                   "submitted_water_indices"})
             EXPECT_TRUE(tier.contains(field)) << field;
-    EXPECT_EQ(json["tiles"].size(), station.expected.size());
+    EXPECT_EQ(json["tiles"].size(), station.Expected().size());
     EXPECT_EQ(json["tiles"][0]["built"], json["tiles"][0]["desired"]);
     EXPECT_EQ(json["tiles"][0]["desired"]["cave_policy"], json["bound_cave_policy"]);
     EXPECT_EQ(json["gpu_bytes_kind"], "logical_stores");
@@ -369,12 +399,148 @@ TEST(FarWorldDiagnostics, CavePolicyRefusalsKeepTheirNamesInSerializedDiagnostic
     Station station;
     for (const auto refusal :
          {FarWorldRefusal::InvalidCavePolicy, FarWorldRefusal::CavePolicyMismatch}) {
-        station.snapshot.selection.refusal = refusal;
+        station.Snapshot().selection.refusal = refusal;
         const auto expected = refusal == FarWorldRefusal::InvalidCavePolicy ? "InvalidCavePolicy"
                                                                             : "CavePolicyMismatch";
         EXPECT_STREQ(FarWorldRefusalName(refusal), expected);
-        EXPECT_EQ(FarWorldDiagnosticJson(station.snapshot)["refusal"], expected);
+        EXPECT_EQ(FarWorldDiagnosticJson(station.Snapshot())["refusal"], expected);
         EXPECT_FALSE(station.Ready());
     }
 }
 } // namespace
+
+TEST(FarWorldHandoffDiagnostics, ResetClearsAllSlotsAndReleasesOwnedValuesInPlace) {
+    auto snapshot = std::make_unique<FarWorldHandoffDiagnosticSnapshot>();
+    auto water = std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0);
+    std::weak_ptr<const FarWorldWaterObservation> const weak = water;
+    snapshot->captured = true;
+    snapshot->complete = false;
+    snapshot->frame = 7;
+    snapshot->state.target_serial = 4;
+    snapshot->upload.upload_attempts = 3;
+    snapshot->submission.draws = 2;
+    snapshot->memory.back().bytes_total = 1;
+    snapshot->tile_count = snapshot->tiles.size();
+    snapshot->draw_count = snapshot->draws.size();
+    for (auto& tile : snapshot->tiles) {
+        tile.key = {5, -1, -2};
+        tile.observation.target.emplace().water = water;
+        tile.serving_arrival = tile.target_arrival = true;
+    }
+    for (auto& draw : snapshot->draws) {
+        draw.submitted = draw.arrival.eligible = true;
+        draw.child_identities.back().content_hash = 42;
+    }
+    water.reset();
+    snapshot->Reset();
+    EXPECT_TRUE(weak.expired());
+    const auto empty = std::make_unique<FarWorldHandoffDiagnosticSnapshot>();
+    EXPECT_EQ(FarWorldHandoffDiagnosticJson(*snapshot), FarWorldHandoffDiagnosticJson(*empty));
+    for (const auto& tile : snapshot->tiles) {
+        EXPECT_FALSE(tile.observation.target);
+        EXPECT_EQ(tile.key, FarTileKey{});
+        EXPECT_FALSE(tile.serving_arrival);
+        EXPECT_FALSE(tile.target_arrival);
+    }
+    for (const auto& draw : snapshot->draws) {
+        EXPECT_FALSE(draw.submitted);
+        EXPECT_FALSE(draw.arrival.eligible);
+        EXPECT_EQ(draw.child_identities.back().content_hash, 0u);
+    }
+    snapshot->Reset();
+    EXPECT_EQ(snapshot->tile_count, 0u);
+    EXPECT_EQ(snapshot->draw_count, 0u);
+}
+
+TEST(FarWorldDiagnostics, ResetRestoresDefaultsIncludingUnusedTileSlots) {
+    auto snapshot = std::make_unique<FarWorldDiagnosticSnapshot>();
+    snapshot->captured = snapshot->advanced = true;
+    snapshot->complete = false;
+    snapshot->world_epoch = 5;
+    snapshot->far_plane = 1;
+    snapshot->bound_cave_policy = FarCaveMode::BandLimited;
+    snapshot->tiles.back().desired.content_hash = 42;
+    snapshot->tiles.back().water_complete = true;
+    snapshot->tiers.back().indices = 7;
+    snapshot->Reset();
+    const auto empty = std::make_unique<FarWorldDiagnosticSnapshot>();
+    EXPECT_EQ(FarWorldDiagnosticJson(*snapshot), FarWorldDiagnosticJson(*empty));
+    EXPECT_FALSE(snapshot->tiles.back().water_complete);
+    EXPECT_EQ(snapshot->tiles.back().desired.content_hash, 0u);
+    EXPECT_EQ(snapshot->tiers.back().indices, 0u);
+}
+
+TEST(FarWorldHandoffDiagnostics, ServingContinuityCannotQualifyLatestTarget) {
+    FarWorldHandoffDiagnosticSnapshot snapshot;
+    snapshot.captured = true;
+    snapshot.state.world_epoch = 1;
+    snapshot.state.serving_serial = 4;
+    snapshot.state.target_serial = 5;
+    snapshot.state.committed_generation = 9;
+    snapshot.state.awaiting_replacement_fallback = true;
+    snapshot.tile_count = 1;
+    auto& tile = snapshot.tiles[0];
+    tile.key = {5, -1, 0};
+    auto& value = tile.observation;
+    auto& serving = value.serving.emplace();
+    auto& target = value.target.emplace();
+    serving.identity = {1, 42, 0, tile.key, 4, 1};
+    target.identity = {1, 43, 0, tile.key, 5, 2};
+    serving.intent.extra_span = FarVolumeCoverageSpan{-256, 64};
+    target.intent.extra_span = FarVolumeCoverageSpan{-512, 128};
+    value.serving_built.span = {-256, 256};
+    value.target_built.span = {-512, 256};
+    value.serving_coverage = {FarTileState::Uploaded, true, true};
+    value.serving_water_complete = true;
+    value.target_eligibility = FarVolumeEligibility::RequestRejected;
+    EXPECT_FALSE(FarWorldHandoffTargetReady(snapshot));
+    const auto json = FarWorldHandoffDiagnosticJson(snapshot);
+    EXPECT_EQ(json["schema"], "luminumbra.far_handoff.v1");
+    EXPECT_EQ(json["serving_serial"], 4u);
+    EXPECT_EQ(json["target_serial"], 5u);
+    EXPECT_TRUE(json["tiles"][0]["serving_covering"].get<bool>());
+    EXPECT_FALSE(json["tiles"][0]["target_covering"].get<bool>());
+    EXPECT_TRUE(json["tiles"][0]["serving_older_than_target"].get<bool>());
+    EXPECT_EQ(json["tiles"][0]["serving"]["content_hash"], 42u);
+    EXPECT_EQ(json["tiles"][0]["target"]["content_hash"], 43u);
+    value.target_coverage = {FarTileState::Empty, true, true};
+    value.target_water_complete = true;
+    EXPECT_TRUE(FarWorldHandoffTargetReady(snapshot));
+    value.target_water_complete = false;
+    EXPECT_FALSE(FarWorldHandoffTargetReady(snapshot));
+    value.target_water_complete = true;
+    snapshot.complete = false;
+    EXPECT_FALSE(FarWorldHandoffTargetReady(snapshot));
+}
+
+TEST(FarWorldHandoffDiagnostics, DrawArtifactKeepsServingChildIdentitiesAndAttemptBytes) {
+    FarWorldHandoffDiagnosticSnapshot snapshot;
+    snapshot.captured = true;
+    snapshot.state.serving_serial = 1;
+    snapshot.state.target_serial = 2;
+    snapshot.upload.upload_attempts = 1;
+    snapshot.upload.upload_bytes = 640;
+    snapshot.upload.successful_upload_bytes = 0;
+    snapshot.draw_count = 1;
+    auto& draw = snapshot.draws[0];
+    draw.identity = {7, 42, 0, {5, -1, -1}, 1, 3};
+    draw.arrival.eligible = true;
+    draw.submitted = true;
+    snapshot.submission.draws = 1;
+    for (std::size_t i = 0; i < 4; ++i) {
+        draw.child_identities[i] = {
+            7, 50 + i, 0, {4, -2 + std::int64_t(i % 2), -2 + std::int64_t(i / 2)}, 1, 3};
+        draw.arrival.children[i] = {-256, 128 + std::int64_t(i) * 128};
+    }
+    const auto json = FarWorldHandoffDiagnosticJson(snapshot);
+    EXPECT_EQ(json["upload_attempts"], 1u);
+    EXPECT_EQ(json["attempted_upload_bytes"], 640u);
+    EXPECT_EQ(json["successful_upload_bytes"], 0u);
+    EXPECT_EQ(json["submitted_draws"], 1u);
+    EXPECT_TRUE(json["draws"][0]["submitted"].get<bool>());
+    for (std::size_t i = 0; i < 4; ++i) {
+        EXPECT_EQ(json["draws"][0]["children"][i]["bake_generation"], 1u);
+        EXPECT_EQ(json["draws"][0]["children"][i]["content_hash"], 50 + i);
+        EXPECT_EQ(json["draws"][0]["children"][i]["built_span"][1], 128 + i * 128);
+    }
+}

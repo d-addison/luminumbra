@@ -2,8 +2,12 @@
 
 ## Toolchain
 
-The required tools are CMake 3.20 or newer, Ninja, Git, and a C++20 compiler. The
-first configure downloads pinned dependencies. Subsequent configuration can reuse
+The required tools are CMake 3.20 or newer, Ninja, Git, Python 3.10 or newer,
+and a C++20 compiler. Python is required during configuration even with
+`BUILD_TESTING=OFF` to verify and materialize the Jolt startup overlay. This
+minimum follows the existing local-check Python policy; the overlay helper uses
+`Path.is_relative_to`, available since Python 3.9. The first configure downloads
+pinned dependencies. Subsequent configuration can reuse
 the populated dependency sources without probing upstream repositories.
 
 Windows builds with `LUMINUMBRA_ENABLE_GNS=ON` or `LUMINUMBRA_ENABLE_STEAM=ON`
@@ -161,6 +165,15 @@ additional execution fields; only diagnostic backtrace IDs are excluded.
 Source and build roots are recorded in partition evidence and included in the
 inventory digest. Both producers must record byte-identical roots; different
 roots refuse merging, independently of the aggregate's artifact download path.
+Execution must also reproduce the exact source and build roots recorded at planning;
+case, separator, trailing-slash and drive-spelling differences refuse execution.
+Each lane's shard matrix uses the same hosted runner image and default checkout
+location. Discovery, planning and execution share one test step: PowerShell for
+MSVC, the MSYS2 UCRT64 shell and native Python for UCRT64, and Bash for GCC/ASan.
+No step switches the checkout between short/long Windows paths or MSYS and
+Windows spellings. The aggregate compares the recorded producer roots, including
+when Windows evidence is downloaded on Linux; it does not resolve those roots on
+the aggregate host.
 Execution strings are compared byte for byte, including paths, case-sensitive
 regexes, literal environment values and quoted or nested assignments containing
 roots. The fresh execution discovery uses the same contract, so
@@ -229,17 +242,26 @@ ASan also supports light and keeps both heavy cases balanced on the full route.
 Full native validation and the existing platform limits remain required after
 merge; offline policy tests do not establish hosted-runner qualification.
 
+For ready pull requests needing native validation, ASan first runs a Python-only
+fast lane with the `ChangedTranslationUnitsContract` and
+`OfflineDependenciesContract` suites registered by the compiler-free contracts
+project. Both shards wait for success; a failed fast lane skips the shards and
+fails the required `Linux / GCC ASan` aggregate. The fast lane skips drafts and
+non-C++ routes, preserving their existing rejection and successful path skip,
+respectively. Pushes to main/devel and manual dispatches skip the fast lane and
+retain their existing shard admission and full ASan build/test execution.
+
 The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
-`Linux / GCC ASan` checks are ordinary aggregates scheduled with `always()`.
-They reject drafts, missing draft metadata, cancellations and missing or
-unsuccessful expected producers. GCC and MSVC retain their Python-only route;
-UCRT64 runs on ready native PR routes, every main/devel push, and every manual
+`Linux / GCC ASan` checks are ordinary aggregates. Workflow cancellation stops
+aggregates with valid dependencies; invalid dependencies still reach an explicit
+failure step. They reject drafts, missing draft metadata, cancellations and
+missing or unsuccessful expected producers. GCC and MSVC retain their Python-only
+route; UCRT64 runs on ready native PR routes, every main/devel push, and every manual
 dispatch. Devel pushes seed its trusted compiler cache. The existing draft
-guard and job limit remain in place. Manual native qualification captures use
-a single full-suite producer, explicitly distinguished from two-shard evidence.
-Their existing binary-bound manifests, report bytes and qualification artifact
-paths remain intact. Qualification validation checks both the full producer and
-its aggregate.
+guard and job limit remain in place. Manual native qualification captures use a
+single full-suite producer, explicitly distinguished from two-shard evidence. Their existing
+binary-bound manifests, report bytes and qualification artifact paths remain
+intact. Qualification validation checks both the full producer and its aggregate.
 
 Native shard artifact names include lane, shard, SHA, run and attempt. Reports,
 inventories and partition evidence are retained for 30 days. An aggregate-only
@@ -275,14 +297,15 @@ Local `scripts/tidy.sh` still analyses the full scope by default;
 `--shard INDEX/COUNT` selects one stable partition.
 
 Draft pull requests run the cheap routine checks: changed-file formatting, public
-tree inventory, runner contracts, Doxygen, game assets, and the authoring mock
+tree inventory, path-routed runner contracts, Doxygen, game assets, and the authoring mock
 (subject to its existing paths filter). Linux/GCC, ASan, Windows/MSVC,
 Windows/UCRT64, clang-tidy, GNS, Diligent RHI, preview-frame, and the paired server
 comparison do no heavy work on draft pull requests. Linux/GCC, ASan, and
 preview-frame start with a lightweight guard that fails drafts before checkout or
 dependency installation. The native test aggregates also reject drafts when
 Windows producers skip; the other heavy jobs skip drafts. The separate
-path-filtered UCRT package attribution diagnostic keeps its existing job routing.
+path-filtered UCRT package attribution diagnostic also skips draft PRs and uses
+the same native-input path classifier.
 
 C++ sources and headers, CMake inputs, `src/`, `include/`, `test/`, `cmake/`,
 `res/` (including shaders and test data), `data/`, `config/`, `worlds/`, vendored
@@ -299,6 +322,15 @@ file from heavy correctness.
 Unknown tooling remains on the build path. Heavy sensitivity takes precedence
 over standalone Python exemptions, so persistence tooling and validation
 entrypoints also require native correctness tests.
+
+The performance workflow's three `Runner contract` checks depend directly on
+`changes` and skip PRs only when classification succeeds with both `needs_cpp`
+and `needs_python` false. Covered Python changes therefore retain these contracts
+on Linux, Windows, and macOS. Preview-frame retains its existing native-input
+gate, including the draft refusal. This reuses the path-routed skip already used
+by the required GNS and Diligent RHI checks. Missing outputs or failed
+classification keep the runner contracts and ready-PR package attribution runnable;
+cancellation stops them. Push, schedule, and manual routing is unchanged.
 
 Draft pull requests cannot merge. GitHub does not allow draft PRs to merge and
 may report jobs skipped by a condition as successful, so a draft skip alone does
@@ -328,6 +360,18 @@ evidence that native validation ran. No additional job runs on draft pushes
 to enforce this policy; the guards use existing required jobs. Windows/UCRT64
 also runs on devel pushes, and the paired server comparison still runs only for
 main-bound ready PRs or eligible main/devel pushes.
+
+Rerunning a draft-era workflow reuses its stored event payload, including
+`pull_request.draft=true`; marking the pull request ready does not rewrite that
+payload or the old failed aggregates. A new `ready_for_review` run has its own
+payload and checks. Changing only the aggregate's draft guard to read live state
+would not repair the old run: producer guards, job and artifact conditions, and
+the native aggregate route validator also consume the stored draft state.
+Accepting the live ready state without successful routed producers could hide
+missing validation. The guards remain unchanged; use fresh ready-event checks
+on the current head rather than an old draft-event rerun. Persistent stale
+merge-ref checks require a fresh pull request event/ref, such as closing and
+reopening the pull request.
 
 The required `Linux / GCC` and `Windows / MSVC` jobs always run on ready PRs.
 When `needs_cpp=false`, each installs only numpy, Pillow and jsonschema for its OS
@@ -365,8 +409,9 @@ CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 
 Required job names and workflow PR triggers remain present for every PR. Native
 lanes depend directly on the always-running classifier. The clang-tidy aggregate
-also depends on the shards and uses `always()` to report their result even when
-they are skipped. Linux/GCC and Windows/MSVC select their native or Python
+also depends on the shards and reports their result, including routed skips.
+Workflow cancellation stops aggregates with valid dependencies; invalid
+dependencies reach an explicit failure step. Linux/GCC and Windows/MSVC select their native or Python
 steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
 which GitHub accepts for required checks, rather than leaving a missing status
 pending. Public tree, Format, Doxygen, and runner contracts run independently
@@ -420,13 +465,20 @@ supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
 runs. Authoring PR runs retain their independent, non-cancelling behaviour.
 The authoring workflow keeps its existing path triggers. The diagnostic
 `ucrt-attribution.yml` workflow is not a required check. Its devel PR triggers
-cover the workflow itself, `tools/ci/ucrt_attribution.sh`,
+retain their existing paths: the attribution workflow,
+`tools/ci/ucrt_attribution.sh`, `tools/ci/ci_shell.py`,
 `tools/ci/test_ucrt_attribution.py`, `tools/ci/test_ucrt_gcc_cohort.py`,
 `tools/ci/check_worldgen_probe_smoke.py`,
-`tools/ci/test_check_worldgen_probe_smoke.py`, and
-`test/diagnostics/worldgen_probe.cpp`. Devel pushes cover those same paths plus
-`tools/CMakeLists.txt` and `test/CMakeLists.txt`, catching probe build changes
-after merge. Attribution also runs weekly on Sunday at 04:43 UTC on the default
+`tools/ci/test_check_worldgen_probe_smoke.py`, and `test/diagnostics/worldgen_probe.cpp`.
+Admitted PR events classify paths before `Toolchain package cohorts (UCRT64)`;
+the Windows job runs only for ready PRs whose classification does not establish
+`needs_cpp=false`. The shared classifier covers C++/CMake, vendor, toolchain,
+package-list, workflow and diagnostic inputs, but this diagnostic retains its
+narrower workflow filter rather than adding cohort runs for every native change.
+Forks, unknown inputs, missing history, and empty diffs keep native validation
+enabled for admitted ready PRs. Missing draft metadata skips the diagnostic.
+Devel pushes retain those same paths plus `tools/CMakeLists.txt` and `test/CMakeLists.txt`.
+Attribution also runs weekly on Sunday at 04:43 UTC on the default
 branch and supports manual dispatch. Other scheduled and release routing stays
 unchanged.
 

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
+import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PosixPath, WindowsPath
 import re
 import shlex
 import shutil
@@ -17,11 +19,37 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+_PATH_SPEC = importlib.util.spec_from_file_location("_offline_path_safety", ROOT / "tools/ci/path_safety.py")
+_PATH_SAFETY = importlib.util.module_from_spec(_PATH_SPEC)
+_PATH_SPEC.loader.exec_module(_PATH_SAFETY)
 MAX_GIT_REDIRECTIONS = 32
 
 
 class DependencyError(ValueError):
     pass
+
+
+def reject_reparse_points(path):
+    try:
+        _PATH_SAFETY.reject_reparse_points(path)
+    except OSError as error:
+        raise DependencyError(str(error)) from error
+
+
+def resolve_path(path: Path) -> Path:
+    """Normalize pathlib cycle errors, retaining other filesystem errors.
+
+    Python versions report symlink loops as RuntimeError or OSError(ELOOP).
+    Callers and the CLI already handle ordinary OSError refusals.
+    """
+    try:
+        return path.resolve()
+    except OSError as error:
+        if error.errno != errno.ELOOP:
+            raise
+        raise DependencyError(f"cyclic path: {path}") from error
+    except RuntimeError as error:
+        raise DependencyError(f"cyclic path: {path}") from error
 
 
 def declarations(root: Path) -> dict:
@@ -43,6 +71,14 @@ def declarations(root: Path) -> dict:
                 or not fields.get("GIT_TAG")):
             raise DependencyError(f"unsupported dependency declaration: {name}")
         result[name] = {"repository": fields["GIT_REPOSITORY"], "revision": fields["GIT_TAG"]}
+    if "joltphysics" in result:
+        try:
+            spec = importlib.util.spec_from_file_location("_jolt_startup", root / "tools/ci/jolt_startup.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            result["joltphysics"]["overlay"] = module.identity(root)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise DependencyError(f"invalid Jolt overlay identity: {error}") from error
     if not result:
         raise DependencyError("no FetchContent dependencies found")
     return result
@@ -55,12 +91,35 @@ def unresolved_lock(root: Path) -> dict:
     }}
 
 
+def _lexically_relative(path: Path, parent: Path) -> bool:
+    # Compare immutable components without constructing every ancestor Path.
+    # Keep custom Path semantics and non-absolute inputs on the original API.
+    if (type(path) is not type(parent) or type(path) not in (PosixPath, WindowsPath)
+            or not path.is_absolute() or not parent.is_absolute()):
+        return path.is_relative_to(parent)
+    parts, parent_parts = path.parts, parent.parts
+    if isinstance(path, WindowsPath):
+        # pathlib compares Windows path spellings with str.lower(), retaining
+        # drive/UNC anchors, backslash boundaries, ADS and literal '..' parts.
+        parts = tuple(part.lower() for part in parts)
+        parent_parts = tuple(part.lower() for part in parent_parts)
+    return parts[:len(parent_parts)] == parent_parts
+
+
 def contained(path: Path, parent: Path) -> Path:
-    try:
-        resolved = path.resolve()
-    except RuntimeError as error:
-        raise DependencyError(f"cyclic path: {path}") from error
-    if resolved == parent.resolve() or not resolved.is_relative_to(parent.resolve()):
+    # Refuse lexical escapes before filesystem queries: hostile metadata can
+    # contain bytes Windows cannot stat. Still inspect the original components
+    # below before resolving, so '..' cannot erase a redirecting component.
+    # Other spellings (including Windows 8.3 aliases) need resolved comparison.
+    lexical_path, lexical_parent = Path(os.path.abspath(path)), Path(os.path.abspath(parent))
+    if (_lexically_relative(path.absolute(), parent.absolute())
+            and (lexical_path == lexical_parent or not _lexically_relative(lexical_path, lexical_parent))):
+        raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
+    reject_reparse_points(path)
+    reject_reparse_points(parent)
+    resolved = resolve_path(path)
+    resolved_parent = resolve_path(parent)
+    if resolved == resolved_parent or not _lexically_relative(resolved, resolved_parent):
         raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
     return resolved
 
@@ -68,9 +127,10 @@ def contained(path: Path, parent: Path) -> Path:
 def source_digest(source: Path) -> str:
     """Hash sorted paths, types, executable bits and bytes; omit Git metadata.
 
-    Only relative symlinks resolving inside this source are accepted. Copying
-    them therefore preserves their meaning without exposing shared files.
+    POSIX relative symlinks must resolve inside this source, so copying them
+    preserves their meaning. Windows reparse points are refused entirely.
     """
+    reject_reparse_points(source)
     if source.is_symlink() or not source.is_dir():
         raise DependencyError(f"missing source directory: {source.name}")
     digest = hashlib.sha256()
@@ -83,13 +143,14 @@ def source_digest(source: Path) -> str:
 
     def visit(directory):
         for item in sorted(directory.iterdir(), key=lambda p: os.fsencode(p.name)):
+            reject_reparse_points(item)
             if item.name == ".git":
                 continue
             rel = item.relative_to(source).as_posix()
             mode = item.lstat().st_mode
             if stat.S_ISLNK(mode):
                 target = os.readlink(item)
-                if os.path.isabs(target) or not item.resolve().is_relative_to(source.resolve()):
+                if os.path.isabs(target) or not resolve_path(item).is_relative_to(resolve_path(source)):
                     raise DependencyError(f"source symlink escapes: {rel}")
                 if not item.exists():
                     raise DependencyError(f"dangling source symlink: {rel}")
@@ -110,30 +171,105 @@ def source_digest(source: Path) -> str:
     return digest.hexdigest()
 
 
+def git_alternate_paths(data: bytes, *, windows: bool) -> list[str]:
+    """Accept Windows CRLF records without changing POSIX pathname semantics.
+
+    Windows text writers translate LF to CRLF; CR cannot occur in an ordinary
+    Windows filename. POSIX Git retains CR as a pathname byte. Preserve embedded
+    CR, an unpaired final CR, whitespace and Unicode separators on both platforms.
+    """
+    if windows:
+        data = data.replace(b"\r\n", b"\n")
+    result = []
+    for line in data.split(b"\n"):
+        if not line or line.startswith(b"#"):
+            continue
+        # Quoted encodings need Git's C-string parser; refuse rather than
+        # validate a different path from Git's input.
+        if line.startswith(b'"') or b"\0" in line:
+            raise DependencyError("unsupported Git alternate path encoding")
+        result.append(os.fsdecode(line))
+    return result
+
+
+def config_has_includes(text: str) -> bool:
+    """Tokenize section headers, including adjacent headers on the same line.
+
+    Skip variable values as a whole, respecting comments, quotes and escaped
+    newlines so header-like text in a value cannot become a directive.
+    """
+    # Use Git's ASCII whitespace, not Unicode \s. Some Git versions accept
+    # vertical tab and form feed here; refuse includes before any Git runs.
+    section = re.compile(r'\[[ \t\r\v\f]*([\w.-]+)(?:[ \t\r\v\f]+"(?:\\.|[^"\\\n])*")?[ \t\r\v\f]*\]')
+    index = 0
+    statement = True
+    quoted = False
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            index += 2
+            continue
+        if not quoted and char in "#;":
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline
+            continue
+        if char == "\n":
+            statement, quoted = True, False
+        elif statement and char in " \t\r\v\f":
+            pass
+        elif statement and char == "[":
+            match = section.match(text, index)
+            if match:
+                if match[1].casefold().split(".", 1)[0] in {"include", "includeif"}:
+                    return True
+                index = match.end()
+                continue
+            raise DependencyError("unsupported Git config section")
+        else:
+            statement = False
+            if char == '"':
+                quoted = not quoted
+        index += 1
+    return False
+
+
 def git_metadata(source: Path, cache: Path) -> None:
     """Require self-contained metadata, including submodule gitdir files.
 
     Follow internal directory links only once. Resolve every link before Git
     sees it, even links in otherwise unused metadata such as hooks and refs.
+    Refuse config include sections (including inactive conditional includes)
+    instead of allowing Git to discover unvalidated files outside the cache.
     """
     marker = source / ".git"
+    reject_reparse_points(marker)
     if marker.is_symlink():
         raise DependencyError(f"symlinked Git identity: {source.name}")
     seen = set()
 
     def visit(path):
-        if path.is_symlink():
-            contained(path, cache)
+        # Containment checks the original components for reparse points before
+        # resolving them. Do this once per visit, before inspecting file type;
+        # nothing is retained across scans or intervening Git processes.
+        resolved = contained(path, cache)
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
             if not path.exists():
                 raise DependencyError("dangling Git metadata symlink")
-        resolved = contained(path, cache)
+            mode = path.stat().st_mode
+        # Check the logical name before deduplicating resolved symlink targets:
+        # a config alias may point at an already visited, differently named file.
+        if path.name.casefold() in {"config", "config.worktree"} and stat.S_ISREG(mode):
+            text = path.read_text(encoding="utf-8-sig", errors="surrogateescape")
+            if config_has_includes(text):
+                raise DependencyError(f"Git config includes are not allowed: {path}")
         if resolved in seen:
             return
         seen.add(resolved)
-        if path.is_dir():
+        if stat.S_ISDIR(mode):
             for child in sorted(path.iterdir(), key=lambda p: os.fsencode(p.name)):
                 visit(child)
-        elif not path.is_file():
+        elif not stat.S_ISREG(mode):
             raise DependencyError("unsupported Git metadata file")
 
     active, complete = set(), {}
@@ -172,14 +308,8 @@ def git_metadata(source: Path, cache: Path) -> None:
         else:
             alternates = resolved / "info/alternates"
             if alternates.exists():
-                for line in alternates.read_text(encoding="utf-8").splitlines():
-                    if not line or line.startswith("#"):
-                        continue
-                    # Quoted encodings need Git's C-string parser; refuse
-                    # rather than validate a different path from Git's input.
-                    if line.startswith('"') or "\0" in line:
-                        raise DependencyError("unsupported Git alternate path encoding")
-                    redirect("objects", resolved / line, depth + 1)
+                for target in git_alternate_paths(alternates.read_bytes(), windows=os.name == "nt"):
+                    redirect("objects", resolved / target, depth + 1)
         active.remove(key)
         complete[key] = depth
 
@@ -187,7 +317,9 @@ def git_metadata(source: Path, cache: Path) -> None:
 
 
 def git(source: Path, *args: str, cache: Path, network=False) -> str:
-    if args != ("init", "--quiet"):
+    # Reinitialization reads existing metadata too. Only a fresh repository
+    # can omit validation; lexists also catches dangling metadata links.
+    if args != ("init", "--quiet") or os.path.lexists(source / ".git"):
         git_metadata(source, cache)
     # Do not inherit config injection, repository redirection, tracing, helpers
     # or transport commands from the caller. Local config is still read by Git,
@@ -216,7 +348,8 @@ def git(source: Path, *args: str, cache: Path, network=False) -> str:
 
 
 def head(source: Path, cache: Path) -> str:
-    return git(source, "rev-parse", "--verify", "HEAD^{commit}", cache=cache).strip()
+    # ^0 peels to a commit without braces that MSYS argument globbing expands.
+    return git(source, "rev-parse", "--verify", "HEAD^0", cache=cache).strip()
 
 
 def submodules(source: Path, cache: Path) -> dict:
@@ -296,6 +429,7 @@ def verify(root: Path, cache: Path, lock_path: Path) -> dict:
 
 def snapshot(root: Path, cache: Path, lock_path: Path) -> None:
     # Fresh directories avoid reusing stale or partially populated sources.
+    reject_reparse_points(cache)
     if cache.exists() and any(cache.iterdir()):
         raise DependencyError("snapshot requires an empty cache directory")
     cache.mkdir(parents=True, exist_ok=True)
@@ -334,10 +468,50 @@ def cmake_string(value: str) -> str:
     return "[" + equals + "[" + value + "]" + equals + "]"
 
 
+def remove_stage(dest: Path) -> None:
+    """Remove copied read-only directories and Windows read-only files."""
+    def writable(path):
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            return
+        reject_reparse_points(path)
+        # Older Windows Python lacks follow_symlinks for chmod. Only chmod
+        # non-links there; use explicit no-follow semantics where supported.
+        options = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+        os.chmod(path, mode | stat.S_IWUSR, **options)
+
+    def retry(function, path, exc_info):
+        if (not isinstance(exc_info[1], PermissionError)
+                or function not in (os.unlink, os.remove, os.rmdir)):
+            raise exc_info[1]
+        path = Path(path)
+        # POSIX unlink needs a writable parent; Windows deletion also needs
+        # the file's read-only attribute cleared. Never chmod link targets.
+        if path != dest:
+            writable(path.parent)
+        writable(path)
+        function(path)
+
+    # onerror is available on every supported Python, including 3.10/3.11.
+    reject_reparse_points(dest)
+    shutil.rmtree(dest, onerror=retry)
+
+
+def publish_initial_cache(candidate: Path, init: Path) -> None:
+    """Atomically publish complete bytes, refusing every existing occupant.
+
+    Both names are on the same filesystem. Unlike rename on POSIX or replace
+    on either platform, a hard link cannot overwrite a concurrent publisher.
+    The candidate is closed before linking, including on Windows.
+    """
+    os.link(candidate, init)
+
+
 def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> None:
     scratch = root / "scratch"
     if scratch.is_symlink():
         raise DependencyError("symlinked scratch root")
+    reject_reparse_points(scratch)
     contained(scratch, root)
 
     def destination(path):
@@ -355,19 +529,37 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
         return contained(path, scratch)
 
     dest, init = destination(dest), destination(init)
+    resolved_cache = resolve_path(cache)
     if (dest.exists() or init.exists() or init.is_relative_to(dest) or dest.is_relative_to(init)
-            or dest.is_relative_to(cache.resolve()) or cache.resolve().is_relative_to(dest)
-            or init.is_relative_to(cache.resolve())):
+            or dest.is_relative_to(resolved_cache) or resolved_cache.is_relative_to(dest)
+            or init.is_relative_to(resolved_cache)):
         raise DependencyError("stage needs fresh, separate destination and initial cache paths")
     lock = verify(root, cache, lock_path)
     dest.mkdir(parents=True)
     candidate = None
+    candidate_identity = None
+    publication_started = False
+    retain_stage = False
     try:
         lines = []
         for name, entry in lock["dependencies"].items():
             target = dest / name
+            reject_reparse_points(cache / name)
+
+            def checked_entries(directory, names):
+                # copytree calls this for each directory before recursing or
+                # copying its entries. Recheck after verification as well.
+                reject_reparse_points(directory)
+                for child in names:
+                    reject_reparse_points(Path(directory) / child)
+                return {".git"}
+
+            def checked_copy(source, destination):
+                reject_reparse_points(source)
+                return shutil.copy2(source, destination)
+
             shutil.copytree(cache / name, target, symlinks=True,
-                            ignore=shutil.ignore_patterns(".git"))
+                            ignore=checked_entries, copy_function=checked_copy)
             if source_digest(target) != entry["sha256"]:
                 raise DependencyError(f"source changed during copy: {name}")
             lines.append(f'set(FETCHCONTENT_SOURCE_DIR_{name.upper()} '
@@ -380,28 +572,141 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
                                          prefix=init.name + ".", suffix=".tmp", delete=False) as handle:
             candidate = Path(handle.name)
             handle.write("\n".join(lines) + "\n")
-        os.replace(candidate, init)
-    except BaseException:
-        shutil.rmtree(dest)
+        # Use lstat rather than DirEntry or CRT metadata, which can report
+        # zero file identity on Windows. The candidate is already closed.
+        candidate_identity = candidate.lstat()
+        publication_started = True
+        publish_initial_cache(candidate, init)
+        retain_stage = True
+        candidate.unlink()
+        candidate = None
+    except BaseException as error:
+        # A native link can complete before interruption or an API wrapper
+        # raises. Never unlink init: it may belong to another publisher. Keep
+        # our stage if that name references our candidate, or if lookup cannot
+        # establish the outcome. Absence permits stage rollback, not adoption
+        # or removal of an initial-cache occupant. This is an observation for
+        # retaining data, not an identity-conditioned namespace deletion.
+        if publication_started and not retain_stage:
+            try:
+                occupant = init.lstat()
+                if stat.S_ISREG(occupant.st_mode):
+                    if (not candidate_identity.st_ino or not occupant.st_ino
+                            or not candidate_identity.st_dev or not occupant.st_dev):
+                        retain_stage = True
+                        if sys.version_info >= (3, 11):
+                            error.add_note("stage retained: initial cache identity unavailable")
+                    else:
+                        retain_stage = os.path.samestat(candidate_identity, occupant)
+            except FileNotFoundError:
+                pass
+            except BaseException as lookup_error:
+                retain_stage = True
+                if sys.version_info >= (3, 11):
+                    error.add_note(f"stage retained: initial cache lookup failed: {lookup_error}")
+        # Attempt independent cleanups without masking the initiating error.
+        # Once published, even a candidate cleanup failure must retain the
+        # stage so the complete configuration never names deleted sources.
+        if not retain_stage:
+            try:
+                remove_stage(dest)
+            except BaseException as cleanup_error:
+                if sys.version_info >= (3, 11):
+                    error.add_note(f"stage cleanup failed: {cleanup_error}")
+        try:
+            if candidate is not None:
+                candidate.unlink(missing_ok=True)
+        except BaseException as cleanup_error:
+            if sys.version_info >= (3, 11):
+                error.add_note(f"initial cache cleanup failed: {cleanup_error}")
         raise
-    finally:
-        if candidate is not None:
-            candidate.unlink(missing_ok=True)
+
+
+def prepare_scratch(root: Path) -> None:
+    """Validate the recipe's writable paths before creating tmp/cache dirs."""
+    root = root.absolute()
+    scratch = root / "scratch"
+    directories = tuple(scratch / name for name in ("tmp", "ccache", "local-gcc", "local-tidy"))
+
+    def directory(path):
+        # Inspect original components, including those before '..', before
+        # containment resolves them. Do not retain checks across invocations.
+        reject_reparse_points(path)
+        for component in (path, *path.parents):
+            try:
+                mode = component.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(mode):
+                raise DependencyError(f"scratch path component is not an ordinary directory: {component}")
+
+    directory(root)
+    if not root.is_dir():
+        raise DependencyError("missing checkout directory")
+    directory(scratch)
+    contained(scratch, root)
+    for path in directories:
+        directory(path)
+        contained(path, scratch)
+
+    # Staging still verifies the lock and publishes/rolls back its own outputs.
+    # Check its fresh paths here too, before tmp/cache creation or environment
+    # exports. No Git command or shared dependency-cache write is needed.
+    dest, init = scratch / "offline-deps", scratch / "offline-init.cmake"
+    directory(dest)
+    for path in (dest, init):
+        contained(path, scratch)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        raise DependencyError("stage needs fresh destination and initial cache paths")
+
+    def inspect_tree(path):
+        # The scan is bounded by the existing entries under this writable
+        # tree, including the pending-directory stack. Read no payloads. Use
+        # lstat, not DirEntry's Windows metadata, and inspect before descending.
+        pending = [path]
+        while pending:
+            parent = pending.pop()
+            directory(parent)
+            with os.scandir(parent) as entries:
+                for item in entries:
+                    entry = Path(item.path)
+                    reject_reparse_points(entry)
+                    mode = entry.lstat().st_mode
+                    if stat.S_ISDIR(mode):
+                        pending.append(entry)
+                    elif not stat.S_ISREG(mode):
+                        raise DependencyError(f"scratch tree entry is not an ordinary file or directory: {entry}")
+
+    # Reused build trees can redirect generated files below an ordinary root,
+    # just as tmp/cache can. Complete every read-only check before any mkdir.
+    for path in directories:
+        if path.exists():
+            inspect_tree(path)
+    for path in directories[:2]:
+        path.mkdir(parents=True, exist_ok=True)
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("snapshot", "verify", "stage"))
+    parser.add_argument("command", choices=("snapshot", "verify", "stage", "prepare"))
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--lock", type=Path, default=Path("tools/ci/deps-lock.json"))
     parser.add_argument("--dest", type=Path, default=Path("scratch/offline-deps"))
     parser.add_argument("--init", type=Path, default=Path("scratch/offline-init.cmake"))
     args = parser.parse_args(argv)
-    root = args.root.resolve()
-    cache = args.cache.resolve()
-    lock = root / args.lock
+    cache = args.cache
     try:
+        if args.command == "prepare":
+            # Preserve the original root spelling for component inspection.
+            prepare_scratch(args.root)
+            print("offline dependencies: prepare complete")
+            return 0
+        root = resolve_path(args.root)
+        lock = root / args.lock
         if args.command == "snapshot":
             snapshot(root, cache, lock)
         elif args.command == "verify":

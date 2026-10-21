@@ -2,18 +2,21 @@
 """Isolated stdlib contracts for dependency-expanded compile and tidy checks."""
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import ntpath
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,11 +26,35 @@ SPEC.loader.exec_module(tus)
 
 
 class ChangedTranslationUnitsTests(unittest.TestCase):
+    def test_windows_reparse_entries_are_refused_by_every_tree_consumer(self):
+        real_lstat = os.lstat
+        marked = self.src / "redirect"
+        marked.mkdir()
+        (marked / "input.hpp").write_text("same content\n")
+
+        def metadata(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            fields["st_file_attributes"] = 0x400 if Path(path) == marked else 0
+            return SimpleNamespace(**fields)
+
+        actions = (
+            lambda: tus.check_pch_search_roots("g++", {self.src}),
+            lambda: tus.directory_entries(self.src),
+            lambda: tus.directory_stamp(marked),
+            lambda: tus.configured_header_inputs(self.root, self.build),
+            lambda: tus.checked_resolve(marked / "input.hpp"),
+        )
+        with patch.object(tus._DEPS._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(os, "lstat", side_effect=metadata):
+            for action in actions:
+                with self.subTest(action=action), self.assertRaisesRegex(tus.SelectionError, "reparse point"):
+                    action()
+
     def setUp(self):
-        (ROOT / "scratch").mkdir(exist_ok=True)
-        temporary = tempfile.TemporaryDirectory(prefix="changed tus ", dir=ROOT / "scratch")
+        temporary = tempfile.TemporaryDirectory(prefix="changed tus ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.src = self.root / "src"
         self.src.mkdir()
         self.build = self.root / "scratch/build with spaces"
@@ -47,6 +74,9 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         self.commands = []
         self.mock_execute = patch.object(tus, "execute", side_effect=self.fake_execute).start()
+        # Most tests model compiler replay; dedicated search-list tests below
+        # exercise the real probe with subprocess results for both drivers.
+        patch.object(tus, "compiler_header_roots", return_value=set()).start()
         self.addCleanup(patch.stopall)
 
     def raw_entry(self, source, extra=(), directory=None):
@@ -64,7 +94,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def fake_execute(self, command, directory, check=True):
         self.commands.append((command, directory))
         if "-M" in command:
-            source = self.a if str(self.a) in command else self.b
+            _, operands = tus.parse_arguments(command[:-3])
+            source = (directory / operands[0]).resolve()
             paths = [source, self.other, self.generated]
             # A transitive conditional header is consumed by only one target
             # variant, and a separate include is visible only to the analyzer.
@@ -78,6 +109,13 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def select(self, changed):
         return tus.select(self.root, self.entries(), set(changed), 2, self.build)
 
+    def check_commands(self):
+        return [(command, directory) for command, directory in self.commands if "-M" not in command]
+
+    def compile_commands_by_variant(self):
+        # Workers may finish in either order; output names retain input indices.
+        return sorted(self.check_commands(), key=lambda item: int(Path(item[0][-1]).stem))
+
     def arguments(self, command="compile", **updates):
         values = dict(command=command, ccache=False, jobs=2,
                       config_file=Path(".clang-tidy"), also_ci_gate=False,
@@ -86,13 +124,56 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         values.update(updates)
         return argparse.Namespace(**values)
 
-    def test_changed_source_selects_every_command_variant_without_scanning(self):
+    def test_changed_source_selects_every_command_variant_after_scanning(self):
         self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
         self.save_db()
         selected, report = self.select([self.a])
         self.assertEqual([e["file"] for e in selected], [self.a, self.a])
-        self.assertEqual(report["scan_variants"], 0)
-        self.assertEqual(self.commands, [])
+        self.assertEqual(report["scan_variants"], 3)
+        self.assertEqual(len(self.commands), 6)
+        self.assertTrue(all("-M" in command for command, _ in self.commands))
+
+    def test_changed_source_selects_its_includers_in_both_contexts(self):
+        self.raw.append(self.raw_entry(self.b, ["-DENABLE_FEATURE"]))
+        self.raw[-1]["arguments"][0] = "clang++"
+        self.save_db()
+        execute = self.fake_execute
+
+        def including_execute(command, directory, check=True):
+            result = execute(command, directory, check)
+            if str(self.b) in command and ("-DENABLE_FEATURE" in command
+                                          or "-D__clang_analyzer__" in command):
+                escaped = str(self.a).replace(" ", "\\ ")
+                result.stdout = result.stdout.rstrip("\n") + " " + escaped + "\n"
+            return result
+
+        self.mock_execute.side_effect = including_execute
+        selected, report = self.select([self.a])
+        self.assertEqual([e["file"] for e in selected], [self.a, self.b, self.b])
+        self.assertEqual(report["scan_variants"], 3)
+        self.assertFalse(report["full_selection"])
+        self.assertEqual(len(self.commands), 6)
+
+    def test_included_only_source_selects_only_consuming_variants(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included fixture\n", encoding="utf-8")
+        self.raw.append(self.raw_entry(self.b, ["-DENABLE_FEATURE"]))
+        self.save_db()
+
+        def scan(entry):
+            return {entry["file"]} | ({included} if "-DENABLE_FEATURE" in entry["arguments"] else set())
+
+        with patch.object(tus, "dependencies", side_effect=scan):
+            selected, report = self.select([included])
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["file"], self.b)
+        self.assertIn("-DENABLE_FEATURE", selected[0]["arguments"])
+        self.assertFalse(report["full_selection"])
+
+    def test_failed_source_scan_never_silently_omits_includers(self):
+        self.mock_execute.side_effect = tus.SelectionError("scan failed")
+        with self.assertRaisesRegex(tus.SelectionError, "scan failed"):
+            self.select([self.a])
 
     def test_transitive_headers_scan_actual_flags_in_both_contexts(self):
         self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
@@ -305,12 +386,20 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertEqual(tus.configured_header_inputs(self.root, self.build), ({}, True))
 
     def test_engine_version_script_requires_full_scope_for_control_flow(self):
-        declaration = (ROOT / "cmake/engine_version.cmake").read_text()
+        declaration = (ROOT / "cmake/engine_version.cmake").read_text(encoding="utf-8")
         self.assertIn('"${CMAKE_SOURCE_DIR}/src/luminumbra_common/core/EngineVersion.h.in"', declaration)
         self.assertIn("if(Git_FOUND)", declaration)
         mappings, incomplete = tus.configured_header_inputs(ROOT, self.build)
         self.assertEqual(mappings, {})
         self.assertTrue(incomplete)
+
+    def test_non_utf8_cmake_script_requires_full_scope(self):
+        (self.root / "external.cmake").write_bytes(b"# legacy comment: \x92\n")
+        self.assertEqual(tus.configured_header_inputs(self.root, self.build), ({}, True))
+        selected, report = self.select([self.header])
+        self.assertEqual([e["file"] for e in selected], [self.a, self.b])
+        self.assertTrue(report["full_selection"])
+        self.assertIn("unresolved configure/copy relationships", report["selection_fallback"])
 
     def test_cmake_fallback_reason_is_printed_and_inputs_are_unchanged(self):
         self.assert_unproven_cmake_selects_full_scope('if(OFF)\nendif()\n')
@@ -404,8 +493,13 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         newline.write_text("source")
         self.raw = [self.raw_entry(newline)]
         self.save_db()
-        selected, _ = self.select([newline])
+        # Selection preserves pathname bytes when a dependency graph is known.
+        # Make output cannot encode this name unambiguously; scanning refuses it.
+        with patch.object(tus, "dependencies", return_value={newline}):
+            selected, _ = self.select([newline])
         self.assertEqual(selected[0]["file"], newline)
+        with self.assertRaisesRegex(tus.SelectionError, "incomplete dependency scan"):
+            self.select([newline])
 
     def test_relative_database_source_and_shell_quoted_command(self):
         self.raw[0]["file"] = os.path.relpath(self.a, self.build)
@@ -421,6 +515,86 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             self.save_db()
             with self.assertRaises(tus.SelectionError, msg=str(arguments)):
                 self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_windows_and_versioned_compilers_preserve_executable_paths(self):
+        for compiler in ("gcc.exe", "clang.exe", "g++.exe", "clang++.exe", "g++-14", "clang++-18",
+                         "G++-14.EXE", "CLANG++-18.EXE",
+                         "x86_64-w64-mingw32-g++-14.exe",
+                         r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\Program Files\LLVM\bin\clang++.exe"):
+            for command_string in (False, True):
+                with self.subTest(compiler=compiler, command_string=command_string):
+                    self.raw = [self.raw_entry(self.a)]
+                    self.raw[0]["arguments"][0] = compiler
+                    if command_string:
+                        arguments = self.raw[0].pop("arguments")
+                        self.raw[0]["command"] = (subprocess.list2cmdline(arguments)
+                                                  if compiler.lower().endswith(".exe")
+                                                  else shlex.join(arguments))
+                        if compiler.lower().endswith(".exe"):
+                            self.raw[0]["command_platform"] = "windows"
+                    self.save_db()
+                    entry = self.entries()[0]
+                    command = tus.check_arguments(entry, "msvc-approx")
+                    self.assertEqual(command[0], compiler)
+                    self.assertIn("-Wshadow-all" if "clang" in compiler.lower()
+                                  else "-Wshadow", command)
+                    self.assertIn("-Wnarrowing", command)
+        self.assertEqual(self.commands, [])
+
+    def test_quoted_windows_command_preserves_paths_and_embedded_quotes(self):
+        for compiler in (r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\Program Files\LLVM\bin\clang++.exe"):
+            with self.subTest(compiler=compiler):
+                arguments = [compiler, '-DVALUE=a"b', r'-DPATH=C:\some\path\\',
+                             "-c", str(self.a)]
+                self.raw = [{"file": str(self.a), "directory": str(self.build),
+                             "command_platform": "windows",
+                             "command": subprocess.list2cmdline(arguments)}]
+                self.save_db()
+                self.assertEqual(self.entries()[0]["arguments"], arguments)
+        self.assertEqual(self.commands, [])
+
+    def test_posix_exe_command_keeps_shell_quoted_source(self):
+        for compiler in ("g++.exe", "clang++.exe"):
+            arguments = [compiler, "-c", str(self.a)]
+            self.raw = [{"file": str(self.a), "directory": str(self.build),
+                         "command_platform": "posix", "command": shlex.join(arguments)}]
+            self.save_db()
+            self.assertEqual(self.entries()[0]["arguments"], arguments)
+
+    def test_windows_warning_profiles_ignore_compiler_directory_names(self):
+        for compiler, shadow, cxx in ((r"C:\clang++\gcc.exe", "-Wshadow", False),
+                                      (r"C:\gcc\clang.exe", "-Wshadow-all", False),
+                                      (r"C:\msys64\G++.EXE", "-Wshadow", True),
+                                      (r"C:\LLVM\CLANG++-18.EXE", "-Wshadow-all", True)):
+            with self.subTest(compiler=compiler):
+                entry = {"file": self.src / "plain.c", "directory": self.build,
+                         "arguments": [compiler, str(self.src / "plain.c")]}
+                flags = tus.profile_flags(entry, "msvc-approx")
+                self.assertEqual(flags[0], shadow)
+                self.assertEqual("-Wnarrowing" in flags, cxx)
+        self.assertEqual(self.commands, [])
+
+    def test_windows_wrappers_and_driver_names_use_shared_normalization(self):
+        for wrapper in ("ccache.exe", "sccache.exe", r"C:\Tools\CCACHE.EXE"):
+            with self.subTest(wrapper=wrapper):
+                self.assertEqual(tus.clean_arguments([wrapper, "G++.EXE", str(self.a)]),
+                                 ["G++.EXE", str(self.a)])
+        with patch.object(tus.os, "name", "nt"):
+            self.assertEqual(tus.executable_name(r"C:\Tools\CLANG++-18"), "clang++-18")
+            self.assertEqual(tus.executable_name("SCCACHE"), "sccache")
+
+    def test_non_compiler_and_unsupported_windows_drivers_are_rejected(self):
+        for compiler in ("not-a-compiler.exe", r"C:\msys64\ucrt64\bin\cmd.exe",
+                         "g++.exe.exe", "clang-cl.exe", "CL.EXE"):
+            with self.subTest(compiler=compiler):
+                self.raw = [self.raw_entry(self.a)]
+                self.raw[0]["arguments"][0] = compiler
+                self.save_db()
+                with self.assertRaisesRegex(tus.SelectionError, "unsupported compiler"):
+                    self.entries()
         self.assertEqual(self.commands, [])
 
     def test_configured_codegen_options_preserve_exact_source_operand(self):
@@ -455,7 +629,10 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         for flags in (["-fplugin=x.so"], ["-specs=x"], ["-B/x"], ["-B", "/x"],
                       ["-wrapper", "x"], ["@rsp"], ["-load", "x.so"],
                       ["-fprofile-use=data"], ["-flto=plugin.so"], ["-mfoo"],
-                      ["-mno-foo"], ["-Xclang", "-load", "-Xclang", "x.so"]):
+                      ["-mno-foo"], ["-mbmi20"], ["-mmovbe-extra"],
+                      ["-mbmi2=x.so"], ["-mno-bmi2=x.so"],
+                      ["-mmovbe=x.so"], ["-mno-movbe=x.so"],
+                      ["-Xclang", "-load", "-Xclang", "x.so"]):
             with self.subTest(flags=flags):
                 self.raw = [self.raw_entry(self.a, flags)]
                 self.save_db()
@@ -469,6 +646,78 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         flags = ["-mno-bmi", "-mno-avx512f", "-mno-f16c", "-mno-popcnt"]
         self.assertEqual(tus.clean_arguments(["g++", *flags, str(self.a)]),
                          ["g++", *flags, str(self.a)])
+
+    def test_bmi2_and_movbe_enable_and_disable_forms_are_preserved(self):
+        flags = ["-mbmi2", "-mmovbe", "-mno-bmi2", "-mno-movbe"]
+        for compiler in ("g++", "clang++", "g++.exe", "clang++.exe"):
+            with self.subTest(compiler=compiler):
+                command = [compiler, *flags, str(self.a)]
+                self.assertEqual(tus.clean_arguments(command), command)
+
+    def test_cmake_startup_database_reaches_compile_and_tidy_plans(self):
+        text = (ROOT / "cmake/runtime_isa.cmake").read_text()
+        # Read both bitness branches and the complete shared suffix from the
+        # shipping producer, so adding another startup flag exercises replay.
+        architectures = [value.split(";") for value in
+                         re.findall(r'set\(_startup_arch "([^"]+)"\)', text)
+                         if value.startswith("-")]
+        suffixes = [value.split(";")[1:] for value in
+                    re.findall(r'COMPILE_OPTIONS "(\$\{_startup_arch\};[^"]+)"', text)
+                    if value.startswith("${_startup_arch};-")]
+        self.assertEqual(len(architectures), 2)
+        self.assertEqual(len(suffixes), 1)
+        self.assertEqual({flags[0] for flags in architectures}, {"-march=x86-64", "-march=i686"})
+        inherited = [*self.cmake_warning_flags(), "-flto=auto", "-mavx2", "-mbmi",
+                     "-mfma", "-mfpmath=sse", "-fno-omit-frame-pointer"]
+        for compiler in ("g++", "clang++", r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\LLVM\bin\clang++.exe"):
+            for architecture in architectures:
+                flags = [*inherited, *architecture, *suffixes[0]]
+                startup = self.raw_entry(self.a, flags)
+                arguments = startup.pop("arguments")
+                arguments[0] = compiler
+                windows = "\\" in compiler
+                startup["command_platform"] = "windows" if windows else "posix"
+                startup["command"] = (subprocess.list2cmdline(arguments) if windows
+                                      else shlex.join(arguments))
+                self.raw = [startup, self.raw_entry(self.b)]
+                self.save_db()
+                for mode in ("compile", "tidy"):
+                    for changed in (self.a, self.b):
+                        with self.subTest(compiler=compiler, architecture=architecture,
+                                          mode=mode, changed=changed.name):
+                            self.commands.clear()
+                            replayed = []
+
+                            def execute(command, directory, check=True):
+                                if "-p" in command:
+                                    database = Path(command[command.index("-p") + 1]) / "compile_commands.json"
+                                    replayed.append(json.loads(database.read_text())[0]["arguments"])
+                                elif "-M" not in command:
+                                    replayed.append(command)
+                                return self.fake_execute(command, directory, check)
+
+                            output, errors = io.StringIO(), io.StringIO()
+                            with patch.object(tus, "changed_paths", return_value={changed}), \
+                                    patch.object(tus.shutil, "which", return_value="clang-tidy-18"), \
+                                    patch.object(tus, "execute", side_effect=execute), \
+                                    redirect_stdout(output), redirect_stderr(errors):
+                                code = tus.main([mode, "--root", str(self.root),
+                                                 "--build-dir", str(self.build)])
+                            self.assertEqual(code, 0, errors.getvalue())
+                            report = json.loads(output.getvalue().splitlines()[0])
+                            self.assertEqual(report["selected"], [str(changed.relative_to(self.root))])
+                            self.assertEqual(report["scan_variants"], 2)
+                            scans = [command for command, _ in self.commands if "-M" in command]
+                            self.assertEqual(len(scans), 4)
+                            startup_scans = [command for command in scans if str(self.a) in command]
+                            self.assertEqual(len(startup_scans), 2)
+                            for command in startup_scans:
+                                self.assertEqual([flag for flag in command if flag in flags], flags)
+                            self.assertEqual(len(replayed), 1)
+                            self.assertIn(str(changed), replayed[0])
+                            self.assertEqual([flag for flag in replayed[0] if flag in flags],
+                                             flags if changed == self.a else [])
 
     def test_clang_pch_replays_textual_header_without_binary_cache(self):
         header = self.build / "cmake_pch.hxx"
@@ -535,6 +784,550 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                 (self.src / "compile_commands.json").write_text(json.dumps(self.raw))
                 with self.assertRaisesRegex(tus.SelectionError, "exactly one database source"):
                     tus.read_database(self.root, self.src)
+        self.assertEqual(self.commands, [])
+
+    def test_adjacent_binary_pch_files_and_directories_are_refused(self):
+        for compiler in ("g++", "clang++"):
+            for name in ("cmake_pch.h", "cmake_pch.hxx", "ordinary.hpp"):
+                header = self.build / name
+                header.write_text("// current textual header\n")
+                forms = [["-include", str(header)], ["-imacros", str(header)]]
+                if compiler == "clang++":
+                    forms += [["-Xclang", "-include", "-Xclang", str(header)],
+                              ["-include-pch", str(header) + ".pch", "-include", str(header)]]
+                for suffix in (".gch", ".pch"):
+                    for directory in (False, True):
+                        binary = Path(str(header) + suffix)
+                        if directory:
+                            binary.mkdir()
+                            (binary / "cached").write_bytes(b"stale binary header")
+                        else:
+                            binary.write_bytes(b"stale binary header")
+                        for flags in forms:
+                            with self.subTest(compiler=compiler, header=name, suffix=suffix,
+                                              directory=directory, flags=flags):
+                                self.raw = [self.raw_entry(self.a, flags)]
+                                self.raw[0]["arguments"][0] = compiler
+                                self.save_db()
+                                before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                                with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                    self.entries()
+                                self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*")
+                                                          if p.is_file()})
+                        if directory:
+                            (binary / "cached").unlink()
+                            binary.rmdir()
+                        else:
+                            binary.unlink()
+        self.assertEqual(self.commands, [])
+
+    def test_ordinary_include_binary_cache_is_refused_in_every_search_root(self):
+        self.a.write_text('#include "nested/current.hpp"\n')
+        search = self.build / "header search"
+        for flags, directory in (([], self.src), (["-I", str(search)], search),
+                                 (["-I" + str(search)], search),
+                                 (["-iquote", str(search)], search),
+                                 (["-isystem", str(search)], search),
+                                 (["-idirafter", str(search)], search)):
+            nested = directory / "nested"
+            nested.mkdir(parents=True, exist_ok=True)
+            (nested / "current.hpp").write_text("// edited header\n")
+            self.raw = [self.raw_entry(self.a, flags)]
+            self.save_db()
+            entry = self.entries()[0]
+            for is_directory in (False, True):
+                binary = nested / "current.hpp.gch"
+                if is_directory:
+                    binary.mkdir()
+                else:
+                    binary.write_bytes(b"stale binary header")
+                actions = [self.entries, lambda: tus.dependencies(entry),
+                           lambda: tus.run_checks(self.arguments(), self.root, [entry], self.build),
+                           lambda: tus.run_checks(self.arguments("tidy"), self.root, [entry], self.build)]
+                with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                    for index, action in enumerate(actions):
+                        with self.subTest(flags=flags, directory=is_directory, action=index):
+                            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                action()
+                if is_directory:
+                    binary.rmdir()
+                else:
+                    binary.unlink()
+            self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+        self.assertEqual(self.commands, [])
+
+    def test_unrelated_binary_cache_outside_search_roots_does_not_block_replay(self):
+        (self.build / "unrelated.hpp.gch").write_bytes(b"unrelated cache")
+        entry = self.entries()[0]
+        self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+
+    def test_forced_system_and_relative_project_headers_use_compiler_search(self):
+        search = self.root / "compiler headers"
+        search.mkdir()
+        system = search / "cstdint"
+        system.write_text("// system header\n")
+        relative = self.build / "relative.hpp"
+        relative.write_text("// working directory header\n")
+        cases = [("cstdint", [], system), (relative.name, [], relative)]
+        for option in (["-I", str(self.src)], ["-I" + str(self.src)],
+                       ["-isystem", str(self.src)], ["-iquote", str(self.src)],
+                       ["-idirafter", str(self.src)]):
+            cases.append((self.other.name, option, self.other))
+        for compiler in ("g++", "clang++", "G++.EXE", "CLANG++.EXE"):
+            for forced in ("-include", "-imacros"):
+                for name, flags, header in cases:
+                    with self.subTest(compiler=compiler, forced=forced, flags=flags, name=name):
+                        self.raw = [self.raw_entry(self.a, [*flags, forced, name])]
+                        self.raw[0]["arguments"][0] = compiler
+                        self.save_db()
+                        tus._compiler_header_roots.cache_clear()
+                        result = subprocess.CompletedProcess([], 0, "",
+                            '#include "..." search starts here:\r\n ' + str(self.src)
+                            + '\r\n#include <...> search starts here:\r\n ' + str(search)
+                            + '\r\nEnd of search list.\r\n')
+                        with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                                patch.object(tus._DEPS, "run_process", return_value=result) as probe:
+                            entry = self.entries()[0]
+                            self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+                            self.assertEqual(probe.call_count, 1)
+                            binary = Path(str(header) + ".pch")
+                            binary.write_bytes(b"stale cache")
+                            try:
+                                for action in (self.entries, lambda: tus.dependencies(entry),
+                                               lambda: tus.compile_command(entry, self.build / "isolated.o"),
+                                               lambda: tus.run_checks(self.arguments("tidy"), self.root,
+                                                                      [entry], self.build)):
+                                    with patch.object(tus.shutil, "which", return_value="clang-tidy"), \
+                                            self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                        action()
+                            finally:
+                                binary.unlink()
+        self.assertEqual(self.commands, [])
+
+    def test_forced_header_search_preserves_working_directory_and_driver_order(self):
+        first, second = self.root / "z headers", self.root / "a headers"
+        first.mkdir()
+        second.mkdir()
+        for root in (self.build, first, second):
+            (root / "forced.hpp").write_text("// header\n")
+        self.raw = [self.raw_entry(self.a, ["-include", "forced.hpp"])]
+        self.save_db()
+        result = subprocess.CompletedProcess([], 0, "", '#include "..." search starts here:\n '
+            + str(first) + '\n#include <...> search starts here:\n ' + str(second)
+            + '\nEnd of search list.\n')
+        # A cache beside a shadowed header must not change forced-header lookup.
+        (second / "forced.hpp.pch").write_bytes(b"shadowed cache")
+        with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                patch.object(tus._DEPS, "run_process", return_value=result) as probe:
+            self.entries()
+            probe.assert_not_called()
+            (first / "forced.hpp.pch").write_bytes(b"shadowed cache")
+            self.entries()
+            (self.build / "forced.hpp").unlink()
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                self.entries()
+            (first / "forced.hpp.pch").unlink()
+            self.entries()
+            self.assertEqual(probe.call_count, 1)
+
+    def test_missing_forced_headers_refuse_even_with_known_search_paths(self):
+        (self.src / "missing.hpp").mkdir()
+        for forced in ("-include", "-imacros"):
+            for roots in ((), (self.src, self.build / "missing directory")):
+                for name in ("missing.hpp", str(self.root / "missing.hpp")):
+                    with self.subTest(forced=forced, roots=roots, name=name), \
+                            patch.object(tus, "compiler_header_roots", return_value=roots):
+                        self.raw = [self.raw_entry(self.a, [forced, name])]
+                        self.save_db()
+                        with self.assertRaisesRegex(tus.SelectionError, "cannot locate textual forced include"):
+                            self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_forced_header_resolution_refuses_unknown_search_and_unreadable_paths(self):
+        self.raw = [self.raw_entry(self.a, ["-include", "cstdint"])]
+        self.save_db()
+        results = [OSError("unavailable compiler"), subprocess.TimeoutExpired("compiler", 1800),
+                   subprocess.CompletedProcess([], 0, "", ""),
+                   subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n '
+                       + str(self.src) + '\n'),
+                   subprocess.CompletedProcess([], 1, "", '#include <...> search starts here:\n '
+                       + str(self.src) + '\nEnd of search list.\n')]
+        for result in results:
+            with self.subTest(result=result), \
+                    patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                    patch.object(tus._DEPS, "run_process", side_effect=[result]), \
+                    self.assertRaisesRegex(tus.SelectionError, "compiler header search paths"):
+                self.entries()
+        is_file = Path.is_file
+
+        def readable(path):
+            if path == self.src / "cstdint":
+                raise PermissionError("unreadable header")
+            return is_file(path)
+
+        with patch.object(tus, "compiler_header_roots", return_value=(self.src,)), \
+                patch.object(Path, "is_file", autospec=True, side_effect=readable), \
+                self.assertRaisesRegex(OSError, "unreadable header"):
+            self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_environment_header_roots_are_checked_before_every_replay(self):
+        search = self.root / "environment headers"
+        nested = search / "nested"
+        nested.mkdir(parents=True)
+        (nested / "current.hpp").write_text("// edited header\n")
+        self.a.write_text("#include <nested/current.hpp>\n")
+        for variable in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+            # Cover multiple components, relative paths and empty components
+            # (which GCC interprets as the command's working directory).
+            for value, root in ((os.pathsep.join(["missing", os.path.relpath(search, self.build)]), nested),
+                                ("missing" + os.pathsep, self.build)):
+                with self.subTest(variable=variable, value=value), patch.dict(os.environ, {variable: value}):
+                    entry = self.entries()[0]
+                    for is_directory in (False, True):
+                        binary = root / "current.hpp.gch"
+                        if is_directory:
+                            binary.mkdir()
+                        else:
+                            binary.write_bytes(b"stale cache")
+                        try:
+                            actions = [self.entries, lambda: tus.dependencies(entry),
+                                       lambda: tus.compile_command(entry, self.build / "isolated.o"),
+                                       lambda: tus.run_checks(self.arguments("tidy"), self.root, [entry], self.build)]
+                            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                                for action in actions:
+                                    with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                        action()
+                        finally:
+                            binary.rmdir() if is_directory else binary.unlink()
+        self.assertEqual(self.commands, [])
+
+    def test_compiler_default_and_system_header_roots_are_checked_at_replay(self):
+        search = self.root / "compiler system headers"
+        search.mkdir()
+        header = search / "current.hpp"
+        header.write_text("// edited header\n")
+        self.a.write_text("#include <current.hpp>\n")
+        for compiler in ("g++", "clang++"):
+            self.raw = [self.raw_entry(self.a, ["--sysroot", "sdk", "--target=x86_64-linux-gnu",
+                                               "-include", str(self.other)])]
+            self.raw[0]["arguments"][0] = compiler
+            self.save_db()
+            entry = self.entries()[0]
+            result = subprocess.CompletedProcess([], 0, "", '#include "..." search starts here:\r\n'
+                '#include <...> search starts here:\r\n ' + str(search) + '\r\nEnd of search list.\r\n')
+            with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                    patch.object(tus._DEPS, "run_process", return_value=result) as probe:
+                self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+                for is_directory in (False, True):
+                    binary = Path(str(header) + ".gch")
+                    if is_directory:
+                        binary.mkdir()
+                    else:
+                        binary.write_bytes(b"stale cache")
+                    try:
+                        for action in (lambda: tus.dependencies(entry),
+                                       lambda: tus.compile_command(entry, self.build / "isolated.o"),
+                                       lambda: tus.run_checks(self.arguments("tidy"), self.root, [entry], self.build)):
+                            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                                with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                    action()
+                    finally:
+                        binary.rmdir() if is_directory else binary.unlink()
+                self.assertEqual(probe.call_count, 1)
+                for call in probe.call_args_list:
+                    command = call.args[0]
+                    self.assertEqual(command[0], compiler)
+                    self.assertEqual(command[-5:], ["-E", "-v", "-x", "c++", "-"])
+                    self.assertIn("--sysroot", command)
+                    self.assertIn("sdk", command)
+                    self.assertIn("--target=x86_64-linux-gnu", command)
+                    self.assertNotIn(str(self.a), command)
+                    self.assertNotIn(str(self.other), command)
+                    self.assertNotIn("-include", command)
+                    self.assertEqual(call.kwargs["env"]["LC_ALL"], "C")
+                    self.assertEqual(call.kwargs["cwd"], self.build)
+                    self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(self.commands, [])
+
+    def test_equivalent_variants_reuse_compiler_roots_and_pch_scans(self):
+        search = self.root / "compiler headers"
+        (search / "nested").mkdir(parents=True)
+        self.raw = [self.raw_entry(self.a), self.raw_entry(self.b, ["-DENABLE_FEATURE"])]
+        self.save_db()
+        entries = self.entries()
+        result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n '
+            + str(search) + '\nEnd of search list.\n')
+        temporary_directory = tempfile.TemporaryDirectory
+
+        @contextmanager
+        def cleanup_with_walk(**kwargs):
+            with temporary_directory(**kwargs) as name:
+                yield name
+                # Windows cleanup also walks directories. Its OS calls must
+                # not be mistaken for another compiler header search.
+                for _ in os.walk(name):
+                    pass
+
+        with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                patch.object(tus._DEPS, "run_process", return_value=result) as probe, \
+                patch.object(tus, "walk_header_directories", wraps=os.walk) as walk, \
+                patch.object(tus.tempfile, "TemporaryDirectory", side_effect=cleanup_with_walk), \
+                patch.object(os, "walk", wraps=os.walk) as cleanup_walk:
+            tus.dependencies(entries[0])
+            self.assertGreater(walk.call_count, 0)
+            first_scans = walk.call_count
+            tus.dependencies(entries[1])
+            tus.compile_command(entries[1], self.build / "isolated.o")
+            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                tus.run_checks(self.arguments("tidy"), self.root, entries, self.build)
+            self.assertEqual(walk.call_count, first_scans)
+            self.assertGreater(cleanup_walk.call_count, 0)
+            self.assertEqual(probe.call_count, 1)
+            # Reuse must not conceal caches added below an already scanned root.
+            binary = search / "nested/current.hpp.gch"
+            binary.mkdir()
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.dependencies(entries[1])
+            self.assertGreater(walk.call_count, first_scans)
+            refused_scans = walk.call_count
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.dependencies(entries[0])
+            self.assertEqual(walk.call_count, refused_scans)
+            binary.rmdir()
+            tus.dependencies(entries[1])
+            self.assertEqual(probe.call_count, 1)
+
+    def test_compiler_search_probe_refuses_unavailable_or_unknown_defaults(self):
+        entry = self.entries()[0]
+        results = [OSError("compiler unavailable"),
+                   subprocess.TimeoutExpired("compiler", 1800),
+                   subprocess.CompletedProcess([], 1, "", "unsupported target"),
+                   subprocess.CompletedProcess([], 0, "", "unrecognized search output"),
+                   subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n /headers\n')]
+        for result in results:
+            with self.subTest(result=result), \
+                    patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                    patch.object(tus._DEPS, "run_process", side_effect=[result]):
+                with self.assertRaisesRegex(tus.SelectionError, "compiler header search paths"):
+                    tus.replay_arguments(entry)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_cache_tracks_dangling_directory_symlink_targets(self):
+        search = self.root / "header search"
+        link = search / "linked headers"
+        source = search / "unit.cpp"
+        entry = {"arguments": ["g++", "-c", str(source)], "directory": self.build}
+        stamp = tus.directory_stamp(self.src)
+        target_stamp = None
+        frames = [(str(search), [], [source.name, link.name])]
+
+        def entries(path, names=None):
+            for current, children, files in frames:
+                if Path(current) == path:
+                    return tuple((name, stat.S_IFLNK if name == link.name else
+                                  stat.S_IFDIR if name in children else stat.S_IFREG, 1, 1)
+                                 for name in sorted(children + files))
+            self.fail(f"unexpected directory: {path}")
+
+        # Model os.walk's dangling-link classification on every platform,
+        # including Windows hosts without permission to create symlinks.
+        with patch.object(tus, "directory_stamp", side_effect=lambda path:
+                          target_stamp if path == link else stamp), \
+                patch.object(Path, "is_symlink", autospec=True,
+                             side_effect=lambda path: path == link), \
+                patch.object(tus, "directory_entries", side_effect=entries), \
+                patch.object(tus, "walk_header_directories", side_effect=lambda *args, **kwargs: iter(frames)) as walk:
+            tus.replay_arguments(entry)
+            tus.replay_arguments(entry)
+            self.assertEqual(walk.call_count, 1)
+            for is_directory in (False, True):
+                with self.subTest(directory=is_directory):
+                    # Only the target appears: the parent stamp and membership
+                    # are unchanged, so the link's target must invalidate reuse.
+                    target_stamp = stamp
+                    binary = "current.hpp.gch"
+                    frames = [(str(search), [link.name], [source.name]),
+                              (str(link), [binary] if is_directory else [],
+                               [] if is_directory else [binary])]
+                    with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                        tus.replay_arguments(entry)
+                    target_stamp = None
+                    frames = [(str(search), [], [source.name, link.name])]
+                    tus.replay_arguments(entry)
+                    scans = walk.call_count
+                    tus.replay_arguments(entry)
+                    self.assertEqual(walk.call_count, scans)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_cache_detects_changes_with_identical_directory_timestamps(self):
+        search = self.root / "compiler headers"
+        (search / "nested").mkdir(parents=True)
+        entry = self.entries()[0]
+        stamp = tus.directory_stamp
+        snapshots = {}
+
+        def same_tick(path):
+            if path not in snapshots:
+                snapshots[path] = stamp(path)
+            return snapshots[path]
+
+        with patch.object(tus, "compiler_header_roots", return_value={search}), \
+                patch.object(tus, "directory_stamp", side_effect=same_tick), \
+                patch.object(tus.time, "time_ns", return_value=search.stat().st_mtime_ns):
+            tus.replay_arguments(entry)
+            for is_directory in (False, True):
+                with self.subTest(directory=is_directory):
+                    binary = search / "nested/current.hpp.gch"
+                    if is_directory:
+                        binary.mkdir()
+                    else:
+                        binary.write_bytes(b"stale cache")
+                    with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                        tus.replay_arguments(entry)
+                    binary.rmdir() if is_directory else binary.unlink()
+                    tus.replay_arguments(entry)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_cache_detects_same_tick_insertion_on_delayed_replay(self):
+        tick = 10_000_000_000
+        entry = self.entries()[0]
+        original_stamp = tus.directory_stamp
+        for compiler in ("g++", "clang++"):
+            for is_directory in (False, True):
+                with self.subTest(compiler=compiler, directory=is_directory):
+                    search = self.root / f"headers-{compiler}-{is_directory}"
+                    (search / "nested").mkdir(parents=True)
+                    snapshots = {}
+
+                    def same_tick(path):
+                        if path not in snapshots:
+                            stamp = original_stamp(path)
+                            snapshots[path] = (*stamp[:4], tick, tick) if stamp else None
+                        return snapshots[path]
+
+                    variant = {**entry, "arguments": [compiler, *entry["arguments"][1:]]}
+                    with patch.object(tus, "compiler_header_roots", return_value={search}), \
+                            patch.object(tus, "directory_stamp", side_effect=same_tick), \
+                            patch.object(tus.time, "time_ns", return_value=tick + 500_000_000) as clock:
+                        tus.replay_arguments(variant)
+                        binary = search / "nested/current.hpp.gch"
+                        binary.mkdir() if is_directory else binary.write_bytes(b"stale cache")
+                        # The insertion shared the walk's timestamp tick, but
+                        # no replay occurs until that tick has already closed.
+                        clock.return_value = tick + 2_000_000_001
+                        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                            tus.replay_arguments(variant)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_cache_promotes_only_after_membership_check_outside_tick(self):
+        search = self.root / "header search"
+        search.mkdir()
+        tick = 10_000_000_000
+        stamp = (*tus.directory_stamp(search)[:4], tick, tick)
+        with patch.object(tus, "directory_stamp", return_value=stamp), \
+                patch.object(tus.time, "time_ns", return_value=tick + 500_000_000) as clock, \
+                patch.object(tus.os, "listdir", wraps=os.listdir) as membership, \
+                patch.object(tus, "walk_header_directories", wraps=os.walk) as walk:
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 0)
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 1)
+            clock.return_value = tick + 2_000_000_000
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 2)
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 2)
+            self.assertEqual(walk.call_count, 1)
+
+    def test_pch_cache_trusts_walk_taken_after_tick_closes(self):
+        search = self.root / "header search"
+        search.mkdir()
+        tick = 10_000_000_000
+        stamp = (*tus.directory_stamp(search)[:4], tick, tick)
+        with patch.object(tus, "directory_stamp", return_value=stamp), \
+                patch.object(tus.time, "time_ns", return_value=tick + 2_000_000_000), \
+                patch.object(tus.os, "listdir", wraps=os.listdir) as membership, \
+                patch.object(tus, "walk_header_directories", wraps=os.walk) as walk:
+            tus.check_pch_search_roots("g++", {search})
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 0)
+            self.assertEqual(walk.call_count, 1)
+
+    def test_compiler_search_probe_uses_effective_language(self):
+        result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\nEnd of search list.\n')
+        for compiler in ("gcc", "g++", "clang", "clang++"):
+            for suffix in (".c", ".cpp"):
+                for language in (None, "c", "c++"):
+                    source = self.src / ("unit" + suffix)
+                    arguments = [compiler, *(["-x", language] if language else []), str(source)]
+                    expected = language or ("c++" if "++" in compiler or suffix == ".cpp" else "c")
+                    for trailing in ([], ["-x", "c"], ["-x", "c++"]):
+                        # Exercise each probe independently; equivalent probes
+                        # are intentionally memoized during normal replay.
+                        tus._compiler_header_roots.cache_clear()
+                        with self.subTest(arguments=arguments, trailing=trailing), \
+                                patch.object(tus._DEPS, "run_process", return_value=result) as run:
+                            self.assertEqual(COMPILER_HEADER_ROOTS(arguments + trailing, self.build), ())
+                            self.assertEqual(run.call_args.args[0][-3:], ["-x", expected, "-"])
+
+    def test_msvc_pch_replay_is_refused_before_execution(self):
+        for compiler in ("cl", "cl.exe", "clang-cl", "g++", "clang++"):
+            for flags in (["/Yu", "header.hpp"], ["/Yuheader.hpp"],
+                          ["/Fp", "cached.pch"], ["/Fpcached.pch"],
+                          ["/Yu", "header.hpp", "/Fp", "cached.pch"],
+                          ["/Yuheader.hpp", "/Fpcached.pch"]):
+                with self.subTest(compiler=compiler, flags=flags):
+                    self.raw = [self.raw_entry(self.a, flags)]
+                    self.raw[0]["arguments"][0] = compiler
+                    self.save_db()
+                    with self.assertRaisesRegex(tus.SelectionError, "unsupported"):
+                        self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_binary_pch_created_after_database_read_is_refused_by_every_replay(self):
+        header = self.build / "cmake_pch.hxx"
+        header.write_text("// current textual header\n")
+        self.raw = [self.raw_entry(self.a, ["-include", str(header)])]
+        self.save_db()
+        entry = self.entries()[0]
+        actions = [lambda: tus.dependencies(entry),
+                   lambda: tus.run_checks(self.arguments(), self.root, [entry], self.build),
+                   lambda: tus.run_checks(self.arguments("tidy", also_ci_gate=True),
+                                          self.root, [entry], self.build)]
+        for suffix in (".gch", ".pch"):
+            binary = Path(str(header) + suffix)
+            binary.mkdir()
+            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                for index, action in enumerate(actions):
+                    with self.subTest(suffix=suffix, replay=index):
+                        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                            action()
+            binary.rmdir()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
+
+    def test_forced_include_search_cannot_bypass_binary_cache_check(self):
+        header = self.src / "ordinary.hpp"
+        Path(str(header) + ".gch").write_bytes(b"stale binary header")
+        for option in ("-include", "-imacros"):
+            with self.subTest(option=option), \
+                    patch.object(tus, "compiler_header_roots", return_value=(self.src,)):
+                self.raw = [self.raw_entry(self.a, [option, header.name])]
+                self.save_db()
+                with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                    self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_relative_textual_forced_include_is_checked_beside_command_directory(self):
+        header = self.build / "ordinary.hpp"
+        header.write_text("// current textual header\n")
+        self.raw = [self.raw_entry(self.a, ["-include", header.name])]
+        self.save_db()
+        self.assertIn(header.name, self.entries()[0]["arguments"])
+        Path(str(header) + ".gch").mkdir()
+        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+            self.entries()
         self.assertEqual(self.commands, [])
 
     def test_pch_refusals_are_bounded_and_leave_state_unchanged(self):
@@ -624,7 +1417,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.assertEqual([entry["file"] for entry in selected], [self.b])
                     command = tus.compile_command(selected[0], self.build / "isolated.o")
                     self.assertEqual(command[1:5], [option, str(self.a), "-x", "c++"])
-        self.assertEqual(self.commands, [])
+        self.assertEqual(len(self.commands), 8)
+        self.assertTrue(all("-M" in command for command, _ in self.commands))
 
     def test_database_requires_one_source_and_refuses_ambiguous_value_options(self):
         for arguments in (
@@ -722,8 +1516,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         selected, _ = self.select([client, strict])
         tus.run_checks(self.arguments(), self.root, selected, self.build)
-        self.assertEqual(len(self.commands), 2)
-        for command, _ in self.commands:
+        self.assertEqual(len(self.check_commands()), 2)
+        for command, _ in self.check_commands():
             self.assertEqual(self.warning_options(command), [] if str(client) in command else strict_flags)
 
     def test_warning_exceptions_match_all_explicit_ci_definitions(self):
@@ -753,7 +1547,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         selected, _ = self.select([self.a])
         tus.run_checks(self.arguments(), self.root, selected, self.build)
-        self.assertEqual([self.warning_options(c) for c, _ in self.commands], [[], flags])
+        self.assertEqual([self.warning_options(c) for c, _ in self.compile_commands_by_variant()], [[], flags])
 
     def test_c_source_does_not_receive_cxx_narrowing_option(self):
         source = self.src / "plain.c"
@@ -785,16 +1579,20 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.raw_entry(self.a, ["-DFEATURE", "-Wno-error"])]
         self.save_db()
         selected, _ = self.select([self.a])
-        tus.run_checks(self.arguments(warning_profile="msvc-approx"), self.root, selected, self.build)
-        # Submission indices identify variants; worker arrival order is free.
-        recorded = sorted(self.commands, key=lambda item: int(Path(item[0][-1]).stem))
-        for entry, (command, _) in zip(selected, recorded):
+        def reverse_parallel(function, items, jobs):
+            return [function(item) for item in reversed(items)][::-1]
+
+        with patch.object(tus, "parallel", side_effect=reverse_parallel):
+            tus.run_checks(self.arguments(warning_profile="msvc-approx"), self.root, selected, self.build)
+        commands = self.compile_commands_by_variant()
+        self.assertEqual([int(Path(command[-1]).stem) for command, _ in commands], [0, 1])
+        for entry, (command, _) in zip(selected, commands):
             replay = tus.clean_arguments(entry["arguments"])
             self.assertEqual(command[:len(replay)], replay)
             self.assertEqual(command[len(replay):len(replay) + 4],
                              ["-Wshadow", "-Wconversion", "-Wnarrowing", "-Wsign-conversion"])
             self.assertEqual(command[-3], "-c")
-        self.assertEqual(len(self.commands), 2)
+        self.assertEqual(len(commands), 2)
 
     def test_profile_preserves_target_exceptions_and_existing_warning_families(self):
         for flags in ([], self.cmake_warning_flags(), ["-Wno-error"],
@@ -1002,7 +1800,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def test_profile_baseline_runs_real_execute_contract_and_preserves_nonfatal_targets(self):
         entry = self.entries()[0]
         args = self.arguments(warning_profile="msvc-approx", baseline_records=self.baseline_records(entry))
-        with patch.object(tus, "execute", side_effect=EXECUTE), patch.object(tus.subprocess, "run") as run:
+        with patch.object(tus, "execute", side_effect=EXECUTE), patch.object(tus._DEPS, "run_process") as run:
             run.side_effect = [subprocess.CompletedProcess([], 0, "", ""), self.diagnostic_result()]
             with redirect_stdout(io.StringIO()):
                 tus.run_checks(args, self.root, [entry], self.build)
@@ -1020,6 +1818,128 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                 tus.run_checks(self.arguments(warning_profile="msvc-approx"), self.root, [entry], self.build)
             self.assertIn(": warning:", output.getvalue())
             self.assertNotIn("Accepted", output.getvalue())
+
+    def diagnostic_driver(self):
+        # A real child chooses its diagnostic language from its received locale.
+        # Translate only argv at the runner seam; preserve all launch kwargs.
+        driver = self.build / "diagnostic driver.py"
+        observations = self.build / "driver observations.jsonl"
+        driver.write_text(
+            "import json, os, pathlib, sys\n"
+            "command = json.loads(sys.argv[1])\n"
+            "with open(sys.argv[2], 'a', encoding='utf-8') as stream:\n"
+            "    stream.write(json.dumps(dict(os.environ)) + '\\n')\n"
+            "english = all(os.environ.get(key) == 'C' for key in "
+            "('LC_ALL', 'LANG', 'LANGUAGE'))\n"
+            "if '--version' in command:\n"
+            "    print('gcc (Free Software Foundation)')\n"
+            "elif '-M' in command:\n"
+            "    source = next(arg for arg in command if arg.endswith('.cpp'))\n"
+            "    print('selected-tu: ' + source.replace(' ', '\\\\ '))\n"
+            "elif '-E' in command:\n"
+            "    print('#include <...> search starts here:\\n ' + sys.argv[3] + "
+            "'\\nEnd of search list.', file=sys.stderr)\n"
+            "elif '-DFAIL_NATIVE' in command:\n"
+            "    print('native policy failure', file=sys.stderr)\n"
+            "    sys.exit(7)\n"
+            "elif '-Wconversion' in command:\n"
+            "    fatal = '-Werror' in command\n"
+            "    severity = ('error' if fatal else 'warning') if english else 'avertissement'\n"
+            "    option = '-Werror=conversion' if fatal else '-Wconversion'\n"
+            "    source = next(arg for arg in command if arg.endswith('.cpp'))\n"
+            "    print(f'{source}:1:3: {severity}: value may change [{option}]', file=sys.stderr)\n"
+            "    sys.exit(1 if fatal else 0)\n", encoding="utf-8")
+        run_process = tus._DEPS.run_process
+
+        def run(command, **kwargs):
+            return run_process([sys.executable, "-I", "-B", str(driver), json.dumps(command),
+                                str(observations), str(self.src)], **kwargs)
+
+        return run, observations
+
+    def test_hostile_locale_reaches_english_baseline_capture_and_replay_in_real_child(self):
+        caller = dict(os.environ, LC_ALL="fr_FR.invalid", LANG="de_DE.invalid",
+                      LANGUAGE="fr:de", DIAGNOSTIC_SENTINEL="unchanged", CPATH=str(self.src))
+        original = dict(caller)
+        run, observations = self.diagnostic_driver()
+        with patch.dict(os.environ, caller, clear=True), \
+                patch.object(tus, "execute", side_effect=EXECUTE), \
+                patch.object(tus._DEPS, "run_process", side_effect=run):
+            global_before = dict(os.environ)
+            for fatal in (False, True):
+                with self.subTest(fatal=fatal):
+                    self.raw[0] = self.raw_entry(self.a, ("-Werror",) if fatal else ())
+                    self.save_db()
+                    entry = self.entries()[0]
+                    destination = self.build / f"baseline-{fatal}.json"
+                    args = self.arguments(warning_profile="msvc-approx", write_warning_baseline=destination)
+                    with redirect_stdout(io.StringIO()):
+                        records = tus.run_checks(args, self.root, [entry], self.build)
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(records[0]["message"], "value may change")
+                    tus.publish_warning_baseline(self.root, destination, records)
+                    baseline = tus.read_warning_baseline(destination)
+                    args = self.arguments(warning_profile="msvc-approx", baseline_records=baseline)
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(tus.run_checks(args, self.root, [entry], self.build), records)
+                    if fatal:
+                        with self.assertRaisesRegex(tus.SelectionError, "value may change"):
+                            tus.run_checks(self.arguments(warning_profile="msvc-approx"),
+                                           self.root, [entry], self.build)
+                    before = destination.read_bytes()
+                    entry["arguments"].insert(1, "-DFAIL_NATIVE")
+                    with self.assertRaisesRegex(tus.SelectionError, "native policy failure"):
+                        tus.run_checks(args, self.root, [entry], self.build)
+                    self.assertEqual(destination.read_bytes(), before)
+                    self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
+            self.assertEqual(dict(os.environ), global_before)
+        self.assertEqual(caller, original)
+        received = [json.loads(line) for line in observations.read_text().splitlines()]
+        self.assertEqual(len(received), 11)
+        for environment in received:
+            for key in ("PATH", "CPATH", "DIAGNOSTIC_SENTINEL"):
+                self.assertEqual(environment[key], caller[key])
+            for key in ("LC_ALL", "LANG", "LANGUAGE"):
+                self.assertEqual(environment[key], "C")
+
+    def test_sibling_tool_invocations_share_real_child_locale_and_preserve_environment(self):
+        run, observations = self.diagnostic_driver()
+        caller = dict(os.environ, LC_ALL="hostile", LANG="hostile", LANGUAGE="hostile",
+                      DIAGNOSTIC_SENTINEL="retained", CPLUS_INCLUDE_PATH=str(self.src))
+        with patch.dict(os.environ, caller, clear=True), \
+                patch.object(tus, "execute", side_effect=EXECUTE), \
+                patch.object(tus._DEPS, "run_process", side_effect=run):
+            entry = self.entries()[0]
+            self.assertEqual(tus.dependencies(entry), {self.a})
+            entry["arguments"][0] = "c++"
+            self.assertEqual(tus.profile_compiler(entry), "gcc")
+            tus._compiler_header_roots.cache_clear()
+            self.addCleanup(tus._compiler_header_roots.cache_clear)
+            self.assertEqual(COMPILER_HEADER_ROOTS(entry["arguments"], self.build), (self.src,))
+            with patch.object(tus.shutil, "which", return_value="clang-tidy-18"), \
+                    redirect_stdout(io.StringIO()):
+                tus.run_checks(self.arguments(command="tidy"), self.root, [entry], self.build)
+            self.assertEqual(dict(os.environ), caller)
+        received = [json.loads(line) for line in observations.read_text().splitlines()]
+        self.assertEqual(len(received), 5)
+        for environment in received:
+            for key in ("PATH", "CPLUS_INCLUDE_PATH", "DIAGNOSTIC_SENTINEL"):
+                self.assertEqual(environment[key], caller[key])
+            for key in ("LC_ALL", "LANG", "LANGUAGE"):
+                self.assertEqual(environment[key], "C")
+
+    def test_locale_setup_preserves_launch_failure_timeout_and_cancellation(self):
+        caller = dict(os.environ, LC_ALL="hostile", LANG="hostile", LANGUAGE="hostile")
+        failures = (OSError("unreadable driver"), subprocess.TimeoutExpired("driver", 1),
+                    tus._DEPS.concurrent.futures.CancelledError())
+        with patch.dict(os.environ, caller, clear=True):
+            for failure in failures:
+                with self.subTest(failure=type(failure)), \
+                        patch.object(tus._DEPS, "run_process", side_effect=failure), \
+                        self.assertRaises(type(failure)) as raised:
+                    EXECUTE(["driver"], self.build)
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(dict(os.environ), caller)
 
     def test_baseline_publication_is_exclusive_and_removes_temporary_on_failure(self):
         destination = self.build / "baseline.json"
@@ -1107,7 +2027,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         selected, _ = self.select([self.a])
         tus.run_checks(self.arguments(), self.root, selected, self.build)
-        outputs = [Path(command[-1]) for command, _ in self.commands]
+        outputs = [Path(command[-1]) for command, _ in self.check_commands()]
         self.assertEqual(len(set(outputs)), 2)
         self.assertTrue(all(p.is_relative_to(self.root / "scratch") for p in outputs))
         self.assertTrue(all(not p.parent.exists() for p in outputs))
@@ -1176,16 +2096,19 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         selected, _ = self.select([source])
         with patch.object(tus.shutil, "which", return_value="clang-tidy"):
             tus.run_checks(self.arguments("tidy", also_ci_gate=True), self.root, selected, self.build)
-        self.assertEqual(len(self.commands), 1)
-        self.assertTrue(any(arg.startswith("--config-file=") for arg in self.commands[0][0]))
+        self.assertEqual(len(self.check_commands()), 1)
+        self.assertTrue(any(arg.startswith("--config-file=") for arg in self.check_commands()[0][0]))
 
     def test_suites_are_registered_and_retain_native_routing(self):
         commands = tus._PATHS.python_test_commands(ROOT)
+        registration = (ROOT / "tools/ci/local_check_contracts.cmake").read_text()
+        self.assertIn('include("${CMAKE_CURRENT_SOURCE_DIR}/ci/local_check_contracts.cmake")',
+                      (ROOT / "tools/CMakeLists.txt").read_text())
         for name in ("changed_tus", "offline_deps"):
             self.assertIn((f"tools/ci/test_{name}.py",), commands)
             self.assertTrue(tus._PATHS.covered_python(f"tools/ci/{name}.py"))
             self.assertTrue(tus._PATHS.needs_cpp(f"tools/ci/{name}.py"))
-            self.assertIn(f'ci/test_{name}.py', (ROOT / "tools/CMakeLists.txt").read_text())
+            self.assertIn(f'${{_local_check_source_dir}}/test_{name}.py', registration)
 
     def test_unrecognized_gate_configuration_fails_closed(self):
         (self.root / "scripts/tidy.sh").write_text("gate_checks=dynamic\n")
@@ -1196,10 +2119,11 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         script = self.root / "scripts/tidy.sh"
         script.write_text(script.read_text().replace("tools/*.c|", "$dynamic/*.cpp|tools/*.c|"))
         selected, _ = self.select([self.a])
+        selection_commands = list(self.commands)
         with patch.object(tus.shutil, "which", return_value="clang-tidy"):
             with self.assertRaisesRegex(tus.SelectionError, "curated tidy file pattern"):
                 tus.run_checks(self.arguments("tidy", also_ci_gate=True), self.root, selected, self.build)
-        self.assertEqual(self.commands, [])
+        self.assertEqual(self.commands, selection_commands)
         self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
 
     def test_check_failures_propagate_and_cleanup(self):
@@ -1210,22 +2134,35 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
 
     def test_subprocess_failures_and_diagnostics_propagate(self):
-        with patch.object(tus.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, "out", "diagnostic")):
+        with patch.object(tus._DEPS, "run_process", return_value=subprocess.CompletedProcess([], 2, "out", "diagnostic")):
             with self.assertRaisesRegex(tus.SelectionError, "command failed.*"):
                 EXECUTE(["g++", "-c", str(self.a)], self.build)
 
     def test_git_selection_includes_merge_base_staged_unstaged_and_untracked(self):
         outputs = [b"a" * 40 + b"\n", b"src/committed.cpp\0", b"src/unstaged.hpp\0",
-                   b"src/staged.cpp\0", b"src/new name\nfile.hpp\0"]
+                   b"src/staged.cpp\0", "src/new name \u00fc file.hpp\0".encode()]
         with patch.object(tus.subprocess, "check_output", side_effect=outputs) as git:
             paths = tus.changed_paths(self.root, "local-base")
         self.assertEqual(paths, {self.root / name for name in (
-            "src/committed.cpp", "src/unstaged.hpp", "src/staged.cpp", "src/new name\nfile.hpp")})
+            "src/committed.cpp", "src/unstaged.hpp", "src/staged.cpp", "src/new name \u00fc file.hpp")})
         commands = [call.args[0] for call in git.call_args_list]
-        self.assertEqual(commands[0], ["git", "merge-base", "local-base", "HEAD"])
+        self.assertEqual(commands[0], ["git", "merge-base", "--", "local-base", "HEAD"])
         self.assertTrue(any("--cached" in c for c in commands))
         self.assertTrue(any("--others" in c for c in commands))
         self.assertFalse(any("fetch" in c for c in commands))
+
+    def test_git_nul_records_preserve_filename_line_separators(self):
+        # Exercise Git's byte protocol without asking the host filesystem to
+        # accept names that Windows forbids. Real path validation is covered
+        # by the selection and escape tests.
+        names = [f"src/new{separator}file.hpp" for separator in ("\n", "\r", "\v", "\x1c", "\u2028")]
+        payload = b"\0".join(os.fsencode(name) for name in names) + b"\0"
+        with patch.object(tus.subprocess, "check_output", side_effect=[b"a" * 40, payload]), \
+                patch.object(tus, "checked_resolve", side_effect=lambda path: path) as resolve:
+            paths = tus.changed_paths(self.root, "base", False, False)
+        expected = [self.root / name for name in names]
+        self.assertEqual(paths, set(expected))
+        self.assertEqual([call.args[0] for call in resolve.call_args_list], expected)
 
     def test_missing_local_merge_base_fails(self):
         with patch.object(tus.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "git")):
@@ -1569,6 +2506,34 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertIn("scratch escapes", (self.root / "summary.md").read_text())
         self.assertEqual({p: p.read_bytes() for p in self.src.iterdir()}, before)
 
+    def test_ci_reparse_checks_cover_both_builds_tracked_sources_and_scratch(self):
+        clang_build = self.root / "scratch" / "clang-build"
+        clang_build.mkdir()
+        (clang_build / "compile_commands.json").write_text(json.dumps(self.raw), encoding="utf-8")
+        dormant = self.src / "DormantBackend.cpp"
+        dormant.write_text("// optional input\n", encoding="utf-8")
+        real_lstat = os.lstat
+        before = {p: p.read_bytes() for p in self.src.iterdir()}
+        namespace = os.environ.get("CCACHE_NAMESPACE")
+        for marked in (self.build, clang_build, dormant, self.root / "scratch"):
+            def metadata(path, *args, **kwargs):
+                info = real_lstat(path, *args, **kwargs)
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                fields["st_file_attributes"] = 0x400 if Path(path) == marked else 0
+                return SimpleNamespace(**fields)
+
+            self.commands.clear()
+            summary = self.root / "summary.md"
+            summary.unlink(missing_ok=True)
+            with self.subTest(marked=marked.relative_to(self.root)), patch.object(
+                    tus._DEPS._PATH_SAFETY, "WINDOWS", True), patch.object(os, "lstat", side_effect=metadata):
+                self.assertEqual(self.run_ci(tracked=[self.a, dormant], clang_build_dir=clang_build), 1)
+            self.assertIn("reparse point", summary.read_text())
+            self.assertEqual(self.check_commands(), [])
+            self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+            self.assertEqual({p: p.read_bytes() for p in self.src.iterdir()}, before)
+            self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
     def test_ci_reports_unconfigured_sources_and_failure_does_not_validate_them(self):
         dormant = self.src / "DormantBackend.cpp"
         dormant.write_text("optional source")
@@ -1579,6 +2544,41 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertIn("src/DormantBackend.cpp", summary)
         self.commands.clear()
         self.assertEqual(self.run_ci([dormant], tracked=[self.a, dormant]), 1)
+        # Included .cpp inputs require dependency scans before refusing a source
+        # absent from both the database and every dependency closure.
+        self.assertEqual(len(self.commands), 2 * len(self.raw))
+        self.assertTrue(all("-M" in command for command, _ in self.commands))
+        self.assertEqual(self.check_commands(), [])
+        self.assertIn("missing compile database", (self.root / "summary.md").read_text())
+
+    def test_ci_dependency_scans_accept_included_only_sources_in_both_databases(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included input\n", encoding="utf-8")
+        self.other = included
+        self.assertEqual(self.run_ci([included], tracked=[self.a, self.b, included]), 0)
+        compiles = [command for command, _ in self.check_commands() if command[0] == "ccache"]
+        self.assertEqual(len(compiles), 2)
+        for source in (self.a, self.b):
+            self.assertEqual(sum(str(source) in command for command in compiles), 1)
+        self.assertIn("src/included.cpp", (self.root / "summary.md").read_text())
+
+    def test_cli_refuses_unresolvable_roots_before_dispatch_or_publication(self):
+        for command in ("compile", "tidy", "route", "ci"):
+            output = self.root / "route-output"
+            summary = self.root / "route-summary"
+            with self.subTest(command=command), patch.object(
+                    tus, "checked_resolve", side_effect=tus.SelectionError("unsafe root")), patch.object(
+                    tus, "ci_route") as route, patch.object(tus, "ci_checks") as ci, patch.object(
+                    tus, "changed_paths") as changed, redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(tus.main([command, "--root", str(self.root),
+                                           "--build-dir", str(self.build), "--output", str(output),
+                                           "--summary-file", str(summary)]), 1)
+                self.assertIn("unsafe root", errors.getvalue())
+                route.assert_not_called()
+                ci.assert_not_called()
+                changed.assert_not_called()
+                self.assertFalse(output.exists())
+                self.assertFalse(summary.exists())
         self.assertEqual(self.commands, [])
 
     def test_ci_summary_escapes_unusual_filenames(self):
@@ -1601,7 +2601,510 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertIn("-DVARIANT_A", stream.getvalue())
 
 
+class BaseRefProcessTests(unittest.TestCase):
+    def test_option_like_ref_is_refused_instead_of_selecting_head(self):
+        # Without Git's option terminator, --octopus HEAD succeeds and would
+        # silently report no work despite naming no base ref at all.
+        with tempfile.TemporaryDirectory(prefix="selector invalid ref ") as temporary:
+            build = Path(temporary).resolve()
+            (build / "compile_commands.json").write_text("[]", encoding="utf-8")
+            for command in ("compile", "tidy"):
+                for options in ([], ["--base-ref=--octopus"]):
+                    with self.subTest(command=command, options=options):
+                        environment = {name: value for name, value in os.environ.items()
+                                       if not name.startswith("GIT_")}
+                        environment["LUMINUMBRA_BASE_REF"] = "--octopus"
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(ROOT / "tools/ci/changed_tus.py"),
+                             command, "--root", str(ROOT), "--build-dir", str(build),
+                             "--no-worktree", "--no-include-untracked", *options],
+                            env=environment, capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(str(["git", "merge-base", "--", "--octopus", "HEAD"]), result.stderr)
+                        self.assertEqual(result.stdout, "")
+
+    def test_direct_selector_accepts_local_head_without_native_work(self):
+        with tempfile.TemporaryDirectory(prefix="selector database ") as temporary:
+            build = Path(temporary).resolve()
+            (build / "compile_commands.json").write_text("[]", encoding="utf-8")
+            for command in ("compile", "tidy"):
+                for value, options in (("HEAD", []), ("unavailable-base", ["--base-ref", "HEAD"])):
+                    with self.subTest(command=command, environment=value):
+                        environment = {name: value for name, value in os.environ.items()
+                                       if not name.startswith("GIT_")}
+                        environment["LUMINUMBRA_BASE_REF"] = value
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(ROOT / "tools/ci/changed_tus.py"),
+                             command, "--root", str(ROOT), "--build-dir", str(build),
+                             "--no-worktree", "--no-include-untracked", *options],
+                            env=environment, capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        report = json.loads(result.stdout.splitlines()[0])
+                        self.assertEqual(report["selected"], [])
+                        self.assertEqual(report["scan_variants"], 0)
+                        self.assertIn("No native work selected.", result.stdout)
+
+    def test_direct_selector_resolves_environment_and_cli_refs_through_git(self):
+        # An empty repository makes every ref unavailable. The real Git error
+        # identifies the chosen ref before any database read or native work.
+        # No mocks cross the selector's process boundary.
+        with tempfile.TemporaryDirectory(prefix="selector refs ") as temporary:
+            root = Path(temporary).resolve()
+            environment = dict(os.environ)
+            for name in list(environment):
+                if name.startswith("GIT_") or name == "LUMINUMBRA_BASE_REF":
+                    del environment[name]
+            subprocess.run(["git", "init", "--quiet", "--template=", str(root)],
+                           env=environment, check=True, capture_output=True)
+            before = {path.relative_to(root): path.read_bytes()
+                      for path in root.rglob("*") if path.is_file()}
+            cases = (
+                (None, None, "origin/devel"),
+                ("", None, "origin/devel"),
+                ("refs/heads/local-selector-base", None, "refs/heads/local-selector-base"),
+                ("0", None, "0"),
+                (" ", None, " "),
+                (None, "explicit-base", "explicit-base"),
+                ("", "explicit-base", "explicit-base"),
+                ("environment-base", "explicit-base", "explicit-base"),
+                ("environment-base", "", ""),
+            )
+            for command in ("compile", "tidy"):
+                for value, explicit, expected in cases:
+                    with self.subTest(command=command, environment=value, explicit=explicit):
+                        child_environment = dict(environment)
+                        if value is not None:
+                            child_environment["LUMINUMBRA_BASE_REF"] = value
+                        arguments = [sys.executable, "-I", "-B", str(ROOT / "tools/ci/changed_tus.py"),
+                                     command, "--root", str(root), "--build-dir", "absent-database"]
+                        if explicit is not None:
+                            arguments += ["--base-ref", explicit]
+                        result = subprocess.run(arguments, cwd=root, env=child_environment,
+                                                capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(str(["git", "merge-base", "--", expected, "HEAD"]), result.stderr)
+                        self.assertEqual(result.stdout, "")
+                        self.assertNotIn("compile_commands.json", result.stderr)
+                        self.assertEqual(before, {path.relative_to(root): path.read_bytes()
+                                                  for path in root.rglob("*") if path.is_file()})
+
+    def test_imported_selector_reads_environment_at_each_invocation(self):
+        with tempfile.TemporaryDirectory(prefix="selector defaults ") as temporary:
+            root = Path(temporary).resolve()
+            (root / "compile_commands.json").write_text("[]", encoding="utf-8")
+            for command in ("compile", "tidy"):
+                for value in ("local-base", "", None, "0"):
+                    with self.subTest(command=command, environment=value), patch.dict(os.environ):
+                        os.environ.pop("LUMINUMBRA_BASE_REF", None)
+                        if value is not None:
+                            os.environ["LUMINUMBRA_BASE_REF"] = value
+                        with patch.object(tus, "changed_paths", return_value=set()) as changed, \
+                                redirect_stdout(io.StringIO()):
+                            self.assertEqual(tus.main([command, "--root", str(root),
+                                                       "--build-dir", str(root)]), 0)
+                        changed.assert_called_once_with(root, value or "origin/devel", True, True)
+
+    def test_documented_shell_default_matches_direct_selector_contract(self):
+        docs = (ROOT / "docs/ci/local-checks.md").read_text(encoding="utf-8")
+        self.assertIn('base_ref="${LUMINUMBRA_BASE_REF:-origin/devel}"', docs)
+        self.assertIn('an unset or empty variable defaults to `origin/devel`', docs)
+        self.assertIn('An explicit `--base-ref`\ntakes priority over the environment', docs)
+
+
 EXECUTE = tus.execute
+COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 # The implementation is saved before any setUp patch replaces the entry point.
+
+
+class ProcessTimeoutTests(unittest.TestCase):
+    def test_hostile_locale_parallel_failure_reaps_owned_process_tree(self):
+        spec = importlib.util.spec_from_file_location("locale_tree_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        with patch.dict(os.environ, {"LC_ALL": "hostile", "LANG": "hostile", "LANGUAGE": "hostile"}):
+            caller = dict(os.environ)
+            for driver_exits in (False, True):
+                with self.subTest(driver_exits=driver_exits):
+                    ready = fixtures.threading.Event()
+
+                    def launch(command, directory):
+                        failure = tus.SelectionError("locale command failed")
+                        error = fixtures.assert_parallel_failure(
+                            self, tus._DEPS, failure, parallel=tus.parallel, ready=ready,
+                            slow=lambda: EXECUTE(command, directory))
+                        self.assertIs(type(error), tus.SelectionError)
+                        self.assertEqual(str(error), str(failure))
+                        raise error
+
+                    fixtures.assert_tree_timeout(self, launch, tus.SelectionError,
+                                                 driver_exits=driver_exits, ready_event=ready)
+            self.assertEqual(dict(os.environ), caller)
+
+    def test_collected_later_failure_cancels_and_reaps_owned_processes(self):
+        spec = importlib.util.spec_from_file_location("collected_tree_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                ready = fixtures.threading.Event()
+
+                def launch(command, directory):
+                    error = fixtures.assert_parallel_failure(
+                        self, tus._DEPS, tus.SelectionError("later command failed"),
+                        parallel=tus.parallel, ready=ready,
+                        slow=lambda: EXECUTE(command, directory))
+                    self.assertIs(type(error), tus.SelectionError)
+                    self.assertEqual(str(error), "later command failed")
+                    raise error
+
+                fixtures.assert_tree_timeout(self, launch, tus.SelectionError,
+                                             driver_exits=driver_exits, ready_event=ready)
+
+    def test_collected_failure_holds_slow_slot_until_publication(self):
+        spec = importlib.util.spec_from_file_location("publication_tree_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        case = self
+
+        class Observer:
+            def __init__(self, failure):
+                self.failure = failure
+                self.condition = fixtures.threading.Condition()
+                self.work0_thread = None
+                self.work0_wait = False
+                self.queued_completed = False
+                self.released = False
+                self.caught = []
+                self.releases = []
+                self.errors = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, error_type, error, traceback):
+                with self.condition:
+                    if error is not None:
+                        self.errors.append(error)
+                    # Release only this observer's hold; the tree fixture owns rescue.
+                    self.released = True
+                    self.condition.notify_all()
+
+            def work0_started(self):
+                with self.condition:
+                    self.work0_thread = fixtures.threading.get_ident()
+
+            def publication_event(self, event):
+                observer = self
+
+                class Publication:
+                    def set(self):
+                        return event.set()
+
+                    def is_set(self):
+                        return event.is_set()
+
+                    def wait(self, timeout=None):
+                        with observer.condition:
+                            if fixtures.threading.get_ident() == observer.work0_thread:
+                                observer.work0_wait = True
+                                observer.condition.notify_all()
+                        return event.wait(timeout)
+
+                return Publication()
+
+            def queued_future(self, future):
+                def completed(result):
+                    with self.condition:
+                        if result.done() and not result.cancelled():
+                            self.queued_completed = True
+                            self.condition.notify_all()
+
+                future.add_done_callback(completed)
+
+            def failure_caught(self, error, cancelled):
+                try:
+                    case.assertIs(error, self.failure)
+                    case.assertTrue(cancelled.is_set(), "invoke did not cancel before rethrow")
+                    case.assertFalse(hasattr(tus._DEPS._PROCESS_CONTEXT, "cancelled"))
+                    with self.condition:
+                        self.caught.append(error)
+                        case.assertTrue(self.condition.wait_for(
+                            lambda: self.work0_wait or self.queued_completed or self.released, 5),
+                            "neither the slow publication wait nor queued completion was observed")
+                        if self.work0_wait:
+                            self.releases.append("work0_wait")
+                        elif self.queued_completed:
+                            self.releases.append("queued_completion")
+                        else:
+                            case.fail("observer was released during cleanup")
+                except BaseException as error:
+                    with self.condition:
+                        self.errors.append(error)
+                    raise
+                finally:
+                    with self.condition:
+                        self.released = True
+                        self.condition.notify_all()
+
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                ready = fixtures.threading.Event()
+                failure = tus.SelectionError("later command failed")
+                with Observer(failure) as observer:
+                    def launch(command, directory):
+                        error = fixtures.assert_parallel_failure(
+                            self, tus._DEPS, failure, parallel=tus.parallel, ready=ready,
+                            slow=lambda: EXECUTE(command, directory), observer=observer)
+                        self.assertIs(type(error), tus.SelectionError)
+                        self.assertEqual(str(error), "later command failed")
+                        raise error
+
+                    fixtures.assert_tree_timeout(self, launch, tus.SelectionError,
+                                                 driver_exits=driver_exits, ready_event=ready)
+                    self.assertEqual(observer.errors, [])
+                    self.assertEqual(observer.caught, [failure])
+                    self.assertEqual(observer.releases, ["work0_wait"])
+                    self.assertTrue(observer.work0_wait)
+                    self.assertFalse(observer.queued_completed)
+
+    def test_collected_parallel_refusals_cancel_before_publication_and_preserve_diagnostics(self):
+        spec = importlib.util.spec_from_file_location("parallel_failure_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        error = fixtures.assert_parallel_failure(
+            self, tus._DEPS, PermissionError("unreadable command"), parallel=tus.parallel,
+            active_error=ValueError("partial dependency output"))
+        self.assertIs(type(error), tus.SelectionError)
+        self.assertEqual(str(error), "unreadable command\npartial dependency output")
+
+    def test_unexpected_parallel_error_is_not_wrapped_as_selection_refusal(self):
+        spec = importlib.util.spec_from_file_location("unexpected_failure_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        failure = RuntimeError("cleanup failed")
+        self.assertIs(fixtures.assert_parallel_failure(
+            self, tus._DEPS, ValueError("dependency refusal"), parallel=tus.parallel,
+            active_error=failure), failure)
+
+    def test_parallel_interrupt_cancels_queue_and_reaps_descendants(self):
+        spec = importlib.util.spec_from_file_location("tree_interrupt_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        visited = []
+
+        def launch(command, directory):
+            def work(index):
+                visited.append(index)
+                if index == 0:
+                    return EXECUTE(command, directory)
+            tus.parallel(work, range(8), 1)
+
+        fixtures.assert_tree_timeout(self, launch, KeyboardInterrupt, interrupt=True)
+        self.assertEqual(visited, [0])
+
+    def test_replay_and_probe_timeout_terminate_grandchildren(self):
+        spec = importlib.util.spec_from_file_location("tree_timeout_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        actions = (
+            (lambda command, directory: EXECUTE(command, directory), subprocess.TimeoutExpired),
+            (lambda command, directory: tus._compiler_header_roots(
+                tuple(command), directory, tuple(os.environ.items())), tus.SelectionError),
+        )
+        for launch, error_type in actions:
+            with self.subTest(error_type=error_type):
+                fixtures.assert_tree_timeout(self, launch, error_type)
+
+
+class WindowsSearchPathTests(unittest.TestCase):
+    class SearchPath(PureWindowsPath):
+        def resolve(self):
+            # Model the handle-based short-name expansion at the OS boundary.
+            parts = ["Header Directory" if part.casefold() == "header~1" else part
+                     for part in self.parts]
+            return type(self)(ntpath.normpath(str(type(self)(*parts))))
+
+    def test_equivalent_windows_roots_reuse_scan_and_keep_invalidation(self):
+        root = self.SearchPath(r"C:\Header Directory")
+        variants = [root, self.SearchPath("c:/header directory/"),
+                    self.SearchPath(r"C:\HEADER~1"),
+                    self.SearchPath(r"c:\HEADER~1\nested\..")]
+        tick = 10_000_000_000
+        stamp = [1, 1, stat.S_IFDIR, 0, tick, tick]
+        files = []
+        with patch.object(tus.os, "name", "nt"), \
+                patch.object(tus, "Path", self.SearchPath), \
+                patch.object(tus, "_PCH_SEARCH_CACHE", {}), \
+                patch.object(tus.time, "time_ns", return_value=tick + 2_000_000_000), \
+                patch.object(tus, "directory_stamp", side_effect=lambda path: tuple(stamp)) as stamps, \
+                patch.object(tus, "directory_entries", side_effect=lambda *args: tuple(
+                    (name, stat.S_IFREG, 1, 2) for name in files)), \
+                patch.object(tus, "walk_header_directories", side_effect=lambda *args, **kwargs:
+                             iter([(str(root), [], list(files))])) as walk:
+            compilers = (r"C:\Toolchain\G++.EXE", "c:/toolchain/g++.exe",
+                         r"c:\TOOLCHAIN\.\g++.exe", r"C:\Toolchain\bin\..\g++.exe")
+            for compiler, variant in zip(compilers, variants):
+                tus.check_pch_search_roots(compiler, {variant, root})
+            self.assertEqual(walk.call_count, 1)
+            self.assertEqual(len(tus._PCH_SEARCH_CACHE), 1)
+            self.assertTrue(all(call.args[0] == root for call in stamps.call_args_list))
+            files.append("header.hpp.gch")
+            stamp[4] += 1
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.check_pch_search_roots(compilers[-1], {variants[-1]})
+            self.assertEqual(walk.call_count, 2)
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.check_pch_search_roots(compilers[1], {variants[1]})
+            self.assertEqual(walk.call_count, 2)
+
+    def test_equivalent_windows_probe_directories_reuse_search_list(self):
+        result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\r\n '
+            'C:/Header Directory\r\nEnd of search list.\r\n')
+        tus._compiler_header_roots.cache_clear()
+        with patch.object(tus.os, "name", "nt"), \
+                patch.object(tus, "Path", self.SearchPath), \
+                patch.object(tus._DEPS, "run_process", return_value=result) as probe:
+            for directory in (r"C:\Header Directory", "c:/header directory", r"C:\HEADER~1"):
+                roots = COMPILER_HEADER_ROOTS(["g++.exe", r"C:\changed_tus\unit.cpp"],
+                                             self.SearchPath(directory))
+                self.assertEqual(roots, (self.SearchPath(r"C:\Header Directory"),))
+            self.assertEqual(probe.call_count, 1)
+
+    def test_unresolvable_root_refuses_and_empty_roots_do_not_walk(self):
+        with patch.object(tus, "_PCH_SEARCH_CACHE", {}), \
+                patch.object(tus, "walk_header_directories") as walk:
+            tus.check_pch_search_roots("g++", set())
+            with patch.object(Path, "resolve", side_effect=PermissionError("unreadable root")), \
+                    self.assertRaisesRegex(tus.SelectionError, "cannot check binary PCH search directory"):
+                tus.check_pch_search_roots("g++", {Path("headers")})
+            walk.assert_not_called()
+
+    def test_posix_compiler_case_remains_distinct(self):
+        with patch.object(tus.os, "name", "posix"), \
+                patch.object(tus, "_PCH_SEARCH_CACHE", {}) as cache:
+            for compiler in ("G++", "g++"):
+                tus.check_pch_search_roots(compiler, set())
+            self.assertEqual(len(cache), 2)
+
+
+class PchEntryIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path("virtual headers").absolute()
+        self.child = self.root / "generated"
+        self.binary = self.child / "header.hpp.gch"
+        self.tick = 10_000_000_000
+        self.nodes = {self.root: (stat.S_IFDIR, 1, 1)}
+        # Keep stamps fixed to isolate entry identity from timestamp detection.
+        stamp = (1, 1, stat.S_IFDIR, 0, self.tick, self.tick)
+
+        def names(path):
+            return sorted(node.name for node in self.nodes if node.parent == path)
+
+        def walk(path, **kwargs):
+            children, files = [], []
+            for name in names(path):
+                kind = self.nodes[path / name][0]
+                (children if kind == stat.S_IFDIR else files).append(name)
+            yield str(path), children, files
+            for name in children:
+                yield from walk(path / name, **kwargs)
+
+        def lstat(path):
+            path = Path(path)
+            if path in self.root.parents:
+                kind, device, inode = stat.S_IFDIR, 1, 0
+            elif path in self.nodes:
+                kind, device, inode = self.nodes[path]
+            else:
+                raise FileNotFoundError(path)
+            # This virtual filesystem isolates entry identity changes from
+            # native reparse tags; ancestor probes must use its metadata too.
+            return SimpleNamespace(st_mode=kind, st_dev=device, st_ino=inode, st_file_attributes=0)
+
+        patches = [patch.object(tus, "_PCH_SEARCH_CACHE", {}),
+                   patch.object(tus, "directory_stamp",
+                                side_effect=lambda path: stamp if path in self.nodes
+                                and self.nodes[path][0] != stat.S_IFLNK else None),
+                   patch.object(tus.os, "listdir", side_effect=names),
+                   patch.object(tus.os, "lstat", side_effect=lstat),
+                   patch.object(Path, "resolve", autospec=True, side_effect=lambda path: path),
+                   patch.object(Path, "is_symlink", autospec=True,
+                                side_effect=lambda path: self.nodes[path][0] == stat.S_IFLNK)]
+        for mock in patches:
+            mock.start()
+            self.addCleanup(mock.stop)
+        self.walk = patch.object(tus, "walk_header_directories", side_effect=walk).start()
+        self.clock = patch.object(tus.time, "time_ns", return_value=self.tick + 500_000_000).start()
+        self.addCleanup(patch.stopall)
+
+    def test_file_becoming_directory_with_pch_invalidates_approval(self):
+        for compiler in ("g++", "clang++"):
+            for replay_delay in (750_000_000, 2_000_000_000):
+                with self.subTest(compiler=compiler, replay_delay=replay_delay):
+                    tus._PCH_SEARCH_CACHE.clear()
+                    self.walk.reset_mock()
+                    self.clock.return_value = self.tick + 500_000_000
+                    self.nodes = {self.root: (stat.S_IFDIR, 1, 1),
+                                  self.child: (stat.S_IFREG, 1, 2)}
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    self.nodes[self.child] = (stat.S_IFDIR, 1, 2)
+                    self.nodes[self.binary] = (stat.S_IFREG, 1, 3)
+                    self.clock.return_value = self.tick + replay_delay
+                    for _ in range(2):
+                        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                            tus.check_pch_search_roots(compiler, {self.root})
+                    self.assertEqual(self.walk.call_count, 2)
+
+    def test_directory_becoming_file_requires_rescan(self):
+        for compiler in ("g++", "clang++"):
+            for replay_delay in (750_000_000, 2_000_000_000):
+                with self.subTest(compiler=compiler, replay_delay=replay_delay):
+                    tus._PCH_SEARCH_CACHE.clear()
+                    self.walk.reset_mock()
+                    self.clock.return_value = self.tick + 500_000_000
+                    self.nodes = {self.root: (stat.S_IFDIR, 1, 1),
+                                  self.child: (stat.S_IFDIR, 1, 2)}
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    self.nodes[self.child] = (stat.S_IFREG, 1, 2)
+                    self.clock.return_value = self.tick + replay_delay
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    self.assertEqual(self.walk.call_count, 2)
+
+    def test_entry_kind_device_and_inode_changes_require_rescan(self):
+        replacements = [(stat.S_IFLNK, 1, 2), (stat.S_IFIFO, 1, 2),
+                        (stat.S_IFREG, 2, 2), (stat.S_IFREG, 1, 3)]
+        for replacement in replacements:
+            with self.subTest(replacement=replacement):
+                tus._PCH_SEARCH_CACHE.clear()
+                self.walk.reset_mock()
+                self.clock.return_value = self.tick + 500_000_000
+                self.nodes = {self.root: (stat.S_IFDIR, 1, 1),
+                              self.child: (stat.S_IFREG, 1, 2)}
+                tus.check_pch_search_roots("g++", {self.root})
+                self.nodes[self.child] = replacement
+                self.clock.return_value = self.tick + 2_000_000_000
+                tus.check_pch_search_roots("g++", {self.root})
+                self.assertEqual(self.walk.call_count, 2)
+                tus.check_pch_search_roots("g++", {self.root})
+                self.assertEqual(self.walk.call_count, 2)
+
+    def test_type_change_during_walk_refuses_snapshot(self):
+        for kind in (stat.S_IFDIR, stat.S_IFLNK):
+            with self.subTest(kind=kind):
+                self.nodes[self.child] = (kind, 1, 2)
+                self.walk.side_effect = None
+                self.walk.return_value = [(str(self.root), [], [self.child.name])]
+                stamp = (1, 1, stat.S_IFDIR, 0, self.tick, self.tick)
+                with patch.object(tus, "directory_stamp", return_value=stamp), \
+                        self.assertRaisesRegex(tus.SelectionError, "entry changed type during scan"):
+                    tus.check_pch_search_roots("g++", {self.root})
+                self.assertEqual(tus._PCH_SEARCH_CACHE, {})
+
+
 if __name__ == "__main__":
-    unittest.main()
+    diagnostic_spec = importlib.util.spec_from_file_location(
+        "contract_case_diagnostics", ROOT / "tools/ci/contract_case_diagnostics.py")
+    diagnostics = importlib.util.module_from_spec(diagnostic_spec)
+    diagnostic_spec.loader.exec_module(diagnostics)
+    unittest.main(testRunner=diagnostics.CaseDiagnosticRunner)

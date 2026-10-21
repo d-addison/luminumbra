@@ -8,19 +8,23 @@ variant, in ordinary and clang analyzer preprocessing contexts. No Git fetches.
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import fnmatch
+import functools
 import hashlib
 import importlib.util
 import json
+import ntpath
 import os
+from os import walk as walk_header_directories
 from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -75,6 +79,25 @@ class SelectionError(ValueError):
     pass
 
 
+def reject_reparse_points(path):
+    try:
+        _DEPS.reject_reparse_points(path)
+    except OSError as error:
+        raise SelectionError(str(error)) from error
+
+
+def checked_resolve(path):
+    reject_reparse_points(path)
+    return path.resolve()
+
+
+# Compiler installations/search lists are stable during one invocation. PCH
+# scan results also record directory identities and timestamps: adding a cache
+# after database validation must still invalidate a successful scan.
+_HEADER_SEARCH_LOCK = threading.RLock()
+_PCH_SEARCH_CACHE: dict[tuple, tuple[dict, Path | None, int]] = {}
+
+
 def first_party(relative: Path) -> bool:
     return (relative.parts[0] in {"src", "include", "test", "tools"}
             and relative.parts[:4] != ("src", "luminumbra_client", "ui", "gl3"))
@@ -85,7 +108,7 @@ def changed_paths(root: Path, base_ref: str, worktree=True, include_untracked=Tr
         return subprocess.check_output(["git", *args], cwd=root,
                                        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
 
-    base = git("merge-base", base_ref, "HEAD").decode("ascii").strip()
+    base = git("merge-base", "--", base_ref, "HEAD").decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{40,64}", base):
         raise SelectionError("no local merge base; provision local history and base ref")
     commands = [("diff", "--name-only", "--no-renames", "-z", base, "HEAD", "--")]
@@ -99,7 +122,7 @@ def changed_paths(root: Path, base_ref: str, worktree=True, include_untracked=Tr
         for raw in git(*command).split(b"\0"):
             if raw:
                 path = root / os.fsdecode(raw)
-                if not path.resolve().is_relative_to(root):
+                if not checked_resolve(path).is_relative_to(root):
                     raise SelectionError(f"changed path escapes checkout: {os.fsdecode(raw)}")
                 paths.add(path)
     return paths
@@ -116,22 +139,23 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
         directory = Path(raw.get("directory", ""))
         if not directory.is_absolute() or not directory.is_dir():
             raise SelectionError("compile database needs existing absolute working directories")
-        source = (directory / raw["file"]).resolve()
+        source = checked_resolve(directory / raw["file"])
         if not source.is_relative_to(root) or not first_party(source.relative_to(root)):
             continue
         if source.suffix.lower() not in SOURCE_SUFFIXES:
             continue
-        if not directory.resolve().is_relative_to(root):
+        if not checked_resolve(directory).is_relative_to(root):
             raise SelectionError(f"working directory escapes checkout: {source}")
         try:
             if "arguments" in raw and (not isinstance(raw["arguments"], list)
                     or not all(isinstance(a, str) for a in raw["arguments"])):
                 raise SelectionError("malformed compiler arguments")
             args = normalise_pch_arguments(_DEPS.entry_arguments(raw), directory, build_dir)
-            # Validate before spawning anything, including unselected variants.
-            _, operands = parse_arguments(args)
-            if len(operands) != 1 or (directory / operands[0]).resolve() != source:
+            # Reject unsupported arguments and wrong source operands before probing.
+            cleaned, operands = parse_arguments(args)
+            if len(operands) != 1 or checked_resolve(directory / operands[0]) != source:
                 raise SelectionError(f"command must compile exactly one database source: {source}")
+            validate_textual_includes(cleaned, directory)
         except (_DEPS.CacheMiss, ValueError, TypeError) as error:
             raise SelectionError(str(error)) from error
         entries.append({"file": source, "directory": directory, "arguments": args})
@@ -164,8 +188,8 @@ def normalise_pch_arguments(arguments: list[str], directory: Path, build_dir: Pa
             if arg == "-include" and Path(value).name not in {"cmake_pch.h", "cmake_pch.hxx"}:
                 # Ordinary forced includes retain the existing input policy.
                 # They can also provide the textual counterpart of a PCH.
-                path = (directory / value).resolve()
-                if path.is_relative_to(build_dir.resolve()) and path.is_file():
+                path = checked_resolve(directory / value)
+                if path.is_relative_to(checked_resolve(build_dir)) and path.is_file():
                     headers.add(path)
                 result.extend([arg, value])
                 continue
@@ -179,8 +203,8 @@ def normalise_pch_arguments(arguments: list[str], directory: Path, build_dir: Pa
             continue
         if not value or value.startswith(("-", "@")):
             raise SelectionError(f"missing value after {option}")
-        path = (directory / value).resolve()
-        if not path.is_relative_to(build_dir.resolve()):
+        path = checked_resolve(directory / value)
+        if not path.is_relative_to(checked_resolve(build_dir)):
             raise SelectionError("PCH reference escapes build tree")
         if option == "-include":
             if not path.is_file():
@@ -199,6 +223,260 @@ def clean_arguments(arguments: list[str]) -> list[str]:
     return parse_arguments(arguments)[0]
 
 
+def compiler_header_roots(arguments: list[str], directory: Path) -> tuple[Path, ...]:
+    """Query effective GCC/Clang roots with the variant's target and sysroot.
+
+    Preprocess empty stdin, never a header or TU, so the probe cannot consume
+    a PCH. Fail closed if the compiler is unavailable or its list is unknown.
+    Memoize equivalent probes for this process; macros and TU paths do not
+    affect the driver's search list. Directory contents are checked separately.
+    """
+    command, operands = parse_arguments(arguments)
+    language = "c++" if "++" in executable_name(command[0]) or Path(operands[0]).suffix != ".c" else "c"
+    probe = command[:1]
+    source_seen = False
+    index = 1
+    while index < len(command):
+        option = command[index]
+        if option == "-x":
+            # -x affects only later operands; flags after the TU cannot
+            # change its language (other search flags remain global).
+            if not source_seen:
+                language = command[index + 1]
+        elif option in VALUE_OPTIONS:
+            if option not in {"-include", "-imacros", "-D", "-U"}:
+                probe.extend(command[index:index + 2])
+        elif option.startswith("-"):
+            if not option.startswith(("-D", "-U")):
+                probe.append(option)
+        else:
+            source_seen = True
+        index += 2 if option in VALUE_OPTIONS else 1
+    probe.extend(["-E", "-v", "-x", language, "-"])
+    environment = tuple(sorted(diagnostic_environment().items()))
+    # Serialize misses too, so parallel TU variants cannot duplicate a probe.
+    with _HEADER_SEARCH_LOCK:
+        return _compiler_header_roots(tuple(probe), checked_resolve(directory), environment)
+
+
+@functools.lru_cache(maxsize=None)
+def _compiler_header_roots(probe: tuple[str, ...], directory: Path,
+                           environment: tuple[tuple[str, str], ...]) -> tuple[Path, ...]:
+    try:
+        result = _DEPS.run_process(list(probe), cwd=directory, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=1800,
+                                env=dict(environment))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SelectionError(f"cannot query compiler header search paths: {error}") from error
+    roots, scanning, complete = [], False, False
+    for line in result.stderr.splitlines():
+        line = line.strip()
+        if line in {'#include "..." search starts here:', '#include <...> search starts here:'}:
+            scanning = True
+        elif scanning and line == "End of search list.":
+            complete = True
+            break
+        elif scanning:
+            roots.append(directory / line.removesuffix(" (framework directory)"))
+    if result.returncode or not complete:
+        raise SelectionError("cannot establish compiler header search paths; refusing replay")
+    # Forced includes follow the driver's quote/system search order.
+    return tuple(dict.fromkeys(roots))
+
+
+def directory_stamp(path: Path) -> tuple | None:
+    """Use stat, not DirEntry's incomplete Windows identity fields."""
+    reject_reparse_points(path)
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def directory_entries(path: Path, names=None) -> tuple:
+    """Record entry kinds and identities without following symlink targets.
+
+    Use lstat because Windows DirEntry.stat omits device and inode identity.
+    Target changes, including dangling links, have separate directory stamps.
+    """
+    reject_reparse_points(path)
+    entries = []
+    for name in sorted(os.listdir(path) if names is None else names):
+        reject_reparse_points(path / name)
+        info = os.lstat(path / name)
+        entries.append((name, stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino))
+    return tuple(entries)
+
+
+def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
+    """Reuse directory walks until a directory's identity or contents change.
+
+    Retain both successes and refusals per compiler/root set for this process.
+    Stat the visited directories on reuse, including links and missing roots;
+    newly added nested .gch entries or retargeted links require another walk.
+    Track dangling links too, so creating their targets invalidates reuse.
+    """
+    def fail(error):
+        raise SelectionError(f"cannot check binary PCH search directory: {error}") from error
+
+    def unchanged(stamps, checked_at):
+        for path, (stamp, entries) in stamps.items():
+            if directory_stamp(path) != stamp:
+                return False
+            # Directory timestamps can have DOS's two-second granularity.
+            # A snapshot captured within that tick remains suspect even when
+            # replay happens later. Check membership until an observation
+            # after the tick closes confirms the recorded entry identities.
+            if (entries is not None and stamp is not None
+                    and stamp[4] + 2_000_000_000 > checked_at
+                    and directory_entries(path) != entries):
+                return False
+        return True
+
+    with _HEADER_SEARCH_LOCK:
+        try:
+            # Resolve before deduplication and keying: Windows handles expand
+            # short names, and Path equality folds native case/separators.
+            roots = tuple(sorted({checked_resolve(path) for path in search}))
+            # Compiler spellings are case/separator insensitive on Windows.
+            # Keep the launch argument intact; only the scan identity changes.
+            compiler_key = ntpath.normcase(ntpath.normpath(compiler)) if os.name == "nt" else compiler
+            key = (compiler_key, roots)
+            # Sample before walking or checking membership, so crossing a
+            # timestamp tick during either operation cannot confer trust.
+            checked_at = time.time_ns()
+            cached = _PCH_SEARCH_CACHE.get(key)
+            if cached is not None and unchanged(cached[0], cached[2]):
+                stamps, binary = cached[:2]
+            else:
+                stamps, seen, binary = {}, set(), None
+                for root in roots:
+                    stamps[root] = (directory_stamp(root), None)
+                    if stamps[root][0] is None:
+                        continue  # Compilers ignore nonexistent include directories.
+                    for current, children, files in walk_header_directories(root, followlinks=True, onerror=fail):
+                        path = Path(current)
+                        # Capture each directory before os.walk enumerates it,
+                        # so a concurrent insertion cannot acquire a cached
+                        # timestamp newer than the membership we checked.
+                        entries = directory_entries(path, children + files)
+                        stamps[path] = (stamps[path][0], entries)
+                        directories = set(children)
+                        for name, kind, _, _ in entries:
+                            child = path / name
+                            if name in directories or kind == stat.S_IFLNK:
+                                # Track targets even for links classified as files;
+                                # dangling targets may become traversable later.
+                                child_stamp = directory_stamp(child)
+                                stamps[child] = (child_stamp, None)
+                                if kind == stat.S_IFLNK:
+                                    kind = stat.S_IFMT(child_stamp[2]) if child_stamp else None
+                            if (kind == stat.S_IFDIR) != (name in directories):
+                                raise SelectionError(
+                                    f"header search entry changed type during scan: {child}")
+                        resolved = checked_resolve(path)
+                        if resolved in seen:
+                            children[:] = []
+                            continue
+                        seen.add(resolved)
+                        children.sort()
+                        for name in sorted(children + files):
+                            if name.lower().endswith(".gch"):
+                                binary = path / name
+                                break
+                        if binary is not None:
+                            break
+                    if binary is not None:
+                        break
+            _PCH_SEARCH_CACHE[key] = (stamps, binary, checked_at)
+        except OSError as error:
+            fail(error)
+        if binary is not None:
+            raise SelectionError(f"binary PCH cache in header search path: {binary}; "
+                                 "remove the cache before replaying textual headers")
+
+
+def validate_textual_includes(arguments: list[str], directory: Path, *, compiler_roots=False) -> None:
+    """Refuse implicit binary PCH lookup for forced and ordinary includes.
+
+    Check both the spelled and resolved names: a header symlink can have a
+    cache beside either name. Directories and dangling cache links also count.
+    Locate forced headers in the working directory, then in the driver's
+    ordered quote/system search paths. Conservatively scan all explicit
+    search roots, environment roots and source/forced-header directories,
+    including subdirectories and directory links. Before replay also query
+    compiler defaults/system roots; never guess platform-specific locations.
+    GCC may silently use a stale .gch without diagnostics;
+    rejecting the cache is safer than relying on invalid-PCH warnings. Call
+    again at replay in case a build populated it after database validation.
+    """
+    search, forced = set(), []
+    for variable in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+        if variable in os.environ:
+            # An empty component means the compiler's working directory.
+            search.update(directory / value for value in os.environ[variable].split(os.pathsep))
+    index = 1
+    while index < len(arguments):
+        option = arguments[index]
+        if option in {"-include", "-imacros"}:
+            forced.append(arguments[index + 1])
+        elif option in {"-I", "-iquote", "-isystem", "-idirafter"}:
+            search.add(directory / arguments[index + 1])
+        elif option.startswith("-I"):
+            search.add(directory / option[2:])
+        elif option not in VALUE_OPTIONS and not option.startswith("-"):
+            source = directory / option
+            search.update((source.parent, checked_resolve(source).parent))
+        index += 2 if option in VALUE_OPTIONS else 1
+
+    roots = None
+    for value in forced:
+        candidates = [directory / value]
+        index = 0
+        while index < len(candidates):
+            header = candidates[index]
+            for path in (header, checked_resolve(header)):
+                for suffix in (".gch", ".pch"):
+                    binary = Path(str(path) + suffix)
+                    if os.path.lexists(binary):
+                        raise SelectionError(f"binary PCH cache beside forced include: {binary}; "
+                                             "remove the cache before replaying textual headers")
+            if header.is_file():
+                search.update((header.parent, checked_resolve(header).parent))
+                break
+            if index == 0 and not Path(value).is_absolute():
+                if roots is None:
+                    roots = compiler_header_roots(arguments, directory)
+                candidates.extend(root / value for root in roots)
+            index += 1
+        else:
+            raise SelectionError(f"cannot locate textual forced include: {value}")
+
+    if compiler_roots and roots is None:
+        roots = compiler_header_roots(arguments, directory)
+    search.update(roots or ())
+    check_pch_search_roots(arguments[0], search)
+
+
+def replay_arguments(entry: dict) -> list[str]:
+    arguments = clean_arguments(entry["arguments"])
+    validate_textual_includes(arguments, entry["directory"], compiler_roots=True)
+    return arguments
+
+
+def executable_name(executable: str) -> str:
+    """Identify native and Windows drivers without rewriting their launch path."""
+    name = ntpath.basename(executable)
+    # Also recognize Windows command spellings when inspecting a database on
+    # POSIX. Keep case-sensitive POSIX driver names otherwise.
+    if os.name == "nt" or name.lower().endswith(".exe"):
+        name = name.casefold()
+    return name.removesuffix(".exe")
+
+
 def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     """Allow only supported input/configuration flags; discard rewritten outputs.
 
@@ -208,9 +486,9 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     if not arguments or not all(isinstance(a, str) for a in arguments):
         raise SelectionError("malformed compiler arguments")
     args = list(arguments)
-    if Path(args[0]).name in {"ccache", "sccache"}:
+    if executable_name(args[0]) in {"ccache", "sccache"}:
         args.pop(0)
-    if not args or not re.fullmatch(r"(?:[\w.+-]*-)?(?:gcc|g\+\+|cc|c\+\+|clang|clang\+\+)(?:-[0-9.]+)?", Path(args[0]).name):
+    if not args or not re.fullmatch(r"(?:[\w.+-]*-)?(?:gcc|g\+\+|cc|c\+\+|clang|clang\+\+)(?:-[0-9.]+)?", executable_name(args[0])):
         raise SelectionError("unsupported compiler or command wrapper")
     result, operands = [args[0]], []
     rewritten_values = {option for option, policy in VALUE_OPTIONS.items() if policy == "drop"}
@@ -225,8 +503,8 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
         "-flto", "-fno-lto", "-fpch-instantiate-templates", "-m32", "-m64", "-Wa,-mbig-obj",
     }
     # Explicit x86 features, including their disable forms; no driver/path options.
-    x86_features = {"avx", "avx2", "avx512dq", "avx512f", "bmi", "f16c", "fma",
-                    "lzcnt", "popcnt", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2"}
+    x86_features = {"avx", "avx2", "avx512dq", "avx512f", "bmi", "bmi2", "f16c", "fma",
+                    "lzcnt", "movbe", "popcnt", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2"}
     safe_exact.update(f"-m{prefix}{feature}" for prefix in ("", "no-") for feature in x86_features)
     safe_pattern = re.compile(
         r"(?:-O(?:[0-3gsz]|fast)?|-g(?:[0-3]|gdb[0-3]?|dwarf-[2-5])?"
@@ -267,10 +545,15 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     return result, operands
 
 
+def diagnostic_environment() -> dict[str, str]:
+    """Keep parsed tool output in English without changing the caller locale."""
+    return {**os.environ, "LC_ALL": "C", "LANG": "C", "LANGUAGE": "C"}
+
+
 def execute(command, directory: Path, check=True):
-    completed = subprocess.run(command, cwd=directory, stdin=subprocess.DEVNULL,
+    completed = _DEPS.run_process(command, cwd=directory, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, timeout=1800)
+                               text=True, timeout=1800, env=diagnostic_environment())
     if check and completed.returncode:
         raise SelectionError(f"command failed ({completed.returncode}): {shlex.join(map(str, command))}\n"
                              + completed.stdout + completed.stderr)
@@ -278,7 +561,7 @@ def execute(command, directory: Path, check=True):
 
 
 def dependencies(entry: dict) -> set[Path]:
-    command = clean_arguments(entry["arguments"])
+    command = replay_arguments(entry)
     found = set()
     for analyzer in (False, True):
         args = command[:1] + (["-D__clang_analyzer__"] if analyzer else []) + command[1:]
@@ -287,7 +570,7 @@ def dependencies(entry: dict) -> set[Path]:
             paths = _DEPS.parse_make_deps(output)
         except _DEPS.CacheMiss as error:
             raise SelectionError(str(error)) from error
-        resolved = {(entry["directory"] / p).resolve() for p in paths}
+        resolved = {checked_resolve(entry["directory"] / p) for p in paths}
         if entry["file"] not in resolved or any(not p.is_file() for p in resolved):
             raise SelectionError(f"incomplete dependency scan: {entry['file']}")
         found.update(resolved)
@@ -295,18 +578,11 @@ def dependencies(entry: dict) -> set[Path]:
 
 
 def parallel(function, items, jobs: int):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        # Consume every future so failures from any variant remain visible.
-        futures = [pool.submit(function, item) for item in items]
-        results, errors = [], []
-        for future in futures:
-            try:
-                results.append(future.result())
-            except (ValueError, OSError, subprocess.SubprocessError) as error:
-                errors.append(str(error))
-        if errors:
-            raise SelectionError("\n".join(errors))
-        return results
+    try:
+        return _DEPS.parallel_map(function, items, jobs, collect_errors=(
+            ValueError, OSError, subprocess.SubprocessError))
+    except ValueError as error:
+        raise SelectionError(str(error)) from error
 
 
 def requires_full_selection(relative: Path) -> bool:
@@ -328,10 +604,13 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
     """
     mappings, incomplete = {}, False
     for directory, children, files in os.walk(root):
+        reject_reparse_points(directory)
+        for name in children + files:
+            reject_reparse_points(Path(directory) / name)
         children[:] = sorted(c for c in children if c not in {
             ".git", "scratch", "vendor", "third_party", "deps", "node_modules"
         } and not (Path(directory) / c).is_symlink()
-            and not (Path(directory) / c).resolve().is_relative_to(build_dir))
+            and not checked_resolve(Path(directory) / c).is_relative_to(build_dir))
         for name in sorted(files):
             if name != "CMakeLists.txt" and not name.endswith(".cmake"):
                 continue
@@ -340,7 +619,12 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
             if name == "CMakeLists.txt" and script.parent == root:
                 variables.update(CMAKE_CURRENT_SOURCE_DIR=str(root),
                                  CMAKE_CURRENT_BINARY_DIR=str(build_dir))
-            text = script.read_text(encoding="utf-8")
+            try:
+                text = script.read_text(encoding="utf-8")
+            except UnicodeError:
+                # An unreadable script cannot establish configure provenance.
+                incomplete = True
+                continue
             # Preserve quoted '#' while dropping comments. Bracket quoting is
             # outside this reader's grammar and cannot establish provenance.
             if re.search(r"\[=*\[", text):
@@ -407,7 +691,7 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
                 if (not source.is_absolute() or not output.is_absolute()) and script != root / "CMakeLists.txt":
                     script_incomplete = True
                     continue
-                source, output = (root / source).resolve(), (build_dir / output).resolve()
+                source, output = checked_resolve(root / source), checked_resolve(build_dir / output)
                 if (source.is_file() and source.is_relative_to(root)
                         and output != source and not output.is_dir()):
                     script_mappings.setdefault(output, set()).add(source)
@@ -426,30 +710,34 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
 def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
            build_dir: Path | None = None) -> tuple[list[dict], dict]:
     by_file = {entry["file"] for entry in entries}
-    direct, headers = set(), set()
+    sources, headers = set(), set()
     full = False
     for path in sorted(changed):
         relative = path.relative_to(root)
         suffix = path.suffix.lower()
         if suffix in SOURCE_SUFFIXES and first_party(relative):
             if path.exists():
-                resolved = path.resolve()
-                if resolved not in by_file:
-                    raise SelectionError(f"missing compile database entry (possibly disabled configuration): {relative}")
-                direct.add(resolved)
+                resolved = checked_resolve(path)
+                sources.add(resolved)
             else:
                 # A removed TU has nothing to compile, but can invalidate targets.
                 full = True
         elif suffix in HEADER_SUFFIXES:
-            headers.add(path.resolve())
+            headers.add(checked_resolve(path))
             full |= not path.exists()
         elif suffix in SOURCE_SUFFIXES or requires_full_selection(relative):
             full = True
     if (full or headers) and not entries:
         raise SelectionError("incomplete selection: no first-party compile database entries")
     scans = []
-    if full or headers:
+    if full or headers or sources:
         scans = parallel(dependencies, entries, jobs)
+    matched_sources = set().union(*scans) if scans else set()
+    missing_sources = sources - by_file - matched_sources
+    if missing_sources:
+        source = min(missing_sources)
+        raise SelectionError("missing compile database entry (possibly disabled configuration): "
+                             f"{source.relative_to(root)}")
     fallback = []
     if headers and not full:
         mappings, incomplete = configured_header_inputs(root, build_dir) if build_dir else ({}, True)
@@ -478,8 +766,9 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
             fallback.append("unresolved configure/copy relationships")
         full = bool(fallback)
     selected = []
+    changed_inputs = sources | headers
     for index, entry in enumerate(entries):
-        if full or entry["file"] in direct or (headers and scans[index] & headers):
+        if full or (scans and scans[index] & changed_inputs):
             if not entry["file"].is_file():
                 raise SelectionError(f"stale database entry for deleted TU: {entry['file']}")
             selected.append(entry)
@@ -496,7 +785,7 @@ def warning_family(option: str) -> str | None:
 
 
 def profile_compiler(entry: dict) -> str:
-    name = Path(clean_arguments(entry["arguments"])[0]).name
+    name = executable_name(clean_arguments(entry["arguments"])[0])
     if "clang" in name:
         return "clang"
     if "gcc" in name or "g++" in name:
@@ -528,7 +817,7 @@ def profile_flags(entry: dict, profile: str) -> list[str]:
     # where GCC and Clang disagree about group specificity and option order.
     configured = {warning_family(arg) for arg in command if arg.startswith("-W")}
     compiler = profile_compiler(entry)
-    cxx = entry["file"].suffix.lower() != ".c" or "++" in Path(command[0]).name
+    cxx = entry["file"].suffix.lower() != ".c" or "++" in executable_name(command[0])
     index = 1
     while index < len(command):
         arg = command[index]
@@ -537,7 +826,7 @@ def profile_flags(entry: dict, profile: str) -> list[str]:
         if arg in INPUT_VALUE_OPTIONS:
             index += 2
             continue
-        if not arg.startswith("-") and (entry["directory"] / arg).resolve() == entry["file"]:
+        if not arg.startswith("-") and checked_resolve(entry["directory"] / arg) == entry["file"]:
             break
         index += 1
     flags = []
@@ -550,7 +839,7 @@ def profile_flags(entry: dict, profile: str) -> list[str]:
 
 
 def check_arguments(entry: dict, profile="none") -> list[str]:
-    command = clean_arguments(entry["arguments"])
+    command = replay_arguments(entry)
     if profile != "none":
         compiler = profile_compiler(entry)
         command += profile_flags(entry, profile) + [
@@ -595,7 +884,7 @@ def variant_key(entry: dict, profile: str) -> str:
 def clean_prefixes(root: Path, prefixes: list[Path]) -> tuple[Path, ...]:
     resolved = []
     for prefix in prefixes:
-        path = (root / prefix).resolve()
+        path = checked_resolve(root / prefix)
         if prefix.is_absolute() or ".." in prefix.parts or not path.is_relative_to(root) or not path.is_dir():
             raise SelectionError("clean prefixes must be existing checkout-relative directories")
         resolved.append(path)
@@ -643,7 +932,7 @@ def profile_diagnostics(result, entry: dict, profile: str, root: Path,
             unknown_error |= bool(re.search(r"\b(?:fatal )?error:", line))
             continue
         filename, lineno, column, severity, message, option = match.groups()
-        path = (entry["directory"] / filename).resolve()
+        path = checked_resolve(entry["directory"] / filename)
         family = warning_family(option)
         # Clean scopes cannot acquire conversion baseline exemptions, including
         # diagnostics in a baseline header included by a clean translation unit.
@@ -719,7 +1008,7 @@ def ci_gate_file(root: Path, source: Path) -> bool:
 
 def run_checks(args, root: Path, selected: list[dict], build_dir: Path) -> list[dict]:
     scratch = root / "scratch"
-    if scratch.is_symlink() or not scratch.resolve().is_relative_to(root):
+    if scratch.is_symlink() or not checked_resolve(scratch).is_relative_to(root):
         raise SelectionError("scratch escapes checkout")
     scratch.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="local-checks-", dir=scratch) as temporary:
@@ -758,7 +1047,7 @@ def run_checks(args, root: Path, selected: list[dict], build_dir: Path) -> list[
             tidy = shutil.which("clang-tidy-18") or shutil.which("clang-tidy")
             if not tidy:
                 raise SelectionError("clang-tidy-18 or clang-tidy not found")
-            config = (root / args.config_file).resolve()
+            config = checked_resolve(root / args.config_file)
             if not config.is_file():
                 raise SelectionError(f"missing tidy configuration: {config}")
             def tidy_one(item):
@@ -769,7 +1058,7 @@ def run_checks(args, root: Path, selected: list[dict], build_dir: Path) -> list[
                 directory.mkdir()
                 (directory / "compile_commands.json").write_text(json.dumps([{
                     "file": str(entry["file"]), "directory": str(entry["directory"]),
-                    "arguments": clean_arguments(entry["arguments"]) + ["-c", "-o", str(directory / "tidy.o")],
+                    "arguments": replay_arguments(entry) + ["-c", "-o", str(directory / "tidy.o")],
                 }]), encoding="utf-8")
                 commands = [[tidy, "-quiet", "-p", str(directory),
                              f"--config-file={config}", str(entry["file"])]]
@@ -791,9 +1080,9 @@ def warning_baseline_destination(root: Path, destination: Path) -> Path:
     scratch = root / "scratch"
     if scratch.is_symlink() or destination.is_symlink():
         raise SelectionError("new warning baseline must be a fresh file under scratch")
-    destination = destination.resolve()
+    destination = checked_resolve(destination)
     if (destination.exists() or not destination.parent.is_dir()
-            or not destination.is_relative_to(scratch.resolve())):
+            or not destination.is_relative_to(checked_resolve(scratch))):
         raise SelectionError("new warning baseline must be a fresh file under scratch")
     return destination
 
@@ -952,7 +1241,7 @@ def ci_checks(args, root: Path) -> int:
             ["git", "ls-files", "-z"], cwd=root).split(b"\0") if p]
         selections, databases = {}, {}
         for label, directory in (("gcc", args.build_dir), ("clang", args.clang_build_dir)):
-            build = (root / directory).resolve()
+            build = checked_resolve(root / directory)
             entries = read_database(root, build)
             if not entries:
                 raise SelectionError(f"empty {label} first-party compile database")
@@ -967,7 +1256,7 @@ def ci_checks(args, root: Path) -> int:
             configured = {e["file"] for e in entries}
             missing = sorted(p.relative_to(root).as_posix() for p in tracked
                              if p.suffix.lower() in SOURCE_SUFFIXES and first_party(p.relative_to(root))
-                             and p.resolve() not in configured)
+                             and checked_resolve(p) not in configured)
             report["unsupported_configurations"].append({label + "_unconfigured_sources": missing})
         # Union the dependency-expanded file selections across compiler contexts.
         # Replay every variant in each database; a cross-context missing TU fails.
@@ -986,7 +1275,7 @@ def ci_checks(args, root: Path) -> int:
         if not shutil.which("ccache"):
             raise SelectionError("ccache not found")
         scratch = root / "scratch"
-        if scratch.is_symlink() or not scratch.resolve().is_relative_to(root):
+        if scratch.is_symlink() or not checked_resolve(scratch).is_relative_to(root):
             raise SelectionError("scratch escapes checkout")
         scratch.mkdir(exist_ok=True)
         report[phase] = round(time.monotonic() - started, 3)
@@ -1028,7 +1317,8 @@ def main(argv=None) -> int:
     parser.add_argument("--full-selection", action="store_true")
     parser.add_argument("--summary-file", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--base-ref", default="origin/devel")
+    parser.add_argument("--base-ref", default=os.environ.get("LUMINUMBRA_BASE_REF") or "origin/devel",
+                        help="override LUMINUMBRA_BASE_REF (unset or empty defaults to origin/devel)")
     parser.add_argument("--worktree", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-untracked", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jobs", type=int, default=2)
@@ -1041,18 +1331,18 @@ def main(argv=None) -> int:
     baselines.add_argument("--write-warning-baseline", type=Path)
     parser.add_argument("--conversion-clean-prefix", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
-    root = args.root.resolve()
     if args.command in {"route", "ci"} and (
             args.warning_baseline or args.write_warning_baseline or args.conversion_clean_prefix):
         parser.error("CI routing and checks do not accept warning calibration")
-    if args.command == "route":
-        return ci_route(args, root)
-    if args.command == "ci":
-        return ci_checks(args, root)
-    if args.build_dir is None:
+    if args.command in {"compile", "tidy"} and args.build_dir is None:
         parser.error("--build-dir is required for compile/tidy")
     start = time.monotonic()
     try:
+        root = checked_resolve(args.root)
+        if args.command == "route":
+            return ci_route(args, root)
+        if args.command == "ci":
+            return ci_checks(args, root)
         if args.jobs < 1:
             raise SelectionError("--jobs must be positive")
         if ((args.warning_baseline or args.write_warning_baseline or args.conversion_clean_prefix)
@@ -1061,12 +1351,12 @@ def main(argv=None) -> int:
         if args.command != "compile" and args.warning_profile != "none":
             raise SelectionError("warning profiles apply to compile checks only")
         args.clean_prefixes = clean_prefixes(root, args.conversion_clean_prefix)
-        args.baseline_records = (read_warning_baseline((root / args.warning_baseline).resolve())
+        args.baseline_records = (read_warning_baseline(checked_resolve(root / args.warning_baseline))
                                  if args.warning_baseline else [])
         if args.write_warning_baseline:
             args.write_warning_baseline = warning_baseline_destination(root, root / args.write_warning_baseline)
         changed = changed_paths(root, args.base_ref, args.worktree, args.include_untracked)
-        build_dir = (root / args.build_dir).resolve()
+        build_dir = checked_resolve(root / args.build_dir)
         entries = read_database(root, build_dir)
         selected, report = select(root, entries, changed, args.jobs, build_dir)
         scan_done = time.monotonic()

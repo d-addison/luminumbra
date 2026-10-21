@@ -9,8 +9,8 @@
 
 namespace Luminumbra::Net {
 
-// Local 30 Hz handshake time, independent of simulation progress. Like the separate
-// kRuntimeTcpHelloTimeoutTicks policy, 150 ticks is nominally five seconds.
+// Local 30 Hz handshake time, independent of simulation progress: 150 ticks is
+// nominally five seconds, separate from the runtime TCP steady-clock deadline.
 inline constexpr std::uint64_t kAdmissionTimeoutTicks = 150;
 inline constexpr std::size_t kAdmissionDrainLimit = 32;
 
@@ -92,9 +92,15 @@ public:
     [[nodiscard]] std::size_t MaxFramePayloadBytes() const override {
         return m_transport.MaxFramePayloadBytes();
     }
+    [[nodiscard]] std::size_t MaxReceiveFramePayloadBytes() const override {
+        return m_transport.MaxReceiveFramePayloadBytes();
+    }
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
     bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
                                      FrameDelivery& delivery) override;
+    FrameReceiveResult TryReceiveFrameWithDeliveryBounded(std::vector<std::uint8_t>& out,
+                                                          FrameDelivery& delivery,
+                                                          FrameReceiveBudget& budget) override;
     [[nodiscard]] bool IsPeerConnected() const override;
     void Close() override;
     void CloseWithReason(const std::string& reason) override;

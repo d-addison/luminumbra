@@ -313,9 +313,7 @@ class CheckerEvidenceTests(MatrixTestBase):
         data['camera'] = dict(position=position, yaw=0.0, pitch=0.0, fov=90.0)
         data['capture_context'] = dict(time_of_day_at_report=0.04,
                                        last_world_streaming_position=position)
-        right, up, forward = capture.camera_basis(0, 0)
-        view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
-                right[2], up[2], -forward[2], 0, 0, 0, 0, 1]
+        view = capture.camera_view(position, 0, 0)
         projection = [0.0] * 16
         projection[0], projection[5] = 720 / 1280, 1.0
         data['render_uniforms'] = dict(matrix_layout='column_major',
@@ -326,7 +324,7 @@ class CheckerEvidenceTests(MatrixTestBase):
         phase = 0.04 * 2 * math.pi
         data['render_uniforms']['lighting'] = {
             'available': True, 'u_viewPos': position,
-            'u_inverseView': right + [0] + up + [0] + [-v for v in forward] + [0] + position + [1],
+            'u_inverseView': capture.inverse_view(view),
             'u_sun.direction': [math.sin(phase), -math.cos(phase), 0]}
         data['streaming'] = dict(terrain_draws=1, generation_pending=0,
                                  meshing_pending=0, terrain_uploads_pending=0)
@@ -555,7 +553,7 @@ class MatrixValidationTests(MatrixTestBase):
 class PathResolutionTests(unittest.TestCase):
     def test_windows_long_case_and_parent_aliases_share_sidecar_identity(self):
         class WindowsPath(PureWindowsPath):
-            def resolve(self):
+            def resolve(self, strict=False):
                 text = ntpath.normpath(self).lower()
                 return type(self)(text.replace('runner~1', 'runner account')
                                   .replace('captur~1.jso', 'capture record.json'))
@@ -579,7 +577,7 @@ class PathResolutionTests(unittest.TestCase):
     @contextlib.contextmanager
     def windows_paths(self):
         class WindowsPath(PureWindowsPath):
-            def resolve(self):
+            def resolve(self, strict=False):
                 return type(self)(ntpath.normpath(self))
 
             def is_file(self):
@@ -725,7 +723,7 @@ class PathResolutionTests(unittest.TestCase):
 
     def test_resolved_windows_prefixes_do_not_change_path_identity(self):
         class WindowsPath(PureWindowsPath):
-            def resolve(self):
+            def resolve(self, strict=False):
                 # Model handle resolution expanding a short directory name.
                 return type(self)(str(self).replace('RUNNER~1', 'Runner Account'))
 
@@ -1059,25 +1057,26 @@ class ProcessRunnerTests(MatrixTestBase):
         return json.loads(self.receipt.read_text(encoding='utf-8'))
 
     def test_executable_identity_uses_consistent_handle_metadata(self):
-        executable = Path(sys.executable)
-        real_stat = os.stat
+        executable = runner.resolve_path(sys.executable)
+        original_stat = os.stat
 
         def path_stat(path, *args, **kwargs):
-            metadata = real_stat(path, *args, **kwargs)
+            metadata = original_stat(path, *args, **kwargs)
             if not isinstance(path, int) and Path(path) == executable:
-                fields = {key: getattr(metadata, key) for key in
-                          ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
-                fields['st_ctime_ns'] += 1
-                return types.SimpleNamespace(**fields)
+                # Path and descriptor stat can report different ctime values
+                # for the same unchanged executable on Windows.
+                values = {name: getattr(metadata, name) for name in (
+                    'st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                values['st_ctime_ns'] += 2000000000
+                return types.SimpleNamespace(**values)
             return metadata
 
-        # Model the Windows path/descriptor timestamp discrepancy without
-        # changing any descriptor metadata or executable bytes.
         with mock.patch.object(runner.os, 'stat', side_effect=path_stat):
             identity, digest = runner._binary_identity(executable)
-        metadata = os.stat(executable)
-        self.assertEqual(identity[0], runner._executable_metadata(metadata))
-        self.assertEqual(identity[1], runner._executable_metadata(path_stat(executable)))
+        with executable.open('rb') as source:
+            metadata = os.fstat(source.fileno())
+        self.assertEqual(identity, (runner._executable_metadata(metadata),
+                                    runner._executable_metadata(path_stat(executable))))
         self.assertEqual(digest, runner.file_sha256(executable))
 
     def test_executable_path_replaced_with_pipe_is_refused(self):
@@ -1140,6 +1139,27 @@ class ProcessRunnerTests(MatrixTestBase):
                 self.assertEqual(receipt['binary_identity_status'], 'changed')
                 self.assertTrue(receipt['evidence_errors'])
                 self.assertEqual(receipt['capture_status'], 'retained')
+
+    def test_retirement_failure_does_not_finalize_a_previous_receipt(self):
+        self.artifact.write_bytes(b'previous capture')
+        self.receipt.write_bytes(b'previous receipt')
+        original_unlink = Path.unlink
+        failure = PermissionError('fixture output retirement refused')
+        finalize = mock.Mock()
+
+        def unlink(path, *args, **kwargs):
+            if path == self.artifact:
+                raise failure
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'unlink', unlink), self.assertRaises(PermissionError) as caught:
+            runner.run_process([sys.executable], cwd=self.tmp, environment=os.environ.copy(),
+                               log=self.log, artifact=self.artifact, retained=self.retained,
+                               receipt_path=self.receipt, finalize_receipt=finalize)
+        self.assertIs(caught.exception, failure)
+        finalize.assert_not_called()
+        self.assertEqual(self.receipt.read_bytes(), b'previous receipt')
+        self.assert_output_locks_released()
 
     def test_locks_cover_binary_reverification_and_receipt_publication(self):
         identity = runner._binary_identity
@@ -1253,6 +1273,36 @@ class ProcessRunnerTests(MatrixTestBase):
         self.assertGreater(receipt['elapsed_seconds'], 0)
         self.assertTrue(self.retained.is_file())
 
+    def test_timeout_raises_and_receipt_shows_timed_out(self):
+        command = self.script('import time\ntime.sleep(30)\n')
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_case(command, timeout_seconds=1)
+        receipt = self.read_receipt()
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['timeout_seconds'], 1)
+
+    def test_injected_timeout_records_diagnostics(self):
+        command = self.script('')
+
+        def timeout(argv, **kwargs):
+            kwargs['stdout'].write(b'x' * 20000 + b'\nEnsureSurfaceReadyNear: draining\n')
+            raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+
+        diagnostic = io.StringIO()
+        with contextlib.redirect_stderr(diagnostic), \
+                mock.patch.object(runner.subprocess, 'run', side_effect=timeout), \
+                self.assertRaises(subprocess.TimeoutExpired):
+            self.run_case(command, timeout_seconds=1)
+        receipt = self.read_receipt()
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['timeout_seconds'], 1)
+        self.assertEqual(receipt['last_observed_phase'],
+                         'EnsureSurfaceReadyNear: draining')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')),
+                         runner.TIMEOUT_LOG_TAIL_BYTES)
+        self.assertIn('timed out after 1 s', diagnostic.getvalue())
+        self.assertIn('EnsureSurfaceReadyNear: draining', diagnostic.getvalue())
+
     def test_injected_timeout_raises_and_receipt_shows_timed_out(self):
         command = self.script('')
         error = subprocess.TimeoutExpired(command, 1)
@@ -1279,7 +1329,7 @@ class ProcessRunnerTests(MatrixTestBase):
         self.assertIn('timed out after 1 s', diagnostic.getvalue())
         self.assertIn('EnsureSurfaceReadyNear: draining', diagnostic.getvalue())
 
-    def test_timeout_raises_and_receipt_shows_timed_out(self):
+    def test_real_child_timeout_raises_and_receipt_shows_timed_out(self):
         ready = self.tmp / 'ready'
         command = self.script(
             'import sys, time\nfrom pathlib import Path\n'
