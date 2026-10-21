@@ -1364,7 +1364,9 @@ class CachedGitSafetyTests(unittest.TestCase):
                                    script.as_posix(), self.marker.as_posix()])
 
     def git(self, source, *args):
-        return deps.git(source, *args, cache=self.cache)
+        # Fixture mutations must not leave a maintenance writer racing the
+        # next metadata scan or a copy of the immutable template.
+        return deps.git(source, "-c", "maintenance.auto=false", *args, cache=self.cache)
 
     @classmethod
     def initialize(cls, source, cache):
@@ -1381,7 +1383,8 @@ class CachedGitSafetyTests(unittest.TestCase):
 
     @staticmethod
     def commit(source, cache):
-        deps.git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
+        deps.git(source, "-c", "maintenance.auto=false",
+                 "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
                  "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "fixture", cache=cache)
 
     def save_lock(self, identity):
@@ -2196,6 +2199,90 @@ class CachedGitSafetyTests(unittest.TestCase):
         (nested / ".git").rename(metadata)
         (nested / ".git").write_text("gitdir: " + str(metadata) + "\n")
         self.assert_refused_without_writes()
+
+    @contextmanager
+    def fixture_git_trace(self, name):
+        # Install tracing at the real child boundary: the production wrapper
+        # deliberately removes caller-supplied Git tracing from its environment.
+        trace = self.base / name
+        check_output = subprocess.check_output
+
+        def traced(command, **options):
+            options["env"] = dict(options["env"], GIT_TRACE2_EVENT=str(trace))
+            return check_output(command, **options)
+
+        with patch.object(deps.subprocess, "check_output", side_effect=traced):
+            yield trace
+
+    def fixture_git_events(self, trace):
+        # These fixed, tiny repositories need at most six traced Git commands.
+        # Bound the diagnostic input to 256 KiB before parsing its JSON records.
+        limit = 256 * 1024
+        with trace.open("rb") as stream:
+            data = stream.read(limit + 1)
+        self.assertLessEqual(len(data), limit)
+        return [json.loads(line) for line in data.splitlines()]
+
+    def test_fixture_template_commit_does_not_start_automatic_maintenance(self):
+        class FreshFixture(type(self)):
+            pass
+
+        try:
+            with self.fixture_git_trace("template trace.jsonl") as trace:
+                FreshFixture.setUpClass()
+            events = self.fixture_git_events(trace)
+            self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "commit"
+                                for event in events))
+            self.assertFalse(any(event.get("event") == "child_start"
+                                 and "maintenance" in event.get("argv", []) for event in events))
+            self.assertEqual(deps.head(FreshFixture.template_source, FreshFixture.template_cache),
+                             FreshFixture.template_identity["commit"])
+            self.assertEqual((FreshFixture.template_source / "input.h").read_text(), "content\n")
+        finally:
+            FreshFixture.doClassCleanups()
+        self.assertEqual(FreshFixture.tearDown_exceptions, [])
+
+    def test_fixture_mutation_commits_do_not_start_automatic_maintenance(self):
+        nested = self.source / "nested"
+        nested.mkdir()
+        self.initialize(nested, self.cache)
+        nested_head = deps.head(nested, self.cache)
+        self.git(self.source, "update-index", "--add", "--cacheinfo", "160000", nested_head, "nested")
+        before = deps.head(self.source, self.cache)
+        with self.fixture_git_trace("gitlink trace.jsonl") as trace:
+            self.commit(self.source, self.cache)
+        events = self.fixture_git_events(trace)
+        self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "commit"
+                            for event in events))
+        self.assertFalse(any(event.get("event") == "child_start"
+                             and "maintenance" in event.get("argv", []) for event in events))
+        self.assertNotEqual(deps.head(self.source, self.cache), before)
+        self.assertEqual(deps.submodules(self.source, self.cache), {"nested": nested_head})
+        with self.fixture_git_trace("nested commit trace.jsonl") as trace:
+            self.git(nested, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
+                     "-c", "commit.gpgSign=false", "commit", "--quiet", "--allow-empty", "-m", "changed")
+        events = self.fixture_git_events(trace)
+        self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "commit"
+                            for event in events))
+        self.assertFalse(any(event.get("event") == "child_start"
+                             and "maintenance" in event.get("argv", []) for event in events))
+        self.assertNotEqual(deps.head(nested, self.cache), nested_head)
+        self.assert_refused_without_writes()
+
+    def test_real_git_trace_detects_explicit_foreground_automatic_maintenance(self):
+        before = deps.head(self.source, self.cache)
+        with self.fixture_git_trace("maintenance control.jsonl") as trace:
+            deps.git(self.source, "-c", "maintenance.auto=true", "-c", "maintenance.autoDetach=false",
+                     "-c", "gc.autoDetach=false", "-c", "user.name=Fixture",
+                     "-c", "user.email=fixture@example.org", "-c", "commit.gpgSign=false",
+                     "commit", "--quiet", "--allow-empty", "-m", "control", cache=self.cache)
+        events = self.fixture_git_events(trace)
+        self.assertTrue(any(event.get("event") == "child_start"
+                            and "maintenance" in event.get("argv", []) for event in events))
+        self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "maintenance"
+                            for event in events))
+        self.assertNotEqual(deps.head(self.source, self.cache), before)
+        self.assertEqual((self.source / "input.h").read_text(), "content\n")
 
 
 class ScratchPreparationTests(unittest.TestCase):
