@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Offline regressions for shared CTest partitions and aggregate evidence."""
 
+import argparse
 import importlib.util
+import io
 import copy
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -16,6 +19,7 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
+ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("ctest_shards", Path(__file__).with_name("ctest_shards.py"))
 shards = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(shards)
@@ -2680,5 +2684,251 @@ class GateArgumentTests(unittest.TestCase):
                     self.assertIn(diagnostic, stderr)
 
 
+# Measured baseline: 91 cases in 25.18s. These nine overrides balance the
+# four groups at about 5.9-6.6s; new methods in known classes enter part 1.
+CTEST_SHARD_PARTITIONS = ("1", "2", "3", "4")
+CTEST_SHARD_CLASS_PARTITIONS = {
+    "CTestShardTests": "1",
+    "ExecutionNormalizationTests": "1",
+    "GateArgumentTests": "1",
+    "CTestShardPartitionSelectionTests": "1",
+}
+CTEST_SHARD_CASE_PARTITIONS = {
+    "CTestShardTests.test_policy_cli_publication_and_resolved_execution_preserve_fixture_contract": "2",
+    "CTestShardTests.test_manifest_oracle_construction_is_bounded_with_real_plans": "2",
+    "CTestShardTests.test_plan_manifest_bytes_match_general_evidence_in_every_profile": "3",
+    "CTestShardTests.test_cli_publishes_only_the_selected_real_plan": "3",
+    "CTestShardTests.test_selected_junit_exact_coverage_and_selection_bound_digests_in_all_profiles": "3",
+    "CTestShardTests.test_all_full_and_light_unions_preserve_floors_and_required_cases": "4",
+    "CTestShardTests.test_projected_plans_match_traversal_oracle_and_literal_manifests": "4",
+    "CTestShardTests.test_cli_independent_discovery_refuses_before_any_plan_or_output_write": "4",
+    "CTestShardTests.test_execution_field_drift_refuses_discovery_run_and_merge_without_mutation": "4",
+}
+
+
+def ctest_shard_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from ctest_shard_cases(item)
+        else:
+            yield item
+
+
+def ctest_shard_partition_suite(loader, module, partition):
+    if partition not in CTEST_SHARD_PARTITIONS:
+        raise ValueError("unknown CTest shard partition")
+    if any(value not in CTEST_SHARD_PARTITIONS for value in (
+            *CTEST_SHARD_CLASS_PARTITIONS.values(), *CTEST_SHARD_CASE_PARTITIONS.values())):
+        raise ValueError("invalid CTest shard partition mapping")
+    # Scan the finite unittest roster once; selection starts no subprocesses.
+    cases = list(ctest_shard_cases(loader.loadTestsFromModule(module)))
+    seen = set()
+    selected = []
+    for case in cases:
+        key = f"{type(case).__name__}.{case._testMethodName}"
+        if key in seen:
+            raise ValueError("duplicate CTest shard case: " + key)
+        seen.add(key)
+        class_partition = CTEST_SHARD_CLASS_PARTITIONS.get(type(case).__name__)
+        if class_partition is None:
+            raise ValueError("unregistered CTest shard class: " + type(case).__name__)
+        if CTEST_SHARD_CASE_PARTITIONS.get(key, class_partition) == partition:
+            selected.append(case)
+    if not CTEST_SHARD_CASE_PARTITIONS.keys() <= seen:
+        raise ValueError("missing dedicated CTest shard case")
+    if not selected:
+        raise ValueError("empty CTest shard partition")
+    return unittest.TestSuite(selected)
+
+
+def ctest_shard_main(argv=None):
+    # Without a partition, retain unittest's complete CLI and discovery semantics.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--partition", choices=CTEST_SHARD_PARTITIONS, action="append")
+    parser.add_argument("--list-tests", action="store_true")
+    args, remaining = parser.parse_known_args(argv)
+    if args.partition is None:
+        if args.list_tests:
+            parser.error("--list-tests requires --partition")
+        unittest.main(argv=[sys.argv[0], *remaining], testLoader=unittest.TestLoader(),
+                      testRunner=CaseProgressRunner)
+        return 0
+    if len(args.partition) != 1 or remaining:
+        parser.error("one partition is required, without unittest selectors")
+    try:
+        suite = ctest_shard_partition_suite(unittest.TestLoader(), sys.modules[__name__], args.partition[0])
+    except ValueError as error:
+        parser.error(str(error))
+    if args.list_tests:
+        for case in ctest_shard_cases(suite):
+            print(case.id())
+        return 0
+    result = CaseProgressRunner(verbosity=2).run(suite)
+    return int(not result.wasSuccessful())
+
+
+class CTestShardPartitionSelectionTests(unittest.TestCase):
+    def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        complete = [case.id() for case in ctest_shard_cases(loader.loadTestsFromModule(module))]
+        selected = []
+        for partition in CTEST_SHARD_PARTITIONS:
+            cases = list(ctest_shard_cases(ctest_shard_partition_suite(loader, module, partition)))
+            self.assertTrue(cases)
+            selected.extend(case.id() for case in cases)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertCountEqual(selected, complete)
+        self.assertTrue(any("CTestShardPartitionSelectionTests." in name for name in selected))
+        self.assertEqual(set(CTEST_SHARD_CLASS_PARTITIONS),
+                         {type(case).__name__ for case in ctest_shard_cases(loader.loadTestsFromModule(module))})
+        # New methods in known classes enter selection without maintaining lists.
+        class Extended(CTestShardTests):
+            def test_added_case(self):
+                pass
+        Extended.__name__ = "CTestShardTests"
+        extra = Extended("test_added_case")
+        augmented = unittest.TestSuite([loader.loadTestsFromModule(module), extra])
+        with patch.object(loader, "loadTestsFromModule", return_value=augmented):
+            cases = list(ctest_shard_cases(ctest_shard_partition_suite(loader, module, "1")))
+        self.assertIn(extra, cases)
+
+    def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        for invalid in ("", "0", "-1", "5", "01", "1/4", None, 1):
+            with self.subTest(partition=invalid), self.assertRaises(ValueError):
+                ctest_shard_partition_suite(loader, module, invalid)
+        complete = list(ctest_shard_cases(loader.loadTestsFromModule(module)))
+        for mapping in (CTEST_SHARD_CLASS_PARTITIONS, CTEST_SHARD_CASE_PARTITIONS):
+            with patch.dict(mapping, {next(iter(mapping)): "unknown"}):
+                with self.assertRaisesRegex(ValueError, "invalid CTest shard partition mapping"):
+                    ctest_shard_partition_suite(loader, module, "1")
+        dedicated = next(case for case in complete if type(case).__name__ + "." + case._testMethodName in CTEST_SHARD_CASE_PARTITIONS)
+        class Unknown(unittest.TestCase):
+            def test_unknown(self):
+                pass
+        for cases, partition, message in (
+            ([], "1", "missing dedicated"),
+            ([*complete, complete[0]], "1", "duplicate"),
+            ([case for case in complete if case is not dedicated], "1", "missing dedicated"),
+            ([*complete, Unknown("test_unknown")], "1", "unregistered"),
+            ([case for case in complete if type(case).__name__ + "." + case._testMethodName
+              in CTEST_SHARD_CASE_PARTITIONS], "1", "empty"),
+        ):
+            with self.subTest(message=message), patch.object(loader, "loadTestsFromModule", return_value=unittest.TestSuite(cases)):
+                with self.assertRaisesRegex(ValueError, message):
+                    ctest_shard_partition_suite(loader, module, partition)
+
+    def test_measured_costly_cases_keep_their_balanced_groups(self):
+        module = sys.modules[__name__]
+        for partition in CTEST_SHARD_PARTITIONS[1:]:
+            cases = ctest_shard_cases(ctest_shard_partition_suite(unittest.TestLoader(), module, partition))
+            self.assertCountEqual(
+                [type(case).__name__ + "." + case._testMethodName for case in cases],
+                [key for key, value in CTEST_SHARD_CASE_PARTITIONS.items() if value == partition])
+
+    def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
+        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.findall(r"add_test\(\s*NAME ([\w]+)\s+COMMAND ([^)]*)\)", cmake)
+        actual = [(name, " ".join(command.split())) for name, command in registrations
+                  if "test_ctest_shards.py" in command]
+        expected = []
+        for partition in CTEST_SHARD_PARTITIONS:
+            name = "CTestShardContractPart" + partition
+            expected.append((name, '"${Python3_EXECUTABLE}" -I -B '
+                             '"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition ' + partition))
+            properties = re.findall(r"set_tests_properties\(" + name + r"\s+PROPERTIES ([^)]*)\)", cmake)
+            self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'])
+        self.assertCountEqual(actual, expected)
+        self.assertEqual(len(actual), len(set(actual)))
+
+    def test_direct_discovery_and_path_routes_keep_complete_suite(self):
+        spec = importlib.util.spec_from_file_location("ci_paths", ROOT / "tools/ci/ci_paths.py")
+        routes = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(routes)
+        path = "tools/ci/test_ctest_shards.py"
+        self.assertEqual(routes.PYTHON_TESTS.count(path), 1)
+        self.assertEqual(routes.python_test_commands(ROOT).count((path,)), 1)
+        for changed in (path, "tools/CMakeLists.txt"):
+            self.assertTrue(routes.needs_cpp(changed))
+        self.assertTrue(routes.needs_python(path))
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertRegex(workflow, r"(?m)^          python3 -I -B tools/ci/test_ctest_shards.py$")
+        self.assertNotRegex(workflow, r"test_ctest_shards.py[^\n]*--partition")
+        discovered = unittest.TestLoader().discover(str(ROOT / "tools/ci"), pattern="test_ctest_shards.py")
+        expected = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+        def roster(suite):
+            return [(type(case).__name__, case._testMethodName) for case in ctest_shard_cases(suite)]
+        self.assertCountEqual(roster(discovered), roster(expected))
+
+    def test_cli_listing_and_refusals_use_actual_selection(self):
+        for partition in CTEST_SHARD_PARTITIONS:
+            with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output, \
+                    patch.object(unittest.defaultTestLoader, "testNamePatterns", ["*hidden_case*"]):
+                self.assertEqual(ctest_shard_main(["--partition", partition, "--list-tests"]), 0)
+                expected = ctest_shard_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
+                self.assertEqual(output.getvalue().splitlines(), [case.id() for case in ctest_shard_cases(expected)])
+        for argv in (["--partition"], ["--partition", "5"], ["--partition", "01"],
+                     ["--partition", "1", "--partition", "2"], ["--list-tests"],
+                     ["--partition", "1", "CTestShardTests"], ["--partition", "1", "--unknown"]):
+            with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                ctest_shard_main(argv)
+            self.assertEqual(error.exception.code, 2)
+        with patch.object(sys.modules[__name__], "ctest_shard_partition_suite", side_effect=ValueError("bad roster")), \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as output, self.assertRaises(SystemExit) as error:
+            ctest_shard_main(["--partition", "1"])
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("bad roster", output.getvalue())
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(ctest_shard_main([]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0]], testLoader=run.call_args.kwargs["testLoader"],
+                                        testRunner=CaseProgressRunner)
+            self.assertIsInstance(run.call_args.kwargs["testLoader"], unittest.TestLoader)
+            self.assertIsNot(run.call_args.kwargs["testLoader"], unittest.defaultTestLoader)
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(ctest_shard_main(["CTestShardTests", "-v"]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0], "CTestShardTests", "-v"],
+                                        testLoader=run.call_args.kwargs["testLoader"], testRunner=CaseProgressRunner)
+
+    def test_partition_runner_propagates_case_failure_and_reports_duration(self):
+        class Fails(unittest.TestCase):
+            def test_failure(self):
+                self.fail("partition failure")
+        class Passes(unittest.TestCase):
+            def test_success(self):
+                pass
+        for cases, status in (([Fails("test_failure")], 1), ([Passes("test_success")], 0), ([], 0)):
+            suite = unittest.TestSuite(cases)
+            with self.subTest(status=status), patch.object(sys, "stderr", new_callable=io.StringIO) as output, patch.object(
+                    sys.modules[__name__], "ctest_shard_partition_suite", return_value=suite):
+                self.assertEqual(ctest_shard_main(["--partition", "1"]), status)
+            self.assertEqual(output.getvalue().count("CASE START "), len(cases))
+            self.assertEqual(output.getvalue().count("CASE FINISH "), len(cases))
+            self.assertIn("Ran " + str(len(cases)) + " test", output.getvalue())
+            if status:
+                self.assertIn("partition failure", output.getvalue())
+
+    def test_qualified_import_keeps_complete_partition_roster_and_listing(self):
+        name = "ctest_shard_selection.qualified"
+        spec = importlib.util.spec_from_file_location(name, Path(__file__))
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {name: module}):
+            spec.loader.exec_module(module)
+            complete = list(module.ctest_shard_cases(unittest.TestLoader().loadTestsFromModule(module)))
+            selected = []
+            for partition in module.CTEST_SHARD_PARTITIONS:
+                selected.extend(module.ctest_shard_cases(module.ctest_shard_partition_suite(unittest.TestLoader(), module, partition)))
+            self.assertEqual(len(selected), len({case.id() for case in selected}))
+            self.assertCountEqual([case.id() for case in selected], [case.id() for case in complete])
+            expected = ctest_shard_cases(unittest.TestLoader().loadTestsFromModule(sys.modules[__name__]))
+            self.assertCountEqual([(type(case).__name__, case._testMethodName) for case in complete],
+                                  [(type(case).__name__, case._testMethodName) for case in expected])
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(module.ctest_shard_main(["--partition", "1", "--list-tests"]), 0)
+            part_one = module.ctest_shard_partition_suite(unittest.TestLoader(), module, "1")
+            self.assertEqual(output.getvalue().splitlines(), [case.id() for case in module.ctest_shard_cases(part_one)])
+
+
 if __name__ == "__main__":
-    unittest.main(testRunner=CaseProgressRunner)
+    raise SystemExit(ctest_shard_main())
