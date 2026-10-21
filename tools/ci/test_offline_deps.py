@@ -2306,7 +2306,8 @@ class CachedGitSafetyTests(unittest.TestCase):
                          {nested.name: nested_head, nested.name + "/child": child_head})
         deps.verify(self.root, self.cache, self.lock)
         self.git(child, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
-                 "-c", "commit.gpgSign=false", "commit", "--quiet", "--allow-empty", "-m", "changed")
+                 "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                 "commit", "--quiet", "--allow-empty", "-m", "changed")
         # Keep the content digest correct while changing only submodule HEAD.
         self.assert_refused_without_writes()
         (child / ".git/HEAD").unlink()
