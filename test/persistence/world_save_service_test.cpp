@@ -397,8 +397,9 @@ TEST(WorldSaveService, RegionStagingRetainsSymlinkParentTraversalWithoutFilesyst
                              std::filesystem::path("missing/link/../../save")}) {
         for (const auto* member : {"r.0.0.lmr", "world-manifest.json"}) {
             const auto destination = WorldSaveService::region_directory(root) / member;
-            EXPECT_EQ(WorldSaveService::region_staging_path(destination).native(),
-                      (root / member).native());
+            // Ignore separator spelling while retaining every "." and ".." component.
+            EXPECT_EQ(WorldSaveService::region_staging_path(destination).generic_string(),
+                      (root / member).generic_string());
         }
     }
 }

@@ -2092,12 +2092,19 @@ TEST(WorldgenOverrideTest, NumericOverridesRejectPartialNonfiniteAndOutOfRangeVa
     const auto unchanged = BuildCustomPreset(base, {}).json;
     const auto knobs = NeutralKnobVector();
     const auto resolved_base = ResolveEffectivePreset(base, TerrainPresetUse::NewWorld);
-    const auto baseline = ApplyKnobLayer(resolved_base, knobs);
+    // The persisted layer snapshots generation_params; schema_rev belongs to the preset.
+    const auto baseline = ApplyKnobLayer(resolved_base, knobs).at("generation_params");
     const auto reopened = [&](const char* path, const char* value, const char* type) {
         nlohmann::json persisted;
         WriteKnobLayer(persisted, resolved_base, knobs, {{path, value, type}});
+        EXPECT_EQ(persisted.at("schema_rev"), resolved_base.at("schema_rev"));
         const auto layer = ReadKnobLayer(nlohmann::json::parse(persisted.dump()));
-        return ResolveKnobLayer(layer.baseline, layer.knobs, layer.overrides);
+        EXPECT_TRUE(layer.present);
+        const auto resolved = ResolveKnobLayer(layer.baseline, layer.knobs, layer.overrides);
+        auto saved_params = persisted.at("generation_params");
+        saved_params.erase("knob_layer");
+        EXPECT_EQ(saved_params, resolved.at("generation_params"));
+        return resolved;
     };
     for (const auto* value : {"", "0suffix", "nan", "inf", "-inf", "1e999"}) {
         SCOPED_TRACE(value);
@@ -2108,7 +2115,8 @@ TEST(WorldgenOverrideTest, NumericOverridesRejectPartialNonfiniteAndOutOfRangeVa
             EXPECT_EQ(result.applied, 0);
             EXPECT_EQ(result.skipped, 1);
             EXPECT_EQ(result.json, unchanged);
-            EXPECT_EQ(reopened("terrain.base_amplitude", value, type), baseline);
+            EXPECT_EQ(reopened("terrain.base_amplitude", value, type).at("generation_params"),
+                      baseline);
         }
     }
     for (const auto* value : {"1e38",
@@ -2124,7 +2132,7 @@ TEST(WorldgenOverrideTest, NumericOverridesRejectPartialNonfiniteAndOutOfRangeVa
         EXPECT_FALSE(result.changed);
         EXPECT_EQ(result.skipped, 1);
         EXPECT_EQ(result.json, unchanged);
-        EXPECT_EQ(reopened("terrain.octaves", value, "int"), baseline);
+        EXPECT_EQ(reopened("terrain.octaves", value, "int").at("generation_params"), baseline);
     }
     for (const auto& [value, expected] :
          {std::pair{"0", 0LL},
