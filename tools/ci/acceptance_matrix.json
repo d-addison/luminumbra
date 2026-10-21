@@ -5,7 +5,7 @@
     {
       "id": "ci.ctest-shard-partitions",
       "source": "tools/ci/test_ctest_shards.py",
-      "statement": "Four disjoint CTest shard contract partitions retain every unittest case and the 30-second deadline with unchanged labels. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster and registration regressions pin exact coverage and reject invalid selections. Windows Python ci/tools contracts reserve four CTest slots in both engine and compiler-free local-check projects, with explicit costs prioritizing known slow cases; shard membership and Linux scheduling stay unchanged. Python-only scheduler regressions check exclusive execution, cost ordering and progress with smaller parallelism.",
+      "statement": "Eight disjoint CTest shard contract partitions retain every unittest case and the 30-second deadline with unchanged labels. Whole-case overrides balance the groups for Windows; Windows deadline qualification remains pending. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster and registration regressions pin exact coverage and reject invalid selections. Windows Python ci/tools contracts reserve four CTest slots in both engine and compiler-free local-check projects, with explicit costs prioritizing known slow cases. These scheduling properties add no shard relationship edges; Linux retains its existing slot policy. Python-only scheduler regressions check exclusive execution, cost ordering and progress with smaller parallelism.",
       "status": "covered",
       "evidence": [
         {
@@ -23,6 +23,22 @@
         {
           "kind": "ctest",
           "ref": "CTestShardContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart8"
         }
       ]
     },

@@ -4774,14 +4774,14 @@ def offline_main(argv=None):
 
 
 class OfflinePartitionSelectionTests(unittest.TestCase):
-    def test_heavy_deferral_retains_every_offline_and_workflow_partition(self):
+    def test_heavy_deferral_retains_every_offline_workflow_and_ctest_shard_partition(self):
         spec = importlib.util.spec_from_file_location("ctest_shards", ROOT / "tools/ci/ctest_shards.py")
         shards = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(shards)
         cmake = "\n".join(path.read_text(encoding="utf-8") for path in (
             ROOT / "tools/ci/local_check_contracts.cmake", ROOT / "tools/CMakeLists.txt"))
-        names = re.findall(r"NAME ((?:OfflineDependencies|WorkflowPolicy)Contract(?:Part[0-9]+)?)\s", cmake)
-        self.assertEqual(len(names), 13)
+        names = re.findall(r"NAME ((?:OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
+        self.assertEqual(len(names), 21)
         self.assertEqual(len(set(names)), len(names))
         for profile in shards.PROFILES:
             # The real inventory floor bounds this synthetic roster.

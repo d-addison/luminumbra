@@ -557,7 +557,7 @@ class CTestShardTests(unittest.TestCase):
         local_names = {"ChangedTranslationUnitsContract", "OfflineDependenciesContract",
                        "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"}
         priorities = {"WorkflowPolicyContract": 30, "ChangedTranslationUnitsContract": 29,
-                      **{f"CTestShardContractPart{index}": 25 for index in range(1, 5)},
+                      **{f"CTestShardContractPart{index}": 25 for index in range(1, 9)},
                       "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
                       "WorkflowPolicyContractPart9": 19, "OfflineDependenciesContractPart2": 18,
                       "OfflineDependenciesContract": 10, "OfflineDependenciesContractPart1": 10}
@@ -584,7 +584,7 @@ class CTestShardTests(unittest.TestCase):
                             self.assertNotIn("PROCESSORS", props)
                             self.assertNotIn("COST", props)
                 self.assertTrue(local_names <= set(selected))
-                self.assertEqual(len(selected), 4 if standalone else 23 if windows else 25)
+                self.assertEqual(len(selected), 4 if standalone else 27 if windows else 29)
                 names = [row["name"] for row in rows]
                 unthrottled = copy.deepcopy(rows)
                 for row in unthrottled:
@@ -2808,9 +2808,9 @@ class GateArgumentTests(unittest.TestCase):
                     self.assertIn(diagnostic, stderr)
 
 
-# Measured baseline: 91 cases in 25.18s. These nine overrides balance the
-# four groups at about 5.9-6.6s; new methods in known classes enter part 1.
-CTEST_SHARD_PARTITIONS = ("1", "2", "3", "4")
+# Whole-case overrides balance eight groups for the unchanged 30s Windows
+# deadline. New methods in known classes enter part 1 automatically.
+CTEST_SHARD_PARTITIONS = ("1", "2", "3", "4", "5", "6", "7", "8")
 CTEST_SHARD_CLASS_PARTITIONS = {
     "CTestShardTests": "1",
     "ExecutionNormalizationTests": "1",
@@ -2819,14 +2819,28 @@ CTEST_SHARD_CLASS_PARTITIONS = {
 }
 CTEST_SHARD_CASE_PARTITIONS = {
     "CTestShardTests.test_policy_cli_publication_and_resolved_execution_preserve_fixture_contract": "2",
-    "CTestShardTests.test_manifest_oracle_construction_is_bounded_with_real_plans": "2",
+    "CTestShardTests.test_manifest_oracle_construction_is_bounded_with_real_plans": "5",
     "CTestShardTests.test_plan_manifest_bytes_match_general_evidence_in_every_profile": "3",
-    "CTestShardTests.test_cli_publishes_only_the_selected_real_plan": "3",
     "CTestShardTests.test_selected_junit_exact_coverage_and_selection_bound_digests_in_all_profiles": "3",
     "CTestShardTests.test_all_full_and_light_unions_preserve_floors_and_required_cases": "4",
     "CTestShardTests.test_projected_plans_match_traversal_oracle_and_literal_manifests": "4",
     "CTestShardTests.test_cli_independent_discovery_refuses_before_any_plan_or_output_write": "4",
-    "CTestShardTests.test_execution_field_drift_refuses_discovery_run_and_merge_without_mutation": "4",
+    "CTestShardTests.test_execution_field_drift_refuses_discovery_run_and_merge_without_mutation": "8",
+    "CTestShardTests.test_ctest_windows_reservations_run_alone_longest_first_with_smaller_parallelism": "5",
+    "CTestShardTests.test_full_capture_prefab_output_survives_both_contract_suites": "5",
+    "CTestShardTests.test_manual_fixture_and_dependency_edges_still_refuse_before_writing_every_plan": "5",
+    "CTestShardTests.test_case_progress_records_survive_success_failure_and_interruption": "6",
+    "CTestShardTests.test_floor_precedes_selection_and_refusal_does_not_replace_existing_plan": "6",
+    "CTestShardTests.test_manual_gl_selection_reaches_shared_and_compatibility_cli_planners": "6",
+    "CTestShardTests.test_light_refusal_fixture_is_constructed_once_with_real_boundaries": "7",
+    "CTestShardTests.test_cli_output_absent_empty_unwritable_and_invalid_inventory": "7",
+    "CTestShardTests.test_different_recorded_roots_refuse_merge_without_mutating_evidence": "7",
+    "CTestShardTests.test_cli_policy_defaults_and_explicit_selection_use_full_inventory_floor": "8",
+    "CTestShardTests.test_ctest_partial_discovery_without_target_list_preserves_selection": "8",
+    "CTestShardTests.test_ctest_defined_invalid_target_lists_refuse_even_filtered": "8",
+    "CTestShardTests.test_plan_validates_two_owned_graphs_and_keeps_fresh_refusals": "8",
+    "CTestShardTests.test_light_coverage_refuses_missing_extra_skipped_or_mismatched_selection_without_mutation": "8",
+    "CTestShardTests.test_every_lane_rechecks_same_context_and_preserves_limits_and_exit_status": "8",
 }
 
 
@@ -2920,7 +2934,7 @@ class CTestShardPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "0", "-1", "5", "01", "1/4", None, 1):
+        for invalid in ("", "0", "-1", "9", "01", "1/8", None, 1):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 ctest_shard_partition_suite(loader, module, invalid)
         complete = list(ctest_shard_cases(loader.loadTestsFromModule(module)))
@@ -2951,6 +2965,42 @@ class CTestShardPartitionSelectionTests(unittest.TestCase):
             self.assertCountEqual(
                 [type(case).__name__ + "." + case._testMethodName for case in cases],
                 [key for key, value in CTEST_SHARD_CASE_PARTITIONS.items() if value == partition])
+
+    def test_deadline_groups_select_the_measured_whole_cases(self):
+        expected = {
+            "5": (
+                "test_ctest_windows_reservations_run_alone_longest_first_with_smaller_parallelism",
+                "test_full_capture_prefab_output_survives_both_contract_suites",
+                "test_manifest_oracle_construction_is_bounded_with_real_plans",
+                "test_manual_fixture_and_dependency_edges_still_refuse_before_writing_every_plan",
+            ),
+            "6": (
+                "test_case_progress_records_survive_success_failure_and_interruption",
+                "test_floor_precedes_selection_and_refusal_does_not_replace_existing_plan",
+                "test_manual_gl_selection_reaches_shared_and_compatibility_cli_planners",
+            ),
+            "7": (
+                "test_cli_output_absent_empty_unwritable_and_invalid_inventory",
+                "test_different_recorded_roots_refuse_merge_without_mutating_evidence",
+                "test_light_refusal_fixture_is_constructed_once_with_real_boundaries",
+            ),
+            "8": (
+                "test_cli_policy_defaults_and_explicit_selection_use_full_inventory_floor",
+                "test_ctest_defined_invalid_target_lists_refuse_even_filtered",
+                "test_ctest_partial_discovery_without_target_list_preserves_selection",
+                "test_every_lane_rechecks_same_context_and_preserves_limits_and_exit_status",
+                "test_execution_field_drift_refuses_discovery_run_and_merge_without_mutation",
+                "test_light_coverage_refuses_missing_extra_skipped_or_mismatched_selection_without_mutation",
+                "test_plan_validates_two_owned_graphs_and_keeps_fresh_refusals",
+            ),
+        }
+        for partition, methods in expected.items():
+            with self.subTest(partition=partition):
+                cases = ctest_shard_cases(ctest_shard_partition_suite(
+                    unittest.TestLoader(), sys.modules[__name__], partition))
+                self.assertCountEqual(
+                    [(type(case).__name__, case._testMethodName) for case in cases],
+                    [("CTestShardTests", method) for method in methods])
 
     def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
         cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
@@ -2993,7 +3043,7 @@ class CTestShardPartitionSelectionTests(unittest.TestCase):
                 self.assertEqual(ctest_shard_main(["--partition", partition, "--list-tests"]), 0)
                 expected = ctest_shard_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in ctest_shard_cases(expected)])
-        for argv in (["--partition"], ["--partition", "5"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", "9"], ["--partition", "01"],
                      ["--partition", "1", "--partition", "2"], ["--list-tests"],
                      ["--partition", "1", "CTestShardTests"], ["--partition", "1", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
