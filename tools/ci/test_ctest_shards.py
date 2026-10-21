@@ -523,6 +523,127 @@ class CTestShardTests(unittest.TestCase):
                 shards.partition(tests, [name for name in names if name != removed["name"]])
         self.assertTrue(related[-1]["properties"][-1]["value"])
 
+    def contract_registration_inventory(self, windows, standalone=False):
+        source = self.root / ("windows" if windows else "posix") / ("local" if standalone else "engine")
+        source.mkdir(parents=True)
+        # Execute the shipping Python registration tail in a compiler-free
+        # project. The outer conditional replaces BUILD_TESTING; no targets,
+        # compiler checks, dependency downloads or native tests are involved.
+        if standalone:
+            registrations = 'include("' + (ROOT / "tools/ci/local_check_contracts.cmake").as_posix() + '")\n'
+        else:
+            cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+            marker = "    find_package(Python3 COMPONENTS Interpreter REQUIRED)\n"
+            self.assertEqual(cmake.count(marker), 1)
+            registrations = "if(TRUE)\n" + marker + cmake.split(marker, 1)[1]
+        (source / "CMakeLists.txt").write_text(
+            'cmake_minimum_required(VERSION 3.20)\nproject(ContractScheduling LANGUAGES NONE)\n'
+            'enable_testing()\nfind_package(Python3 COMPONENTS Interpreter REQUIRED)\n'
+            f'set(WIN32 {"TRUE" if windows else "FALSE"})\n'
+            f'set(UNIX {"FALSE" if windows else "TRUE"})\n'
+            f'set(CMAKE_CURRENT_SOURCE_DIR "{(ROOT / "tools").as_posix()}")\n' + registrations,
+            encoding="utf-8")
+        build = source / "build"
+        subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
+                        f"-DPython3_EXECUTABLE={sys.executable}"],
+                       check=True, capture_output=True, text=True, timeout=10)
+        cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
+        self.assertNotRegex(cache, r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
+        result = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                                check=True, capture_output=True, text=True, timeout=10)
+        return shards.inventory(json.loads(result.stdout))
+
+    def test_windows_contract_reservations_cover_both_projects_and_preserve_shards(self):
+        local_names = {"ChangedTranslationUnitsContract", "OfflineDependenciesContract",
+                       "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"}
+        priorities = {"WorkflowPolicyContract": 30, "ChangedTranslationUnitsContract": 29,
+                      **{f"CTestShardContractPart{index}": 25 for index in range(1, 5)},
+                      "WorkflowPolicyContractPart1": 21, "OfflineDependenciesContractPart2": 18,
+                      "OfflineDependenciesContract": 10, "OfflineDependenciesContractPart1": 10}
+        for standalone in (False, True):
+            inventories = {}
+            for windows in (False, True):
+                rows = self.contract_registration_inventory(windows, standalone)
+                inventories[windows] = rows
+                selected = []
+                for row in rows:
+                    props = {prop["name"]: prop["value"] for prop in row["properties"]}
+                    python_contract = {"ci", "tools"} <= set(props.get("LABELS", [])) and any(
+                        argument.endswith(".py") for argument in row["command"])
+                    with self.subTest(windows=windows, standalone=standalone, name=row["name"]):
+                        if python_contract:
+                            selected.append(row["name"])
+                            self.assertEqual(props["TIMEOUT"], 30)
+                            expected = 4 if windows else 2 if row["name"] == "WorkflowPolicyContract" else 1
+                            self.assertEqual(props.get("PROCESSORS", 1), expected)
+                            self.assertEqual(props.get("COST", 0), priorities.get(row["name"], 0) if windows else 0)
+                            for relationship in shards.RELATIONS:
+                                self.assertNotIn(relationship, props)
+                        else:
+                            self.assertNotIn("PROCESSORS", props)
+                            self.assertNotIn("COST", props)
+                self.assertTrue(local_names <= set(selected))
+                self.assertEqual(len(selected), 4 if standalone else 21 if windows else 23)
+                names = [row["name"] for row in rows]
+                unthrottled = copy.deepcopy(rows)
+                for row in unthrottled:
+                    row["properties"] = [prop for prop in row["properties"]
+                                         if prop["name"] not in {"PROCESSORS", "COST"}]
+                for profile in ("gcc", "msvc", "ucrt64"):
+                    # Reservations/costs affect only CTest's scheduler, never
+                    # shard membership, index order or relationship closure.
+                    for operation in (shards.partition, shards._partition_validated, shards._partition_projected):
+                        self.assertEqual(operation(rows, names, profile), operation(unthrottled, names, profile))
+                if standalone:
+                    self.assertEqual(set(selected), local_names)
+            posix = {row["name"]: row for row in inventories[False]}
+            for row in inventories[True]:
+                if row["name"] not in selected:
+                    continue
+                original = posix[row["name"]]
+                self.assertEqual(row["command"], original["command"])
+                scheduling = {"PROCESSORS", "COST", "WORKING_DIRECTORY"}
+                self.assertEqual([prop for prop in row["properties"] if prop["name"] not in scheduling],
+                                 [prop for prop in original["properties"] if prop["name"] not in scheduling])
+
+    def test_ctest_windows_reservations_run_alone_longest_first_with_smaller_parallelism(self):
+        rows = self.contract_registration_inventory(True)
+        names = ["WorkflowPolicyContract", "ChangedTranslationUnitsContract", "CTestShardContractPart1",
+                 "WorkflowPolicyContractPart1", "OfflineDependenciesContractPart2", "OfflineDependenciesContract"]
+        probe = self.root / "probe.py"
+        probe.write_text(
+            "import pathlib, sys, time\n"
+            "root = pathlib.Path(sys.argv[1])\n"
+            "active = root / 'active'\n"
+            "active.mkdir()\n"
+            "try:\n"
+            "    with (root / 'order').open('a', encoding='utf-8') as output:\n"
+            "        output.write(sys.argv[2] + '\\n')\n"
+            "    time.sleep(0.05)\n"
+            "finally:\n"
+            "    active.rmdir()\n", encoding="utf-8")
+        for parallel in (4, 2):
+            build = self.root / f"scheduler-{parallel}"
+            build.mkdir()
+            declarations = []
+            # Reverse registration order to prove COST drives fresh scheduling.
+            for name in reversed(names):
+                row = next(row for row in rows if row["name"] == name)
+                props = {prop["name"]: prop["value"] for prop in row["properties"]}
+                self.assertEqual(props["PROCESSORS"], shards.PROFILES["msvc"][1])
+                self.assertEqual(props["PROCESSORS"], shards.PROFILES["ucrt64"][1])
+                declarations.append(f'add_test({name} "{Path(sys.executable).as_posix()}" -I -B '
+                                    f'"{probe.as_posix()}" "{build.as_posix()}" {name})')
+                declarations.append(f'set_tests_properties({name} PROPERTIES PROCESSORS {props["PROCESSORS"]} '
+                                    f'COST {props["COST"]} TIMEOUT {props["TIMEOUT"]})')
+            (build / "CTestTestfile.cmake").write_text("\n".join(declarations) + "\n", encoding="utf-8")
+            result = subprocess.run(["ctest", "--test-dir", str(build), "--parallel", str(parallel),
+                                     "--no-tests=error", "--output-on-failure"],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "order").read_text(encoding="utf-8").splitlines(), names)
+            self.assertFalse((build / "active").exists())
+
     def shared_gl_inventory(self):
         locked = [test("RenderTraversalIntegrated", RESOURCE_LOCK=["luminumbra_gl_context"]),
                   test("RenderTraversalEmbeddedPresetRefusal", RESOURCE_LOCK=["luminumbra_gl_context"])]
@@ -942,6 +1063,7 @@ class CTestShardTests(unittest.TestCase):
                            ("WILL_FAIL", True), ("PASS_REGULAR_EXPRESSION", ["changed"]),
                            ("FAIL_REGULAR_EXPRESSION", ["changed"]), ("SKIP_RETURN_CODE", 42),
                            ("SKIP_REGULAR_EXPRESSION", ["changed"]), ("TIMEOUT", 1),
+                           ("PROCESSORS", 4), ("COST", 30), ("RESOURCE_LOCK", ["python-contracts"]),
                            ("DISABLED", True), ("FUTURE_EXECUTION_PROPERTY", {"setting": [1, "new"]})):
             changed = copy.deepcopy(self.tests)
             changed[0]["properties"] = [prop for prop in changed[0]["properties"] if prop["name"] != key]

@@ -195,7 +195,7 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
             owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
             assignments[owner].extend(group)
             loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
-        # CTest executes indices in registration order.
+        # Preserve registration order for index selection; COST controls scheduling.
         owners = {name: owner for owner, part in enumerate(assignments) for name in part}
         assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
     validate_union(eligible, assignments)
@@ -240,7 +240,7 @@ def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _p
             owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
             assignments[owner].extend(group)
             loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
-        # CTest executes indices in registration order.
+        # Preserve registration order for index selection; COST controls scheduling.
         owners = {name: owner for owner, part in enumerate(assignments) for name in part}
         assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
     validate_union(eligible, assignments)
@@ -326,7 +326,7 @@ def _partition_projected(all_tests, eligible, profile="gcc", timings=None):
         owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
         assignments[owner].extend(group)
         loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
-    # CTest executes indices in registration order.
+    # Preserve registration order for index selection; COST controls scheduling.
     owners = {name: owner for owner, part in enumerate(assignments) for name in part}
     assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
     validate_union(eligible, assignments)
