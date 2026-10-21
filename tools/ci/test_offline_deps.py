@@ -2662,7 +2662,7 @@ def offline_main(argv=None):
     if len(args.partition) != 1 or remaining:
         parser.error("one partition is required, without unittest selectors")
     try:
-        suite = offline_partition_suite(unittest.defaultTestLoader, sys.modules[__name__], args.partition[0])
+        suite = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], args.partition[0])
     except ValueError as error:
         parser.error(str(error))
     if args.list_tests:
