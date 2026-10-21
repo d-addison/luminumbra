@@ -4,7 +4,7 @@
   "revision": "0373ec0dd762e4bc2f6acdb08371ee84fa23c6db",
   "tag": "v5.3.0",
   "patch": "jolt-startup.patch",
-  "sha256": "dc4498a01b27d7ce9542db8994d3be532ec5a0a5f24d497b232d6d0a93bd0160",
+  "sha256": "0f9b9652c530912b98aece7a6fd054ca4c2df29e2123c80005b7a8a1953dcdb1",
   "files": [
     {
       "path": "Jolt/Core/FixedSizeFreeList.h",
@@ -27,7 +27,7 @@
     {
       "path": "Jolt/Core/JobSystemThreadPool.cpp",
       "before": "c342499f68b988ea6d3a175e859a70ad07a704cc05b088e8b630e209283e9dd5",
-      "after": "437136273260d47a4fafc8692aa0fc19aab26adaf582732bddafd570aa4bc9f9",
+      "after": "595064810640d87cd3a7d9b39f412ecbcfe82da0cb4c2cf632557eeeb3fc4661",
       "mode": "100644"
     },
     {
