@@ -1951,7 +1951,23 @@ target_include_directories(menu_presentation_test PRIVATE ../src)
 target_link_libraries(menu_presentation_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
+add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt ${CMAKE_DL_LIBS})
+luminumbra_configure_first_party_target(jolt_startup_test)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(jolt_startup_test PRIVATE
+        "-Wl,--export-dynamic-symbol=pthread_create"
+        "-Wl,--export-dynamic-symbol=pthread_join"
+        "-Wl,--export-dynamic-symbol=sem_init"
+        "-Wl,--export-dynamic-symbol=sem_destroy")
+endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
+set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    jolt_startup_test
     frame_attribution_test
     menu_presentation_test
     graphics_preset_classifier_test
@@ -2202,28 +2218,32 @@ set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" 
 add_test(NAME ShieldRtTracerProfileGpu COMMAND shieldrt_tracer_profile_gpu)
 set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field ground-truth parity gate (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
 set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field G-buffer raymarch (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldGbufferGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldGbufferGpu COMMAND shieldrt_far_field_gbuffer_gpu)
 set_tests_properties(ShieldRtFarFieldGbufferGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # GPU max-mip reduction parity (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldMaxMipGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldMaxMipGpu COMMAND shieldrt_far_field_maxmip_gpu)
 set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 #  per-flag fixtures for the WorldVisualSweep objective
 # critique (tools/visual_critique.py). Pins every objective defect flag so a
@@ -2519,5 +2539,6 @@ foreach(case IN ITEMS
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+        RESOURCE_LOCK luminumbra_gl_context)
 endforeach()

@@ -292,7 +292,7 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
     return true;
 }
 
-void MiniaudioManager::UnloadBank(const std::string& bankPath) {
+void MiniaudioManager::UnloadBank(const std::string&) {
     LUMINUMBRA_CORE_WARN("AUDIO WARNING: Unloading banks is not fully implemented.");
 }
 
@@ -880,6 +880,10 @@ void MiniaudioManager::ApplyEnvironmentalEffects(ma_sound* sound) {
             break;
         case AudioEnvironmentType::Water:
             env_volume_multiplier = 0.6f; // Water muffles sound
+            break;
+        case AudioEnvironmentType::Underground:
+        case AudioEnvironmentType::Canyon:
+        case AudioEnvironmentType::Building:
             break;
     }
 

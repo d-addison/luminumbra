@@ -350,6 +350,11 @@ class OfflineDependenciesTests(unittest.TestCase):
 
     def test_stage_all_real_declaration_overrides(self):
         (self.root / "vendor/CMakeLists.txt").write_text((ROOT / "vendor/CMakeLists.txt").read_text())
+        for relative in ("tools/ci/jolt_startup.py", "tools/ci/path_safety.py", "cmake/jolt_startup.cmake",
+                         "cmake/patches/jolt-startup.json", "cmake/patches/jolt-startup.patch"):
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, target)
         lock = deps.unresolved_lock(self.root)
         lock["status"] = "resolved"
         for name in lock["dependencies"]:
