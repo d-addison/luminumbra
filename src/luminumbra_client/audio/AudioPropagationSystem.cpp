@@ -19,7 +19,12 @@ AudioPropagationSystem::AudioPropagationSystem(Luminumbra::Systems::PhysicsSyste
 }
 
 AudioPropagationSystem::~AudioPropagationSystem() {
-    m_shutdown = true;
+    {
+        // Publishing shutdown under the task mutex keeps a worker that has just evaluated its wait
+        // predicate from missing the notification and blocking destruction in join().
+        std::lock_guard<std::mutex> lock(m_task_mutex);
+        m_shutdown = true;
+    }
     m_task_cv.notify_all();
 
     for (auto& thread : m_worker_threads) {
