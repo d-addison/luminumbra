@@ -297,6 +297,9 @@ class PathGateTests(unittest.TestCase):
                         expression = expression.replace("always()", "True").replace("failure()", repr("failure" in (classification, result)))
                         expression = expression.replace("needs.changes.result", repr(classification))
                         expression = expression.replace(f"needs.{producer}.result", repr(result))
+                        # The pull-request fast lane has its own failure coverage in
+                        # test_workflow_policy; here it is a passing dependency.
+                        expression = expression.replace("needs.fast-lane.result", repr("success"))
                         expression = expression.replace("github.event_name", repr("push"))
                         expression = expression.replace("github.event.pull_request.draft", "False")
                         expression = expression.replace("== false", "== False").replace("&&", "and").replace("||", "or")
