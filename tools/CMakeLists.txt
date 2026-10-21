@@ -305,7 +305,7 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.
-    # Partition 0 reserves both slots for its bounded route-grid overlap.
+    # Partition 0 reserves two slots for its bounded route-grid overlap.
     add_test(
         NAME WorkflowPolicyContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0 --case-workers 2)
@@ -399,4 +399,28 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_check_contracts.py")
     set_tests_properties(LocalCheckRegistrationContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    if(WIN32)
+        # Both Windows shard profiles use four CTest slots. Reserve the pool
+        # for each Python ci/tools contract, including its child processes.
+        # PROCESSORS adds no dependency/lock edges or cross-shard grouping;
+        # CTest can always run a reservation alone, even with a smaller -j.
+        # Linux retains its existing parallelism. Local-check registrations
+        # share this policy through local_check_contracts.cmake.
+        set_tests_properties(
+            WorldgenProbeSmokeValidatorContract AsanShardContract
+            CTestShardContractPart1 CTestShardContractPart2
+            CTestShardContractPart3 CTestShardContractPart4
+            WorkflowPolicyContract WorkflowPolicyContractPart1
+            WorkflowPolicyContractPart2 WorkflowPolicyContractPart3
+            WorkflowPolicyContractPart4 WorkflowPolicyContractPart5
+            WorkflowPolicyContractPart6 WorkflowPolicyContractPart7
+            QualificationCaptureContract SlowestTestsScriptContract
+            LocalCheckRegistrationContract
+            PROPERTIES PROCESSORS 4)
+        # Explicit costs seed longest-first scheduling on fresh runners.
+        set_property(TEST WorkflowPolicyContract PROPERTY COST 30)
+        set_property(TEST CTestShardContractPart1 CTestShardContractPart2
+            CTestShardContractPart3 CTestShardContractPart4 PROPERTY COST 25)
+        set_property(TEST WorkflowPolicyContractPart1 PROPERTY COST 21)
+    endif()
 endif()

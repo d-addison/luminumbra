@@ -5,7 +5,7 @@
     {
       "id": "ci.ctest-shard-partitions",
       "source": "tools/ci/test_ctest_shards.py",
-      "statement": "Four disjoint CTest shard contract partitions retain every unittest case and the 30-second deadline with unchanged labels. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster and registration regressions pin exact coverage and reject invalid selections.",
+      "statement": "Four disjoint CTest shard contract partitions retain every unittest case and the 30-second deadline with unchanged labels. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster and registration regressions pin exact coverage and reject invalid selections. Windows Python ci/tools contracts reserve four CTest slots in both engine and compiler-free local-check projects, with explicit costs prioritizing known slow cases; shard membership and Linux scheduling stay unchanged. Python-only scheduler regressions check exclusive execution, cost ordering and progress with smaller parallelism.",
       "status": "covered",
       "evidence": [
         {
