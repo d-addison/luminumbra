@@ -32,9 +32,9 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("Placement requires 16 column-major numbers");
                 for (int c = 0; c < 4; ++c)
                     for (int r = 0; r < 4; ++r) {
-                        if (!matrix[c * 4 + r].is_number())
+                        if (!matrix[static_cast<std::size_t>(c * 4 + r)].is_number())
                             throw std::runtime_error("Placement must be numeric");
-                        placement[c][r] = matrix[c * 4 + r].get<double>();
+                        placement[c][r] = matrix[static_cast<std::size_t>(c * 4 + r)].get<double>();
                     }
                 have_placement = true;
                 continue;

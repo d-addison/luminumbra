@@ -267,7 +267,7 @@ TEST(LockstepCodecHardening, InputRoundtripMaxTickAndAllByteValues) {
     in.tick = 0xFFFFFFFFFFFFFFFFULL; // max u64 tick
     in.client_id = 0xFFFFFFFFu;
     in.inputs.resize(256);
-    for (int i = 0; i < 256; ++i)
+    for (std::size_t i = 0; i < 256; ++i)
         in.inputs[i] = static_cast<std::uint8_t>(i);
     net::InputMsg out;
     ASSERT_TRUE(net::DecodeInput(net::EncodeInput(in), out));

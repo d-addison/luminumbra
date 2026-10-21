@@ -64,7 +64,7 @@ protected:
         for (float value : {0.f, 0.f, 0.f, 2.f, -1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 1.f,  0.f,
                             0.f, 0.f, 0.f, 1.f, 1.f,  0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.5f, 1.f})
             Unsigned(mesh, std::bit_cast<std::uint32_t>(value));
-        for (unsigned index : {0, 1, 2})
+        for (unsigned index : {0u, 1u, 2u})
             Unsigned(mesh, index);
         auto& texture = files[kTexture];
         Unsigned(texture, 0x5845544c);
@@ -73,7 +73,7 @@ protected:
         Unsigned(texture, 1);
         Unsigned(texture, 1);
         Unsigned(texture, 4, 1);
-        for (unsigned byte : {255, 128, 0, 200})
+        for (unsigned byte : {255u, 128u, 0u, 200u})
             Unsigned(texture, byte, 1);
         const Json texture_binding = {
             {"file", kTexture},
@@ -170,7 +170,7 @@ StaticMatrix4 PublicMatrix(const glm::dmat4& m) {
     StaticMatrix4 result;
     for (int c = 0; c < 4; ++c)
         for (int r = 0; r < 4; ++r)
-            result[c * 4 + r] = m[c][r];
+            result[static_cast<std::size_t>(c * 4 + r)] = m[c][r];
     return result;
 }
 TEST_F(StaticSceneTest, DecodesOwnedRawGeometryAndTrueMaterialBindings) {
@@ -233,15 +233,15 @@ TEST_F(StaticSceneTest, ParentShearMirrorNormalAndBoundsRemainFullAffine) {
         const auto normal = glm::transpose(glm::inverse(glm::dmat3(found->world_matrix)));
         for (int c = 0; c < 3; ++c)
             for (int r = 0; r < 3; ++r)
-                EXPECT_DOUBLE_EQ(draw.normal[c * 3 + r], normal[c][r]);
+                EXPECT_DOUBLE_EQ(draw.normal[static_cast<std::size_t>(c * 3 + r)], normal[c][r]);
         EXPECT_EQ(draw.reverse_front_face, draw.key.node_id == "m.mirror");
         for (const auto& vertex : draw.mesh->vertices) {
             const auto p =
                 found->world_matrix *
                 glm::dvec4(vertex.position[0], vertex.position[1], vertex.position[2], 1);
             for (int axis = 0; axis < 3; ++axis) {
-                EXPECT_LE(draw.world_bounds.minimum[axis], p[axis]);
-                EXPECT_GE(draw.world_bounds.maximum[axis], p[axis]);
+                EXPECT_LE(draw.world_bounds.minimum[static_cast<std::size_t>(axis)], p[axis]);
+                EXPECT_GE(draw.world_bounds.maximum[static_cast<std::size_t>(axis)], p[axis]);
             }
         }
     }

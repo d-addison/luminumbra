@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
+#include <cstddef>
 #include <functional>
 #include <glm/glm.hpp>
 #include <memory>
@@ -124,7 +125,7 @@ public:
     }
 
     // Debug information
-    int GetActiveSourceCount() const {
+    std::size_t GetActiveSourceCount() const {
         return m_active_sources.size();
     }
     int GetClusterCount() const {

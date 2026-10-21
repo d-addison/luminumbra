@@ -222,7 +222,7 @@ TEST_F(MorphAssetTest, PreservesNonindexedTopologyAndAbsentUvs) {
     auto& primitive = fixture.document["meshes"][0]["primitives"][0];
     primitive.erase("indices");
     primitive["attributes"].erase("TEXCOORD_0");
-    for (int i = 0; i < 6; ++i)
+    for (std::size_t i = 0; i < 6; ++i)
         fixture.document["accessors"][i]["count"] = 3;
     ASSERT_TRUE(Compile(fixture));
     auto asset = Load();

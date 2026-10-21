@@ -2245,10 +2245,18 @@ TEST(RenderSmokeTest, ProceduralLeafHasACutoutAndConsistentAlbedo) {
         glReadBuffer(GL_COLOR_ATTACHMENT2);
         std::array<unsigned char, 4> corner{};
         glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner.data());
-        glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, centers[far_lod].data());
+        glReadPixels(32,
+                     32,
+                     1,
+                     1,
+                     GL_RGBA,
+                     GL_UNSIGNED_BYTE,
+                     centers[static_cast<std::size_t>(far_lod)].data());
         EXPECT_EQ(corner[3], 0) << "the empty corner must reveal the scene behind the leaf";
-        EXPECT_GT(centers[far_lod][1], 20) << "the leaf center must retain green reflectance";
-        EXPECT_GT(centers[far_lod][3], 180) << "the leaf must remain a matte surface";
+        EXPECT_GT(centers[static_cast<std::size_t>(far_lod)][1], 20)
+            << "the leaf center must retain green reflectance";
+        EXPECT_GT(centers[static_cast<std::size_t>(far_lod)][3], 180)
+            << "the leaf must remain a matte surface";
     }
     EXPECT_EQ(centers[0], centers[1]);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -2372,8 +2380,8 @@ TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     for (int x = 0; x < 32; ++x) {
         // Float literals: MSVC reports an int-to-float narrowing conversion for an
         // int ternary here, and the render tests build with warnings as errors.
-        EXPECT_FLOAT_EQ(pixels[x].r, x < 16 ? 0.0f : 1.0f);
-        EXPECT_FLOAT_EQ(pixels[x].g, x < 16 ? 1.0f : 0.0f);
+        EXPECT_FLOAT_EQ(pixels[static_cast<std::size_t>(x)].r, x < 16 ? 0.0f : 1.0f);
+        EXPECT_FLOAT_EQ(pixels[static_cast<std::size_t>(x)].g, x < 16 ? 1.0f : 0.0f);
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
@@ -2495,15 +2503,18 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
                                 -2500,
                                 condition == 3 ? 950.0f : 17.0f,
                                 -1400);
-                    samples[path] = probe.draw();
+                    samples[static_cast<std::size_t>(path)] = probe.draw();
                 }
                 for (int i = 0; i < FullscreenFloatProbe::width; ++i) {
                     largest_difference =
-                        std::max(largest_difference, std::abs(samples[0][i].r - samples[1][i].r));
-                    largest_shadow = std::max(largest_shadow, samples[0][i].r);
+                        std::max(largest_difference,
+                                 std::abs(samples[0][static_cast<std::size_t>(i)].r -
+                                          samples[1][static_cast<std::size_t>(i)].r));
+                    largest_shadow =
+                        std::max(largest_shadow, samples[0][static_cast<std::size_t>(i)].r);
                     if (condition != 0) {
-                        EXPECT_FLOAT_EQ(samples[0][i].r, 0);
-                        EXPECT_FLOAT_EQ(samples[1][i].r, 0);
+                        EXPECT_FLOAT_EQ(samples[0][static_cast<std::size_t>(i)].r, 0);
+                        EXPECT_FLOAT_EQ(samples[1][static_cast<std::size_t>(i)].r, 0);
                     }
                 }
             }
@@ -2718,7 +2729,7 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
     // A bright foreground object may neither emit shafts nor receive the sky proxy.
     std::vector<glm::vec4> depths(32, glm::vec4(0.0f));
     for (int x = 14; x < 22; ++x)
-        depths[x] = glm::vec4(0.5f);
+        depths[static_cast<std::size_t>(x)] = glm::vec4(0.5f);
     probe.texture(0, {glm::vec4(1.0f)});
     probe.texture(1, depths);
     const auto occluded = probe.draw();
@@ -3024,14 +3035,19 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
         int opaque = 0, partial = 0;
         float max_error = 0, clear_luma = 0, storm_luma = 0;
         for (int i = 0; i < size * size; ++i) {
-            if (mask[i].a < 0.05f)
+            if (mask[static_cast<std::size_t>(i)].a < 0.05f)
                 continue;
-            opaque += mask[i].a > 0.99f;
-            partial += mask[i].a > 0.1f && mask[i].a < 0.9f;
+            opaque += mask[static_cast<std::size_t>(i)].a > 0.99f;
+            partial += mask[static_cast<std::size_t>(i)].a > 0.1f &&
+                       mask[static_cast<std::size_t>(i)].a < 0.9f;
             for (int channel = 0; channel < 3; ++channel)
-                max_error = std::max(max_error, std::abs(storm[i][channel] - expected[i][channel]));
-            clear_luma += glm::dot(glm::vec3(clear[i]), glm::vec3(0.299f, 0.587f, 0.114f));
-            storm_luma += glm::dot(glm::vec3(storm[i]), glm::vec3(0.299f, 0.587f, 0.114f));
+                max_error = std::max(max_error,
+                                     std::abs(storm[static_cast<std::size_t>(i)][channel] -
+                                              expected[static_cast<std::size_t>(i)][channel]));
+            clear_luma += glm::dot(glm::vec3(clear[static_cast<std::size_t>(i)]),
+                                   glm::vec3(0.299f, 0.587f, 0.114f));
+            storm_luma += glm::dot(glm::vec3(storm[static_cast<std::size_t>(i)]),
+                                   glm::vec3(0.299f, 0.587f, 0.114f));
         }
         EXPECT_GT(opaque, 200);
         EXPECT_GT(partial, 20);
@@ -3045,7 +3061,9 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
         const auto identity = pixels();
         for (int i = 0; i < size * size; ++i)
             for (int channel = 0; channel < 3; ++channel)
-                ASSERT_NEAR(identity[i][channel], clear[i][channel], 0.0002f);
+                ASSERT_NEAR(identity[static_cast<std::size_t>(i)][channel],
+                            clear[static_cast<std::size_t>(i)][channel],
+                            0.0002f);
     }
     // A blade against cleared sky must still occlude shafts at its true alpha,
     // even though the G-buffer depth contains no terrain there. Sampling the
@@ -3093,8 +3111,10 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
     float silhouette_error = 0;
     for (int i = 0; i < size * size; ++i)
         for (int channel = 0; channel < 3; ++channel)
-            silhouette_error = std::max(
-                silhouette_error, std::abs(actual_rays[i][channel] - occluded_rays[i][channel]));
+            silhouette_error =
+                std::max(silhouette_error,
+                         std::abs(actual_rays[static_cast<std::size_t>(i)][channel] -
+                                  occluded_rays[static_cast<std::size_t>(i)][channel]));
     EXPECT_LT(silhouette_error, 0.0002f)
         << "soft grass silhouettes must occlude rays before the common weather grade";
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
