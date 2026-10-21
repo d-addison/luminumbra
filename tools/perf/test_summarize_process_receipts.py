@@ -649,5 +649,137 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
 
 
 
+
+class WindowsEvidencePathTest(unittest.TestCase):
+    def check_handle(self, root, name, *, contained, transfer_error=False):
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = mock.Mock()
+        kernel.CreateFileW.return_value = 123
+        transfer = mock.Mock(return_value=456)
+        if transfer_error:
+            transfer.side_effect = OSError('descriptor transfer failed')
+        crt = types.SimpleNamespace(open_osfhandle=transfer)
+
+        def attributes(_handle, _kind, buffer, _size):
+            ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))[0] = 0
+            return 1
+
+        def final_path(_handle, buffer, _size, _flags):
+            if buffer is not None:
+                buffer.value = name
+            return len(name) + int(buffer is None)
+
+        kernel.GetFileInformationByHandleEx.side_effect = attributes
+        kernel.GetFinalPathNameByHandleW.side_effect = final_path
+        path = PureWindowsPath(root) / 'inside.process.json'
+        with mock.patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), \
+                mock.patch.object(summary.os, 'O_BINARY', 0x8000, create=True), \
+                mock.patch.dict(sys.modules, {'msvcrt': crt}):
+            if not contained:
+                with self.assertRaisesRegex(checker.InputError, 'escapes'):
+                    summary._open_windows_descriptor(path, root)
+            elif transfer_error:
+                with self.assertRaisesRegex(OSError, 'descriptor transfer failed'):
+                    summary._open_windows_descriptor(path, root)
+            else:
+                self.assertEqual(summary._open_windows_descriptor(path, root), 456)
+            if contained:
+                transfer.assert_called_once_with(123, os.O_RDONLY | os.O_BINARY)
+            else:
+                transfer.assert_not_called()
+        kernel.CreateFileW.assert_called_once_with(
+            str(path), 0x80000000, 0x3, None, 3, 0x00200000, None)
+        self.assertEqual(kernel.GetFileInformationByHandleEx.call_count, 1)
+        self.assertEqual(kernel.GetFinalPathNameByHandleW.call_count, 2)
+        if not contained or transfer_error:
+            kernel.CloseHandle.assert_called_once_with(123)
+        else:
+            kernel.CloseHandle.assert_not_called()
+
+    def test_slash_rendered_extended_roots_verify_handle_containment(self):
+        # Root spellings and ordinary handle names are independent literals.
+        # Passing the rendered root as text makes this fail on every platform
+        # when prefix recognition incorrectly assumes backslashes.
+        roots = (
+            ('//?/C:/evidence', (r'C:\evidence', r'\\?\C:\evidence'),
+             (r'D:\evidence\inside.process.json', r'C:\outside\inside.process.json')),
+            ('//?/UNC/server/share/evidence',
+             (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence'),
+             (r'\\server\other\evidence\inside.process.json',
+              r'\\other\share\evidence\inside.process.json')),
+        )
+        for root, handle_roots, other_roots in roots:
+            for handle_root in handle_roots:
+                for suffix, contained in ((r'\inside.process.json', True),
+                                          (r'\nested\inside.process.json', True),
+                                          (r'-sibling\inside.process.json', False)):
+                    name = handle_root + suffix
+                    with self.subTest(root=root, name=name):
+                        self.check_handle(root, name, contained=contained)
+                with self.subTest(root=root, transfer_error=True):
+                    self.check_handle(root, handle_root + r'\inside.process.json',
+                                      contained=True, transfer_error=True)
+            for name in (*other_roots, r'\\.\C:\evidence\inside.process.json',
+                         r'\evidence\inside.process.json', r'evidence\inside.process.json'):
+                with self.subTest(root=root, name=name):
+                    self.check_handle(root, name, contained=False)
+
+    def test_resolved_drive_and_unc_spellings_have_literal_ordinary_names(self):
+        cases = (
+            (r'C:\evidence\inside.process.json',
+             (r'C:\evidence\inside.process.json', 'C:/evidence/inside.process.json',
+              r'\\?\C:\evidence\inside.process.json', '//?/C:/evidence/inside.process.json',
+              r'//?/C:\evidence/inside.process.json')),
+            (r'\\Server\Share\evidence\inside.process.json',
+             (r'\\Server\Share\evidence\inside.process.json',
+              '//Server/Share/evidence/inside.process.json',
+              r'\\?\UNC\Server\Share\evidence\inside.process.json',
+              '//?/UNC/Server/Share/evidence/inside.process.json',
+              r'//?/uNc/Server\Share/evidence/inside.process.json')),
+        )
+        for ordinary, spellings in cases:
+            for name in spellings:
+                with self.subTest(name=name):
+                    self.assertEqual(summary._windows_evidence_path(name),
+                                     PureWindowsPath(ordinary))
+                    self.assertEqual(summary._windows_evidence_path(name.lower()),
+                                     PureWindowsPath(ordinary))
+
+    def test_lexical_components_and_other_namespaces_keep_their_meaning(self):
+        cases = (
+            ('', '.'),
+            ('relative/inside.process.json', 'relative/inside.process.json'),
+            ('C:relative', 'C:relative'),
+            (r'\\?\C:relative', 'C:relative'),
+            ('//?/C:relative', '//?/C:relative'),
+            (r'\\.\C:\evidence', '//./C:/evidence'),
+            (r'\\?\GLOBALROOT\Device\Volume\evidence', 'GLOBALROOT/Device/Volume/evidence'),
+            ('//?/GLOBALROOT/Device/Volume/evidence', '//?/GLOBALROOT/Device/Volume/evidence'),
+            ('//?/Volume{01234567}/evidence', '//?/Volume{01234567}/evidence'),
+            ('//?/C:/evidence./inside', 'C:/evidence./inside'),
+            ('//?/C:/evidence /inside', 'C:/evidence /inside'),
+            ('//?/C:/evidence/../outside', 'C:/evidence/../outside'),
+            ('//?/UNC/server/share/evidence/../outside', '//server/share/evidence/../outside'),
+            ('//?/C:/evidence/NUL', 'C:/evidence/NUL'),
+            ('//?/C:/evidence/inside\x00', 'C:/evidence/inside\x00'),
+        )
+        for name, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(summary._windows_evidence_path(name).as_posix(), expected)
+        # This helper consumes resolved names; it neither validates raw input
+        # nor collapses '..', trims components, expands devices or short names.
+        for name in ('C:/evidence./inside', 'C:/evidence /inside',
+                     'C:/EVIDEN~1/inside', 'C:/evidence-sibling/inside',
+                     'D:/evidence/inside', '//server/share/evidence/inside',
+                     '//./C:/evidence/inside', '//?/GLOBALROOT/Device/evidence/inside',
+                     'C:inside', '/evidence/inside', 'evidence/inside'):
+            with self.subTest(outside=name):
+                self.assertFalse(summary._windows_evidence_path(name).is_relative_to(
+                    summary._windows_evidence_path('//?/C:/evidence')))
+        with self.assertRaisesRegex(checker.InputError, 'NUL'):
+            summary.validate_path('C:/evidence/inside\x00')
+
 if __name__ == '__main__':
     unittest.main()

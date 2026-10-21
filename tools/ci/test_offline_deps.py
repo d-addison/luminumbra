@@ -4,7 +4,7 @@
 import argparse
 import errno
 import ctypes
-from contextlib import contextmanager, redirect_stderr
+from contextlib import ExitStack, contextmanager, redirect_stderr
 import importlib.util
 import io
 import json
@@ -27,7 +27,16 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("offline_deps", ROOT / "tools/ci/offline_deps.py")
 deps = importlib.util.module_from_spec(SPEC)
+if __name__ == "__main__":
+    sys.stderr.write("Offline dependencies: LOAD START\n")
+    sys.stderr.flush()
 SPEC.loader.exec_module(deps)
+if __name__ == "__main__":
+    sys.stderr.write(
+        f"Offline dependencies: LOAD FINISH monotonic_ns={time.monotonic_ns()} "
+        "phase=load_finish ordinal=0\n"
+    )
+    sys.stderr.flush()
 diagnostic_spec = importlib.util.spec_from_file_location(
     "contract_case_diagnostics", ROOT / "tools/ci/contract_case_diagnostics.py")
 diagnostics = importlib.util.module_from_spec(diagnostic_spec)
@@ -1446,6 +1455,38 @@ with patch.object(pathlib.Path, 'resolve', cyclic), patch.object(pathlib.Path, '
                     self.assertEqual(self.fixture_state(), before)
 
 
+def _snapshot_paths(root):
+    """Enumerate fresh names in independently owned, idle test fixtures."""
+    # Snapshot callers observe only the completed mapping, between synchronous
+    # actions. Walk visits ordinary directories once without following links.
+    # Retain the original traversal on Python versions without Path.walk.
+    walk = getattr(root, "walk", None)
+    if walk is None:
+        yield from root.rglob("*")
+        return
+    for directory, directories, files in walk(follow_symlinks=False):
+        for names in (directories, files):
+            for name in names:
+                yield directory / name
+
+
+@contextmanager
+def _patch_snapshot_scandir(scan):
+    """Intercept live and cached raw scanners without changing entry formats."""
+    import glob
+
+    original = os.scandir
+    globber = getattr(glob, "_StringGlobber", None)
+    descriptor = vars(globber).get("scandir") if globber is not None else None
+    with ExitStack() as patches:
+        # Python 3.13 caches the raw scanner. Later tuple-producing adapters
+        # look up os.scandir themselves and must retain their entry format.
+        if isinstance(descriptor, staticmethod) and descriptor.__func__ is original:
+            patches.enter_context(patch.object(globber, "scandir", staticmethod(scan)))
+        patches.enter_context(patch.object(os, "scandir", scan))
+        yield
+
+
 class CachedGitSafetyTests(unittest.TestCase):
     """Use real local Git repositories; no transports or native tools run."""
 
@@ -1512,6 +1553,57 @@ class CachedGitSafetyTests(unittest.TestCase):
                  "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
                  "commit", "--quiet", "-m", "fixture", cache=cache)
 
+    def test_fixture_commits_disable_maintenance_in_real_git(self):
+        original_output = subprocess.check_output
+        commits = []
+
+        def output(argv, **kwargs):
+            if "commit" not in argv:
+                return original_output(argv, **kwargs)
+            source = Path(kwargs["cwd"])
+            config = source / ".git/config"
+            before_config = config.read_bytes()
+            before_source = deps.source_digest(source)
+            trace = self.base / f"commit-trace-{len(commits)}.json"
+            kwargs["env"] = dict(kwargs["env"], GIT_TRACE2_EVENT=str(trace),
+                                 GIT_TRACE2_CONFIG_PARAMS="gc.auto,maintenance.auto")
+            result = original_output(argv, **kwargs)
+            self.assertEqual(config.read_bytes(), before_config)
+            self.assertEqual(deps.source_digest(source), before_source)
+            commits.append((source.name, trace))
+            return result
+
+        class FreshFixture(type(self)):
+            pass
+
+        with patch.object(subprocess, "check_output", side_effect=output):
+            try:
+                FreshFixture.setUpClass()
+            finally:
+                FreshFixture.doClassCleanups()
+            (self.source / "input.h").write_text("changed fixture\n")
+            self.git(self.source, "add", "input.h")
+            self.commit(self.source, self.cache)
+            # Retain the real recursive discovery, verification and refusals.
+            self.test_real_recursive_gitlinks_check_initialized_heads()
+        self.assertEqual([name for name, _ in commits],
+                         ["sample", "sample", "nested path (v1)", "sample", "child"])
+        for name, trace in commits:
+            with self.subTest(repository=name, trace=trace.name):
+                events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+                self.assertTrue(any(event.get("event") == "cmd_name" and
+                                    event.get("name") == "commit" for event in events), events)
+                self.assertTrue(any(event.get("event") == "exit" and
+                                    event.get("code") == 0 for event in events), events)
+                self.assertTrue(any(event.get("event") == "def_param" and
+                                    event.get("param") == "maintenance.auto" and
+                                    event.get("value") == "false" for event in events), events)
+                self.assertTrue(any(event.get("event") == "def_param" and
+                                    event.get("param") == "gc.auto" and
+                                    event.get("value") == "0" for event in events), events)
+                children = [event["argv"] for event in events if event.get("event") == "child_start"]
+                self.assertFalse(any("maintenance" in child or "gc" in child for child in children), children)
+
     def save_lock(self, identity):
         lock = deps.unresolved_lock(self.root)
         lock["status"] = "resolved"
@@ -1533,7 +1625,295 @@ class CachedGitSafetyTests(unittest.TestCase):
     def cache_state(self):
         return {p.relative_to(self.cache).as_posix():
                 os.readlink(p) if p.is_symlink() else p.read_bytes()
-                for p in self.cache.rglob("*") if p.is_symlink() or p.is_file()}
+                for p in _snapshot_paths(self.cache) if p.is_symlink() or p.is_file()}
+
+    def test_cache_snapshot_refreshes_full_mapping_between_actions(self):
+        root = self.base / "snapshot"
+        (root / ".hidden/nested").mkdir(parents=True)
+        config = root / ".hidden/nested/config"
+        config.write_bytes(b"config\x00\xff\r\n")
+        os.link(config, root / "CONFIG~1")
+        (root / "removed").write_bytes(b"remove me")
+        independent = self.base / "independent snapshot"
+        shutil.copytree(root, independent)
+        fixture = SimpleNamespace(cache=root)
+        other = SimpleNamespace(cache=independent)
+        expected = {".hidden/nested/config": b"config\x00\xff\r\n",
+                    "CONFIG~1": b"config\x00\xff\r\n", "removed": b"remove me"}
+        initial = dict(expected)
+
+        def compare():
+            reference = {p.relative_to(root).as_posix():
+                         os.readlink(p) if p.is_symlink() else p.read_bytes()
+                         for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+            self.assertEqual(reference, expected)
+            self.assertEqual(self.cache_state.__func__(fixture), reference)
+            self.assertEqual(self.cache_state.__func__(other), initial)
+
+        compare()
+        (root / ".hidden/nested/added").write_bytes(b"new\x00payload")
+        expected[".hidden/nested/added"] = b"new\x00payload"
+        compare()
+        config.write_bytes(b"changed\r\n\xff")
+        expected[".hidden/nested/config"] = expected["CONFIG~1"] = b"changed\r\n\xff"
+        compare()
+        (root / "removed").unlink()
+        del expected["removed"]
+        compare()
+        (root / ".hidden/nested/added").rename(root / "renamed")
+        expected["renamed"] = expected.pop(".hidden/nested/added")
+        compare()
+
+    def test_cache_snapshot_names_links_without_following_cycles(self):
+        # Placeholders model no-follow link classification on hosts where
+        # creating a symlink requires privileges. POSIX also uses real links.
+        for real_links in ((False, True) if os.name == "posix" else (False,)):
+            with self.subTest(real_links=real_links):
+                root = self.base / f"links-{real_links}"
+                (root / "nested").mkdir(parents=True)
+                (root / "nested/payload").write_bytes(b"nested\xff")
+                outside = self.base / f"outside-{real_links}"
+                outside.mkdir()
+                (outside / "unobserved").write_bytes(b"outside")
+                targets = {"file-link": ("nested/payload", False),
+                           "directory-link": ("nested", True),
+                           "outside-link": (str(outside), True),
+                           "dangling": ("missing", False),
+                           "cycle": (".", True),
+                           "self-cycle": ("self-cycle", False)}
+                for name, (target, directory) in targets.items():
+                    link = root / name
+                    if real_links:
+                        link.symlink_to(target, target_is_directory=directory)
+                    else:
+                        link.write_bytes(b"link placeholder")
+                unknown = root / "unknown-type"
+                unknown.write_bytes(b"not an ordinary file")
+                is_link, is_file, readlink = Path.is_symlink, Path.is_file, os.readlink
+
+                def link_type(path):
+                    if not real_links and path.parent == root and path.name in targets:
+                        return True
+                    return is_link(path)
+
+                def file_type(path):
+                    return False if path == unknown else is_file(path)
+
+                def link_value(path):
+                    if not real_links and path.parent == root and path.name in targets:
+                        return targets[path.name][0]
+                    return readlink(path)
+
+                expected = {"nested/payload": b"nested\xff",
+                            **{name: target for name, (target, _) in targets.items()}}
+                with patch.object(Path, "is_symlink", link_type), \
+                        patch.object(Path, "is_file", file_type), \
+                        patch.object(os, "readlink", link_value):
+                    reference = {p.relative_to(root).as_posix():
+                                 os.readlink(p) if p.is_symlink() else p.read_bytes()
+                                 for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+                    self.assertEqual(reference, expected)
+                    self.assertEqual(self.cache_state.__func__(SimpleNamespace(cache=root)), reference)
+
+    def test_cache_snapshot_enumerates_each_directory_at_most_once(self):
+        root = self.base / "enumeration"
+        directories = {root, root / ".hidden", root / "nested",
+                       root / "nested/deeper", root / "empty"}
+        for directory in sorted(directories):
+            directory.mkdir(parents=True, exist_ok=True)
+            if directory.name != "empty":
+                (directory / "payload").write_bytes(b"every directory\x00\xff")
+        scandir = os.scandir
+        counts = []
+
+        def scan(path):
+            counts.append(Path(path))
+            return scandir(path)
+
+        with _patch_snapshot_scandir(scan):
+            reference = {p.relative_to(root).as_posix():
+                         os.readlink(p) if p.is_symlink() else p.read_bytes()
+                         for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+        original_count = len(counts)
+        self.assertEqual(set(counts), directories)
+        counts.clear()
+        with _patch_snapshot_scandir(scan):
+            self.assertEqual(self.cache_state.__func__(SimpleNamespace(cache=root)), reference)
+        self.assertEqual(set(counts), directories)
+        # This bound does not assume a particular rglob implementation. An
+        # already single-pass rglob remains valid; older Python uses fallback.
+        bound = len(directories) if hasattr(Path, "walk") else original_count
+        self.assertLessEqual(len(counts), bound)
+
+    def test_cache_snapshot_preserves_scan_and_directory_type_errors(self):
+        root = self.base / "scan errors"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        (root / "payload").write_bytes(b"root")
+        (nested / "payload").write_bytes(b"nested")
+        fixture = SimpleNamespace(cache=root)
+        scandir = os.scandir
+
+        def reference():
+            return {p.relative_to(root).as_posix():
+                    os.readlink(p) if p.is_symlink() else p.read_bytes()
+                    for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+
+        def outcome(snapshot):
+            try:
+                return snapshot()
+            except OSError as error:
+                self.assertIs(error, failure)
+                return error
+
+        for failure in (PermissionError(errno.EACCES, "denied"),
+                        FileNotFoundError(errno.ENOENT, "gone"),
+                        OSError(errno.EIO, "unreadable")):
+            for failed_path in (root, nested):
+                def scan(path):
+                    if Path(path) == failed_path:
+                        raise failure
+                    return scandir(path)
+
+                with self.subTest(failure=failure, path=failed_path), \
+                        _patch_snapshot_scandir(scan):
+                    expected = {} if failed_path == root else {"payload": b"root"}
+                    baseline = outcome(reference)
+                    self.assertTrue(baseline == expected or baseline is failure)
+                    self.assertEqual(outcome(lambda: self.cache_state.__func__(fixture)), baseline)
+
+        for failure in (PermissionError("denied type"), OSError(errno.EIO, "partial type"), None):
+            class Scan:
+                def __init__(self, path):
+                    self.entries = scandir(path)
+
+                def __enter__(self):
+                    self.entries.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.entries.__exit__(*args)
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    entry = next(self.entries)
+
+                    def directory_type(**kwargs):
+                        if Path(entry.path) == nested:
+                            if failure is not None:
+                                raise failure
+                            return False
+                        return entry.is_dir(**kwargs)
+
+                    return SimpleNamespace(name=entry.name, path=entry.path,
+                                           is_dir=directory_type, is_symlink=entry.is_symlink)
+
+            def scan(path):
+                return Scan(path)
+
+            with self.subTest(type_failure=failure), _patch_snapshot_scandir(scan):
+                baseline = outcome(reference)
+                self.assertTrue(baseline == {"payload": b"root"} or baseline is failure)
+                self.assertEqual(outcome(lambda: self.cache_state.__func__(fixture)), baseline)
+
+    def test_cache_snapshot_preserves_partial_enumeration_error_visibility(self):
+        root = self.base / "partial enumeration"
+        root.mkdir()
+        (root / "payload").write_bytes(b"payload")
+        scandir = os.scandir
+        failure = OSError(errno.EIO, "partial enumeration")
+        attempts = []
+
+        class Scan:
+            def __init__(self, path):
+                self.entries = scandir(path)
+                self.started = False
+
+            def __enter__(self):
+                self.entries.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.entries.__exit__(*args)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.started:
+                    raise failure
+                entry = next(self.entries)
+                self.started = True
+                return entry
+
+        def scan(path):
+            attempts.append(Path(path))
+            return Scan(path)
+
+        def reference():
+            return {p.relative_to(root).as_posix():
+                    os.readlink(p) if p.is_symlink() else p.read_bytes()
+                    for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+
+        outcomes = []
+        for snapshot in (reference, lambda: self.cache_state.__func__(SimpleNamespace(cache=root))):
+            with _patch_snapshot_scandir(scan):
+                try:
+                    outcomes.append(("mapping", snapshot()))
+                except OSError as error:
+                    self.assertIs(error, failure)
+                    outcomes.append(("error", error.errno))
+        self.assertTrue(attempts)
+        self.assertEqual(outcomes[1], outcomes[0])
+
+    def test_cache_snapshot_retains_fresh_type_queries_and_payload_errors(self):
+        root = self.base / "fresh queries"
+        root.mkdir()
+        entry = root / "payload"
+        entry.write_bytes(b"payload")
+        fixture = SimpleNamespace(cache=root)
+
+        def reference():
+            return {p.relative_to(root).as_posix():
+                    os.readlink(p) if p.is_symlink() else p.read_bytes()
+                    for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+
+        for snapshot in (reference, lambda: self.cache_state.__func__(fixture)):
+            with patch.object(Path, "is_symlink", side_effect=(False, True)) as links, \
+                    patch.object(Path, "is_file", return_value=True) as files, \
+                    patch.object(os, "readlink", return_value="second fresh result") as readlink:
+                self.assertEqual(snapshot(), {"payload": "second fresh result"})
+                self.assertEqual(links.call_count, 2)
+                self.assertEqual(files.call_count, 1)
+                readlink.assert_called_once_with(entry)
+            for operation in ("is_symlink", "is_file", "read_bytes"):
+                failure = PermissionError(f"unreadable {operation}")
+                with self.subTest(operation=operation), patch.object(Path, operation, side_effect=failure):
+                    with self.assertRaises(PermissionError) as caught:
+                        snapshot()
+                    self.assertIs(caught.exception, failure)
+            failure = OSError(errno.EIO, "unreadable link")
+            with patch.object(Path, "is_symlink", return_value=True), \
+                    patch.object(os, "readlink", side_effect=failure):
+                with self.assertRaises(OSError) as caught:
+                    snapshot()
+                self.assertIs(caught.exception, failure)
+
+    def test_cache_snapshot_legacy_traversal_preserves_empty_names_and_errors(self):
+        root = self.base / "legacy traversal"
+        root.mkdir()
+        legacy = SimpleNamespace(rglob=root.rglob)
+        self.assertEqual(list(_snapshot_paths(legacy)), [])
+        self.assertEqual(self.cache_state.__func__(SimpleNamespace(cache=root)), {})
+        (root / ".hidden").write_bytes(b"payload")
+        self.assertEqual(set(_snapshot_paths(legacy)), set(root.rglob("*")))
+        failure = PermissionError("unreadable legacy traversal")
+        with patch.object(legacy, "rglob", side_effect=failure):
+            with self.assertRaises(PermissionError) as caught:
+                list(_snapshot_paths(legacy))
+        self.assertIs(caught.exception, failure)
 
     def assert_refused_without_writes(self):
         before = self.cache_state()
@@ -2411,6 +2791,132 @@ class CachedGitSafetyTests(unittest.TestCase):
         self.assertEqual((self.source / "input.h").read_text(), "content\n")
 
 
+class SnapshotScannerPatchTests(unittest.TestCase):
+    def test_cached_and_tuple_scanners_preserve_entries_and_faults(self):
+        import glob
+
+        original = os.scandir
+        failure = OSError(errno.EIO, "interrupted scan")
+        with tempfile.TemporaryDirectory(prefix="snapshot scanners ") as directory:
+            root = Path(directory)
+            (root / "payload").write_bytes(b"payload")
+            for tuples in (False, True):
+                class Globber:
+                    scandir = staticmethod(original)
+
+                if tuples:
+                    def scan_tuples(path):
+                        with os.scandir(path) as entries:
+                            values = list(entries)
+                        return ((entry, entry.name, entry.path) for entry in values)
+
+                    Globber.scandir = staticmethod(scan_tuples)
+                descriptor = vars(Globber)["scandir"]
+                calls = []
+
+                def scan(path):
+                    calls.append(Path(path))
+                    return original(path)
+
+                def entries():
+                    if tuples:
+                        values = list(Globber.scandir(root))
+                        for entry, name, path in values:
+                            self.assertEqual((name, path), (entry.name, entry.path))
+                        return [entry for entry, _, _ in values]
+                    with Globber.scandir(root) as values:
+                        return list(values)
+
+                with self.subTest(tuples=tuples), \
+                        patch.object(glob, "_StringGlobber", Globber, create=True):
+                    with _patch_snapshot_scandir(scan):
+                        value, = entries()
+                        self.assertEqual(value.name, "payload")
+                        self.assertEqual(Path(value.path), root / "payload")
+                        self.assertFalse(value.is_dir(follow_symlinks=False))
+                        self.assertFalse(value.is_symlink())
+                        with os.scandir(root) as values:
+                            self.assertEqual([entry.name for entry in values], ["payload"])
+                        self.assertEqual(calls, [root, root])
+                    self.assertIs(os.scandir, original)
+                    self.assertIs(vars(Globber)["scandir"], descriptor)
+
+                    def denied(path):
+                        calls.append(Path(path))
+                        raise failure
+
+                    with self.assertRaises(OSError) as caught:
+                        with _patch_snapshot_scandir(denied):
+                            entries()
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual(calls, [root, root, root])
+                    self.assertIs(os.scandir, original)
+                    self.assertIs(vars(Globber)["scandir"], descriptor)
+
+                    @contextmanager
+                    def partial(path):
+                        with original(path) as values:
+                            def interrupted():
+                                yield next(values)
+                                raise failure
+                            yield interrupted()
+
+                    with self.assertRaises(OSError) as caught:
+                        with _patch_snapshot_scandir(partial):
+                            entries()
+                    self.assertIs(caught.exception, failure)
+                    self.assertIs(os.scandir, original)
+                    self.assertIs(vars(Globber)["scandir"], descriptor)
+
+    def test_nested_scanner_patches_restore_after_body_exception(self):
+        import glob
+
+        original = os.scandir
+
+        class Globber:
+            scandir = staticmethod(original)
+
+        descriptor = vars(Globber)["scandir"]
+        failure = RuntimeError("snapshot body failed")
+
+        def outer(path):
+            return original(path)
+
+        def inner(path):
+            return original(path)
+
+        with patch.object(glob, "_StringGlobber", Globber, create=True):
+            with self.assertRaises(RuntimeError) as caught:
+                with _patch_snapshot_scandir(outer):
+                    outer_descriptor = vars(Globber)["scandir"]
+                    with _patch_snapshot_scandir(inner):
+                        self.assertIs(Globber.scandir, inner)
+                        self.assertIs(os.scandir, inner)
+                    self.assertIs(os.scandir, outer)
+                    self.assertIs(vars(Globber)["scandir"], outer_descriptor)
+                    raise failure
+            self.assertIs(caught.exception, failure)
+            self.assertIs(os.scandir, original)
+            self.assertIs(vars(Globber)["scandir"], descriptor)
+
+    def test_scanner_patch_without_cached_globber_restores_on_error(self):
+        import glob
+
+        original = os.scandir
+        failure = OSError(errno.EACCES, "denied scan")
+
+        def denied(path):
+            raise failure
+
+        with patch.object(glob, "_StringGlobber", None, create=True):
+            with self.assertRaises(OSError) as caught:
+                with _patch_snapshot_scandir(denied):
+                    os.scandir("unused")
+            self.assertIs(caught.exception, failure)
+            self.assertIsNone(glob._StringGlobber)
+            self.assertIs(os.scandir, original)
+
+
 class ScratchPreparationTests(unittest.TestCase):
     def test_public_containment_preserves_redirect_refusal_without_writes(self):
         alias = self.root / "redirect"
@@ -2803,6 +3309,1298 @@ class WindowsReparseMetadataTests(unittest.TestCase):
             probe.assert_not_called()
 
 
+
+
+class _ElapsedSample:
+    MAX = (1 << 63) - 1
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.valid = True
+        # G then S: started, closed, raised, inclusive_ns, exclusive_ns.
+        self.counters = [0] * 10
+        # Only the active lifecycle owns these 24 frame cells and 10 counters.
+        self.frames = [[0, 0, 0] for _ in range(8)]
+        self.depth = 0
+        self.begin = None
+        self.life = None
+        self.last = None
+        # Two preallocated wrapper-local monotonic coverage-fault latches.
+        self.fault_latches = ([False], [False])
+
+    def now(self):
+        value = self.clock()
+        if (type(value) is not int or not 0 <= value <= self.MAX
+                or (self.last is not None and value < self.last)):
+            raise ValueError("invalid monotonic sample")
+        self.last = value
+        return value
+
+    def start(self):
+        try:
+            self.begin = self.now()
+        except BaseException:
+            self.valid = False
+
+    def enter(self, category):
+        if not self.valid:
+            return None
+        if self.depth == 8 or self.counters[0] + self.counters[5] == 4096:
+            self.valid = False
+            return None
+        try:
+            stamp = self.now()
+            frame = self.frames[self.depth]
+            frame[:] = category, stamp, 0
+            self.depth += 1
+            self.counters[category] += 1
+            return self.depth - 1
+        except BaseException:
+            self.valid = False
+            return None
+
+    def leave(self, token, returned):
+        if token is None:
+            return
+        try:
+            if self.depth != token + 1:
+                raise ValueError("unbalanced frames")
+            category, stamp, child = self.frames[token]
+            if self.valid:
+                elapsed = self.now() - stamp
+                exclusive = elapsed - child
+                if not 0 <= exclusive <= elapsed <= self.MAX:
+                    raise ValueError("invalid elapsed interval")
+                values = (self.counters[category + 1] + 1,
+                          self.counters[category + 2] + (not returned),
+                          self.counters[category + 3] + elapsed,
+                          self.counters[category + 4] + exclusive)
+                if any(value > self.MAX for value in values):
+                    raise ValueError("counter overflow")
+                self.counters[category + 1:category + 5] = values
+                if token:
+                    total = self.frames[token - 1][2] + elapsed
+                    if total > self.MAX:
+                        raise ValueError("frame overflow")
+                    self.frames[token - 1][2] = total
+        except BaseException:
+            self.valid = False
+        finally:
+            self.depth = token
+
+    def observe_faults(self):
+        if self.fault_latches[0][0] or self.fault_latches[1][0]:
+            self.valid = False
+
+    def stop(self):
+        try:
+            self.observe_faults()
+            if self.begin is None or self.depth:
+                raise ValueError("missing endpoint")
+            self.life = self.now() - self.begin
+            union = self.counters[4] + self.counters[9]
+            if not 0 <= union <= self.life <= self.MAX:
+                raise ValueError("invalid residual")
+        except BaseException:
+            self.valid = False
+
+    def wrap(self, target, category, owner_thread, get_ident):
+        sample = self
+        # Bind the two fixed latch references before either slot is installed.
+        # A synthetic foreign-only delegate need not provide sample storage.
+        try:
+            fault = self.fault_latches[category // 5]
+        except BaseException:
+            fault = [True]
+
+        def wrapped(*args, **kwargs):
+            # Foreign calls never inspect or mutate the shared sample.
+            try:
+                owned = bool(get_ident() == owner_thread)
+            except BaseException:
+                fault[0] = True
+                return target(*args, **kwargs)
+            if not owned:
+                return target(*args, **kwargs)
+            token = None
+            depth = None
+            try:
+                depth = sample.depth
+                token = sample.enter(category)
+            except BaseException:
+                fault[0] = True
+            returned = False
+            try:
+                result = target(*args, **kwargs)
+                returned = True
+                return result
+            finally:
+                try:
+                    try:
+                        sample.leave(token, returned)
+                    finally:
+                        # Even a lost token drains without another clock.
+                        if depth is not None:
+                            sample.depth = depth
+                    sample.observe_faults()
+                except BaseException:
+                    fault[0] = True
+                    try:
+                        sample.observe_faults()
+                    except BaseException:
+                        pass
+
+        return wrapped
+
+
+class _ElapsedLease:
+    """Lease only the saved child call and the raw snapshot descriptor."""
+
+    def __init__(self, module, fixture, sample, get_ident):
+        self.module = module
+        self.fixture = fixture
+        self.sample = sample
+        self.saved_output = module.check_output
+        self.saved_cache = fixture.__dict__["cache_state"]
+        owner = get_ident()
+        if type(owner) is not int or not 0 <= owner <= sample.MAX:
+            raise ValueError("invalid owner identity")
+        self.output = sample.wrap(self.saved_output, 0, owner, get_ident)
+        self.cache = sample.wrap(self.saved_cache, 5, owner, get_ident)
+
+    def install(self):
+        try:
+            self.module.check_output = self.output
+            self.fixture.cache_state = self.cache
+        except BaseException:
+            self.sample.valid = False
+            self.restore()
+        self.sample.start()
+
+    def restore(self):
+        # Reverse order; refusing foreign replacements is deliberate.
+        released = True
+        for obj, name, wrapper, saved in (
+                (self.fixture, "cache_state", self.cache, self.saved_cache),
+                (self.module, "check_output", self.output, self.saved_output)):
+            try:
+                current = obj.__dict__[name]
+                if current is wrapper:
+                    setattr(obj, name, saved)
+                elif current is not saved:
+                    self.sample.valid = False
+            except BaseException:
+                self.sample.valid = False
+                released = False
+        return released
+
+
+def _elapsed_owner(test):
+    # Read the four known default identities without adding test.id callbacks.
+    if type(test) is CachedGitSafetyTests:
+        return _CHECKPOINT_ORDINALS.get(
+            f'__main__.CachedGitSafetyTests.{test._testMethodName}')
+    return None
+
+
+class _ElapsedDiagnostic:
+    """First-sample elapsed diagnostics; missing coverage always stays unknown.
+
+    G includes child launch, pipes, scheduling and waiting, not CPU or pure Git.
+    S includes the entire snapshot, not just enumeration. Residual includes
+    safety checks, fixtures, assertions, cleanup, scheduling and timer overhead.
+    Top-level class fixtures are outside these selected lifecycles.
+    """
+    OWNERS = (11, 12, 20, 38)
+
+    def __init__(self):
+        self.seen = [False] * 4
+        self.pending = [None] * 4
+        self.lease = None
+        self.owner = None
+
+    def start(self, ordinal):
+        if ordinal not in self.OWNERS:
+            return
+        index = self.OWNERS.index(ordinal)
+        if self.seen[index]:
+            # Repetition before emission invalidates the pending first sample.
+            if self.owner == ordinal:
+                self.abort()
+            if self.pending[index] is not None:
+                self.pending[index] = f'{ordinal}:first_only:unknown'
+            return
+        self.seen[index] = True
+        if self.lease is not None:
+            self.abort()
+            return
+        self.owner = ordinal
+        self.lease = _ElapsedLease(subprocess, CachedGitSafetyTests,
+                                   _ElapsedSample(time.monotonic_ns), threading.get_ident)
+        self.lease.install()
+
+    def stop(self, ordinal):
+        if ordinal != self.owner or self.lease is None:
+            return
+        lease = self.lease
+        released = False
+        try:
+            lease.sample.stop()
+        finally:
+            released = lease.restore()
+        sample = lease.sample
+        index = self.OWNERS.index(ordinal)
+        # Completed owners retain only four <=756-byte strings, no samples.
+        # Across all owners: 10 counters + 24 frames + 2 endpoints + last,
+        # depth + validity + 2 latches + 4 seen flags + owner = 46 cells.
+        # Four closure integer references and five constants make 55 cells.
+        # Allow 64 transient integer locals: peak <=119, below 128;
+        # there is never a stack array for each retained owner.
+        try:
+            sample.observe_faults()
+            valid = (sample.valid and sample.depth == 0
+                     and sample.counters[0] == sample.counters[1]
+                     and sample.counters[5] == sample.counters[6])
+            if valid:
+                fields = []
+                # Validate each of the ten <=19-byte fields before joining.
+                for value in sample.counters:
+                    if type(value) is not int or not 0 <= value <= sample.MAX:
+                        raise ValueError('invalid elapsed counter')
+                    field = str(value)
+                    if type(field) is not type('') or field != f'{value:d}':
+                        raise ValueError('invalid elapsed formatting')
+                    fields.append(field)
+                fields = ','.join(fields)
+                residual = sample.life - sample.counters[4] - sample.counters[9]
+                text = (f'{ordinal}:first_only:valid:life_ns={sample.life}'
+                        f':G_S={fields}:residual_ns={residual}')
+            else:
+                text = f'{ordinal}:first_only:unknown'
+            if len(text) > 756 or not text.isascii() or not text.isprintable():
+                raise ValueError('elapsed summary exceeds fixed budget')
+            self.pending[index] = text
+        except BaseException:
+            self.pending[index] = f'{ordinal}:first_only:unknown'
+        finally:
+            # Keep one failed lease available to the outer runner finally.
+            if released:
+                self.lease = None
+                self.owner = None
+
+    def suffix(self, ordinal, phase):
+        if phase != 'stop' or ordinal not in (12, 20, 38):
+            return ''
+        indexes = (0, 1) if ordinal == 12 else (self.OWNERS.index(ordinal),)
+        parts = [self.pending[index] for index in indexes if self.pending[index] is not None]
+        if not parts:
+            return ''
+        text = ' elapsed_v1=' + ';'.join(parts)
+        maximum = 1536 if ordinal == 12 else 768
+        if len(text) > maximum:
+            return ''
+        for index in indexes:
+            self.pending[index] = None
+        return text
+
+    def abort(self):
+        if self.lease is not None:
+            self.lease.sample.valid = False
+            if self.lease.restore():
+                self.lease = None
+                self.owner = None
+
+
+class ElapsedDiagnosticTests(unittest.TestCase):
+    def test_exact_delegate_and_base_exceptions(self):
+        for failure in (None, ValueError('target'), KeyboardInterrupt(), SystemExit(73)):
+            args, value, calls = object(), object(), []
+
+            def target(*positional, **keywords):
+                calls.append((positional, keywords))
+                if failure is not None:
+                    raise failure
+                return value
+
+            clock = iter(range(100)).__next__
+            sample = _ElapsedSample(clock)
+            sample.start()
+            wrapped = sample.wrap(target, 0, 1, lambda: 1)
+            if failure is None:
+                self.assertIs(wrapped(args, named=value), value)
+            else:
+                try:
+                    wrapped(args, named=value)
+                except BaseException as caught:
+                    self.assertIs(caught, failure)
+                else:
+                    self.fail('target exception lost')
+            sample.stop()
+            self.assertEqual(len(calls), 1)
+            self.assertIs(calls[0][0][0], args)
+            self.assertIs(calls[0][1]['named'], value)
+            self.assertEqual(sample.counters[:3], [1, 1, int(failure is not None)])
+            self.assertTrue(sample.valid)
+
+    def test_descriptor_actual_subclass_and_leaf_mock(self):
+        calls = []
+
+        class Fixture:
+            def cache_state(self):
+                calls.append(type(self))
+                return self
+
+        class Nested(Fixture):
+            pass
+
+        result = object()
+        module = SimpleNamespace(check_output=lambda *a, **k: result)
+        original = Fixture.cache_state
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        lease = _ElapsedLease(module, Fixture, sample, lambda: 1)
+        lease.install()
+        obj = Nested()
+        self.assertIs(obj.cache_state(), obj)
+        leaf = module.check_output
+        events = []
+
+        def trace(*a, **k):
+            events.append('prepare')
+            self.assertEqual(sample.depth, 0)
+            value = leaf(*a, **k)
+            events.append('after')
+            self.assertEqual(sample.depth, 0)
+            return value
+
+        module.check_output = trace
+        self.assertIs(module.check_output('argv'), result)
+        module.check_output = leaf
+        lease.restore()
+        sample.stop()
+        self.assertEqual(calls, [Nested])
+        self.assertEqual(events, ['prepare', 'after'])
+        self.assertIs(Fixture.cache_state, original)
+        self.assertEqual(sample.counters[:2], [1, 1])
+        self.assertEqual(sample.counters[5:7], [1, 1])
+
+    def test_nested_union_and_fault_drain(self):
+        sample = _ElapsedSample(iter([0, 2, 3, 8, 10, 20]).__next__)
+        sample.start()
+        outer = sample.enter(5)
+        inner = sample.enter(0)
+        sample.leave(inner, True)
+        sample.leave(outer, True)
+        sample.stop()
+        self.assertTrue(sample.valid)
+        self.assertEqual((sample.counters[3], sample.counters[4]), (5, 5))
+        self.assertEqual((sample.counters[8], sample.counters[9]), (8, 3))
+        self.assertEqual(sample.life - sample.counters[4] - sample.counters[9], 12)
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        sample.start()
+        real_enter = sample.enter
+
+        def faulty(category):
+            real_enter(category)
+            raise RuntimeError('lost enter token')
+
+        sample.enter = faulty
+        target = object()
+        self.assertIs(sample.wrap(lambda: target, 0, 1, lambda: 1)(), target)
+        self.assertEqual(sample.depth, 0)
+        self.assertFalse(sample.valid)
+
+    def test_foreign_call_has_no_sample_access(self):
+        class Forbidden:
+            def __getattribute__(self, name):
+                raise AssertionError('foreign timer state access')
+
+        value = object()
+        wrapper = _ElapsedSample.wrap(Forbidden(), lambda: value, 0, 1, lambda: 2)
+        self.assertIs(wrapper(), value)
+
+    def test_clock_faults_and_counter_limits_keep_target(self):
+        for clock in (lambda: -1, lambda: 1 << 63, lambda: True,
+                      lambda: (_ for _ in ()).throw(KeyboardInterrupt()),
+                      lambda: (_ for _ in ()).throw(SystemExit(73)),
+                      lambda: (_ for _ in ()).throw(OSError('timer unavailable'))):
+            sample = _ElapsedSample(clock)
+            sample.start()
+            value = object()
+            self.assertIs(sample.wrap(lambda: value, 0, 1, lambda: 1)(), value)
+            sample.stop()
+            self.assertFalse(sample.valid)
+        sample = _ElapsedSample(iter(range(9000)).__next__)
+        sample.start()
+        calls = []
+        wrapper = sample.wrap(lambda: calls.append(1), 0, 1, lambda: 1)
+        for _ in range(4097):
+            wrapper()
+        self.assertEqual(len(calls), 4097)
+        self.assertEqual(sample.counters[0], 4096)
+        self.assertFalse(sample.valid)
+        self.assertEqual(sample.depth, 0)
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        tokens = [sample.enter(0) for _ in range(9)]
+        self.assertIsNone(tokens[-1])
+        for token in reversed(tokens):
+            sample.leave(token, True)
+        self.assertEqual(sample.depth, 0)
+        self.assertFalse(sample.valid)
+
+    def test_partial_install_and_foreign_replacement(self):
+        failure = RuntimeError('install fault')
+
+        class Meta(type):
+            def __setattr__(cls, name, value):
+                if name == 'cache_state':
+                    raise failure
+                super().__setattr__(name, value)
+
+        class Refusing(metaclass=Meta):
+            def cache_state(self):
+                return self
+
+        saved = lambda: None
+        module = SimpleNamespace(check_output=saved)
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        lease = _ElapsedLease(module, Refusing, sample, lambda: 1)
+        lease.install()
+        self.assertIs(module.check_output, saved)
+        self.assertIs(Refusing.__dict__['cache_state'], lease.saved_cache)
+        self.assertFalse(sample.valid)
+
+        class Fixture:
+            def cache_state(self):
+                return self
+
+        lease = _ElapsedLease(module, Fixture, _ElapsedSample(iter(range(100)).__next__), lambda: 1)
+        lease.install()
+        foreign = lambda: None
+        module.check_output = foreign
+        lease.restore()
+        lease.restore()
+        self.assertIs(module.check_output, foreign)
+        self.assertIs(Fixture.__dict__['cache_state'], lease.saved_cache)
+        self.assertFalse(lease.sample.valid)
+
+    def test_negative_overflow_missing_endpoint_and_faulted_exit(self):
+        for stamps in ([10, 20, 19, 30], [0, 0, 10, 5]):
+            sample = _ElapsedSample(iter(stamps).__next__)
+            sample.start()
+            token = sample.enter(0)
+            sample.leave(token, True)
+            sample.stop()
+            self.assertFalse(sample.valid)
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        sample.start()
+        sample.counters[3] = sample.MAX
+        token = sample.enter(0)
+        sample.leave(token, True)
+        self.assertFalse(sample.valid)
+        self.assertEqual(sample.depth, 0)
+        sample = _ElapsedSample(lambda: 100)
+        sample.stop()
+        self.assertFalse(sample.valid)
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        sample.start()
+
+        def broken(*args):
+            raise RuntimeError('exit bookkeeping fault')
+
+        sample.leave = broken
+        target_error = KeyboardInterrupt()
+
+        def target():
+            raise target_error
+
+        try:
+            sample.wrap(target, 0, 1, lambda: 1)()
+        except BaseException as caught:
+            self.assertIs(caught, target_error)
+        else:
+            self.fail('target interrupt lost')
+        self.assertEqual(sample.depth, 0)
+        self.assertFalse(sample.valid)
+
+    def test_pending_repetition_and_output_envelope(self):
+        class Fixture:
+            def cache_state(self):
+                return self
+
+        saved = lambda: b'value'
+        module = SimpleNamespace(check_output=saved)
+        clock_reads = []
+
+        def clock():
+            clock_reads.append(None)
+            return len(clock_reads)
+
+        with patch.dict(globals(), {'subprocess': module, 'CachedGitSafetyTests': Fixture,
+                                   'time': SimpleNamespace(monotonic_ns=clock)}):
+            diagnostic = _ElapsedDiagnostic()
+            self.assertEqual(diagnostic.suffix(20, 'stop'), '')
+            for owner in (11, 12, 20, 38):
+                diagnostic.start(owner)
+                for _ in range(4096):
+                    module.check_output()
+                diagnostic.stop(owner)
+                self.assertIs(module.check_output, saved)
+                if owner == 11:
+                    self.assertEqual(diagnostic.suffix(11, 'stop'), '')
+                else:
+                    text = diagnostic.suffix(owner, 'stop')
+                    self.assertIn('first_only:valid:', text)
+                    self.assertTrue(text.isascii())
+                    self.assertNotIn('\n', text)
+                    self.assertLessEqual(len(text), 1536 if owner == 12 else 768)
+                    self.assertEqual(diagnostic.suffix(owner, 'stop'), '')
+            self.assertEqual(len(clock_reads), 32776)
+            diagnostic.start(20)
+            self.assertIsNone(diagnostic.lease)
+            self.assertEqual(diagnostic.suffix(20, 'stop'), '')
+            self.assertEqual(len(clock_reads), 32776)
+            diagnostic.abort()
+            missing = _ElapsedDiagnostic()
+            missing.start(38)
+            missing.abort()
+            self.assertIs(module.check_output, saved)
+            self.assertEqual(missing.suffix(38, 'stop'), '')
+
+    def test_original_stream_error_and_callback_sequence(self):
+        owner_name = 'test_fixture_commits_disable_maintenance_in_real_git'
+        events = []
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+            def id(self):
+                events.append('id')
+                return '__main__.CachedGitSafetyTests.' + owner_name
+
+        saved = subprocess.check_output
+        with patch.dict(globals(), {'CachedGitSafetyTests': Fixture}):
+            case = Fixture()
+            case._testMethodName = owner_name
+            result = _LifecycleResult(io.StringIO(), True, 0)
+            result.startTest(case)
+            self.assertIsNot(subprocess.check_output, saved)
+            result.stopTest(case)
+            self.assertIs(subprocess.check_output, saved)
+            self.assertEqual(events, ['id', 'id'])
+            failure = OSError('original stream error')
+
+            class Stream:
+                def write(self, value):
+                    raise failure
+
+            result = _LifecycleResult(Stream(), True, 0)
+            try:
+                result.startTest(case)
+            except OSError as caught:
+                self.assertIs(caught, failure)
+            else:
+                self.fail('original stream failure lost')
+            self.assertIs(subprocess.check_output, saved)
+
+    def test_runner_finally_restores_after_target_interrupt(self):
+        owner_name = 'test_fixture_commits_disable_maintenance_in_real_git'
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+            def id(self):
+                return '__main__.CachedGitSafetyTests.' + owner_name
+
+        case = Fixture()
+        case._testMethodName = owner_name
+        failure = SystemExit(73)
+        saved = subprocess.check_output
+
+        def interrupted(runner, suite):
+            result = runner._makeResult()
+            result.startTest(case)
+            raise failure
+
+        with patch.dict(globals(), {'CachedGitSafetyTests': Fixture}), patch.object(
+                unittest.TextTestRunner, 'run', interrupted):
+            runner = _LifecycleRunner(stream=io.StringIO(), verbosity=0)
+            try:
+                runner.run(None)
+            except SystemExit as caught:
+                self.assertIs(caught, failure)
+            else:
+                self.fail('runner interrupt lost')
+        self.assertIs(subprocess.check_output, saved)
+
+    def test_callback_and_formatter_failures_restore_slots(self):
+        owner_name = 'test_fixture_commits_disable_maintenance_in_real_git'
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+            def id(self):
+                return '__main__.CachedGitSafetyTests.' + owner_name
+
+        case = Fixture()
+        case._testMethodName = owner_name
+        saved_output = subprocess.check_output
+        saved_cache = Fixture.__dict__['cache_state']
+        with patch.dict(globals(), {'CachedGitSafetyTests': Fixture}):
+            for callback in ('startTest', 'stopTest'):
+                failure = RuntimeError('original callback failure')
+                result = _LifecycleResult(io.StringIO(), True, 0)
+                if callback == 'stopTest':
+                    result.startTest(case)
+                with patch.object(unittest.TextTestResult, callback, side_effect=failure) as original:
+                    try:
+                        getattr(result, callback)(case)
+                    except RuntimeError as caught:
+                        self.assertIs(caught, failure)
+                    else:
+                        self.fail('callback error lost')
+                    original.assert_called_once_with(case)
+                self.assertIs(subprocess.check_output, saved_output)
+                self.assertIs(Fixture.__dict__['cache_state'], saved_cache)
+            diagnostic = _ElapsedDiagnostic()
+            diagnostic.start(20)
+
+            def formatter_fault(value):
+                raise ValueError('formatter failure')
+
+            with patch.dict(globals(), {'str': formatter_fault}):
+                diagnostic.stop(20)
+            self.assertEqual(diagnostic.suffix(20, 'stop'), ' elapsed_v1=20:first_only:unknown')
+            self.assertIs(subprocess.check_output, saved_output)
+            self.assertIs(Fixture.__dict__['cache_state'], saved_cache)
+
+    def test_target_and_cleanup_errors_keep_original_lifecycle(self):
+        owner_name = 'test_fixture_commits_disable_maintenance_in_real_git'
+        sequences = []
+        body_error = ValueError('body failure')
+        cleanup_error = OSError('cleanup failure')
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+            def id(self):
+                return '__main__.CachedGitSafetyTests.' + owner_name
+
+            def setUp(self):
+                sequences.append('setup')
+                self.addCleanup(self.clean)
+
+            def clean(self):
+                sequences.append('cleanup')
+                raise cleanup_error
+
+            def tearDown(self):
+                sequences.append('teardown')
+
+        def body(self):
+            sequences.append('body')
+            raise body_error
+
+        setattr(Fixture, owner_name, body)
+        saved_output = subprocess.check_output
+        saved_cache = Fixture.__dict__['cache_state']
+        with patch.dict(globals(), {'CachedGitSafetyTests': Fixture}):
+            for result_type in (unittest.TextTestResult, _LifecycleResult):
+                result = result_type(io.StringIO(), True, 0)
+                # A decorator supplies unittest's standard writeln interface.
+                result.stream = unittest.runner._WritelnDecorator(result.stream)
+                Fixture(owner_name).run(result)
+                self.assertEqual(len(result.errors), 2)
+                self.assertIs(subprocess.check_output, saved_output)
+                self.assertIs(Fixture.__dict__['cache_state'], saved_cache)
+        self.assertEqual(sequences, ['setup', 'body', 'teardown', 'cleanup'] * 2)
+
+    def test_flush_error_is_not_swallowed(self):
+        owner_name = 'test_fixture_commits_disable_maintenance_in_real_git'
+        failure = OSError('flush failure')
+        writes = []
+
+        class Stream:
+            def write(self, text):
+                writes.append(text)
+                return len(text)
+
+            def flush(self):
+                raise failure
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+            def id(self):
+                return '__main__.CachedGitSafetyTests.' + owner_name
+
+        case = Fixture()
+        case._testMethodName = owner_name
+        saved = subprocess.check_output
+        with patch.dict(globals(), {'CachedGitSafetyTests': Fixture}):
+            result = _LifecycleResult(Stream(), True, 0)
+            try:
+                result.startTest(case)
+            except OSError as caught:
+                self.assertIs(caught, failure)
+            else:
+                self.fail('flush error lost')
+        self.assertIs(subprocess.check_output, saved)
+        self.assertEqual(len(writes), 1)
+
+    def test_thread_probe_failure_makes_coverage_unknown(self):
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        sample.start()
+        value = object()
+        calls = []
+
+        def target():
+            calls.append(None)
+            return value
+
+        def probe():
+            raise RuntimeError('ownership bookkeeping unavailable')
+
+        wrapped = sample.wrap(target, 0, 1, probe)
+        self.assertIs(wrapped(), value)
+        sample.stop()
+        self.assertEqual(calls, [None])
+        self.assertFalse(sample.valid, 'unobserved target call must not become valid zero')
+
+
+    def test_probe_fault_latches_preserve_owner_and_foreign_outcomes(self):
+        for category in (0, 5):
+            for identity in (1, 2):
+                for failure in (None, ValueError('target'), KeyboardInterrupt(), SystemExit(73)):
+                    sample = _ElapsedSample(iter(range(100)).__next__)
+                    sample.start()
+                    value, argument, calls = object(), object(), []
+                    broken = True
+
+                    def probe():
+                        if broken:
+                            raise OSError('ownership unavailable')
+                        return identity
+
+                    def target(*args, **kwargs):
+                        calls.append((args, kwargs))
+                        if failure is not None:
+                            raise failure
+                        return value
+
+                    wrapped = sample.wrap(target, category, 1, probe)
+                    if failure is None:
+                        self.assertIs(wrapped(argument, named=value), value)
+                    else:
+                        try:
+                            wrapped(argument, named=value)
+                        except BaseException as caught:
+                            self.assertIs(caught, failure)
+                        else:
+                            self.fail('target exception lost')
+                    self.assertEqual(len(calls), 1)
+                    self.assertIs(calls[0][0][0], argument)
+                    self.assertIs(calls[0][1]['named'], value)
+                    self.assertEqual(sample.counters, [0] * 10)
+                    self.assertEqual(sample.depth, 0)
+                    self.assertTrue(sample.fault_latches[category // 5][0])
+                    broken = False
+                    if failure is None:
+                        self.assertIs(wrapped(argument, named=value), value)
+                    else:
+                        with self.assertRaises(type(failure)) as caught:
+                            wrapped(argument, named=value)
+                        self.assertIs(caught.exception, failure)
+                    sample.stop()
+                    self.assertFalse(sample.valid)
+                    self.assertTrue(sample.fault_latches[category // 5][0])
+                    self.assertEqual(len(calls), 2)
+
+    def test_unknown_probe_only_touches_its_prebound_latch(self):
+        class Sample(_ElapsedSample):
+            blocked = False
+
+            def __getattribute__(self, name):
+                if name != 'blocked' and object.__getattribute__(self, 'blocked'):
+                    raise AssertionError('unknown ownership accessed sample')
+                return super().__getattribute__(name)
+
+        sample = Sample(iter(range(100)).__next__)
+        sample.start()
+        value = object()
+        calls = []
+
+        def probe():
+            raise RuntimeError('unknown ownership')
+
+        def target():
+            calls.append(None)
+            return value
+
+        wrapped = sample.wrap(target, 0, 1, probe)
+        latch = sample.fault_latches[0]
+        sample.blocked = True
+        self.assertIs(wrapped(), value)
+        sample.blocked = False
+        self.assertEqual(calls, [None])
+        self.assertTrue(latch[0])
+        sample.stop()
+        self.assertFalse(sample.valid)
+
+    def test_latches_registered_before_install_and_consumed_after_restore(self):
+        class Fixture:
+            def cache_state(self):
+                return self
+
+        saved = lambda: object()
+        module = SimpleNamespace(check_output=saved)
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        lease = _ElapsedLease(module, Fixture, sample, lambda: 1)
+        for wrapper, latch in zip((lease.output, lease.cache), sample.fault_latches):
+            captured = dict(zip(wrapper.__code__.co_freevars,
+                                (cell.cell_contents for cell in wrapper.__closure__)))
+            self.assertIs(captured['fault'], latch)
+            self.assertFalse(latch[0])
+        lease.install()
+        sample.fault_latches[1][0] = True
+        lease.restore()
+        lease.restore()
+        sample.stop()
+        self.assertIs(module.check_output, saved)
+        self.assertIs(Fixture.__dict__['cache_state'], lease.saved_cache)
+        self.assertFalse(sample.valid)
+        self.assertTrue(sample.fault_latches[1][0])
+
+    def test_bookkeeping_read_fault_preserves_target_exception(self):
+        class Sample(_ElapsedSample):
+            blocked = False
+
+            def __getattribute__(self, name):
+                if name == 'depth' and self.blocked:
+                    raise OSError('depth unavailable')
+                return super().__getattribute__(name)
+
+        for failure in (None, KeyboardInterrupt(), SystemExit(73)):
+            sample = Sample(iter(range(100)).__next__)
+            sample.start()
+            value, calls = object(), []
+
+            def target():
+                calls.append(None)
+                if failure is not None:
+                    raise failure
+                return value
+
+            wrapped = sample.wrap(target, 0, 1, lambda: 1)
+            sample.blocked = True
+            if failure is None:
+                self.assertIs(wrapped(), value)
+            else:
+                with self.assertRaises(type(failure)) as caught:
+                    wrapped()
+                self.assertIs(caught.exception, failure)
+            sample.blocked = False
+            sample.stop()
+            self.assertEqual(calls, [None])
+            self.assertFalse(sample.valid)
+
+    def test_repetition_before_emission_and_missing_lifecycle_stay_unknown(self):
+        class Fixture:
+            def cache_state(self):
+                return self
+
+        saved = lambda: b'value'
+        module = SimpleNamespace(check_output=saved)
+        with patch.dict(globals(), {'subprocess': module, 'CachedGitSafetyTests': Fixture}):
+            diagnostic = _ElapsedDiagnostic()
+            diagnostic.start(11)
+            diagnostic.stop(11)
+            diagnostic.start(11)
+            self.assertEqual(diagnostic.suffix(12, 'stop'), ' elapsed_v1=11:first_only:unknown')
+            diagnostic.start(20)
+            sample = diagnostic.lease.sample
+            diagnostic.start(20)
+            self.assertIsNone(diagnostic.lease)
+            self.assertFalse(sample.valid)
+            self.assertIs(module.check_output, saved)
+            self.assertEqual(diagnostic.suffix(20, 'stop'), '')
+            diagnostic.start(38)
+            diagnostic.abort()
+            diagnostic.stop(38)
+            self.assertEqual(diagnostic.suffix(38, 'stop'), '')
+            self.assertIs(module.check_output, saved)
+
+    def test_four_retained_owners_share_one_bounded_stack(self):
+        class Fixture:
+            def cache_state(self):
+                return self
+
+        module = SimpleNamespace(check_output=lambda: None)
+        visited = set()
+
+        def cells(value):
+            if type(value) in (int, bool):
+                return 1
+            if isinstance(value, (_ElapsedDiagnostic, _ElapsedLease, _ElapsedSample, list, tuple)):
+                if id(value) in visited:
+                    return 0
+                visited.add(id(value))
+                values = value if isinstance(value, (list, tuple)) else value.__dict__.values()
+                return sum(cells(item) for item in values)
+            if getattr(value, '__name__', None) == 'wrapped':
+                if id(value) in visited:
+                    return 0
+                visited.add(id(value))
+                return sum(cells(cell.cell_contents) for name, cell in
+                           zip(value.__code__.co_freevars, value.__closure__)
+                           if name not in ('get_ident', 'target'))
+            return 0
+
+        with patch.dict(globals(), {'subprocess': module, 'CachedGitSafetyTests': Fixture,
+                                   'time': SimpleNamespace(monotonic_ns=iter(range(1000)).__next__)}):
+            diagnostic = _ElapsedDiagnostic()
+            for owner in (11, 12, 20):
+                diagnostic.start(owner)
+                diagnostic.stop(owner)
+            self.assertTrue(all(isinstance(item, str) for item in diagnostic.pending[:3]))
+            diagnostic.start(38)
+            sample = diagnostic.lease.sample
+            tokens = [sample.enter(0 if index % 2 else 5) for index in range(8)]
+            self.assertEqual(sample.depth, 8)
+            # Reserve one cell for the not-yet-written lifecycle endpoint,
+            # five fixed owner/MAX constants, and 64 transient local cells.
+            self.assertLessEqual(cells(diagnostic) + 1 + 5 + 64, 128)
+            self.assertEqual(len(sample.frames), 8)
+            for token in reversed(tokens):
+                sample.leave(token, True)
+            diagnostic.stop(38)
+            self.assertIsNone(diagnostic.lease)
+            self.assertTrue(all(isinstance(item, str) for item in diagnostic.pending))
+            self.assertLessEqual(sum(len(item) for item in diagnostic.pending), 4 * 756)
+
+    def test_fault_summary_has_no_zero_measurements(self):
+        class Fixture:
+            def cache_state(self):
+                return self
+
+        module = SimpleNamespace(check_output=lambda: object())
+        with patch.dict(globals(), {'subprocess': module, 'CachedGitSafetyTests': Fixture}):
+            diagnostic = _ElapsedDiagnostic()
+            diagnostic.start(20)
+            lease = diagnostic.lease
+            with patch.object(lease, 'restore', wraps=lease.restore) as restore:
+                lease.sample.fault_latches[0][0] = True
+                diagnostic.stop(20)
+                restore.assert_called_once_with()
+            self.assertEqual(diagnostic.suffix(20, 'stop'), ' elapsed_v1=20:first_only:unknown')
+            self.assertEqual(diagnostic.suffix(20, 'stop'), '')
+
+
+    def test_failed_fault_observation_never_masks_target(self):
+        for failure in (None, KeyboardInterrupt(), SystemExit(73)):
+            sample = _ElapsedSample(iter(range(100)).__next__)
+            sample.start()
+            value, calls = object(), []
+
+            def target():
+                calls.append(None)
+                if failure is not None:
+                    raise failure
+                return value
+
+            with patch.object(sample, 'leave', side_effect=OSError('bookkeeping')), patch.object(
+                    sample, 'observe_faults', side_effect=OSError('observation')):
+                wrapped = sample.wrap(target, 0, 1, lambda: 1)
+                if failure is None:
+                    self.assertIs(wrapped(), value)
+                else:
+                    with self.assertRaises(type(failure)) as caught:
+                        wrapped()
+                    self.assertIs(caught.exception, failure)
+            sample.stop()
+            self.assertEqual(calls, [None])
+            self.assertEqual(sample.depth, 0)
+            self.assertFalse(sample.valid)
+
+
+    def test_transient_restore_failure_retains_lease_for_outer_finally(self):
+        deny_restore = [True]
+
+        class Meta(type):
+            def __setattr__(cls, name, value):
+                if name == 'cache_state' and value is saved_cache and deny_restore[0]:
+                    deny_restore[0] = False
+                    raise OSError('transient restoration failure')
+                super().__setattr__(name, value)
+
+        class Fixture(metaclass=Meta):
+            def cache_state(self):
+                return self
+
+        saved_cache = Fixture.__dict__['cache_state']
+        saved_output = lambda: b'value'
+        module = SimpleNamespace(check_output=saved_output)
+        with patch.dict(globals(), {'subprocess': module, 'CachedGitSafetyTests': Fixture}):
+            diagnostic = _ElapsedDiagnostic()
+            try:
+                diagnostic.start(20)
+                sample = diagnostic.lease.sample
+                diagnostic.stop(20)
+                self.assertIs(module.check_output, saved_output)
+                self.assertIsNot(Fixture.__dict__['cache_state'], saved_cache)
+                self.assertIsNotNone(diagnostic.lease)
+                self.assertFalse(sample.valid)
+                self.assertEqual(diagnostic.suffix(20, 'stop'), ' elapsed_v1=20:first_only:unknown')
+                diagnostic.abort()
+                self.assertIsNone(diagnostic.lease)
+                self.assertIs(Fixture.__dict__['cache_state'], saved_cache)
+            finally:
+                # This control owns its synthetic class even on rejection.
+                Fixture.cache_state = saved_cache
+                diagnostic.abort()
+
+
+    def test_clock_reversal_between_intervals_is_unknown(self):
+        for stamps in ([100, 90, 95, 200], [0, 2, 4, 3, 5, 10]):
+            sample = _ElapsedSample(iter(stamps).__next__)
+            sample.start()
+            value, calls = object(), []
+
+            def target():
+                calls.append(None)
+                return value
+
+            wrapped = sample.wrap(target, 0, 1, lambda: 1)
+            self.assertIs(wrapped(), value)
+            if len(stamps) == 6:
+                self.assertIs(wrapped(), value)
+            sample.stop()
+            self.assertFalse(sample.valid)
+            self.assertEqual(len(calls), 2 if len(stamps) == 6 else 1)
+
+    def test_malformed_formatter_never_emits_valid_or_extra_lines(self):
+        class Fixture:
+            def cache_state(self):
+                return self
+
+        module = SimpleNamespace(check_output=lambda: None)
+        with patch.dict(globals(), {'subprocess': module, 'CachedGitSafetyTests': Fixture}):
+            for bad in ('\n', '\r', '\x00', 'x', '', '1', '0' * 769):
+                diagnostic = _ElapsedDiagnostic()
+                diagnostic.start(20)
+                with patch.dict(globals(), {'str': lambda value: bad}):
+                    diagnostic.stop(20)
+                self.assertEqual(diagnostic.suffix(20, 'stop'), ' elapsed_v1=20:first_only:unknown')
+                self.assertIsNone(diagnostic.lease)
+
+
+    def test_ownership_truth_conversion_fault_latches_before_delegate(self):
+        class Truth:
+            def __bool__(self):
+                raise OSError('ownership comparison unavailable')
+
+        class Identity:
+            def __eq__(self, other):
+                return Truth()
+
+        sample = _ElapsedSample(iter(range(100)).__next__)
+        sample.start()
+        calls, value = [], object()
+
+        def target():
+            calls.append(None)
+            return value
+
+        self.assertIs(sample.wrap(target, 0, 1, Identity)(), value)
+        self.assertEqual(calls, [None])
+        sample.stop()
+        self.assertFalse(sample.valid)
+
+
+    def test_owner_lookup_fault_preserves_original_callbacks(self):
+        owner_name = 'test_fixture_commits_disable_maintenance_in_real_git'
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+            def id(self):
+                return '__main__.CachedGitSafetyTests.' + owner_name
+
+        case = Fixture()
+        case._testMethodName = owner_name
+        saved = subprocess.check_output
+
+        def lookup_fault(test):
+            raise OSError('owner lookup unavailable')
+
+        with patch.dict(globals(), {'CachedGitSafetyTests': Fixture}):
+            for callback in ('startTest', 'stopTest'):
+                result = _LifecycleResult(io.StringIO(), True, 0)
+                original = getattr(unittest.TextTestResult, callback)
+                try:
+                    if callback == 'stopTest':
+                        result.startTest(case)
+                    with patch.dict(globals(), {'_elapsed_owner': lookup_fault}), patch.object(
+                            unittest.TextTestResult, callback, autospec=True, side_effect=original) as observed:
+                        getattr(result, callback)(case)
+                        observed.assert_called_once_with(result, case)
+                    self.assertIs(subprocess.check_output, saved)
+                    self.assertIsNone(result._elapsed.lease)
+                finally:
+                    result._diagnostic('abort')
+
+
+    def test_owner_identity_is_bounded_before_installation(self):
+        owner_name = 'test_fixture_commits_disable_maintenance_in_real_git'
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+            def id(self):
+                return '__main__.CachedGitSafetyTests.' + owner_name
+
+        case = Fixture()
+        case._testMethodName = owner_name
+        saved_output = subprocess.check_output
+        saved_cache = Fixture.__dict__['cache_state']
+        with patch.dict(globals(), {'CachedGitSafetyTests': Fixture}):
+            for owner in (-1, True, 1 << 63, None, 0, (1 << 63) - 1):
+                result = _LifecycleResult(io.StringIO(), True, 0)
+                with patch.dict(globals(), {'threading': SimpleNamespace(get_ident=lambda: owner)}):
+                    try:
+                        result.startTest(case)
+                        if type(owner) is int and 0 <= owner <= (1 << 63) - 1:
+                            self.assertIsNotNone(result._elapsed.lease)
+                        else:
+                            self.assertIsNone(result._elapsed.lease)
+                            self.assertIs(subprocess.check_output, saved_output)
+                            self.assertIs(Fixture.__dict__['cache_state'], saved_cache)
+                        result.stopTest(case)
+                    finally:
+                        result._diagnostic('abort')
+                self.assertIs(subprocess.check_output, saved_output)
+                self.assertIs(Fixture.__dict__['cache_state'], saved_cache)
+
+
+class ImportModeTests(unittest.TestCase):
+    def test_isolated_import_has_no_startup_output_and_runs_diagnostic_control(self):
+        spec = importlib.util.spec_from_file_location("offline_deps_import_test", __file__)
+        module = importlib.util.module_from_spec(spec)
+        output, diagnostic = io.StringIO(), io.StringIO()
+        with patch.object(sys, "stdout", output), redirect_stderr(diagnostic):
+            spec.loader.exec_module(module)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(diagnostic.getvalue(), "")
+        # Select one fixture-free control; never collect the imported suite.
+        result = unittest.TestResult()
+        module.ElapsedDiagnosticTests("test_original_stream_error_and_callback_sequence").run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.skipped, [])
+        self.assertIs(module.time, time)
+        self.assertIs(module._LifecycleRunner.resultclass, module._LifecycleResult)
+        self.assertEqual(module._CHECKPOINT_ORDINALS, _CHECKPOINT_ORDINALS)
+        self.assertEqual(module._START_ORDINALS, _START_ORDINALS)
+        self.assertEqual(module._STOP_ORDINALS, _STOP_ORDINALS)
+
+
+# Fixed source identities keep checkpoints stable under unittest selection.
+_CHECKPOINT_ORDINALS = {
+    "__main__.CachedGitSafetyTests.test_alternate_and_common_directory_cycles_are_refused_before_git": 1,
+    "__main__.CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": 11,
+    "__main__.CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": 12,
+    "__main__.CachedGitSafetyTests.test_fixture_commits_disable_maintenance_in_real_git": 20,
+    "__main__.CachedGitSafetyTests.test_real_recursive_gitlinks_check_initialized_heads": 38,
+    "__main__.CachedGitSafetyTests.test_windows_crlf_alternate_metadata_is_contained_on_every_host": 45,
+    "__main__.OfflineDependenciesTests.test_candidate_cleanup_errors_after_publication_keep_stage_and_original_error": 49,
+    "__main__.OfflineDependenciesTests.test_glad_requires_bundled_generator_and_specification_inputs": 65,
+    "__main__.OfflineDependenciesTests.test_initial_cache_replace_failure_cleans_up_and_retry_succeeds": 66,
+    "__main__.OfflineDependenciesTests.test_symlinked_scratch_root_refused_without_writes": 97,
+    "__main__.OfflineDependenciesTests.test_uncertain_publication_retains_stage_without_claiming_an_occupant": 98,
+    "__main__.WindowsReparseMetadataTests.test_original_components_are_checked_before_dotdot_resolution": 120,
+}
+_START_ORDINALS = frozenset((1, 11, 20, 38, 49, 66, 98))
+_STOP_ORDINALS = frozenset((12, 20, 38, 45, 65, 66, 97, 98, 120))
+
+class _LifecycleResult(diagnostics.CaseDiagnosticResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # At most 16 phase/identity pairs, including repeated selections.
+        self._emitted_checkpoints = set()
+        self._elapsed = None
+        try:
+            self._elapsed = _ElapsedDiagnostic()
+        except BaseException:
+            pass
+
+    def _diagnostic(self, method, *args):
+        try:
+            if self._elapsed is not None:
+                if method in ('start', 'stop'):
+                    args = (_elapsed_owner(args[0]),)
+                return getattr(self._elapsed, method)(*args)
+        except BaseException:
+            try:
+                self._elapsed.abort()
+            except BaseException:
+                pass
+        return ''
+
+    def _checkpoint(self, test, phase, selected):
+        identity = test.id()
+        ordinal = _CHECKPOINT_ORDINALS.get(identity)
+        checkpoint = (phase, ordinal)
+        if ordinal in selected and checkpoint not in self._emitted_checkpoints:
+            if phase == "start" and self.showAll:
+                self.stream.write("\n")
+            self.stream.write(
+                f"Offline dependencies: monotonic_ns={time.monotonic_ns()} "
+                f"phase={phase} ordinal={ordinal} identity={identity}"
+                f"{self._diagnostic('suffix', ordinal, phase)}\n"
+            )
+            self.stream.flush()
+            self._emitted_checkpoints.add(checkpoint)
+
+    def startTest(self, test):
+        self._diagnostic('start', test)
+        try:
+            super().startTest(test)
+            self._checkpoint(test, "start", _START_ORDINALS)
+        except BaseException:
+            self._diagnostic('abort')
+            raise
+
+    def stopTest(self, test):
+        try:
+            super().stopTest(test)
+        finally:
+            self._diagnostic('stop', test)
+        self._checkpoint(test, "stop", _STOP_ORDINALS)
+
+class _LifecycleRunner(diagnostics.CaseDiagnosticRunner):
+    resultclass = _LifecycleResult
+
+    def _makeResult(self):
+        result = super()._makeResult()
+        self._elapsed_result = result
+        return result
+
+    def run(self, test):
+        try:
+            return super().run(test)
+        finally:
+            result = getattr(self, '_elapsed_result', None)
+            if result is not None:
+                result._diagnostic('abort')
+
+
 # Measured class costs: cached Git 1.80s, provisioning 0.42s, scratch 0.24s.
 # Moving the three costliest Git cases (0.85s) gives parts of about 0.66s,
 # 0.95s and 0.85s, leaving room for slower process launches on Windows.
@@ -2814,6 +4612,9 @@ OFFLINE_CLASS_PARTITIONS = {
     "ScratchPreparationTests": "0",
     "WindowsReparseMetadataTests": "0",
     "OfflinePartitionSelectionTests": "0",
+    "ElapsedDiagnosticTests": "0",
+    "ImportModeTests": "0",
+    "SnapshotScannerPatchTests": "0",
     "CachedGitSafetyTests": "1",
 }
 OFFLINE_CASE_PARTITIONS = {
@@ -2855,7 +4656,7 @@ def offline_partition_suite(loader, module, partition):
     return unittest.TestSuite(selected)
 
 
-class OfflineTimingResult(diagnostics.CaseDiagnosticResult):
+class OfflineTimingResult(_LifecycleResult):
     def startTest(self, test):
         self.case_started = time.perf_counter()
         super().startTest(test)
@@ -2874,7 +4675,7 @@ def offline_main(argv=None):
     if args.partition is None:
         if args.list_tests:
             parser.error("--list-tests requires --partition")
-        unittest.main(argv=[sys.argv[0], *remaining], testRunner=diagnostics.CaseDiagnosticRunner)
+        unittest.main(argv=[sys.argv[0], *remaining], verbosity=2, testRunner=_LifecycleRunner)
         return 0
     if len(args.partition) != 1 or remaining:
         parser.error("one partition is required, without unittest selectors")
@@ -2886,7 +4687,7 @@ def offline_main(argv=None):
         for case in offline_cases(suite):
             print(case.id())
         return 0
-    result = diagnostics.CaseDiagnosticRunner(verbosity=2, resultclass=OfflineTimingResult).run(suite)
+    result = _LifecycleRunner(verbosity=2, resultclass=OfflineTimingResult).run(suite)
     return int(not result.wasSuccessful())
 
 
@@ -2992,11 +4793,11 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
         self.assertIn("bad roster", output.getvalue())
         with patch.object(unittest, "main") as run:
             self.assertEqual(offline_main([]), 0)
-            run.assert_called_once_with(argv=[sys.argv[0]], testRunner=diagnostics.CaseDiagnosticRunner)
+            run.assert_called_once_with(argv=[sys.argv[0]], verbosity=2, testRunner=_LifecycleRunner)
         with patch.object(unittest, "main") as run:
             self.assertEqual(offline_main(["CachedGitSafetyTests", "-v"]), 0)
             run.assert_called_once_with(argv=[sys.argv[0], "CachedGitSafetyTests", "-v"],
-                                        testRunner=diagnostics.CaseDiagnosticRunner)
+                                        verbosity=2, testRunner=_LifecycleRunner)
 
     def test_partition_runner_propagates_case_failure_and_reports_duration(self):
         class Fails(unittest.TestCase):
@@ -3027,6 +4828,87 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "timer unavailable"):
                 timing.startTest(Fails("test_failure"))
         self.assertEqual(timing.testsRun, 0)
+
+    def test_partition_runner_preserves_diagnostics_and_restores_after_interrupt(self):
+        owner_name = "test_fixture_commits_disable_maintenance_in_real_git"
+        saved_output = subprocess.check_output
+        for failure in (None, ValueError("partition body failure"), KeyboardInterrupt()):
+            calls = []
+
+            class Fixture(unittest.TestCase):
+                def cache_state(self):
+                    return self
+
+                def id(self):
+                    return "__main__.CachedGitSafetyTests." + owner_name
+
+            def body(case):
+                calls.append(case)
+                self.assertIsNot(subprocess.check_output, saved_output)
+                if failure is not None:
+                    raise failure
+
+            setattr(Fixture, owner_name, body)
+            saved_cache = Fixture.__dict__["cache_state"]
+            case = Fixture(owner_name)
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.dict(globals(), {"CachedGitSafetyTests": Fixture}), \
+                    patch.object(sys, "stderr", new_callable=io.StringIO) as output, \
+                    patch.object(sys.modules[__name__], "offline_partition_suite",
+                                 return_value=unittest.TestSuite([case])):
+                if isinstance(failure, KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        offline_main(["--partition", "1"])
+                    self.assertIs(caught.exception, failure)
+                else:
+                    self.assertEqual(offline_main(["--partition", "1"]), int(failure is not None))
+                self.assertEqual(calls, [case])
+                self.assertIs(subprocess.check_output, saved_output)
+                self.assertIs(Fixture.__dict__["cache_state"], saved_cache)
+                self.assertIn("phase=start ordinal=20", output.getvalue())
+                self.assertIn("phase=stop ordinal=20", output.getvalue())
+                self.assertIn("elapsed_v1=20:first_only:valid:", output.getvalue())
+                self.assertRegex(output.getvalue(), owner_name + r": [0-9]+\.[0-9]{3}s")
+
+    def test_cli_selection_ignores_default_loader_filters(self):
+        expected = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], "1")
+        with patch.object(unittest.defaultTestLoader, "testNamePatterns", ["*no_offline_case*"]), \
+                patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(offline_main(["--partition", "1", "--list-tests"]), 0)
+        self.assertEqual(output.getvalue().splitlines(), [case.id() for case in offline_cases(expected)])
+
+    def test_partition_runner_finally_restores_without_stop_callback(self):
+        owner_name = "test_fixture_commits_disable_maintenance_in_real_git"
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+        case = Fixture()
+        case._testMethodName = owner_name
+        saved_output = subprocess.check_output
+        saved_cache = Fixture.__dict__["cache_state"]
+        failure = SystemExit(73)
+
+        def interrupted(runner, suite):
+            result = runner._makeResult()
+            result.startTest(case)
+            self.assertIsNot(subprocess.check_output, saved_output)
+            raise failure
+
+        with patch.dict(globals(), {"CachedGitSafetyTests": Fixture}), \
+                patch.object(sys, "stderr", new_callable=io.StringIO), \
+                patch.object(sys.modules[__name__], "offline_partition_suite", return_value=unittest.TestSuite()), \
+                patch.object(unittest.TextTestRunner, "run", interrupted):
+            try:
+                with self.assertRaises(SystemExit) as caught:
+                    offline_main(["--partition", "1"])
+                self.assertIs(caught.exception, failure)
+                self.assertIs(subprocess.check_output, saved_output)
+                self.assertIs(Fixture.__dict__["cache_state"], saved_cache)
+            finally:
+                subprocess.check_output = saved_output
+                Fixture.cache_state = saved_cache
 
     def test_qualified_import_keeps_complete_partition_roster_and_listing(self):
         name = "offline_selection.qualified"

@@ -68,8 +68,15 @@ def regular_file(path, root):
 def _windows_evidence_path(name):
     """Compare resolved long paths in the same Win32 namespace on both sides."""
     name = str(name)
-    if name.upper().startswith('\\\\?\\UNC\\'):
-        name = '\\\\' + name[8:]
+    # Public path rendering may use either separator. Recognize resolved
+    # drive/UNC prefixes through a public spelling before removing them.
+    public_name = PureWindowsPath(name).as_posix()
+    if public_name.upper().startswith('//?/UNC/'):
+        name = '//' + public_name[8:]
+    elif (len(public_name) >= 7 and public_name.startswith('//?/')
+          and public_name[4] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+          and public_name[5:7] == ':/'):
+        name = public_name[4:]
     elif name.startswith('\\\\?\\'):
         name = name[4:]
     return PureWindowsPath(name)
