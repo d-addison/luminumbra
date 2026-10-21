@@ -1951,7 +1951,23 @@ target_include_directories(menu_presentation_test PRIVATE ../src)
 target_link_libraries(menu_presentation_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
+add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt ${CMAKE_DL_LIBS})
+luminumbra_configure_first_party_target(jolt_startup_test)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(jolt_startup_test PRIVATE
+        "-Wl,--export-dynamic-symbol=pthread_create"
+        "-Wl,--export-dynamic-symbol=pthread_join"
+        "-Wl,--export-dynamic-symbol=sem_init"
+        "-Wl,--export-dynamic-symbol=sem_destroy")
+endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
+set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    jolt_startup_test
     frame_attribution_test
     menu_presentation_test
     graphics_preset_classifier_test

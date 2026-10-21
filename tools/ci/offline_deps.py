@@ -71,6 +71,14 @@ def declarations(root: Path) -> dict:
                 or not fields.get("GIT_TAG")):
             raise DependencyError(f"unsupported dependency declaration: {name}")
         result[name] = {"repository": fields["GIT_REPOSITORY"], "revision": fields["GIT_TAG"]}
+    if "joltphysics" in result:
+        try:
+            spec = importlib.util.spec_from_file_location("_jolt_startup", root / "tools/ci/jolt_startup.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            result["joltphysics"]["overlay"] = module.identity(root)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise DependencyError(f"invalid Jolt overlay identity: {error}") from error
     if not result:
         raise DependencyError("no FetchContent dependencies found")
     return result
