@@ -553,7 +553,7 @@ class MatrixValidationTests(MatrixTestBase):
 class PathResolutionTests(unittest.TestCase):
     def test_windows_long_case_and_parent_aliases_share_sidecar_identity(self):
         class WindowsPath(PureWindowsPath):
-            def resolve(self):
+            def resolve(self, strict=False):
                 text = ntpath.normpath(self).lower()
                 return type(self)(text.replace('runner~1', 'runner account')
                                   .replace('captur~1.jso', 'capture record.json'))
@@ -577,7 +577,7 @@ class PathResolutionTests(unittest.TestCase):
     @contextlib.contextmanager
     def windows_paths(self):
         class WindowsPath(PureWindowsPath):
-            def resolve(self):
+            def resolve(self, strict=False):
                 return type(self)(ntpath.normpath(self))
 
             def is_file(self):
@@ -723,7 +723,7 @@ class PathResolutionTests(unittest.TestCase):
 
     def test_resolved_windows_prefixes_do_not_change_path_identity(self):
         class WindowsPath(PureWindowsPath):
-            def resolve(self):
+            def resolve(self, strict=False):
                 # Model handle resolution expanding a short directory name.
                 return type(self)(str(self).replace('RUNNER~1', 'Runner Account'))
 

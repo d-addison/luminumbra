@@ -3,6 +3,8 @@
 
 import importlib.util
 import json
+import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -20,14 +22,19 @@ SPEC.loader.exec_module(shards)
 
 
 def test(name, **properties):
-    return {"name": name, "properties": [{"name": key, "value": value} for key, value in properties.items()]}
+    return {"name": name, "command": ["test-binary", name], "properties": [{"name": key, "value": value} for key, value in properties.items()]}
 
 
 def aggregate_inventory_arguments():
     workflow = Path(__file__).resolve().parents[2] / ".github/workflows/asan.yml"
     command = next(line for line in workflow.read_text(encoding="utf-8").splitlines()
                    if line.strip().startswith("python3 tools/ci/check_ctest_junit.py "))
-    return shlex.split(command)[3:]
+    arguments = shlex.split(command)[3:]
+    floor = re.search(r"(?m)^          minimum_tests=([0-9]+)$", workflow.read_text(encoding="utf-8"))
+    assert arguments[:2] == ["--minimum-tests", "$minimum_tests"]
+    assert floor is not None
+    arguments[1] = floor.group(1)
+    return arguments
 
 
 class AsanShardTests(unittest.TestCase):
@@ -35,8 +42,21 @@ class AsanShardTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GITHUB_OUTPUT", None)
         self.names = ["ordinary", *(f"ActiveRegions/SimBudgetWorldParity.Replay/{n}" for n in range(4)), "last"]
         self.tests = [test(name) for name in self.names]
+
+    def test_synthetic_plans_do_not_publish_workflow_outputs(self):
+        self.assertNotIn("GITHUB_OUTPUT", os.environ)
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        output.write_bytes(sentinel)
+        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+            self.planned_selection(self.tests, self.tests)
+        self.assertEqual(output.read_bytes(), sentinel)
 
     def test_stride_alternates_four_heavy_tests_and_covers_exactly_once(self):
         result = shards.partition(self.tests, self.names)
@@ -100,9 +120,49 @@ class AsanShardTests(unittest.TestCase):
                         shards.plan(self.root, shard)
                     self.assertEqual(selection.read_text(encoding="utf-8"), "previous selection\n")
 
+    def test_plan_fixture_encodes_shared_inputs_once_without_retaining_mutations(self):
+        encode = json.dumps
+        for shared in (True, False):
+            with self.subTest(shared=shared):
+                all_tests = self.tests if shared else [dict(row) for row in self.tests]
+                expected = encode({"tests": self.tests}).encode()
+                with patch.object(json, "dumps", wraps=encode) as serialize:
+                    self.planned_selection(all_tests, self.tests)
+                calls = [call for call in serialize.call_args_list
+                         if isinstance(call.args[0], dict) and "tests" in call.args[0]
+                         and (call.args[0]["tests"] is self.tests or call.args[0]["tests"] is all_tests)]
+                self.assertEqual(len(calls), 1 if shared else 2)
+                self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+                self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+                self.assertEqual(encode({"tests": self.tests}).encode(), expected)
+                self.assertEqual(all_tests, self.tests)
+        self.tests[0]["command"].append("--changed")
+        expected = encode({"tests": self.tests}).encode()
+        with patch.object(json, "dumps", wraps=encode) as serialize:
+            self.planned_selection(self.tests, self.tests)
+        calls = [call for call in serialize.call_args_list
+                 if isinstance(call.args[0], dict) and call.args[0].get("tests") is self.tests]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        independent = json.loads(encode({"tests": self.tests}))["tests"]
+        independent[0]["command"].append("--independent")
+        with self.assertRaisesRegex(ValueError, "execution inventory differs"):
+            self.planned_selection(independent, self.tests)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(),
+                         encode({"tests": independent}).encode())
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        empty = []
+        with self.assertRaisesRegex(ValueError, "empty CTest inventory"):
+            self.planned_selection(empty, empty)
+
     def planned_selection(self, all_tests, eligible):
-        (self.root / "ctest.all.json").write_text(json.dumps({"tests": all_tests}))
-        (self.root / "ctest.inventory.json").write_text(json.dumps({"tests": eligible}))
+        # Reuse only this call's encoding when both fixture inputs are the same object.
+        # Both files and the real planner remain independent consumers.
+        all_text = json.dumps({"tests": all_tests})
+        (self.root / "ctest.all.json").write_text(all_text)
+        eligible_text = all_text if eligible is all_tests else json.dumps({"tests": eligible})
+        (self.root / "ctest.inventory.json").write_text(eligible_text)
         selected = []
         # Model CTest 3.28: apply -LE manual first, then interpret -I against
         # that filtered roster, preserving registration order.
@@ -224,22 +284,46 @@ class AsanShardTests(unittest.TestCase):
 
     def test_unchanged_roster_runs_in_the_same_ctest_context_and_preserves_status(self):
         self.planned_selection(self.tests, self.tests)
+        for shard in (1, 2):
+            with self.subTest(shard=shard):
+                shards.plan(self.root, shard)
+                self.assert_execution_context(self.root)
+
+    def assert_execution_context(self, directory):
+        resolved = directory.resolve()
         for status in (0, 8):
             with self.subTest(status=status):
                 discovery = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
                 execution = subprocess.CompletedProcess([], status)
                 with patch.object(shards.subprocess, "run", side_effect=[discovery, execution]) as invoke:
-                    self.assertEqual(shards.run(self.root), status)
+                    self.assertEqual(shards.run(directory), status)
                 check, execute = invoke.call_args_list
-                common = ["ctest", "--preset", "debug-asan", "--test-dir", str(self.root), "-LE", "manual"]
+                common = ["ctest", "--preset", "debug-asan", "--test-dir", str(resolved), "-LE", "manual"]
                 self.assertEqual(check.args[0], [*common, "--show-only=json-v1"])
-                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True})
+                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
                 self.assertEqual(execute.args[0], [*common, "--no-tests=error", "-I",
-                                                 str(self.root / "ctest.shard-index.txt"),
+                                                 str(resolved / "ctest.shard-index.txt"),
                                                  "--parallel", "2", "--timeout", "300",
                                                  "--output-junit", "ctest.junit.xml"])
                 # Both calls inherit the wrapper's cwd and environment.
                 self.assertEqual(execute.kwargs, {})
+
+    def test_windows_short_alias_uses_exact_resolved_execution_context(self):
+        self.planned_selection(self.tests, self.tests)
+        resolved = self.root.resolve()
+
+        # Model the filesystem's short-name expansion without requiring Windows
+        # symlink privilege or enabled 8.3 names. All reads use real plan files.
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        self.assertNotEqual(str(alias), str(resolved))
+        for shard in (1, 2):
+            with self.subTest(shard=shard):
+                shards.plan(self.root, shard)
+                self.assert_execution_context(alias)
 
     def test_failed_or_malformed_execution_discovery_never_launches_tests(self):
         self.planned_selection(self.tests, self.tests)

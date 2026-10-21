@@ -45,6 +45,12 @@ struct FarVolumeResidentObservation {
     bool water_complete = false, water_known_dry = false;
     std::uint64_t terrain_indices = 0, water_indices = 0;
 };
+// Owner-thread work for the last admission attempt, including refusals. Counts
+// index key comparisons and descriptor visits, not authority sampling.
+// This diagnostic never affects admission, ordering, or resource ownership.
+struct FarVolumeAdmissionWork {
+    std::size_t key_comparisons = 0, descriptor_visits = 0;
+};
 struct FarVolumeFrameResult {
     std::size_t dispatched = 0, uploaded = 0, rejected = 0, evicted = 0;
     std::size_t build_attempts = 0, upload_attempts = 0;
@@ -126,6 +132,7 @@ public:
     std::size_t VisitDraws(FarVolumeDrawVisitor visitor, void* context);
     // Cancels/drains every queue BEFORE dropping any authority/CPU/GPU pair.
     void CancelAndDrain();
+    FarVolumeAdmissionWork AdmissionWork() const;
 
 private:
     struct Entry {
@@ -136,6 +143,8 @@ private:
         double distance = 0;
     };
     struct Tier {
+        static std::size_t IndexSize(std::size_t, const FarVolumeQueueLimits&);
+        void RebuildIndex(FarVolumeAdmissionWork&);
         Tier(JobSystem&,
              World::FarVolumeMemoryPool&,
              std::size_t,
@@ -144,14 +153,18 @@ private:
         World::FarVolumeMemoryLease control;
         World::FarVolumeChargedResource resource;
         std::pmr::vector<Entry> entries;
+        // First entry_slots indices are sorted live descriptors; the second half
+        // holds at most entry_slots incoming positions during admission.
+        std::pmr::vector<std::size_t> key_index;
+        std::size_t index_count = 0;
         std::pmr::vector<std::size_t> order;
         FarVolumeBuildQueue queue;
         std::size_t completion_slots;
     };
     class Guard;
     void CheckOwner() const;
-    Entry* Find(const World::FarTileKey&);
-    const Entry* Find(const World::FarTileKey&) const;
+    Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr);
+    const Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr) const;
     bool Headroom(std::size_t tier,
                   std::uint64_t bytes,
                   const World::FarTileKey& preserve,
@@ -160,6 +173,7 @@ private:
     World::FarVolumeTierMemory& memory_;
     const std::thread::id owner_ = std::this_thread::get_id();
     bool active_ = false;
+    FarVolumeAdmissionWork admission_work_;
     std::array<std::optional<Tier>, World::kFarTierCount> tiers_;
 };
 } // namespace Luminumbra::Rendering

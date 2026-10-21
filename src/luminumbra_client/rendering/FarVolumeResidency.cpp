@@ -1,9 +1,29 @@
 #include "FarVolumeResidency.h"
+#include "FarVolumeBuildQueue.h"
+#include "FarVolumeRenderMesh.h"
+#include "FarVolumeUpload.h"
+#include "core/JobSystem.h"
+#include "world/Chunk.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeRuntime.h"
+#include "world/FarVolumeTierMemory.h"
+#include "world/FarWantedSet.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <memory_resource>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 namespace {
@@ -55,6 +75,15 @@ public:
 private:
     FarVolumeResidency& owner_;
 };
+std::size_t FarVolumeResidency::Tier::IndexSize(std::size_t count,
+                                                const FarVolumeQueueLimits& limits) {
+    if (count == 0 || count > limits.descriptor_slots || limits.result_slots == 0)
+        throw std::invalid_argument("Far-volume residency needs bounded nonzero entries");
+    constexpr auto bytes_per_entry = std::max(sizeof(Entry), 2 * sizeof(std::size_t));
+    if (count > std::numeric_limits<std::size_t>::max() / bytes_per_entry)
+        throw World::FarVolumeMemoryRefused();
+    return count * 2;
+}
 FarVolumeResidency::Tier::Tier(JobSystem& jobs,
                                World::FarVolumeMemoryPool& pool,
                                std::size_t count,
@@ -63,13 +92,28 @@ FarVolumeResidency::Tier::Tier(JobSystem& jobs,
     : control(pool)
     , resource(control, upstream)
     , entries(&resource)
+    , key_index(IndexSize(count, limits), 0, &resource)
     , order(&resource)
     , queue(jobs, pool, limits, upstream)
     , completion_slots(limits.result_slots) {
-    if (count == 0 || count > limits.descriptor_slots)
-        throw std::invalid_argument("Far-volume residency needs bounded nonzero entries");
     entries.resize(count);
     order.reserve(count);
+}
+void FarVolumeResidency::Tier::RebuildIndex(FarVolumeAdmissionWork& work) {
+    index_count = 0;
+    // At most entry_slots descriptors and O(entry_slots * log(entry_slots))
+    // comparisons, independent of coordinates or hash collisions. No allocation.
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        ++work.descriptor_visits;
+        if (entries[index].desired)
+            key_index[index_count++] = index;
+    }
+    std::sort(key_index.begin(),
+              key_index.begin() + static_cast<std::ptrdiff_t>(index_count),
+              [&](std::size_t a, std::size_t b) {
+                  ++work.key_comparisons;
+                  return entries[a].desired->identity.key < entries[b].desired->identity.key;
+              });
 }
 FarVolumeResidency::FarVolumeResidency(JobSystem& jobs,
                                        World::FarVolumeTierMemory& memory,
@@ -84,41 +128,87 @@ FarVolumeResidency::FarVolumeResidency(JobSystem& jobs,
     }
 }
 FarVolumeResidency::~FarVolumeResidency() {
-    CancelAndDrain();
+    try {
+        CancelAndDrain();
+    } catch (...) {
+        std::terminate();
+    }
 }
 void FarVolumeResidency::CheckOwner() const {
     if (std::this_thread::get_id() != owner_)
         throw std::logic_error("Far-volume residency outside owner thread");
 }
-const FarVolumeResidency::Entry* FarVolumeResidency::Find(const World::FarTileKey& key) const {
+const FarVolumeResidency::Entry* FarVolumeResidency::Find(const World::FarTileKey& key,
+                                                          FarVolumeAdmissionWork* work) const {
     if (key.tier == 0 || key.tier > tiers_.size())
         return nullptr;
     const auto& tier = tiers_[key.tier - 1];
     if (!tier)
         return nullptr;
-    for (const auto& entry : tier->entries)
-        if (entry.desired && entry.desired->identity.key == key)
-            return &entry;
-    return nullptr;
+    const auto end = tier->key_index.begin() + static_cast<std::ptrdiff_t>(tier->index_count);
+    const auto found = std::lower_bound(
+        tier->key_index.begin(), end, key, [&](std::size_t index, const World::FarTileKey& sought) {
+            if (work)
+                ++work->key_comparisons;
+            const auto& entry = tier->entries[index];
+            return RequireEngaged(entry.desired).identity.key < sought;
+        });
+    if (found == end)
+        return nullptr;
+    if (work)
+        ++work->key_comparisons;
+    const auto& entry = tier->entries[*found];
+    return entry.desired && entry.desired->identity.key == key ? &entry : nullptr;
 }
-FarVolumeResidency::Entry* FarVolumeResidency::Find(const World::FarTileKey& key) {
-    return const_cast<Entry*>(std::as_const(*this).Find(key));
+FarVolumeResidency::Entry* FarVolumeResidency::Find(const World::FarTileKey& key,
+                                                    FarVolumeAdmissionWork* work) {
+    return const_cast<Entry*>(std::as_const(*this).Find(key, work));
+}
+FarVolumeAdmissionWork FarVolumeResidency::AdmissionWork() const {
+    CheckOwner();
+    return admission_work_;
 }
 bool FarVolumeResidency::ReplaceWanted(std::span<const FarVolumeWantedRequest> requests) {
-    Guard guard(*this);
-    std::array<std::size_t, World::kFarTierCount> counts{};
+    Guard const guard(*this);
+    admission_work_ = {};
+    auto& work = admission_work_;
+    std::array<std::size_t, World::kFarTierCount> counts{}, next_free{};
+    for (auto& tier : tiers_) {
+        auto& value = RequireEngaged(tier);
+        value.order.assign(value.entries.size(), 0);
+    }
+    // Each tier admits at most entry_slots input positions into charged scratch.
     for (std::size_t i = 0; i < requests.size(); ++i) {
         const auto& request = requests[i];
         if (!Valid(request))
             return false;
-        const auto tier = std::size_t(request.identity.key.tier - 1);
-        if (++counts[tier] > tiers_[tier]->entries.size())
+        const auto number = std::size_t(request.identity.key.tier - 1);
+        auto& tier = RequireEngaged(tiers_[number]);
+        auto& count = counts[number];
+        if (count == tier.entries.size())
             return false;
-        for (std::size_t j = 0; j < i; ++j)
-            if (requests[j].identity.key == request.identity.key)
+        tier.key_index[tier.entries.size() + count++] = i;
+    }
+    for (std::size_t i = 0; i < tiers_.size(); ++i) {
+        auto& tier = RequireEngaged(tiers_[i]);
+        auto incoming = std::span(tier.key_index).subspan(tier.entries.size(), counts[i]);
+        std::sort(incoming.begin(), incoming.end(), [&](std::size_t a, std::size_t b) {
+            ++work.key_comparisons;
+            return requests[a].identity.key < requests[b].identity.key;
+        });
+        for (std::size_t j = 1; j < incoming.size(); ++j) {
+            ++work.key_comparisons;
+            if (requests[incoming[j - 1]].identity.key == requests[incoming[j]].identity.key)
                 return false;
-        const auto* old = Find(request.identity.key);
-        if (old && old->desired->identity == request.identity &&
+        }
+    }
+    for (const auto& request : requests) {
+        const auto* old = Find(request.identity.key, &work);
+        if (old) {
+            auto& tier = RequireEngaged(tiers_[request.identity.key.tier - 1]);
+            tier.order[static_cast<std::size_t>(old - tier.entries.data())] = 1;
+        }
+        if (old && old->desired && old->desired->identity == request.identity &&
             (old->desired->intent != request.intent ||
              old->desired->build_headroom_bytes != request.build_headroom_bytes ||
              bool(old->desired->water) != bool(request.water) ||
@@ -126,7 +216,8 @@ bool FarVolumeResidency::ReplaceWanted(std::span<const FarVolumeWantedRequest> r
              (old->desired->water && request.water &&
               old->desired->water->content_identity() != request.water->content_identity())))
             return false;
-        if (old && old->desired->identity.world_epoch == request.identity.world_epoch &&
+        if (old && old->desired &&
+            old->desired->identity.world_epoch == request.identity.world_epoch &&
             old->desired->intent.extra_span &&
             (!request.intent.extra_span ||
              request.intent.extra_span->min_y > old->desired->intent.extra_span->min_y ||
@@ -135,47 +226,84 @@ bool FarVolumeResidency::ReplaceWanted(std::span<const FarVolumeWantedRequest> r
     }
     bool keys_changed = false;
     std::size_t old_count = 0;
-    for (const auto& tier : tiers_)
-        for (const auto& entry : tier->entries)
-            if (entry.desired) {
+    for (const auto& slot : tiers_) {
+        const auto& tier = RequireEngaged(slot);
+        for (std::size_t index = 0; index < tier.entries.size(); ++index) {
+            ++work.descriptor_visits;
+            if (tier.entries[index].desired) {
                 ++old_count;
-                if (std::none_of(requests.begin(), requests.end(), [&](const auto& request) {
-                        return request.identity.key == entry.desired->identity.key;
-                    }))
-                    keys_changed = true;
+                keys_changed |= tier.order[index] == 0;
             }
+        }
+    }
     keys_changed = keys_changed || old_count != requests.size();
-    // Validation is complete. Entries/scratch never grow after construction.
-    for (auto& tier : tiers_)
-        for (auto& entry : tier->entries)
-            if (entry.desired && std::none_of(requests.begin(), requests.end(), [&](const auto& r) {
-                    return r.identity.key == entry.desired->identity.key;
-                })) {
-                tier->queue.Forget(entry.desired->identity.key);
+    // Validation is complete. Batch queue retirement avoids a descriptor search
+    // for every removed/replaced key. Scratch and entries never grow here.
+    for (std::size_t i = 0; i < tiers_.size(); ++i) {
+        auto& tier = RequireEngaged(tiers_[i]);
+        const auto incoming = std::span(tier.key_index).subspan(tier.entries.size(), counts[i]);
+        work.descriptor_visits +=
+            tier.queue.ForgetMatching([&](const World::FarTileKey& key) noexcept {
+                const auto found =
+                    std::lower_bound(incoming.begin(),
+                                     incoming.end(),
+                                     key,
+                                     [&](std::size_t index, const World::FarTileKey& sought) {
+                                         ++work.key_comparisons;
+                                         return requests[index].identity.key < sought;
+                                     });
+                if (found == incoming.end())
+                    return true;
+                ++work.key_comparisons;
+                if (requests[*found].identity.key != key)
+                    return true;
+                const auto* entry = Find(key, &work);
+                return !entry || !entry->desired ||
+                       entry->desired->identity != requests[*found].identity ||
+                       (keys_changed &&
+                        (entry->eligibility == FarVolumeEligibility::RequestRejected ||
+                         entry->eligibility == FarVolumeEligibility::BudgetEvicted));
+            });
+        for (std::size_t index = 0; index < tier.entries.size(); ++index) {
+            ++work.descriptor_visits;
+            auto& entry = tier.entries[index];
+            if (entry.desired && tier.order[index] == 0)
                 entry = Entry{};
-            }
+        }
+        if (keys_changed)
+            tier.RebuildIndex(work);
+    }
     for (const auto& request : requests) {
-        auto& tier = *tiers_[request.identity.key.tier - 1];
-        auto* entry = Find(request.identity.key);
+        const auto number = std::size_t(request.identity.key.tier - 1);
+        auto& tier = RequireEngaged(tiers_[number]);
+        auto* entry = Find(request.identity.key, &work);
         if (!entry) {
-            auto free = std::find_if(tier.entries.begin(),
-                                     tier.entries.end(),
-                                     [](const auto& candidate) { return !candidate.desired; });
-            entry = &*free; // capacities validated above
+            // Monotonic per-tier cursor: at most entry_slots visits in total.
+            auto& cursor = next_free[number];
+            while (cursor < tier.entries.size()) {
+                ++work.descriptor_visits;
+                if (!tier.entries[cursor].desired)
+                    break;
+                ++cursor;
+            }
+            if (cursor == tier.entries.size())
+                throw std::logic_error("Far-volume residency missing admitted entry");
+            entry = &tier.entries[cursor++];
         }
         const bool changed = !entry->desired || entry->desired->identity != request.identity;
         if (changed) {
-            tier.queue.Forget(request.identity.key);
             entry->completion.reset();
             if (entry->eligibility != FarVolumeEligibility::BudgetEvicted || keys_changed)
                 entry->eligibility = FarVolumeEligibility::Wanted;
             entry->desired = request;
         } else if (keys_changed && (entry->eligibility == FarVolumeEligibility::RequestRejected ||
                                     entry->eligibility == FarVolumeEligibility::BudgetEvicted)) {
-            tier.queue.Forget(request.identity.key);
             entry->eligibility = FarVolumeEligibility::Wanted;
         }
     }
+    if (keys_changed)
+        for (auto& tier : tiers_)
+            RequireEngaged(tier).RebuildIndex(work);
     return true;
 }
 void FarVolumeResidency::Reject(Entry& entry, FarVolumeFrameResult& result) {
@@ -239,7 +367,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                                                       const FarVolumeFrameLimits& limits,
                                                       const FarVolumeAuthorityProducer& producer,
                                                       const FarVolumeUploadBackend& backend) {
-    Guard guard(*this);
+    Guard const guard(*this);
     FarVolumeFrameResult result;
     if (!std::isfinite(x))
         x = 0;
@@ -329,6 +457,11 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
     // One global dispatch budget; explicit single-key Pump avoids fallback.
     for (std::size_t n = tiers_.size(); n > 0; --n) {
         auto& tier = RequireEngaged(tiers_[n - 1]);
+        // Retained results share the queue allowance until upload or discard.
+        // Headroom eviction can only reduce this frame's conservative count.
+        std::size_t held = 0;
+        for (const auto& entry : tier.entries)
+            held += entry.completion.has_value();
         for (const auto i : tier.order) {
             auto& entry = tier.entries[i];
             if (entry.eligibility != FarVolumeEligibility::Wanted &&
@@ -336,10 +469,12 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                 continue;
             if (result.build_attempts == limits.builds)
                 break;
+            if (tier.queue.ResultCapacity(held) == 0)
+                break;
             ++result.build_attempts;
             if (entry.eligibility == FarVolumeEligibility::Pending) {
                 const std::array key{RequireEngaged(entry.desired).identity.key};
-                const auto dispatched = tier.queue.Pump(1, key);
+                const auto dispatched = tier.queue.Pump(1, key, held);
                 result.dispatched += dispatched;
                 if (dispatched != 0)
                     entry.eligibility = FarVolumeEligibility::Building;
@@ -382,7 +517,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                 continue;
             }
             const std::array key{entry.desired->identity.key};
-            const auto dispatched = tier.queue.Pump(1, key);
+            const auto dispatched = tier.queue.Pump(1, key, held);
             result.dispatched += dispatched;
             entry.eligibility =
                 dispatched == 0 ? FarVolumeEligibility::Pending : FarVolumeEligibility::Building;
@@ -486,15 +621,18 @@ bool FarVolumeResidency::CoarseMayYield(const World::FarTileKey& key) const {
     return true;
 }
 void FarVolumeResidency::CancelAndDrain() {
-    Guard guard(*this);
+    Guard const guard(*this);
     for (auto& tier : tiers_)
         RequireEngaged(tier).queue.CancelAndDrain();
-    for (auto& tier : tiers_)
-        for (auto& entry : RequireEngaged(tier).entries)
+    for (auto& tier : tiers_) {
+        auto& value = RequireEngaged(tier);
+        for (auto& entry : value.entries)
             entry = Entry{};
+        value.index_count = 0;
+    }
 }
 std::size_t FarVolumeResidency::VisitDraws(FarVolumeDrawVisitor visitor, void* context) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (!visitor)
         return 0;
     std::size_t count = 0;

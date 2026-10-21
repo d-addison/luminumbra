@@ -4154,15 +4154,23 @@ script.write_text('changed input', encoding='utf-8')
     def test_execution_workflow_uses_the_native_producer_condition(self) -> None:
         workflow = (MODULE.DEFAULT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         linux = workflow.split("\n  linux:\n", 1)[1].split("\n  gns-compile-probe:\n", 1)[0]
-        for name in ("Configure", "Test", "Test over-the-wire networking",
-                     "Check acceptance matrix CTest execution", "Upload test evidence"):
+        for name in ("Configure", "Test", "Test over-the-wire networking", "Upload test evidence"):
             with self.subTest(step=name):
                 step = linux.split("      - name: " + name + "\n", 1)[1].split("      - name: ", 1)[0]
                 condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
                 self.assertIsNotNone(condition)
                 self.assertTrue(condition[1].startswith("${{ needs.changes.outputs.needs_cpp != 'false'"))
-                if name != "Upload test evidence":
+                if name == "Test over-the-wire networking":
+                    self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' && matrix.shard != 2 }}")
+                elif name != "Upload test evidence":
                     self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' }}")
+        aggregate = workflow.split("\n  linux-result:\n", 1)[1].split("\n  windows-msvc-result:\n", 1)[0]
+        step = aggregate.split("      - name: Check acceptance matrix CTest execution\n", 1)[1].split("      - name: ", 1)[0]
+        condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
+        self.assertIsNotNone(condition)
+        self.assertEqual(condition[1], "needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'")
+        self.assertLess(aggregate.index("name: Merge shard JUnit and check inventory\n"),
+                        aggregate.index("name: Check acceptance matrix CTest execution\n"))
 
     def test_missing_covered_doc_ref_is_rejected(self) -> None:
         matrix = baseline_matrix()
@@ -5198,6 +5206,30 @@ script.write_text('changed input', encoding='utf-8')
         doc.write_bytes(crlf)
         code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
         self.assertEqual(code, 0, err)
+
+    def test_merged_rows_with_stale_summary_are_rejected(self) -> None:
+        matrix = baseline_matrix()
+        original = MODULE.render_doc(matrix)
+        added = copy.deepcopy(matrix["rows"][0])
+        added.update(id="merged.covered", requirements=[])
+        matrix["rows"].append(added)
+        self.write_matrix(matrix)
+        rendered = MODULE.render_doc(matrix)
+        # A clean text merge can retain a parent's unchanged summary while
+        # adding the other parent's row. Every row cell still matches exactly.
+        stale = original.split("| Row |", 1)[0] + "| Row |" + rendered.split("| Row |", 1)[1]
+        doc = self.root / "docs/acceptance-matrix.md"
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                doc.write_bytes(stale.replace("\n", newline).encode("utf-8"))
+                self.assertFalse(MODULE._doc_matches(doc, rendered))
+                code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
+                self.assertEqual(code, 1)
+                self.assertIn("is stale", err)
+                code, _, err = self.run_main(*self.base_args(), "--write-doc", str(doc))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(doc.read_bytes(), rendered.encode("utf-8"))
+                self.assertTrue(MODULE._doc_matches(doc, rendered))
 
     def test_edited_doc_is_stale(self) -> None:
         self.write_matrix(baseline_matrix())
@@ -7448,9 +7480,9 @@ deep(10)
         original = sorted(case.__name__ + "." + name
                           for case in (*_MATRIX_CLASSES, AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
                           for name in loader.getTestCaseNames(case))
-        self.assertEqual(len(original), 248)
+        self.assertEqual(len(original), 249)
         self.assertEqual(hashlib.sha256("\n".join(original).encode("utf-8")).hexdigest(),
-                         "57e803ce65b9c5c36a831b47562eb13cd5f1cabb9cb9dff9884a918d2479f483")
+                         "4806f17639f51770b6cf64722bc7539f8cd8c97cd08ae49e396c85dc58f70b0d")
         selected = [test.id() for number in range(_CONTRACT_PARTITIONS) for test in contract_suite(number)]
         cmake = (MODULE.DEFAULT_ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         blocks = re.findall(r'add_test\(\s*NAME (Acceptance\w+Contract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
@@ -7489,7 +7521,7 @@ deep(10)
         self.assertEqual(len(selected), len(set(selected)))
         discovered = loader.loadTestsFromModule(sys.modules[__name__])
         self.assertEqual(discovered.countTestCases(), len(expected))
-        self.assertEqual(len(expected), 285)
+        self.assertEqual(len(expected), 286)
         self.assert_phase_contract()
 
     def test_partition_entrypoint_refuses_invalid_selection(self) -> None:
