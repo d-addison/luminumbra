@@ -6,14 +6,15 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 36 |
+| covered | 37 |
 | partial | 11 |
 | needs-native-run | 17 |
 | planned | 86 |
-| Total | 150 |
+| Total | 151 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| ci.asan-fast-lane | covered | `docs/development.md#continuous-integration` |  | Ready pull requests needing native validation run ChangedTranslationUnitsContract and OfflineDependenciesContract before ASan shards. A failed fast lane skips both shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved. | ctest: `WorkflowPolicyContract`<br>doc: `docs/development.md` |
 | iss.500 | covered | `issue #500` |  | Direct compile and tidy selection honors a nonempty LUMINUMBRA_BASE_REF, defaults to origin/devel when it is unset or empty, and gives explicit --base-ref priority. Unavailable or invalid refs fail without fallback or native work. The documented shell recipe uses the same environment default. | ctest: `ChangedTranslationUnitsContract`<br>doc: `docs/ci/local-checks.md` |
 | ci.scratch-preparation | covered | `docs/ci/local-checks.md#worker-recipe` |  | The documented prepare command checks original checkout and scratch components, fresh stage/init paths and all existing temporary, compiler-cache and build-tree entries before creating temporary/cache directories or exporting their paths. Redirects, non-directory components, special files and containment escapes refuse without writes; ordinary nested trees are allowed and checks repeat on every call. | ctest: `OfflineDependenciesContract`<br>doc: `docs/ci/local-checks.md` |
 | iss.482 | covered | `issue #482` |  | Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities. | ctest: `RenderContractPython`<br>ctest: `AmbientReceiptComparatorContract`<br>ctest: `QualificationCaptureContract`<br>ctest: `SoftwareGlEvidenceContract` |
