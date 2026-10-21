@@ -255,7 +255,7 @@ struct PendingPhysicsResources {
     std::unique_ptr<JoltRuntimeLease> lease;
     std::unique_ptr<TempAllocator> temp;
     std::unique_ptr<JPH::PhysicsSystem> physics;
-    std::unique_ptr<JobSystem> jobs;
+    std::unique_ptr<JPH::JobSystem> jobs;
 };
 } // namespace
 
