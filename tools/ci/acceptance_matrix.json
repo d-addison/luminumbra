@@ -3,6 +3,23 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "ci.asan-fast-lane",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "Ready pull requests needing native validation run ChangedTranslationUnitsContract and OfflineDependenciesContract before ASan shards. A failed fast lane skips both shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "iss.500",
       "source": "issue #500",
       "statement": "Direct compile and tidy selection honors a nonempty LUMINUMBRA_BASE_REF, defaults to origin/devel when it is unset or empty, and gives explicit --base-ref priority. Unavailable or invalid refs fail without fallback or native work. The documented shell recipe uses the same environment default.",
