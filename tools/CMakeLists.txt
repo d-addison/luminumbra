@@ -303,6 +303,26 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 4)
     set_tests_properties(CTestShardContractPart4
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart5
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 5)
+    set_tests_properties(CTestShardContractPart5
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart6
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 6)
+    set_tests_properties(CTestShardContractPart6
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart7
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 7)
+    set_tests_properties(CTestShardContractPart7
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart8
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 8)
+    set_tests_properties(CTestShardContractPart8
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.
     # Partition 9 reserves two slots for its bounded route-grid overlap.
@@ -420,6 +440,8 @@ if(BUILD_TESTING)
             WorldgenProbeSmokeValidatorContract AsanShardContract
             CTestShardContractPart1 CTestShardContractPart2
             CTestShardContractPart3 CTestShardContractPart4
+            CTestShardContractPart5 CTestShardContractPart6
+            CTestShardContractPart7 CTestShardContractPart8
             WorkflowPolicyContract WorkflowPolicyContractPart1
             WorkflowPolicyContractPart2 WorkflowPolicyContractPart3
             WorkflowPolicyContractPart4 WorkflowPolicyContractPart5
@@ -431,7 +453,9 @@ if(BUILD_TESTING)
         # Explicit costs seed longest-first scheduling on fresh runners.
         set_property(TEST WorkflowPolicyContract PROPERTY COST 30)
         set_property(TEST CTestShardContractPart1 CTestShardContractPart2
-            CTestShardContractPart3 CTestShardContractPart4 PROPERTY COST 25)
+            CTestShardContractPart3 CTestShardContractPart4
+            CTestShardContractPart5 CTestShardContractPart6
+            CTestShardContractPart7 CTestShardContractPart8 PROPERTY COST 25)
         set_property(TEST WorkflowPolicyContractPart1 PROPERTY COST 21)
         set_property(TEST WorkflowPolicyContractPart8 PROPERTY COST 20)
         set_property(TEST WorkflowPolicyContractPart9 PROPERTY COST 19)
