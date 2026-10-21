@@ -25,6 +25,52 @@ tus = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(tus)
 
 
+class DependencyIncludesTests(unittest.TestCase):
+    def test_common_dependencies_export_system_headers_to_all_consumers(self):
+        vendor = (ROOT / "vendor/CMakeLists.txt").read_text(encoding="utf-8")
+        common = (ROOT / "src/luminumbra_common/CMakeLists.txt").read_text(encoding="utf-8")
+        # Exercise the production export commands without fetching dependencies,
+        # probing a compiler, compiling a translation unit or running native code.
+        exports = re.search(r"foreach\(_common_dependency\b.*?endforeach\(\)", vendor, re.S)
+        self.assertIsNotNone(exports)
+        dependencies = ("EnTT", "Jolt", "nlohmann_json", "sol2", "lua", "spdlog",
+                        "lz4_static", "glm", "FastNoise")
+        aliases = {"EnTT": "entt", "lz4_static": "lz4"}
+        links = re.search(r"target_link_libraries\(luminumbra_common PUBLIC(.*?)\)", common, re.S)
+        self.assertIsNotNone(links)
+        self.assertEqual(links[1].split(), [aliases.get(name, name) for name in dependencies])
+        with tempfile.TemporaryDirectory(prefix="dependency includes ") as temporary:
+            source = Path(temporary).resolve()
+            build = source / "build"
+            project = ["cmake_minimum_required(VERSION 3.20)",
+                       "project(DependencyIncludes LANGUAGES NONE)"]
+            for name in dependencies:
+                project += [f"add_library({name} INTERFACE)",
+                            f"target_include_directories({name} INTERFACE "
+                            f'"$<BUILD_INTERFACE:${{CMAKE_CURRENT_SOURCE_DIR}}/{name}>" '
+                            f'"$<INSTALL_INTERFACE:include/{name}>")']
+            project.append(exports[0])
+            # Late-added paths model generated overlays such as Jolt's startup
+            # headers. Exporting a snapshot would silently miss these paths.
+            for name in dependencies:
+                project += [f'target_include_directories({name} INTERFACE '
+                            f'"${{CMAKE_CURRENT_BINARY_DIR}}/{name}")',
+                            f'file(GENERATE OUTPUT "${{CMAKE_CURRENT_BINARY_DIR}}/{name}.txt" '
+                            f'CONTENT "$<TARGET_PROPERTY:{name},INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>")']
+            project += ["add_library(first_party INTERFACE)",
+                        'target_include_directories(first_party INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/src")',
+                        'file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/first_party.txt" '
+                        'CONTENT "$<TARGET_PROPERTY:first_party,INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>")']
+            (source / "CMakeLists.txt").write_text("\n".join(project) + "\n", encoding="utf-8")
+            subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja"],
+                           check=True, capture_output=True, text=True, timeout=10)
+            for name in dependencies:
+                with self.subTest(dependency=name):
+                    self.assertEqual((build / f"{name}.txt").read_text(encoding="utf-8").split(";"),
+                                     [(source / name).as_posix(), (build / name).as_posix()])
+            self.assertEqual((build / "first_party.txt").read_text(encoding="utf-8"), "")
+
+
 class ChangedTranslationUnitsTests(unittest.TestCase):
     def test_windows_reparse_entries_are_refused_by_every_tree_consumer(self):
         real_lstat = os.lstat

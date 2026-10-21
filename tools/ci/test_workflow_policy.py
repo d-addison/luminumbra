@@ -861,11 +861,14 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
             "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
-            "linux": "05a0dfbb924be809da5c6d52bcd95b2d9c74b3adb877efe7c6f80fc66240e72e",
+            # Require all three offline-dependency partitions in local-check evidence.
+            "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
             "gns-compile-probe": "8ba48b3b08d1b8c8b3c566827d1c07b850f3d21b3ee2c4765952169a7c13532b",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
-            "windows-msvc": "47a945caca4789dbf32c34dcc89c18e97afa4fe2bd2715771465a35be84bccc9",
-            "windows-ucrt64": "85c4fb01cf8d886b3b5ab0886ad915d7e891bdab187ecde8df11469005dccbe9",
+            # Pin Python 3.14.8 across consumers and require partitioned local-check evidence.
+            "windows-msvc": "763218a207e024d39c82df14c933c89ac1d090342d7f4a794baa046a7a8d10f5",
+            # Pin Python 3.14.8 and pass the selected runtime to UCRT64 configuration.
+            "windows-ucrt64": "00890b97a7e49d22c50d046972b2f272fe0a63ca8ff90fb132f99fb410797eb1",
             "linux-result": "506db39392d1e4e81219389b13a4a626675bec93182c598d4e6588f356512f77",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
