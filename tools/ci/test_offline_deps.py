@@ -1384,8 +1384,11 @@ class CachedGitSafetyTests(unittest.TestCase):
 
     @staticmethod
     def commit(source, cache):
+        # A commit otherwise starts detached background maintenance, which writes lock files under the
+        # object directory while the finished repository is being copied for every test.
         deps.git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
-                 "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "fixture", cache=cache)
+                 "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                 "commit", "--quiet", "-m", "fixture", cache=cache)
 
     def save_lock(self, identity):
         lock = deps.unresolved_lock(self.root)
