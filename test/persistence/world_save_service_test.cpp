@@ -358,7 +358,10 @@ TEST(WorldSaveService, RegionStagingPreservesRootsAndStandaloneSpelling) {
                                    std::filesystem::path("chunks/unused/../region/r.0.0.lmr")}) {
             const auto destination = root / suffix;
             const auto staging = WorldSaveService::region_staging_path(destination);
-            EXPECT_EQ(paths::GenericUtf8PathString(staging), expected + "/r.0.0.lmr");
+            EXPECT_EQ(staging.native(),
+                      (destination.parent_path() / ".." / ".." / destination.filename()).native());
+            EXPECT_EQ(paths::GenericUtf8PathString(paths::LexicallyNormalPath(staging)),
+                      expected + "/r.0.0.lmr");
         }
         for (const auto& suffix : {std::filesystem::path("standalone/./records.lmr"),
                                    std::filesystem::path("standalone/child/../records.lmr"),
@@ -384,6 +387,58 @@ TEST(WorldSaveService, RegionStagingPreservesRootsAndStandaloneSpelling) {
     check_root("/save", "/save");
 #endif
 }
+
+TEST(WorldSaveService, RegionStagingRetainsSymlinkParentTraversalWithoutFilesystemAccess) {
+    // Missing paths also exercise this contract on Windows without symlink privilege.
+    // Four spellings bound the pass; none is opened or resolved.
+    for (const auto& root : {std::filesystem::path("missing/link/../save"),
+                             std::filesystem::path("missing/link/.."),
+                             std::filesystem::path("missing/link/../save/./"),
+                             std::filesystem::path("missing/link/../../save")}) {
+        for (const auto* member : {"r.0.0.lmr", "world-manifest.json"}) {
+            const auto destination = WorldSaveService::region_directory(root) / member;
+            EXPECT_EQ(WorldSaveService::region_staging_path(destination).native(),
+                      (destination.parent_path() / ".." / ".." / member).native());
+        }
+    }
+}
+
+#if !defined(_WIN32)
+TEST(WorldSaveService, SymlinkParentSaveReclaimsAndReplacesInTheResolvedDirectory) {
+    const TempSaveDir fixture("symlink_parent_staging");
+    const auto actual_root = fixture.path() / "actual";
+    std::filesystem::create_directories(actual_root / "child");
+    std::filesystem::create_directory_symlink(actual_root / "child", fixture.path() / "link");
+    const auto save_root = fixture.path() / "link/../save";
+    const auto actual_save = actual_root / "save";
+    const auto wrong_save = fixture.path() / "save";
+    std::filesystem::create_directories(wrong_save);
+    const auto unrelated = wrong_save / "r.0.0.lmr.tmp.retained";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(unrelated, "unrelated"));
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    const WorldSaveService service;
+    ASSERT_TRUE(service.save_world(state, save_root));
+    const auto original_hash = service.world_hash(state);
+    const auto abandoned = actual_save / "r.0.0.lmr.tmp.abandoned";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial"));
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool interrupted = service.save_world(state, save_root);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(interrupted);
+    EXPECT_FALSE(std::filesystem::exists(abandoned));
+    EXPECT_TRUE(std::filesystem::exists(unrelated));
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.load_world(loaded, save_root, errors));
+    EXPECT_EQ(service.world_hash(loaded), original_hash);
+    ASSERT_TRUE(service.save_world(state, save_root));
+    ASSERT_TRUE(service.load_world(loaded, actual_save, errors));
+    EXPECT_EQ(service.world_hash(loaded), original_hash);
+    EXPECT_FALSE(std::filesystem::exists(wrong_save / "chunks"));
+    EXPECT_TRUE(std::filesystem::exists(unrelated));
+}
+#endif
 
 TEST(WorldSaveService, DurableContainerStagingHandlesParentComponentsAndInterruptedRetry) {
     const TempSaveDir save_dir("staging_paths");

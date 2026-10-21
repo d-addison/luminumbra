@@ -1804,19 +1804,11 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     if (report) {
         *report = result;
     }
-    if (!IsSimulationTickBoundary() || !ClockConfigurationCompatible(save_dir) ||
-        !m_worldOpenError.empty() || !m_worldSystem || save_dir.empty() ||
+    if (!IsSimulationTickBoundary() || !m_worldOpenError.empty() || !m_worldSystem ||
+        save_dir.empty() ||
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
     }
-
-    if (!Persistence::WorldSaveService::validate_save(save_dir))
-        return false;
-
-    // Refuse a changed preset or identity before any snapshot write or dirty acknowledgement,
-    // including the chunk-free plant/energy path and saves with active regions disabled.
-    if (!SavedPresetCompatible(save_dir))
-        return false;
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an
@@ -1844,6 +1836,14 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     result.chunks_dirty = dirty_ids.size();
     if (report)
         *report = result;
+
+    // Jobs can need persistence ownership themselves. Quiesce and capture first,
+    // then retain the shared recursive ownership from destination validation
+    // through every payload, metadata publication and dirty acknowledgement.
+    const Persistence::WorldSaveService::SaveOwnership save_ownership;
+    if (!ClockConfigurationCompatible(save_dir) ||
+        !Persistence::WorldSaveService::validate_save(save_dir) || !SavedPresetCompatible(save_dir))
+        return false;
 
     std::vector<std::string> errors;
     const Persistence::WorldSaveService service;

@@ -282,7 +282,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         end = service.index("returnreclaimed;", start)
         self.assertIn('destination.has_parent_path()?destination.parent_path():'
                       'std::filesystem::path(".")', service[start:end])
-        self.assertIn("returndirectory.parent_path().parent_path()/normalized.filename();", service)
+        self.assertIn('returndestination.parent_path()/".."/".."/destination.filename();', service)
         for function, destination in (("WriteRegionFile", "path"),
                                       ("WriteWorldManifest", "manifest_path")):
             start = service.index("bool" + function + "(")
@@ -292,6 +292,26 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           destination + ");", write)
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
             self.assertIn("WriteDurableRegionTemp(staging,", write)
+
+    def test_session_save_owns_validation_payloads_metadata_and_acknowledgement(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        start = session.index("boolGameSession::SaveWorldStateToImpl(")
+        sequence = session[start:session.index("boolGameSession::LoadWorldState()", start)]
+        guard = "constPersistence::WorldSaveService::SaveOwnershipsave_ownership;"
+        self.assertIn(guard, sequence)
+        ownership = sequence.index(guard)
+        # Function scope keeps ownership across all phases and every early return.
+        self.assertEqual(sequence[:ownership].count("{") - sequence[:ownership].count("}"), 1)
+        for capture in ("quiesce_streaming_jobs_for_save();", "BuildPlantEntitySnapshot(m_registry)",
+                        "state.dirty_chunk_ids()"):
+            self.assertLess(sequence.index(capture), ownership)
+        for operation in ("ClockConfigurationCompatible(save_dir)", "validate_save(save_dir)",
+                          "SavedPresetCompatible(save_dir)", "service.save_world(",
+                          ".save_dirty_chunks(", "save_plant_entities(", "SaveEnergyFieldRecord(",
+                          "SaveWorldMetadataTo(", "m_activeRegionLedger.mark_saved(",
+                          "chunk->clear_voxel_data_dirty()"):
+            self.assertLess(ownership, sequence.index(operation))
 
     def test_writers_hold_shared_ownership_through_cleanup_and_publication(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")

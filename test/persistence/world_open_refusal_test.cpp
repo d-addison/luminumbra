@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -1709,6 +1710,103 @@ private:
 };
 
 class CompleteSaveFailure : public WorldOpenRefusal {};
+
+namespace {
+struct SessionSaveOverlap {
+    std::barrier<> staged{2};
+    std::barrier<> release{2};
+    std::atomic<bool> hold_next{true};
+};
+
+SessionSaveOverlap*& ActiveSessionSaveOverlap() {
+    static SessionSaveOverlap* overlap = nullptr;
+    return overlap;
+}
+
+bool HoldSessionMetadata() {
+    if (!ActiveSessionSaveOverlap()->hold_next.exchange(false))
+        return true;
+    ActiveSessionSaveOverlap()->staged.arrive_and_wait();
+    ActiveSessionSaveOverlap()->release.arrive_and_wait();
+    return true;
+}
+} // namespace
+
+TEST_F(WorldOpenRefusal, OverlappingSessionSaveOwnsDestinationThroughMetadataAndRefusal) {
+    // Four cases bound this pass: incremental/complete exports, each with a
+    // compatible or refused clock configuration. Each session has one chunk.
+    for (const bool full_snapshot : {false, true}) {
+        for (const bool compatible : {false, true}) {
+            SCOPED_TRACE(full_snapshot);
+            SCOPED_TRACE(compatible);
+            const auto first_config = SnapshotRunnerConfig(RootString(), true);
+            auto second_config = SnapshotRunnerConfig(RootString(), compatible);
+            second_config.world_name = "Other snapshot";
+            Server::ServerWorldRunner first(first_config);
+            Server::ServerWorldRunner second(second_config);
+            ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(first, true));
+            ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(second, compatible));
+            std::shared_ptr<Chunk> first_chunk;
+            std::shared_ptr<Chunk> second_chunk;
+            ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*first.Session(), first_chunk, true));
+            ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*second.Session(), second_chunk, true));
+            second_chunk->heightmap_data.front() = 84.0f;
+            second.Session()->SetSpawnPoint(Vec3(29, 31, 37));
+            const PendingSnapshotState first_pending(*first.Session());
+            const PendingSnapshotState second_pending(*second.Session());
+            const auto destination = first.Session()->GetWorldSaveDir();
+            SessionSaveOverlap overlap;
+            ActiveSessionSaveOverlap() = &overlap;
+            WorldSaveService::set_before_active_regions_replace_for_testing(&HoldSessionMetadata);
+            bool first_saved = false;
+            bool second_saved = false;
+            std::atomic<bool> second_done{false};
+            std::jthread first_writer([&] { first_saved = first.Session()->SaveWorld(); });
+            overlap.staged.arrive_and_wait();
+            std::jthread second_writer([&] {
+                second_saved =
+                    second.Session()->SaveWorldStateTo(destination, nullptr, full_snapshot);
+                second_done.store(true, std::memory_order_release);
+            });
+            // Ownership wait or return is observable, so no sleeps or assumed
+            // scheduling order are needed. On an unguarded session save the
+            // incompatible call returns here while the first save is incomplete.
+            while (WorldSaveService::waiting_save_writers() == 0 &&
+                   !second_done.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            EXPECT_FALSE(second_done.load(std::memory_order_acquire));
+            EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+            // The hook remains installed until both writers finish; only its
+            // first invocation pauses, so an unexpected refusal cannot strand a barrier.
+            overlap.release.arrive_and_wait();
+            first_writer.join();
+            second_writer.join();
+            WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+            ActiveSessionSaveOverlap() = nullptr;
+            EXPECT_TRUE(first_saved);
+            EXPECT_EQ(second_saved, compatible);
+            EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
+            EXPECT_TRUE(second_chunk->is_voxel_data_dirty());
+            const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+            const auto* expected_session = compatible ? second.Session() : first.Session();
+            const auto& expected_metadata = expected_session->GetMetadata();
+            EXPECT_EQ(metadata.at("name"), expected_metadata.name);
+            EXPECT_EQ(metadata.at("spawnPoint").at("x"), expected_metadata.spawnPoint.x);
+            EXPECT_EQ(metadata.at("spawnPoint").at("y"), expected_metadata.spawnPoint.y);
+            EXPECT_EQ(metadata.at("spawnPoint").at("z"), expected_metadata.spawnPoint.z);
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectSnapshotReloaded(compatible ? second_pending : first_pending,
+                                       compatible ? *second_chunk : *first_chunk,
+                                       first_config,
+                                       first.Session()->GetMetadata().worldId,
+                                       jobs));
+            // A refused writer releases ownership and can save to its own root.
+            ASSERT_TRUE(second.Session()->SaveWorld());
+            first.Shutdown();
+            second.Shutdown();
+        }
+    }
+}
 
 TEST_F(WorldOpenRefusal, ClientExitCompleteSavePublishesCapturedSpawnInBothRegionModes) {
     for (const bool regions : {false, true}) {

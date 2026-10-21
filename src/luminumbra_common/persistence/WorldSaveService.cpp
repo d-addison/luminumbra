@@ -222,19 +222,7 @@ public:
     }
 };
 
-class SaveGuard {
-public:
-    SaveGuard()
-        : m_lock(SaveMutex(), std::defer_lock) {
-        if (!m_lock.try_lock()) {
-            const WaitingSaveWriter waiting;
-            m_lock.lock();
-        }
-    }
-
-private:
-    std::unique_lock<std::recursive_mutex> m_lock;
-};
+using SaveGuard = WorldSaveService::SaveOwnership;
 
 // One record of an LMR1 region file kept in its on-disk (compressed) form so
 // untouched records survive a merge byte-for-byte without a decode pass.
@@ -1146,6 +1134,14 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
 } // namespace
 
+WorldSaveService::SaveOwnership::SaveOwnership()
+    : m_lock(SaveMutex(), std::defer_lock) {
+    if (!m_lock.try_lock()) {
+        const WaitingSaveWriter waiting;
+        m_lock.lock();
+    }
+}
+
 std::filesystem::path
 WorldSaveService::region_staging_path(const std::filesystem::path& destination) {
     // Every region member lives at save/chunks/region/<filename>. Stage on the
@@ -1154,7 +1150,10 @@ WorldSaveService::region_staging_path(const std::filesystem::path& destination) 
     const auto directory = normalized.parent_path();
     if (directory.filename() == kRegionDirectoryName &&
         directory.parent_path().filename() == kChunksDirectoryName)
-        return directory.parent_path().parent_path() / normalized.filename();
+        // Normalize only to recognize the layout. Traverse from the original
+        // region directory so a symlink followed by ".." keeps its filesystem
+        // meaning in staging, reclamation and final replacement alike.
+        return destination.parent_path() / ".." / ".." / destination.filename();
     // Raw container access also supports standalone files outside a world save.
     return destination;
 }

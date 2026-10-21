@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -44,6 +45,18 @@ struct RegionDigestInputs {
 // Obsolete disk formats are refused; migration is not supported.
 class WorldSaveService {
 public:
+    // Compose multiple persistence operations under the same process ownership.
+    // Acquire only after quiescing jobs: a job may itself need a persistence writer.
+    // Recursive acquisition lets the ordinary writers retain their own guards.
+    // Caller-owned session inputs must remain stable until the sequence returns.
+    class SaveOwnership {
+    public:
+        SaveOwnership();
+
+    private:
+        std::unique_lock<std::recursive_mutex> m_lock;
+    };
+
     // Also recorded in world_info.json, including before the first chunk save.
     static constexpr std::uint16_t kContainerVersion = 2;
     static constexpr const char* kObsoleteWorldMessage =
@@ -180,7 +193,8 @@ public:
     // Read-only diagnostic of the staging filename base used by region/manifest
     // writers, before the unique temporary suffix. Region members stage in the
     // save root outside strict scans; standalone paths retain their spelling.
-    // Normalization preserves Windows UNC roots and performs no filesystem I/O.
+    // Lexical recognition performs no filesystem I/O; relocated paths retain the
+    // original traversal, including symlinks followed by parent components.
     static std::filesystem::path region_staging_path(const std::filesystem::path& destination);
 
     // Deterministic test seam for failure-atomic LMR1 rewrites. When armed,
