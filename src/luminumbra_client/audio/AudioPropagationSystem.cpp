@@ -19,7 +19,11 @@ AudioPropagationSystem::AudioPropagationSystem(Luminumbra::Systems::PhysicsSyste
 }
 
 AudioPropagationSystem::~AudioPropagationSystem() {
-    m_shutdown = true;
+    {
+        // Serialize shutdown with the worker's predicate-to-wait transition.
+        std::lock_guard<std::mutex> lock(m_task_mutex);
+        m_shutdown = true;
+    }
     m_task_cv.notify_all();
 
     for (auto& thread : m_worker_threads) {
@@ -387,6 +391,7 @@ bool AudioPropagationSystem::ShouldUseCachedResult(const glm::vec3& source,
 }
 
 void AudioPropagationSystem::UpdatePerformanceMetrics(float calculation_time_ms, bool cache_hit) {
+    std::lock_guard<std::mutex> lock(m_metrics_mutex);
     if (cache_hit) {
         m_metrics.cache_hits++;
     } else {
@@ -416,10 +421,14 @@ void AudioPropagationSystem::WorkerThreadFunction() {
             if (!m_pending_tasks.empty()) {
                 task = std::move(m_pending_tasks.back());
                 m_pending_tasks.pop_back();
-                m_metrics.active_calculations++;
             } else {
                 continue;
             }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.active_calculations++;
         }
 
         // Process task
@@ -431,7 +440,10 @@ void AudioPropagationSystem::WorkerThreadFunction() {
             task.callback(result);
         }
 
-        m_metrics.active_calculations--;
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.active_calculations--;
+        }
     }
 }
 
@@ -449,8 +461,6 @@ float LinearToDb(float linear) {
 
 float CalculateAirAbsorption(float distance, float frequency_hz, float humidity) {
     // ISO 9613-1 standard for atmospheric absorption
-    float temp_celsius = 20.0f;    // Assume 20°C
-    float pressure_kpa = 101.325f; // Standard atmospheric pressure
 
     // Simplified air absorption coefficient
     float absorption_coefficient = 0.0f;
