@@ -37,10 +37,11 @@ def load_budgets(path: Path) -> dict[str, Any]:
             raise ValueError(f"budgets identity {key} must be null or an integer")
         if value is not None:
             sim_budget_io.validate_workload_integer(value, key)
-    fixture = data["identity"].get("fixture_hash")
-    if fixture is not None and (
-            not isinstance(fixture, str) or sim_budget_io.SHA256_HEX.fullmatch(fixture) is None):
-        raise ValueError("budgets identity fixture_hash must be null or 64 lowercase hex characters")
+    for key in ("fixture_hash", "preset_hash"):
+        fixture = data["identity"].get(key)
+        if fixture is not None and (
+                not isinstance(fixture, str) or sim_budget_io.SHA256_HEX.fullmatch(fixture) is None):
+            raise ValueError(f"budgets identity {key} must be null or 64 lowercase hex characters")
     presets = data.get("presets")
     if not isinstance(presets, dict):
         raise ValueError("budgets file lacks presets")
@@ -59,7 +60,7 @@ def load_budgets(path: Path) -> dict[str, Any]:
 def identity_mismatch(identity: dict[str, Any], manifest: dict[str, Any]) -> str | None:
     workload = {key: sim_budget_io.validate_workload_integer(manifest.get(key), key)
                 for key in ("seed", "ticks")}
-    for key in ("seed", "ticks", "fixture_hash", "surface_radius", "collision_radius"):
+    for key in ("seed", "ticks", "fixture_hash", "preset_hash", "surface_radius", "collision_radius"):
         expected = identity.get(key)
         if expected is None:
             continue

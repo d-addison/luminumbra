@@ -1951,7 +1951,23 @@ target_include_directories(menu_presentation_test PRIVATE ../src)
 target_link_libraries(menu_presentation_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
+add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt ${CMAKE_DL_LIBS})
+luminumbra_configure_first_party_target(jolt_startup_test)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(jolt_startup_test PRIVATE
+        "-Wl,--export-dynamic-symbol=pthread_create"
+        "-Wl,--export-dynamic-symbol=pthread_join"
+        "-Wl,--export-dynamic-symbol=sem_init"
+        "-Wl,--export-dynamic-symbol=sem_destroy")
+endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
+set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    jolt_startup_test
     frame_attribution_test
     menu_presentation_test
     graphics_preset_classifier_test
@@ -2202,28 +2218,32 @@ set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" 
 add_test(NAME ShieldRtTracerProfileGpu COMMAND shieldrt_tracer_profile_gpu)
 set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field ground-truth parity gate (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
 set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field G-buffer raymarch (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldGbufferGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldGbufferGpu COMMAND shieldrt_far_field_gbuffer_gpu)
 set_tests_properties(ShieldRtFarFieldGbufferGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # GPU max-mip reduction parity (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldMaxMipGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldMaxMipGpu COMMAND shieldrt_far_field_maxmip_gpu)
 set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 #  per-flag fixtures for the WorldVisualSweep objective
 # critique (tools/visual_critique.py). Pins every objective defect flag so a
@@ -2472,6 +2492,37 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 # on Windows and can exit inside the renderer without diagnostic output.
 
 # Pure CPU measurement contract, also runnable without a GL context.
+# Generate from the production destructor so a shutdown reversion also changes
+# the native ordering probe. No access hooks are added to the production class.
+set(audio_shutdown_source "${CMAKE_SOURCE_DIR}/src/luminumbra_client/audio/AudioPropagationSystem.cpp")
+set(audio_shutdown_generator "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py")
+set(audio_shutdown_body "${CMAKE_CURRENT_BINARY_DIR}/audio_shutdown_body.inc")
+# Configure-only compilation consumers need the same body before any build runs.
+# Reconfigure on either input change, and retain normal build-time regeneration.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${audio_shutdown_source}" "${audio_shutdown_generator}")
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+        --emit-destructor "${audio_shutdown_body}"
+    RESULT_VARIABLE audio_shutdown_result
+    ERROR_VARIABLE audio_shutdown_error)
+if(NOT "${audio_shutdown_result}" STREQUAL "0")
+    message(FATAL_ERROR "Audio shutdown body generation failed (${audio_shutdown_result}): ${audio_shutdown_error}")
+endif()
+add_custom_command(OUTPUT "${audio_shutdown_body}"
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+        --emit-destructor "${audio_shutdown_body}"
+    DEPENDS "${audio_shutdown_source}" "${audio_shutdown_generator}"
+    VERBATIM)
+add_executable(audio_shutdown_test "audio/audio_shutdown_test.cpp" "${audio_shutdown_body}")
+target_include_directories(audio_shutdown_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(audio_shutdown_test PRIVATE Threads::Threads)
+luminumbra_configure_first_party_target(audio_shutdown_test)
+add_test(NAME AudioShutdownTransition COMMAND audio_shutdown_test)
+set_tests_properties(AudioShutdownTransition PROPERTIES TIMEOUT 15)
+add_test(NAME AudioShutdownSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py")
+
 add_executable(render_measurement_test rendering/render_measurement_test.cpp)
 target_include_directories(render_measurement_test PRIVATE ../src)
 target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
@@ -2519,5 +2570,6 @@ foreach(case IN ITEMS
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+        RESOURCE_LOCK luminumbra_gl_context)
 endforeach()

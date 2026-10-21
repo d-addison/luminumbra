@@ -58,7 +58,8 @@ void AudioSpatialCluster::Update(const glm::vec3& listener_pos, float delta_time
               });
 
     // Limit processing to max sources
-    if (m_sources_to_process.size() > m_max_audio_sources) {
+    if (m_sources_to_process.size() >
+        static_cast<std::vector<AudioSource*>::size_type>(m_max_audio_sources)) {
         m_sources_to_process.resize(m_max_audio_sources);
     }
 
@@ -394,7 +395,7 @@ void AudioSpatialCluster::CalculateBatchedOcclusion(const std::vector<AudioSourc
                 int query_id = batch_queries.QueueRaycast(
                     source->position,
                     listener_pos,
-                    [this, source, listener_pos](
+                    [source, listener_pos](
                         const ::Luminumbra::Systems::PhysicsSystem::AudioRaycastResult& result) {
                         // Callback when the raycast completes
                         float occlusion = 0.0f;

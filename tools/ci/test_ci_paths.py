@@ -147,7 +147,7 @@ class PathGateTests(unittest.TestCase):
                     self.assertTrue(gate.needs_cpp(path))
 
     def test_workflow_bootstrap_uses_base_and_fails_open_without_executing_head(self):
-        for name in ("ci", "asan", "performance"):
+        for name in ("ci", "asan", "performance", "ucrt-attribution"):
             workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
             script = run_block(workflow, "Classify merge-base diff (all lanes for non-PR events)")
             for sensitive, missing, failed in ((False, False, False), (True, False, False),
@@ -185,10 +185,10 @@ class PathGateTests(unittest.TestCase):
                     subprocess.run([BASH, "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     self.assertFalse(marker.exists())
-                    expected = "needs_cpp=true\nneeds_python=true\n" if sensitive or missing or failed else "needs_cpp=false\nneeds_python=true\n"
-                    if name != "performance":
-                        expected = ("needs_cpp=true\nneeds_python=true\nneeds_heavy=true\n"
-                                    "heavy_reason=classification_uncertain\n")
+                    # The two-field base fixture predates heavy policy; every
+                    # consumer must fail open instead of publishing partial data.
+                    expected = ("needs_cpp=true\nneeds_python=true\nneeds_heavy=true\n"
+                                "heavy_reason=classification_uncertain\n")
                     self.assertEqual(output.read_text(encoding="utf-8"), expected)
 
     def test_required_jobs_run_python_plan_on_mixed_changes_and_publish_route(self):

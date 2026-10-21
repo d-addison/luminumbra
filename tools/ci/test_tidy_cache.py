@@ -258,9 +258,11 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
 
 
 def assert_parallel_failure(case, module, failure, *, collect_errors=(), active_error=None,
-                            parallel=None, slow=None, ready=None):
+                            parallel=None, slow=None, ready=None, observer=None):
     """Hold publication and joining apart to inspect the worker failure boundary."""
     submitted, published, joining = (threading.Event() for _ in range(3))
+    if observer is not None:
+        published = observer.publication_event(published)
     active = threading.Barrier(3, timeout=5)
     futures, visited, contexts, boundary, slow_cancelled, shutdowns, tool_errors, publication_joined = (
         [] for _ in range(8))
@@ -273,6 +275,10 @@ def assert_parallel_failure(case, module, failure, *, collect_errors=(), active_
             def observe():
                 try:
                     return function(item)
+                except BaseException as error:
+                    if observer is not None and item == 1 and error is failure:
+                        observer.failure_caught(error, shared[0])
+                    raise
                 finally:
                     contexts.append(hasattr(module._PROCESS_CONTEXT, "cancelled"))
 
@@ -289,6 +295,8 @@ def assert_parallel_failure(case, module, failure, *, collect_errors=(), active_
                     publication_joined.append(joining.wait(5))
 
                 future.add_done_callback(failure_published)
+            if observer is not None and item == 3:
+                observer.queued_future(future)
             if item == 7:
                 submitted.set()
             return future
@@ -306,6 +314,8 @@ def assert_parallel_failure(case, module, failure, *, collect_errors=(), active_
         cancelled = module._PROCESS_CONTEXT.cancelled
         if item == 0:
             shared.append(cancelled)
+            if observer is not None:
+                observer.work0_started()
         if item < 3:
             active.wait()
         if item == 0:

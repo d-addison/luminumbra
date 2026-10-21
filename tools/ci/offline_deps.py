@@ -9,7 +9,7 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PosixPath, WindowsPath
 import re
 import shlex
 import shutil
@@ -71,6 +71,14 @@ def declarations(root: Path) -> dict:
                 or not fields.get("GIT_TAG")):
             raise DependencyError(f"unsupported dependency declaration: {name}")
         result[name] = {"repository": fields["GIT_REPOSITORY"], "revision": fields["GIT_TAG"]}
+    if "joltphysics" in result:
+        try:
+            spec = importlib.util.spec_from_file_location("_jolt_startup", root / "tools/ci/jolt_startup.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            result["joltphysics"]["overlay"] = module.identity(root)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise DependencyError(f"invalid Jolt overlay identity: {error}") from error
     if not result:
         raise DependencyError("no FetchContent dependencies found")
     return result
@@ -83,20 +91,35 @@ def unresolved_lock(root: Path) -> dict:
     }}
 
 
+def _lexically_relative(path: Path, parent: Path) -> bool:
+    # Compare immutable components without constructing every ancestor Path.
+    # Keep custom Path semantics and non-absolute inputs on the original API.
+    if (type(path) is not type(parent) or type(path) not in (PosixPath, WindowsPath)
+            or not path.is_absolute() or not parent.is_absolute()):
+        return path.is_relative_to(parent)
+    parts, parent_parts = path.parts, parent.parts
+    if isinstance(path, WindowsPath):
+        # pathlib compares Windows path spellings with str.lower(), retaining
+        # drive/UNC anchors, backslash boundaries, ADS and literal '..' parts.
+        parts = tuple(part.lower() for part in parts)
+        parent_parts = tuple(part.lower() for part in parent_parts)
+    return parts[:len(parent_parts)] == parent_parts
+
+
 def contained(path: Path, parent: Path) -> Path:
     # Refuse lexical escapes before filesystem queries: hostile metadata can
     # contain bytes Windows cannot stat. Still inspect the original components
     # below before resolving, so '..' cannot erase a redirecting component.
     # Other spellings (including Windows 8.3 aliases) need resolved comparison.
     lexical_path, lexical_parent = Path(os.path.abspath(path)), Path(os.path.abspath(parent))
-    if (path.absolute().is_relative_to(parent.absolute())
-            and (lexical_path == lexical_parent or not lexical_path.is_relative_to(lexical_parent))):
+    if (_lexically_relative(path.absolute(), parent.absolute())
+            and (lexical_path == lexical_parent or not _lexically_relative(lexical_path, lexical_parent))):
         raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
     reject_reparse_points(path)
     reject_reparse_points(parent)
     resolved = resolve_path(path)
     resolved_parent = resolve_path(parent)
-    if resolved == resolved_parent or not resolved.is_relative_to(resolved_parent):
+    if resolved == resolved_parent or not _lexically_relative(resolved, resolved_parent):
         raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
     return resolved
 

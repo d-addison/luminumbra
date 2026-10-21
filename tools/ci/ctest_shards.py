@@ -116,21 +116,13 @@ def validate_union(names, parts):
     require(set(flattened) == set(names), "partition union differs from eligible inventory")
 
 
-def partition(all_tests, eligible, profile="gcc", timings=None):
+def relationship_groups(all_tests, eligible, profile):
     inventory({"tests": all_tests})
-    return _partition_validated(all_tests, eligible, profile, timings)
-
-
-def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _projected=False):
-    # Opt-in selects an implementation, never ownership or input provenance.
-    if _projected and type(profile) is str and profile != "asan":
-        return _partition_projected(all_tests, eligible, profile, timings)
-    # Only plan may bypass public validation: its freshly parsed graph is owned
-    # by this call and all aliases remain read-only until partitioning finishes.
-    # Never retain this mutable graph in a global or cross-call cache.
     names = [test["name"] for test in all_tests]
     require(eligible and len(eligible) == len(set(eligible)) and set(eligible) <= set(names),
             "empty, duplicate or unknown eligible tests")
+    selected = set(eligible)
+    excluded_manual = set(names) - {test["name"] for test in filtered_tests(all_tests)} - selected
     groups = {name: {name} for name in names}
 
     def join(left, right):
@@ -143,7 +135,12 @@ def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _p
         name = test["name"]
         for prop in test.get("properties", []):
             kind = prop["name"]
-            if kind not in RELATIONS or (profile == "asan" and not kind.startswith("FIXTURES_")):
+            if kind not in RELATIONS:
+                continue
+            # Excluded manual tests never execute, so their locks need no shard
+            # placement. Keep all fixture/dependency edges, even through them,
+            # and every lock edge of selected manual or nonmanual tests.
+            if kind == "RESOURCE_LOCK" and name in excluded_manual:
                 continue
             for value in prop["value"]:
                 if kind == "DEPENDS":
@@ -159,12 +156,63 @@ def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _p
         prefab = [name for name in eligible if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
         for name in prefab[1:]:
             join(prefab[0], name)
-    selected = set(eligible)
     for name in eligible:
         require(groups[name] <= selected, "eligible selection breaks fixture, dependency or resource lock closure")
+    return groups
+
+
+def partition(all_tests, eligible, profile="gcc", timings=None):
+    groups = relationship_groups(all_tests, eligible, profile)
+    names = [test["name"] for test in all_tests]
+    selected = set(eligible)
     assignments = [[], []]
     if profile == "asan":
         # Preserve the existing ASan placement and heavy parity balance.
+        heavy = [name for name in names if name in selected and "SimBudgetWorldParity." in name]
+        require(len(heavy) in (2, 4), "expected two or four heavy parity tests")
+        owners = {name: index % 2 for index, name in enumerate(heavy)}
+        positions = {name: index for index, name in enumerate(names)}
+        for name in names:
+            if name not in selected:
+                continue
+            group = groups[name]
+            forced = {owners[member] for member in group if member in owners}
+            require(len(forced) <= 1, "fixture group prevents balanced heavy tests")
+            owner = next(iter(forced)) if forced else min(positions[member] for member in group) % 2
+            assignments[owner].append(name)
+    else:
+        timings = {} if timings is None else timings
+        require(isinstance(timings, dict) and all(isinstance(key, str) and
+                isinstance(value, (int, float)) and not isinstance(value, bool) and
+                math.isfinite(value) and value > 0 for key, value in timings.items()), "invalid timings")
+        # Unknown tests get at least a minute, or the largest known observation.
+        unknown_weight = max([60.0, *timings.values()])
+        unique = sorted({tuple(sorted(groups[name])) for name in eligible})
+        loads = [0.0, 0.0]
+        if timings:
+            unique.sort(key=lambda group: (-sum(timings.get(name, unknown_weight) for name in group), group))
+        for group in unique:
+            owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
+            assignments[owner].extend(group)
+            loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
+        # CTest executes indices in registration order.
+        owners = {name: owner for owner, part in enumerate(assignments) for name in part}
+        assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
+    validate_union(eligible, assignments)
+    return assignments
+
+
+def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _projected=False):
+    # Opt-in selects an implementation, never ownership or input provenance.
+    if _projected and type(profile) is str and profile != "asan":
+        return _partition_projected(all_tests, eligible, profile, timings)
+    groups = relationship_groups(all_tests, eligible, profile)
+    names = [test["name"] for test in all_tests]
+    selected = set(eligible)
+    assignments = [[], []]
+    if profile == "asan":
+        # Selected light plans can omit heavy cases; legacy partition retains
+        # its two-or-four requirement. All relationship checks remain shared.
         heavy = [name for name in names if name in selected and "SimBudgetWorldParity." in name]
         require(len(heavy) in (0, 2, 4), "expected zero, two or four heavy parity tests")
         owners = {name: index % 2 for index, name in enumerate(heavy)}
@@ -200,7 +248,7 @@ def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _p
 
 
 def _grouping_shape(all_tests, eligible, profile, timings):
-    """Check only grouping observations, without invoking input callbacks."""
+    """Guard observations of relationship_groups without input callbacks."""
     if type(profile) is not str or profile == "asan" or type(all_tests) is not list or type(eligible) is not list:
         return False
     for name in eligible:
@@ -216,6 +264,12 @@ def _grouping_shape(all_tests, eligible, profile, timings):
                 return False
         if type(test.get("name")) is not str:
             return False
+        command = test.get("command")
+        if type(command) is not list:
+            return False
+        for argument in command:
+            if type(argument) is not str:
+                return False
         properties = test.get("properties", [])
         if type(properties) is not list:
             return False
@@ -228,7 +282,7 @@ def _grouping_shape(all_tests, eligible, profile, timings):
             kind = prop.get("name")
             if type(kind) is not str:
                 return False
-            if kind in RELATIONS:
+            if kind in RELATIONS or kind == "LABELS":
                 values = prop.get("value")
                 if type(values) is not list:
                     return False
@@ -251,60 +305,10 @@ def _partition_projected(all_tests, eligible, profile="gcc", timings=None):
     # Unsupported shapes use the unchanged generic path without prior callbacks.
     if not _grouping_shape(all_tests, eligible, profile, timings):
         return _partition_validated(all_tests, eligible, profile, timings)
-    names = [test["name"] for test in all_tests]
-    selected = set(eligible)
-    require(eligible and len(eligible) == len(selected) and selected <= set(names),
-            "empty, duplicate or unknown eligible tests")
-    parents = {name: name for name in names}
-    sizes = {}
-
-    def representative(name):
-        while name != parents[name]:
-            parents[name] = parents[parents[name]]
-            name = parents[name]
-        return name
-
-    def join(left, right):
-        left, right = representative(left), representative(right)
-        if left == right:
-            return
-        if sizes.get(left, 1) < sizes.get(right, 1):
-            left, right = right, left
-        parents[right] = left
-        sizes[left] = sizes.get(left, 1) + sizes.get(right, 1)
-
-    related = {}
-    for test in all_tests:
-        name = test["name"]
-        for prop in test.get("properties", []):
-            kind = prop["name"]
-            if kind not in RELATIONS:
-                continue
-            for value in prop["value"]:
-                if kind == "DEPENDS":
-                    require(value in parents, "unknown CTest dependency")
-                    join(name, value)
-                else:
-                    key = ("fixture" if kind.startswith("FIXTURES_") else "lock", value)
-                    if key in related:
-                        join(name, related[key])
-                    related[key] = name
-    # The installed-runtime qualification consumes all prefab cases together.
-    if profile == "gcc":
-        prefab = [name for name in eligible if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
-        for name in prefab[1:]:
-            join(prefab[0], name)
-    for name, parent in parents.items():
-        if name != parent:
-            parents[name] = representative(parent)
-    selected_roots = {parents[name] for name in eligible}
-    components = {}
-    for name, root in parents.items():
-        if root in selected_roots:
-            components.setdefault(root, []).append(name)
-    for group in components.values():
-        require(all(member in selected for member in group),
-                "eligible selection breaks fixture, dependency or resource lock closure")
+    groups = relationship_groups(all_tests, eligible, profile)
+    # Shared grouping validates closure. Canonicalize each selected component
+    # once, by its local set identity, rather than once per eligible member.
+    components = {id(groups[name]): groups[name] for name in eligible}
     assignments = [[], []]
     timings = {} if timings is None else timings
     require(isinstance(timings, dict) and all(isinstance(key, str) and
@@ -383,7 +387,11 @@ def plan(directory, shard, profile="gcc", timings=None, selection=None):
             "discovery CTest execution inventory differs between inventories")
     selected = select_tests(tests, profile, selection)
     require(shard != 0 or selection in (None, "full"), "qualification requires full selection")
-    parts = [selected] if shard == 0 else _partition_validated(all_tests, selected, profile, timings, _projected=True)
+    if shard == 0:
+        relationship_groups(all_tests, eligible, profile)
+        parts = [selected]
+    else:
+        parts = _partition_validated(all_tests, selected, profile, timings, _projected=True)
     # Reuse identity only within this call: tests and roots must remain unchanged
     # after independent discovery validation, including during selection/partition.
     manifest = {**validated, "selection": selection, "timings": timings or {},
