@@ -558,7 +558,8 @@ class CTestShardTests(unittest.TestCase):
                        "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"}
         priorities = {"WorkflowPolicyContract": 30, "ChangedTranslationUnitsContract": 29,
                       **{f"CTestShardContractPart{index}": 25 for index in range(1, 5)},
-                      "WorkflowPolicyContractPart1": 21, "OfflineDependenciesContractPart2": 18,
+                      "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
+                      "WorkflowPolicyContractPart9": 19, "OfflineDependenciesContractPart2": 18,
                       "OfflineDependenciesContract": 10, "OfflineDependenciesContractPart1": 10}
         for standalone in (False, True):
             inventories = {}
@@ -574,7 +575,7 @@ class CTestShardTests(unittest.TestCase):
                         if python_contract:
                             selected.append(row["name"])
                             self.assertEqual(props["TIMEOUT"], 30)
-                            expected = 4 if windows else 2 if row["name"] == "WorkflowPolicyContract" else 1
+                            expected = 4 if windows else 2 if row["name"] == "WorkflowPolicyContractPart9" else 1
                             self.assertEqual(props.get("PROCESSORS", 1), expected)
                             self.assertEqual(props.get("COST", 0), priorities.get(row["name"], 0) if windows else 0)
                             for relationship in shards.RELATIONS:
@@ -583,7 +584,7 @@ class CTestShardTests(unittest.TestCase):
                             self.assertNotIn("PROCESSORS", props)
                             self.assertNotIn("COST", props)
                 self.assertTrue(local_names <= set(selected))
-                self.assertEqual(len(selected), 4 if standalone else 21 if windows else 23)
+                self.assertEqual(len(selected), 4 if standalone else 23 if windows else 25)
                 names = [row["name"] for row in rows]
                 unthrottled = copy.deepcopy(rows)
                 for row in unthrottled:
@@ -609,7 +610,8 @@ class CTestShardTests(unittest.TestCase):
     def test_ctest_windows_reservations_run_alone_longest_first_with_smaller_parallelism(self):
         rows = self.contract_registration_inventory(True)
         names = ["WorkflowPolicyContract", "ChangedTranslationUnitsContract", "CTestShardContractPart1",
-                 "WorkflowPolicyContractPart1", "OfflineDependenciesContractPart2", "OfflineDependenciesContract"]
+                 "WorkflowPolicyContractPart1", "WorkflowPolicyContractPart8", "WorkflowPolicyContractPart9",
+                 "OfflineDependenciesContractPart2", "OfflineDependenciesContract"]
         probe = self.root / "probe.py"
         probe.write_text(
             "import pathlib, sys, time\n"
