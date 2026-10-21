@@ -2213,28 +2213,32 @@ set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" 
 add_test(NAME ShieldRtTracerProfileGpu COMMAND shieldrt_tracer_profile_gpu)
 set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field ground-truth parity gate (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
 set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field G-buffer raymarch (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldGbufferGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldGbufferGpu COMMAND shieldrt_far_field_gbuffer_gpu)
 set_tests_properties(ShieldRtFarFieldGbufferGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # GPU max-mip reduction parity (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldMaxMipGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldMaxMipGpu COMMAND shieldrt_far_field_maxmip_gpu)
 set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 #  per-flag fixtures for the WorldVisualSweep objective
 # critique (tools/visual_critique.py). Pins every objective defect flag so a
@@ -2530,5 +2534,6 @@ foreach(case IN ITEMS
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+        RESOURCE_LOCK luminumbra_gl_context)
 endforeach()
