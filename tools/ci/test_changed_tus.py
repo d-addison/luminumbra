@@ -2378,6 +2378,113 @@ class ProcessTimeoutTests(unittest.TestCase):
                 fixtures.assert_tree_timeout(self, launch, tus.SelectionError,
                                              driver_exits=driver_exits, ready_event=ready)
 
+    def test_collected_failure_holds_slow_slot_until_publication(self):
+        spec = importlib.util.spec_from_file_location("publication_tree_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        case = self
+
+        class Observer:
+            def __init__(self, failure):
+                self.failure = failure
+                self.condition = fixtures.threading.Condition()
+                self.work0_thread = None
+                self.work0_wait = False
+                self.queued_completed = False
+                self.released = False
+                self.caught = []
+                self.releases = []
+                self.errors = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, error_type, error, traceback):
+                with self.condition:
+                    if error is not None:
+                        self.errors.append(error)
+                    # Release only this observer's hold; the tree fixture owns rescue.
+                    self.released = True
+                    self.condition.notify_all()
+
+            def work0_started(self):
+                with self.condition:
+                    self.work0_thread = fixtures.threading.get_ident()
+
+            def publication_event(self, event):
+                observer = self
+
+                class Publication:
+                    def set(self):
+                        return event.set()
+
+                    def is_set(self):
+                        return event.is_set()
+
+                    def wait(self, timeout=None):
+                        with observer.condition:
+                            if fixtures.threading.get_ident() == observer.work0_thread:
+                                observer.work0_wait = True
+                                observer.condition.notify_all()
+                        return event.wait(timeout)
+
+                return Publication()
+
+            def queued_future(self, future):
+                def completed(result):
+                    with self.condition:
+                        if result.done() and not result.cancelled():
+                            self.queued_completed = True
+                            self.condition.notify_all()
+
+                future.add_done_callback(completed)
+
+            def failure_caught(self, error, cancelled):
+                try:
+                    case.assertIs(error, self.failure)
+                    case.assertTrue(cancelled.is_set(), "invoke did not cancel before rethrow")
+                    case.assertFalse(hasattr(tus._DEPS._PROCESS_CONTEXT, "cancelled"))
+                    with self.condition:
+                        self.caught.append(error)
+                        case.assertTrue(self.condition.wait_for(
+                            lambda: self.work0_wait or self.queued_completed or self.released, 5),
+                            "neither the slow publication wait nor queued completion was observed")
+                        if self.work0_wait:
+                            self.releases.append("work0_wait")
+                        elif self.queued_completed:
+                            self.releases.append("queued_completion")
+                        else:
+                            case.fail("observer was released during cleanup")
+                except BaseException as error:
+                    with self.condition:
+                        self.errors.append(error)
+                    raise
+                finally:
+                    with self.condition:
+                        self.released = True
+                        self.condition.notify_all()
+
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                ready = fixtures.threading.Event()
+                failure = tus.SelectionError("later command failed")
+                with Observer(failure) as observer:
+                    def launch(command, directory):
+                        error = fixtures.assert_parallel_failure(
+                            self, tus._DEPS, failure, parallel=tus.parallel, ready=ready,
+                            slow=lambda: EXECUTE(command, directory), observer=observer)
+                        self.assertIs(type(error), tus.SelectionError)
+                        self.assertEqual(str(error), "later command failed")
+                        raise error
+
+                    fixtures.assert_tree_timeout(self, launch, tus.SelectionError,
+                                                 driver_exits=driver_exits, ready_event=ready)
+                    self.assertEqual(observer.errors, [])
+                    self.assertEqual(observer.caught, [failure])
+                    self.assertEqual(observer.releases, ["work0_wait"])
+                    self.assertTrue(observer.work0_wait)
+                    self.assertFalse(observer.queued_completed)
+
     def test_collected_parallel_refusals_cancel_before_publication_and_preserve_diagnostics(self):
         spec = importlib.util.spec_from_file_location("parallel_failure_tests", ROOT / "tools/ci/test_tidy_cache.py")
         fixtures = importlib.util.module_from_spec(spec)
@@ -2614,4 +2721,8 @@ class PchEntryIdentityTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    diagnostic_spec = importlib.util.spec_from_file_location(
+        "contract_case_diagnostics", ROOT / "tools/ci/contract_case_diagnostics.py")
+    diagnostics = importlib.util.module_from_spec(diagnostic_spec)
+    diagnostic_spec.loader.exec_module(diagnostics)
+    unittest.main(testRunner=diagnostics.CaseDiagnosticRunner)

@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "test/tools/check_audio_shutdown_contract.py",
     "tools/ci/test_audio_propagation_metrics.py",
     "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
@@ -45,6 +46,7 @@ PYTHON_TESTS = (
     "tools/perf/test_render_contract.py",
     "tools/perf/test_render_runner_evidence.py",
     "tools/perf/test_sim_budget_gate.py",
+    "tools/perf/test_terrain_aov_paths.py",
     "tools/perf/test_terrain_aovs.py",
     "tools/release/test_sbom.py",
     "tools/release/test_sbom_schema.py",
@@ -64,6 +66,7 @@ PYTHON_MODULES = {
     "tools/perf/check_residency.py", "tools/perf/check_sim_budgets.py",
     "tools/perf/propose_sim_budgets.py", "tools/perf/sim_budget_compare.py",
     "tools/perf/sim_budget_io.py", "tools/perf/render_budget.py",
+    "tools/perf/fixture_paths.py",
     "tools/perf/inspect_terrain_aovs.py", "tools/perf/validate_foliage_evidence.py",
     "tools/perf/validate_render_capture.py",
     "tools/release/generate_sbom.py", "tools/release/validate_sbom.py",
