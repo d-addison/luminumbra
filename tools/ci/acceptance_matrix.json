@@ -27,6 +27,54 @@
       ]
     },
     {
+      "id": "ci.workflow-policy-partitions",
+      "source": "tools/ci/test_workflow_policy.py",
+      "statement": "Ten disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for both new entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart8"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart9"
+        }
+      ]
+    },
+    {
       "id": "ci.asan-fast-lane",
       "source": "docs/development.md#continuous-integration",
       "statement": "Ready pull requests needing native validation run ChangedTranslationUnitsContract and OfflineDependenciesContract before ASan shards. A failed fast lane skips both shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved.",

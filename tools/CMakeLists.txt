@@ -305,12 +305,12 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.
-    # Partition 0 reserves two slots for its bounded route-grid overlap.
+    # Partition 9 reserves two slots for its bounded route-grid overlap.
     add_test(
         NAME WorkflowPolicyContract
-        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0 --case-workers 2)
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0)
     set_tests_properties(WorkflowPolicyContract
-        PROPERTIES LABELS "ci;tools" TIMEOUT 30 PROCESSORS 2)
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     add_test(
         NAME WorkflowPolicyContractPart1
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 1)
@@ -346,6 +346,16 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 7)
     set_tests_properties(WorkflowPolicyContractPart7
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart8
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 8)
+    set_tests_properties(WorkflowPolicyContractPart8
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart9
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 9 --case-workers 2)
+    set_tests_properties(WorkflowPolicyContractPart9
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30 PROCESSORS 2)
     add_test(
         NAME SoftwareGlEvidenceContract
         COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -414,6 +424,7 @@ if(BUILD_TESTING)
             WorkflowPolicyContractPart2 WorkflowPolicyContractPart3
             WorkflowPolicyContractPart4 WorkflowPolicyContractPart5
             WorkflowPolicyContractPart6 WorkflowPolicyContractPart7
+            WorkflowPolicyContractPart8 WorkflowPolicyContractPart9
             QualificationCaptureContract SlowestTestsScriptContract
             LocalCheckRegistrationContract
             PROPERTIES PROCESSORS 4)
@@ -422,5 +433,7 @@ if(BUILD_TESTING)
         set_property(TEST CTestShardContractPart1 CTestShardContractPart2
             CTestShardContractPart3 CTestShardContractPart4 PROPERTY COST 25)
         set_property(TEST WorkflowPolicyContractPart1 PROPERTY COST 21)
+        set_property(TEST WorkflowPolicyContractPart8 PROPERTY COST 20)
+        set_property(TEST WorkflowPolicyContractPart9 PROPERTY COST 19)
     endif()
 endif()

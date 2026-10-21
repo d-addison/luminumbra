@@ -7,7 +7,7 @@ This is deliberately scoped to their current YAML layout, not a YAML parser.
 The 72-case baseline launched 772 subprocesses on POSIX; aggregate cancellation,
 ASan admission and Bash syntax cases accounted for 340, 210 and 79 launches.
 Windows qualification exhausted the suite's 30-second CTest deadline without
-per-case timings. Eight disjoint registrations isolate those workloads and keep
+per-case timings. Ten disjoint registrations isolate those workloads and keep
 each 30-second deadline. Each selected case reports elapsed time so a slow case
 remains visible. Native per-case qualification is still required; local timings
 do not establish that every Windows case fits its deadline. Direct invocation
@@ -2524,13 +2524,16 @@ def policy_route_results(cases, workers):
 
 # Keep launch-heavy cases separate without changing any case or subtest.
 # Selection scans the finite unittest roster once; no subprocess is started here.
-POLICY_PARTITIONS = tuple(str(index) for index in range(8))
+POLICY_PARTITIONS = tuple(str(index) for index in range(10))
+POLICY_ROUTE_CASE = "WorkflowDraftPolicyTests.test_native_aggregates_preserve_route_checks"
 POLICY_CASE_PARTITIONS = {
     "WorkflowDraftPolicyTests.test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies": "1",
     "WorkflowDraftPolicyTests.test_asan_aggregate_accepts_only_success_or_the_original_path_skip": "2",
     "WorkflowDraftPolicyTests.test_ci_and_asan_bash_scripts_parse_without_executing_native_commands": "3",
     "WorkflowShellDiagnosticTests.test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin": "6",
     "WorkflowShellDiagnosticTests.test_actual_windows_probe_refuses_other_identities_despite_msystem": "7",
+    "WorkflowDraftPolicyTests.test_bootstrap_pins_full_events_main_prs_and_missing_or_invalid_outputs": "8",
+    POLICY_ROUTE_CASE: "9",
 }
 POLICY_CLASS_PARTITIONS = {
     "WorkflowDraftPolicyTests": "0",
@@ -2592,8 +2595,10 @@ def policy_main(argv=None):
     parser.add_argument("--case-workers", choices=("1", "2"), action="append")
     args, remaining = parser.parse_known_args(argv)
     if args.case_workers is not None:
-        if len(args.case_workers) != 1 or args.partition != ["0"]:
-            parser.error("one --case-workers option requires partition 0")
+        route_partition = POLICY_CASE_PARTITIONS.get(
+            POLICY_ROUTE_CASE, POLICY_CLASS_PARTITIONS["WorkflowDraftPolicyTests"])
+        if len(args.case_workers) != 1 or args.partition != [route_partition]:
+            parser.error("one --case-workers option requires the route-grid partition " + route_partition)
     if args.partition is None:
         if args.list_tests:
             parser.error("--list-tests requires --partition")
@@ -2610,8 +2615,7 @@ def policy_main(argv=None):
             print(case.id())
         return 0
     for case in policy_cases(suite):
-        if (isinstance(case, WorkflowDraftPolicyTests)
-                and case._testMethodName == "test_native_aggregates_preserve_route_checks"):
+        if f"{type(case).__name__}.{case._testMethodName}" == POLICY_ROUTE_CASE:
             case.route_case_workers = int(args.case_workers[0]) if args.case_workers else 1
     result = unittest.TextTestRunner(verbosity=2, resultclass=PolicyTimingResult).run(suite)
     return int(not result.wasSuccessful())
@@ -2805,6 +2809,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 self.assertTrue(completed.empty())
 
     def test_case_workers_are_local_to_selected_route_case_and_listing_is_inert(self):
+        partition = POLICY_CASE_PARTITIONS[POLICY_ROUTE_CASE]
         for option, expected in (([], 1), (["--case-workers", "1"], 1), (["--case-workers", "2"], 2)):
             case = WorkflowDraftPolicyTests("test_native_aggregates_preserve_route_checks")
             other = WorkflowDraftPolicyTests("test_ready_and_draft_transitions_trigger_existing_pr_routes")
@@ -2812,7 +2817,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             with patch.object(sys.modules[__name__], "policy_partition_suite", return_value=suite), patch.object(
                     unittest, "TextTestRunner") as runner:
                 runner.return_value.run.return_value.wasSuccessful.return_value = True
-                self.assertEqual(policy_main(["--partition", "0", *option]), 0)
+                self.assertEqual(policy_main(["--partition", partition, *option]), 0)
                 self.assertEqual(case.route_case_workers, expected)
                 self.assertFalse(hasattr(other, "route_case_workers"))
                 runner.return_value.run.assert_called_once_with(suite)
@@ -2821,22 +2826,50 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
         with patch.object(unittest, "TextTestRunner") as runner, patch.object(
                 sys.modules[__name__], "policy_run_route_case") as launch, patch.object(
                 sys, "stdout", new_callable=io.StringIO) as output:
-            self.assertEqual(policy_main(["--partition", "0", "--case-workers", "2", "--list-tests"]), 0)
+            self.assertEqual(policy_main(["--partition", partition, "--case-workers", "2", "--list-tests"]), 0)
             self.assertIn("test_native_aggregates_preserve_route_checks", output.getvalue())
             runner.assert_not_called()
             launch.assert_not_called()
 
+    def test_case_workers_follow_route_case_partition_including_class_default(self):
+        for partition in ("0", "8", "9"):
+            dedicated = dict(POLICY_CASE_PARTITIONS)
+            if partition == "0":
+                dedicated.pop(POLICY_ROUTE_CASE)
+            else:
+                dedicated[POLICY_ROUTE_CASE] = partition
+            with self.subTest(partition=partition), patch.dict(POLICY_CASE_PARTITIONS, dedicated, clear=True):
+                case = WorkflowDraftPolicyTests("test_native_aggregates_preserve_route_checks")
+                suite = unittest.TestSuite([case])
+                with patch.object(sys.modules[__name__], "policy_partition_suite", return_value=suite), patch.object(
+                        unittest, "TextTestRunner") as runner:
+                    runner.return_value.run.return_value.wasSuccessful.return_value = True
+                    self.assertEqual(policy_main(["--partition", partition, "--case-workers", "2"]), 0)
+                    self.assertEqual(case.route_case_workers, 2)
+                    runner.return_value.run.assert_called_once_with(suite)
+                for other in POLICY_PARTITIONS:
+                    if other == partition:
+                        continue
+                    with self.subTest(other=other), patch.object(
+                            sys.modules[__name__], "policy_partition_suite") as select, patch.object(
+                            sys, "stderr", new_callable=io.StringIO) as output, self.assertRaises(SystemExit) as error:
+                        policy_main(["--partition", other, "--case-workers", "2"])
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn("requires the route-grid partition " + partition, output.getvalue())
+                    select.assert_not_called()
+
     def test_case_worker_cli_refuses_invalid_duplicate_and_unreserved_options(self):
-        invalid = [["--partition", "0", "--case-workers", value]
+        partition = POLICY_CASE_PARTITIONS[POLICY_ROUTE_CASE]
+        invalid = [["--partition", partition, "--case-workers", value]
                    for value in ("0", "3", "-1", "1.0", "nan", "inf", "01", "02", "", "2" * 5000)]
-        invalid += [["--partition", "0", "--case-workers"],
-                    ["--partition", "0", "--case-workers", "2", "--case-workers", "2"],
-                    ["--partition", "0", "--case-workers", "1", "--case-workers", "2"],
+        invalid += [["--partition", partition, "--case-workers"],
+                    ["--partition", partition, "--case-workers", "2", "--case-workers", "2"],
+                    ["--partition", partition, "--case-workers", "1", "--case-workers", "2"],
                     ["--case-workers", "2"], ["--case-workers", "1"],
-                    ["--partition", "0", "--partition", "0", "--case-workers", "2"],
-                    ["--partition", "0", "--case-workers", "2", "WorkflowDraftPolicyTests"]]
-        invalid += [["--partition", partition, "--case-workers", workers]
-                    for partition in POLICY_PARTITIONS[1:] for workers in ("1", "2")]
+                    ["--partition", partition, "--partition", partition, "--case-workers", "2"],
+                    ["--partition", partition, "--case-workers", "2", "WorkflowDraftPolicyTests"]]
+        invalid += [["--partition", other, "--case-workers", workers]
+                    for other in POLICY_PARTITIONS if other != partition for workers in ("1", "2")]
         with patch.object(unittest, "main") as direct, patch.object(
                 sys.modules[__name__], "policy_partition_suite") as select:
             for argv in invalid:
@@ -2965,7 +2998,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "-1", "8", "01", "0/8", None, 0):
+        for invalid in ("", "-1", "10", "01", "0/10", None, 0):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 policy_partition_suite(loader, module, invalid)
         complete = list(policy_cases(loader.loadTestsFromModule(module)))
@@ -2992,6 +3025,8 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             ("3", "test_ci_and_asan_bash_scripts_parse_without_executing_native_commands"),
             ("6", "test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin"),
             ("7", "test_actual_windows_probe_refuses_other_identities_despite_msystem"),
+            ("8", "test_bootstrap_pins_full_events_main_prs_and_missing_or_invalid_outputs"),
+            ("9", "test_native_aggregates_preserve_route_checks"),
         ):
             with self.subTest(partition=partition):
                 cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
@@ -3007,10 +3042,10 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             name = "WorkflowPolicyContract" + ("" if partition == "0" else "Part" + partition)
             expected.append((name, '\"${Python3_EXECUTABLE}\" -I -B '
                              '\"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py\" --partition ' + partition
-                             + (' --case-workers 2' if partition == '0' else '')))
+                             + (' --case-workers 2' if partition == POLICY_CASE_PARTITIONS[POLICY_ROUTE_CASE] else '')))
             properties = re.findall(r"set_tests_properties\(" + name + r"\s+PROPERTIES ([^)]*)\)", cmake)
             self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'
-                             + (' PROCESSORS 2' if partition == '0' else '')])
+                             + (' PROCESSORS 2' if partition == POLICY_CASE_PARTITIONS[POLICY_ROUTE_CASE] else '')])
         self.assertCountEqual(actual, expected)
         self.assertEqual(len(actual), len(set(actual)))
 
@@ -3039,12 +3074,12 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             self.assertCountEqual(roster(discovered_cases), roster(expected_cases))
 
     def test_cli_listing_and_refusals_use_actual_selection(self):
-        for partition in ("0", "7"):
+        for partition in ("0", "7", "8", "9"):
             with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(policy_main(["--partition", partition, "--list-tests"]), 0)
                 expected = policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in policy_cases(expected)])
-        for argv in (["--partition"], ["--partition", "8"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", "10"], ["--partition", "01"],
                      ["--partition", "0", "--partition", "1"], ["--list-tests"],
                      ["--partition", "0", "WorkflowShellTests"], ["--partition", "0", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
