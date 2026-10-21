@@ -1240,6 +1240,7 @@ struct RuntimeAllocationState {
     unsigned dependency_releases = 0;
     bool observe = false;
 };
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 RuntimeAllocationState* runtime_allocations = nullptr;
 
 bool RefuseRuntimeAllocation() {
@@ -1774,6 +1775,38 @@ void ApplicationExternalFactoryRefusal() {
 }
 
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+void ApplicationChangedAllocatorCallbacksRefusal() {
+    Log::Init();
+    InitializeAllocators();
+    ApplicationPhysics physics;
+    physics.startup();
+    Require(physics.is_started() && JPH::Factory::sInstance != nullptr);
+    physics.shutdown();
+    Require(JPH::Factory::sInstance == nullptr && JPH::PhysicsMaterial::sDefault == nullptr);
+    {
+        ScopedRuntimeHooks hooks;
+        bool refused = false;
+        try {
+            physics.startup();
+        } catch (const std::logic_error&) {
+            refused = true;
+        }
+        Require(refused && JPH::Factory::sInstance == nullptr &&
+                JPH::PhysicsMaterial::sDefault == nullptr);
+        hooks.RequireInstalled();
+        Require(hooks.state.ordinal == 0);
+        RequireUnpublished(physics);
+    }
+    Require(JPH::Allocate == JoltAllocate && JPH::Reallocate == JoltReallocate &&
+            JPH::Free == JoltFree && JPH::AlignedAllocate == JoltAlignedAllocate &&
+            JPH::AlignedFree == JoltAlignedFree);
+    physics.startup();
+    Require(physics.is_started() && JPH::Factory::sInstance != nullptr);
+    physics.shutdown();
+    Require(JPH::Factory::sInstance == nullptr && JPH::PhysicsMaterial::sDefault == nullptr);
+    std::_Exit(0);
+}
+
 void ApplicationDefaultAllocatorLifetime() {
     Log::Init();
     Require(JPH::Allocate == nullptr && JPH::Reallocate == nullptr && JPH::Free == nullptr &&
@@ -1928,6 +1961,9 @@ TEST(JoltStartup, ApplicationUninitializedAndSubstitutedFactoriesRefuseWithoutMu
     ASSERT_EXIT(ApplicationExternalFactoryRefusal(), ::testing::ExitedWithCode(0), "");
 }
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+TEST(JoltStartup, ApplicationChangedAllocatorCallbacksRefuseAndOriginalSetAllowsRetry) {
+    ASSERT_EXIT(ApplicationChangedAllocatorCallbacksRefusal(), ::testing::ExitedWithCode(0), "");
+}
 TEST(JoltStartup, ApplicationDefaultAllocatorsRemainCompatibleWithStaticStorage) {
     ASSERT_EXIT(ApplicationDefaultAllocatorLifetime(), ::testing::ExitedWithCode(0), "");
 }

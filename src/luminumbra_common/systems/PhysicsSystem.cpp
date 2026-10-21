@@ -120,6 +120,11 @@ struct JoltRuntimeState {
     RefConst<PhysicsMaterial> prior_material;
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
     bool allocators_used = false;
+    AllocateFunction used_allocate = nullptr;
+    ReallocateFunction used_reallocate = nullptr;
+    FreeFunction used_free = nullptr;
+    AlignedAllocateFunction used_aligned_allocate = nullptr;
+    AlignedFreeFunction used_aligned_free = nullptr;
 #endif
 };
 
@@ -141,12 +146,23 @@ void CheckJoltAllocators(JoltRuntimeState& state) {
         (!any && (state.allocators_used || state.users != 0 || Factory::sInstance != nullptr))) {
         throw std::logic_error("Incomplete Jolt allocator callbacks");
     }
+    if (state.allocators_used && any &&
+        (Allocate != state.used_allocate || Reallocate != state.used_reallocate ||
+         Free != state.used_free || AlignedAllocate != state.used_aligned_allocate ||
+         AlignedFree != state.used_aligned_free)) {
+        throw std::logic_error("Jolt allocator callbacks changed after use");
+    }
     if (!any) {
         RegisterDefaultAllocator();
     }
     // RTTI retains process-static allocations even after registration fails.
-    // Never reset these callbacks to null or replace a complete custom set.
+    // Never reset these callbacks to null or replace the set already in use.
     state.allocators_used = true;
+    state.used_allocate = Allocate;
+    state.used_reallocate = Reallocate;
+    state.used_free = Free;
+    state.used_aligned_allocate = AlignedAllocate;
+    state.used_aligned_free = AlignedFree;
 #else
     static_cast<void>(state);
 #endif
