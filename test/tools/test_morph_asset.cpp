@@ -72,9 +72,9 @@ struct Fixture {
         Accessor<float>({0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0}, "VEC3", 3);
         Accessor<float>({0, 2, 0, 0, 2, 0, 0, 2, 0, 0, 2, 0}, "VEC3", 3);
         Accessor<std::uint16_t>({0, 1, 2, 3, 1, 2}, "SCALAR", 1, 5123);
-        for (int index : {0, 3, 5}) {
-            document["accessors"][index]["min"] = {0, 0, 0};
-            document["accessors"][index]["max"] = {3, 2, 0};
+        for (const int index : {0, 3, 5}) {
+            document["accessors"][static_cast<std::size_t>(index)]["min"] = {0, 0, 0};
+            document["accessors"][static_cast<std::size_t>(index)]["max"] = {3, 2, 0};
         }
         document["meshes"] = {
             {{"primitives",

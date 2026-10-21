@@ -243,7 +243,8 @@ std::string ReadRenderPipelineCombinedSources() {
 
 std::string JsonEscape(const std::string& value) {
     std::ostringstream escaped;
-    for (const unsigned char ch : value) {
+    for (const char character : value) {
+        const auto ch = static_cast<unsigned char>(character);
         switch (ch) {
             case '"':
                 escaped << "\\\"";
@@ -961,7 +962,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
 
-    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
@@ -996,7 +997,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     const unsigned char caustics_px[4] = {255, 255, 255, 255};
     GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
 
-    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_array_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -1182,7 +1183,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
         ppm << "P6\n" << kRes << " " << kRes << "\n255\n";
         for (int y = kRes - 1; y >= 0; --y) {
             for (int x = 0; x < kRes; ++x) {
-                const size_t i = (static_cast<size_t>(y) * kRes + x) * 4;
+                const size_t i = (static_cast<size_t>(y) * kRes + static_cast<size_t>(x)) * 4;
                 ppm.put(static_cast<char>(px[i + 0]));
                 ppm.put(static_cast<char>(px[i + 1]));
                 ppm.put(static_cast<char>(px[i + 2]));
@@ -1642,14 +1643,14 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // tint multiply would zero the albedo, so author it at 1.0 below.
     std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
     auto set_row1 = [&](int id, int layer, float tiling) {
-        const size_t base = (static_cast<size_t>(256) + id) * 4u; // row 1
+        const size_t base = (static_cast<size_t>(256) + static_cast<size_t>(id)) * 4u; // row 1
         lut[base + 0] = static_cast<float>(layer) / 255.0f;
         lut[base + 1] = static_cast<float>(layer) / 255.0f;
         lut[base + 2] = std::min(tiling / 64.0f, 1.0f);
         lut[base + 3] = 1.0f; // has_texture
     };
     auto set_row2 = [&](int id, float albedo_scale) {
-        const size_t base = (static_cast<size_t>(2) * 256u + id) * 4u; // row 2
+        const size_t base = (static_cast<size_t>(2) * 256u + static_cast<size_t>(id)) * 4u; // row 2
         lut[base + 0] = 0.0f;         // emissive_intensity/scale (non-emissive)
         lut[base + 1] = albedo_scale; //  albedo_scale (G channel)
     };
@@ -1657,7 +1658,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // baked albedo by this, so it MUST be authored to 1.0 or textured plates go
     // black. Default no-op tint = [1,1,1].
     auto set_row3 = [&](int id) {
-        const size_t base = (static_cast<size_t>(3) * 256u + id) * 4u; // row 3
+        const size_t base = (static_cast<size_t>(3) * 256u + static_cast<size_t>(id)) * 4u; // row 3
         lut[base + 0] = 1.0f;
         lut[base + 1] = 1.0f;
         lut[base + 2] = 1.0f;
@@ -1689,13 +1690,17 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     GLuint fbo = 0, gpos = 0, gnorm = 0, galbedo = 0, gmat = 0, gdepth = 0;
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    auto make_color = [&](GLuint& t, GLenum ifmt, GLenum fmt, GLenum type, int attach) {
+    auto make_color = [&](GLuint& t, GLint ifmt, GLenum fmt, GLenum type, int attach) {
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
         glTexImage2D(GL_TEXTURE_2D, 0, ifmt, kRes, kRes, 0, fmt, type, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attach, GL_TEXTURE_2D, t, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,
+                               GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(attach),
+                               GL_TEXTURE_2D,
+                               t,
+                               0);
     };
     make_color(gpos, GL_RGB16F, GL_RGB, GL_FLOAT, 0);
     make_color(gnorm, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 1);
@@ -1857,7 +1862,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             ppm << "P6\n" << kRes << " " << kRes << "\n255\n";
             for (int y = kRes - 1; y >= 0; --y) { // flip to top-down
                 for (int x = 0; x < kRes; ++x) {
-                    const size_t i = (static_cast<size_t>(y) * kRes + x) * 4;
+                    const size_t i = (static_cast<size_t>(y) * kRes + static_cast<size_t>(x)) * 4;
                     ppm.put(static_cast<char>(frame[i + 0]));
                     ppm.put(static_cast<char>(frame[i + 1]));
                     ppm.put(static_cast<char>(frame[i + 2]));
@@ -1926,13 +1931,13 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             double mean = 0;
             for (float x : v)
                 mean += x;
-            mean /= v.size();
+            mean /= static_cast<double>(v.size());
             double var = 0;
             for (float x : v) {
                 double d = x - mean;
                 var += d * d;
             }
-            return static_cast<float>(std::sqrt(var / v.size()));
+            return static_cast<float>(std::sqrt(var / static_cast<double>(v.size())));
         };
         pr.shading_spatial_stddev[0] = stddev(shadeA);
         pr.shading_spatial_stddev[1] = stddev(shadeB);
@@ -2333,12 +2338,12 @@ public:
         glDeleteVertexArrays(1, &vao);
     }
     void texture(int unit, const std::vector<glm::vec4>& pixels, int rows = 1) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, inputs[static_cast<std::size_t>(unit)]);
         glTexImage2D(GL_TEXTURE_2D,
                      0,
                      GL_RGBA32F,
-                     static_cast<GLsizei>(pixels.size() / rows),
+                     static_cast<GLsizei>(pixels.size() / static_cast<std::size_t>(rows)),
                      rows,
                      0,
                      GL_RGBA,
@@ -2468,15 +2473,15 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
         ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
         const GLuint vertex =
             CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
-        programs[path] = glCreateProgram();
-        glAttachShader(programs[path], vertex);
-        glAttachShader(programs[path], fragment);
-        glLinkProgram(programs[path]);
+        programs[static_cast<std::size_t>(path)] = glCreateProgram();
+        glAttachShader(programs[static_cast<std::size_t>(path)], vertex);
+        glAttachShader(programs[static_cast<std::size_t>(path)], fragment);
+        glLinkProgram(programs[static_cast<std::size_t>(path)]);
         glDeleteShader(vertex);
         glDeleteShader(fragment);
         GLint linked = GL_FALSE;
-        glGetProgramiv(programs[path], GL_LINK_STATUS, &linked);
-        ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(programs[path]);
+        glGetProgramiv(programs[static_cast<std::size_t>(path)], GL_LINK_STATUS, &linked);
+        ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(programs[static_cast<std::size_t>(path)]);
     }
     FullscreenFloatProbe probe;
     float largest_shadow = 0, largest_difference = 0;
@@ -2485,7 +2490,7 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
             for (int condition = 0; condition < 4; ++condition) {
                 std::array<std::array<glm::vec4, FullscreenFloatProbe::width>, 2> samples{};
                 for (int path = 0; path < 2; ++path) {
-                    const GLuint program = programs[path];
+                    const GLuint program = programs[static_cast<std::size_t>(path)];
                     glUseProgram(program);
                     glUniform1i(glGetUniformLocation(program, "u_cloudShadowEnabled"),
                                 condition != 1);
@@ -2575,7 +2580,7 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
                                               "u_caustics_texture",
                                               "u_underwater_texture"};
     for (int i = 0; i < 6; ++i)
-        glUniform1i(glGetUniformLocation(program, samplers[i]), i);
+        glUniform1i(glGetUniformLocation(program, samplers[static_cast<std::size_t>(i)]), i);
     probe.texture(0, {glm::vec4(0.3f, 0.2f, 0.1f, 1.0f)});
     probe.texture(2, {glm::vec4(0.5f, 0.5f, 1.0f, 1.0f)});
     probe.texture(3, {glm::vec4(0.5f, 0.5f, 0.0f, 0.0f)});
@@ -2802,12 +2807,12 @@ TEST(RenderSmokeTest, WeatherKeepsTerrainStationaryAndUsesWorldNormals) {
         for (int x = 0; x < size; ++x) {
             const float value = (x + y) % 2 ? 0.7f : 0.2f;
             for (int c = 0; c < 3; ++c)
-                scene[(y * size + x) * 4 + c] = value;
+                scene[static_cast<std::size_t>((y * size + x) * 4 + c)] = value;
         }
     }
     const auto upload = [&](int unit, const std::vector<float>& pixels) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, inputs[static_cast<std::size_t>(unit)]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, pixels.data());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -2819,8 +2824,8 @@ TEST(RenderSmokeTest, WeatherKeepsTerrainStationaryAndUsesWorldNormals) {
     std::vector<float> normals(size * size * 4, 0.0f);
     const auto normal = [&](float x, float y) {
         for (int i = 0; i < size * size; ++i) {
-            normals[i * 4] = x;
-            normals[i * 4 + 1] = y;
+            normals[static_cast<std::size_t>(i * 4)] = x;
+            normals[static_cast<std::size_t>(i * 4 + 1)] = y;
         }
         upload(2, normals);
     };
@@ -2912,8 +2917,8 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
     std::array<GLuint, 3> inputs{};
     glGenTextures(3, inputs.data());
     const auto upload = [&](int unit, const std::vector<glm::vec4>& pixels) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, inputs[static_cast<std::size_t>(unit)]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, pixels.data());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -3167,9 +3172,9 @@ TEST(RenderSmokeTest, GrassRemainsVisibleInUpperFrameAndOnRisingGround) {
         glDisable(GL_RASTERIZER_DISCARD);
         glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(positions), positions.data());
         for (int vertex = 0; vertex < 12; ++vertex) {
-            EXPECT_NEAR(positions[vertex * 4 + 3], 1.0f, 0.001f);
-            EXPECT_GE(positions[vertex * 4 + 1], 0.48f);
-            EXPECT_LE(positions[vertex * 4 + 1], 0.76f)
+            EXPECT_NEAR(positions[static_cast<std::size_t>(vertex * 4 + 3)], 1.0f, 0.001f);
+            EXPECT_GE(positions[static_cast<std::size_t>(vertex * 4 + 1)], 0.48f);
+            EXPECT_LE(positions[static_cast<std::size_t>(vertex * 4 + 1)], 0.76f)
                 << "visible uphill grass must not be collapsed into an offscreen point";
         }
     }
@@ -3220,8 +3225,8 @@ TEST(RenderSmokeTest, GrassWindBendIsBoundedByBladeHeight) {
     glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(positions), positions.data());
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     for (int vertex = 0; vertex < 12; ++vertex) {
-        const float x = positions[vertex * 4];
-        const float y = positions[vertex * 4 + 1];
+        const float x = positions[static_cast<std::size_t>(vertex * 4)];
+        const float y = positions[static_cast<std::size_t>(vertex * 4 + 1)];
         EXPECT_LE(std::abs(x), 0.035f + 0.20f * 0.5f + 0.001f);
         if (y < 0) {
             EXPECT_LE(std::abs(x), 0.036f) << "wind must leave the root anchored";
@@ -3280,7 +3285,7 @@ TEST(RenderSmokeTest, GrassBladeNarrowsToATip) {
     const auto width = [&](int y) {
         int count = 0;
         for (int x = 0; x < size; ++x)
-            count += pixels[(y * size + x) * 4 + 3] > 128;
+            count += pixels[static_cast<std::size_t>((y * size + x) * 4 + 3)] > 128;
         return count;
     };
     const int lower_width = width(36);
@@ -3352,7 +3357,8 @@ TEST(RenderSmokeTest, RoughAmbientReflectionMatchesIntegratedGgx) {
         for (const float ndv : {1.0f, 0.5f, 0.1f, 0.02f}) {
             SCOPED_TRACE(::testing::Message() << "roughness=" << roughness << " N.V=" << ndv);
             const auto pixel = render(roughness, ndv);
-            const double quantized_roughness = std::lround(roughness * 255.0f) / 255.0;
+            const double quantized_roughness =
+                static_cast<double>(std::lround(roughness * 255.0f)) / 255.0;
             const auto normal = DecodeOctahedral(128.0f / 255.0f, 128.0f / 255.0f);
             const double actual_ndv = ndv * normal[2] - std::sqrt(1.0f - ndv * ndv) * normal[0];
             const double reference = onscreen(integrate(quantized_roughness, actual_ndv));
@@ -3545,7 +3551,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     // --- Synthetic G-buffer (1x1 textures, value-replicated across the quad) ---
     // A crystal fragment: view-space position in front of the camera, +Z normal,
     // dark albedo so the emission dominates, material id 6 in the normal alpha.
-    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
@@ -3570,7 +3576,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
 
     // Shadow cascades + terrain array as 1x1x1 arrays (distinct sampler types
     // need distinct units; an unbound/shared sampler is undefined).
-    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_array_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -3872,7 +3878,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
-    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
@@ -3881,7 +3887,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         return t;
     };
-    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_array_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -4098,7 +4104,7 @@ TEST(RenderSmokeTest, FroxelUniformMediumMatchesAnalyticTransmittance) {
     GLuint integrated = make_volume();
 
     // Shadow samplers need valid array bindings even though the lights are black.
-    auto make_array = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* px) {
+    auto make_array = [&](GLint ifmt, GLenum fmt, GLenum type, const void* px) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -5852,7 +5858,7 @@ public:
                 for (GLuint column = 0; column < 4; ++column) {
                     glDisableVertexAttribArray(3 + column);
                     glm::vec4 value(0);
-                    value[column] = 1;
+                    value[static_cast<int>(column)] = 1;
                     glVertexAttrib4fv(3 + column, &value[0]);
                 }
                 glVertexAttrib3f(7, 1, 1, 1);
@@ -6253,13 +6259,13 @@ std::string LinkedFragmentSource(GLuint program) {
     glGetAttachedShaders(program, static_cast<GLsizei>(stages.size()), &count, stages.data());
     for (GLsizei i = 0; i < count; ++i) {
         GLint type = 0, length = 0;
-        glGetShaderiv(stages[i], GL_SHADER_TYPE, &type);
+        glGetShaderiv(stages[static_cast<std::size_t>(i)], GL_SHADER_TYPE, &type);
         if (type != GL_FRAGMENT_SHADER)
             continue;
-        glGetShaderiv(stages[i], GL_SHADER_SOURCE_LENGTH, &length);
+        glGetShaderiv(stages[static_cast<std::size_t>(i)], GL_SHADER_SOURCE_LENGTH, &length);
         std::string source(static_cast<std::size_t>(length), '\0');
         GLsizei written = 0;
-        glGetShaderSource(stages[i], length, &written, source.data());
+        glGetShaderSource(stages[static_cast<std::size_t>(i)], length, &written, source.data());
         source.resize(static_cast<std::size_t>(written));
         return source;
     }

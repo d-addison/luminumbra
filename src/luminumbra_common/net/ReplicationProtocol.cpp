@@ -18,11 +18,11 @@ void PutU16(std::vector<std::uint8_t>& out, std::uint16_t v) {
     out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
 }
 void PutU32(std::vector<std::uint8_t>& out, std::uint32_t v) {
-    for (int i = 0; i < 4; ++i)
+    for (std::size_t i = 0; i < 4; ++i)
         out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
 }
 void PutU64(std::vector<std::uint8_t>& out, std::uint64_t v) {
-    for (int i = 0; i < 8; ++i)
+    for (std::size_t i = 0; i < 8; ++i)
         out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
 }
 void PutI16(std::vector<std::uint8_t>& out, std::int16_t v) {
@@ -46,8 +46,8 @@ public:
     bool GetU16(std::uint16_t& v) {
         if (!Remaining(2))
             return false;
-        v = static_cast<std::uint16_t>(m_buf[m_pos]) |
-            (static_cast<std::uint16_t>(m_buf[m_pos + 1]) << 8);
+        v = static_cast<std::uint16_t>(static_cast<std::uint16_t>(m_buf[m_pos]) |
+                                       (static_cast<std::uint16_t>(m_buf[m_pos + 1]) << 8));
         m_pos += 2;
         return true;
     }
@@ -55,7 +55,7 @@ public:
         if (!Remaining(4))
             return false;
         v = 0;
-        for (int i = 0; i < 4; ++i)
+        for (std::size_t i = 0; i < 4; ++i)
             v |= static_cast<std::uint32_t>(m_buf[m_pos + i]) << (8 * i);
         m_pos += 4;
         return true;
@@ -64,7 +64,7 @@ public:
         if (!Remaining(8))
             return false;
         v = 0;
-        for (int i = 0; i < 8; ++i)
+        for (std::size_t i = 0; i < 8; ++i)
             v |= static_cast<std::uint64_t>(m_buf[m_pos + i]) << (8 * i);
         m_pos += 8;
         return true;

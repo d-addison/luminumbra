@@ -240,17 +240,20 @@ protected:
     void Bind(
         Shader& shader, const char* name, int unit, GLuint texture, GLenum target = GL_TEXTURE_2D) {
         shader.setInt(name, unit);
-        glActiveTexture(GL_TEXTURE0 + unit);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
         glBindTexture(target, texture);
     }
     void Attach(GLuint texture, int slot = 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + slot, GL_TEXTURE_2D, texture, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,
+                               GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(slot),
+                               GL_TEXTURE_2D,
+                               texture,
+                               0);
     }
     glm::vec4 Pixel(int slot = 0) {
         glm::vec4 pixel{};
-        glReadBuffer(GL_COLOR_ATTACHMENT0 + slot);
+        glReadBuffer(GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(slot));
         glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, glm::value_ptr(pixel));
         return pixel;
     }

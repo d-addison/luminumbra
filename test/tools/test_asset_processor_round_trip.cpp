@@ -925,7 +925,9 @@ TEST(LtexRoundTrip, OddCutoutRetainsCompiledBytesAcrossCoefficientPacking) {
     // mip dimensions and alpha. Alignment-safe copies must preserve every bit.
     ASSERT_EQ(bytes.size(), 329u);
     uint64_t checksum = 14695981039346656037ull;
-    for (const unsigned char byte : bytes)
+    for (const char ch : bytes) {
+        const auto byte = static_cast<unsigned char>(ch);
         checksum = (checksum ^ byte) * 1099511628211ull;
+    }
     EXPECT_EQ(checksum, 4632687360821141353ull);
 }

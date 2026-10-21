@@ -96,11 +96,12 @@ void FillChunk(Chunk& chunk, const SyntheticSaveSpec& spec, std::uint64_t index)
     if (spec.payload == FixturePayload::Noise) {
         for (std::size_t k = 0; k < sdf_count; ++k) {
             const auto h = LatticeHash(spec.seed, index, k);
-            chunk.sdf_data[k] = (static_cast<int>(h >> 56) - 128) / 16.0f;
+            chunk.sdf_data[k] = static_cast<float>(static_cast<int>(h >> 56) - 128) / 16.0f;
         }
         for (std::size_t k = 0; k < heightmap_count; ++k) {
             const auto h = LatticeHash(spec.seed, index, k + 0x1000000ull);
-            chunk.heightmap_data[k] = 8.0f + (static_cast<int>(h >> 56) % 32) / 4.0f;
+            chunk.heightmap_data[k] =
+                8.0f + static_cast<float>(static_cast<int>(h >> 56) % 32) / 4.0f;
         }
     }
     if (index < spec.edit_count) {

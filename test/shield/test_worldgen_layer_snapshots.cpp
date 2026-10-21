@@ -2286,15 +2286,15 @@ SlopeHistogramMetrics ComputeSlopeHistogram(const std::string& preset_name,
 
     metrics.samples = slopes.size();
     const double count = static_cast<double>(metrics.samples);
-    metrics.flat_fraction = flat / count;
-    metrics.normal_slope_fraction = normal_slope / count;
-    metrics.walkable_fraction = walkable / count;
-    metrics.steep_fraction = steep / count;
-    metrics.cliff_fraction = cliff / count;
-    metrics.normal_land_fraction = normal_land / count;
+    metrics.flat_fraction = static_cast<double>(flat) / count;
+    metrics.normal_slope_fraction = static_cast<double>(normal_slope) / count;
+    metrics.walkable_fraction = static_cast<double>(walkable) / count;
+    metrics.steep_fraction = static_cast<double>(steep) / count;
+    metrics.cliff_fraction = static_cast<double>(cliff) / count;
+    metrics.normal_land_fraction = static_cast<double>(normal_land) / count;
 
     metrics.land_samples = land;
-    metrics.land_fraction = land / count;
+    metrics.land_fraction = static_cast<double>(land) / count;
     if (land > 0) {
         metrics.land_walkable_fraction =
             static_cast<double>(land_walkable) / static_cast<double>(land);
@@ -2764,10 +2764,10 @@ RealismMetrics ComputeRealismMetrics(const std::string& preset_name,
     }
 
     const double count = static_cast<double>(slopes.size());
-    m.frac_lt5 = lt5 / count;
-    m.frac_lt15 = lt15 / count;
-    m.frac_lt25 = lt25 / count;
-    m.frac_gt35 = gt35 / count;
+    m.frac_lt5 = static_cast<double>(lt5) / count;
+    m.frac_lt15 = static_cast<double>(lt15) / count;
+    m.frac_lt25 = static_cast<double>(lt25) / count;
+    m.frac_gt35 = static_cast<double>(gt35) / count;
     std::sort(slopes.begin(), slopes.end());
     m.slope_p50 = PercentileOfSorted(slopes, 0.50);
     m.slope_p95 = PercentileOfSorted(slopes, 0.95);
