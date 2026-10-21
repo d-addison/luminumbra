@@ -28,6 +28,7 @@ class Chunk;
 namespace Systems {
 
 class SHIELD_WorldSystem;
+class JoltRuntimeLease;
 
 struct ChunkCollisionData {
     JPH::BodyID body_id;
@@ -38,6 +39,11 @@ public:
     PhysicsSystem();
     ~PhysicsSystem();
 
+    // Lifecycle calls require owner-thread exclusion of updates/producers.
+    // A supplied Jolt factory must be fully initialized and remain alive,
+    // with compatible complete allocators, through every runtime lease,
+    // including startup preparation. Process-static RTTI also retains storage
+    // that requires compatible allocators after the final lease ends.
     void startup();
     void shutdown();
     void update(float delta_time);
@@ -200,6 +206,8 @@ public:
 
 private:
     WorkItems m_work_items{};
+    // Independent ownership, released only after all Jolt resources.
+    std::unique_ptr<JoltRuntimeLease> m_runtime_lease;
     // Jolt core components
     std::unique_ptr<JPH::PhysicsSystem> m_jolt_system;
     std::unique_ptr<JPH::TempAllocator> m_temp_allocator;

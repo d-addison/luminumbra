@@ -1952,7 +1952,8 @@ target_link_libraries(menu_presentation_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
 add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
-target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt ${CMAKE_DL_LIBS})
+target_include_directories(jolt_startup_test PRIVATE ../src)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt luminumbra_common ${CMAKE_DL_LIBS})
 luminumbra_configure_first_party_target(jolt_startup_test)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(jolt_startup_test PRIVATE
