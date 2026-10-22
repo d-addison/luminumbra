@@ -18,6 +18,7 @@ import contextlib
 import copy
 import errno
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -1096,6 +1097,9 @@ class _RefreshSnapshot:
 _TRANSACTION_OUTPUTS = 5
 _TRANSACTION_BYTES = 16 * 1024 * 1024
 _JOURNAL_BYTES = 64 * 1024
+# Five destinations, three artifacts each, and two journal candidates: each
+# gets at most intention/enrollment/completion records, within 64 total events.
+_PREPARATION_EVENTS = 64
 
 
 @lru_cache(maxsize=1)
@@ -1222,7 +1226,7 @@ def _preparation_pending(journal: Path | None) -> bool:
 
 
 class _OutputPreparation:
-    """Write intentions before creation; only this live call can clear them.
+    """Legacy transient intentions; only this live call can clear them.
 
     A restart cannot prove ownership across an interrupted exclusive create.
     Fixed markers therefore refuse recovery, preserving every byte, until the
@@ -1288,6 +1292,13 @@ class _OutputPreparation:
         _verify_transaction_file(record)
         self.append({"bound": record})
 
+    def enroll(self, artifact: Path, identity: os.stat_result) -> None:
+        # Transient preparations retain their original fail-closed semantics.
+        pass
+
+    def cancel(self, artifact: Path) -> None:
+        pass
+
     def clear_marker(self) -> None:
         if self.uncertain:
             raise MatrixError(f"uncertain recovery preparation; bytes retained: {self.path}")
@@ -1313,6 +1324,302 @@ class _OutputPreparation:
             self.pending = None
 
 
+def _custody_json(value: Any) -> bytes:
+    # Measure the exact ASCII JSON encoding before allocating it. Both traversal
+    # and output are bounded by 64 KiB; nesting is capped at 64 levels. Native
+    # identities need at most 128 bits, so integer conversion is bounded too.
+    remaining = _JOURNAL_BYTES
+
+    def reserve(size: int) -> None:
+        nonlocal remaining
+        if size > remaining:
+            raise MatrixError("recovery preparation exceeds its bound")
+        remaining -= size
+
+    def measure(item: Any, depth: int = 0) -> None:
+        if depth > 64:
+            raise MatrixError("recovery preparation nesting exceeds its bound")
+        if isinstance(item, str):
+            if len(item) > remaining:
+                raise MatrixError("recovery preparation exceeds its bound")
+            reserve(2)
+            for char in item:
+                reserve(2 if char in '"\\\b\f\n\r\t' else 1 if 0x20 <= ord(char) < 0x7f
+                        else 6 if ord(char) <= 0xffff else 12)
+        elif item is None or type(item) is bool:
+            reserve(4 if item is None or item is True else 5)
+        elif type(item) is int and item.bit_length() <= 128:
+            reserve(len(str(item)))
+        elif isinstance(item, (dict, list)):
+            reserve(2 + max(0, len(item) - 1))
+            for key in item:
+                if isinstance(item, dict):
+                    if not isinstance(key, str):
+                        raise MatrixError("invalid preparation JSON key")
+                    measure(key, depth + 1)
+                    reserve(1)
+                    measure(item[key], depth + 1)
+                else:
+                    measure(key, depth + 1)
+        else:
+            raise MatrixError("invalid preparation JSON value")
+
+    measure(value)
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+class _PreparationCustody(_OutputPreparation):
+    """Explicit caller receipt is the enrollment authority, never the filename.
+
+    The independent receipt binds the marker's native identity and authenticates
+    a bounded event chain. Identity enrollment precedes payload writes. A crash
+    between exclusive creation and enrollment leaves UNKNOWN bytes untouched.
+    An enrolled identity grants reset authority over that staging file's content;
+    it never grants authority over a different inode or an output destination.
+    All named mutations still require the cooperating-writer threat model.
+    """
+    def __init__(self, journal: Path, receipt: str) -> None:
+        super().__init__(journal.with_suffix(".preparation"))
+        if len(receipt) > _JOURNAL_BYTES:
+            raise MatrixError("invalid preparation custody receipt")
+        try:
+            value = json.loads(receipt)
+            if (not isinstance(value, dict) or set(value) != {
+                    "version", "journal", "device", "inode", "nonce", "key"}
+                    or type(value["version"]) is not int or value["version"] != 1
+                    or value["journal"] != str(journal.resolve())
+                    or any(type(value[k]) is not int for k in ("device", "inode"))
+                    or value["device"] < 0 or value["inode"] <= 0
+                    or any(not isinstance(value[k], str) or not re.fullmatch(r"[0-9a-f]{64}", value[k])
+                           for k in ("nonce", "key"))):
+                raise ValueError("invalid receipt fields")
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise MatrixError("invalid preparation custody receipt") from exc
+        self.journal = journal.resolve()
+        self.key = bytes.fromhex(value.pop("key"))
+        self.enrollment = {"enrollment": value}
+        self.events: list[dict[str, Any]] = []
+        self.chain = b""
+        raw, identity = _read_transaction_file(self.path, _JOURNAL_BYTES)
+        if ((identity.st_dev, identity.st_ino) != (value["device"], value["inode"])
+                or identity.st_nlink != 1):
+            raise MatrixError("foreign or stale preparation custody; bytes retained")
+        self.identity = identity
+        self.data = raw
+        # splitlines would accept CR and other separators. Only LF commits an
+        # event; a torn final suffix carries no enrollment/commit authority.
+        lines = raw.split(b"\n")
+        if len(lines) > _PREPARATION_EVENTS + 1:
+            raise MatrixError("recovery preparation exceeds its record bound")
+        self.complete = b""
+        try:
+            for line in lines[:-1]:
+                entry = json.loads(line)
+                if not isinstance(entry, dict) or set(entry) != {"event", "mac"}:
+                    raise ValueError("unknown event metadata")
+                event = entry["event"]
+                expected = hmac.digest(self.key, self.chain + _custody_json(event), "sha256")
+                if not isinstance(entry["mac"], str) or not hmac.compare_digest(entry["mac"], expected.hex()):
+                    raise ValueError("event authentication failed")
+                if not self.events and event != self.enrollment:
+                    raise ValueError("enrollment differs from receipt")
+                self.events.append(event)
+                self.chain = expected
+                self.complete += line + b"\n"
+            if not self.events:
+                raise ValueError("enrollment was not committed")
+        except (ValueError, TypeError, KeyError, RecursionError) as exc:
+            raise MatrixError(f"uncertain recovery preparation; bytes retained: {exc}") from exc
+
+    @classmethod
+    def create(cls, journal: Path, journal_record: dict[str, Any] | None = None) -> str:
+        journal = journal.resolve()
+        path = journal.with_suffix(".preparation")
+        if journal_record is not None:
+            if Path(journal_record["path"]) != journal:
+                raise MatrixError("preparation enrollment journal differs from validated recovery")
+            _verify_transaction_file(journal_record, _JOURNAL_BYTES)
+        if (any(os.path.lexists(p) for p in (path, journal.with_suffix(".pending")))
+                or journal_record is None and os.path.lexists(journal)):
+            raise MatrixError("uncertain recovery preparation; enrollment requires empty recovery state")
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            handle = os.fdopen(descriptor, "w+b")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with handle:
+            identity = _transaction_metadata(handle)
+            if not identity.st_ino or identity.st_nlink != 1 or not _same_transaction_identity(path, identity):
+                raise MatrixError("preparation enrollment identity unavailable; bytes retained")
+            receipt = {"version": 1, "journal": str(journal), "device": identity.st_dev,
+                       "inode": identity.st_ino, "nonce": secrets.token_hex(32), "key": secrets.token_hex(32)}
+            event = {"enrollment": {k: v for k, v in receipt.items() if k != "key"}}
+            mac = hmac.digest(bytes.fromhex(receipt["key"]), _custody_json(event), "sha256")
+            data = _custody_json({"event": event, "mac": mac.hex()}) + b"\n"
+            if len(data) > _JOURNAL_BYTES or len(_custody_json(receipt)) > _JOURNAL_BYTES:
+                raise MatrixError("recovery preparation exceeds its bound")
+            if handle.write(data) != len(data):
+                raise OSError("incomplete preparation enrollment write")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Only returning this independent receipt commits enrollment to the
+        # caller. Failed/lost receipt delivery cannot authorize later adoption.
+        return _custody_json(receipt).decode("utf-8")
+
+    def append(self, event: dict[str, Any]) -> None:
+        if len(self.events) >= _PREPARATION_EVENTS or self.data != self.complete:
+            raise MatrixError("recovery preparation exceeds its record bound or needs restart reset")
+        mac = hmac.digest(self.key, self.chain + _custody_json(event), "sha256")
+        addition = _custody_json({"event": event, "mac": mac.hex()}) + b"\n"
+        if len(addition) > _JOURNAL_BYTES - len(self.data):
+            raise MatrixError("recovery preparation exceeds its bound")
+        self._rewrite(self.data + addition)
+        self.chain = mac
+        self.events.append(event)
+
+    def _rewrite(self, data: bytes) -> None:
+        # The receipt owns the marker identity, including its incomplete suffix.
+        # Verify through the same handle before reset; close before unlink/rename.
+        flags = os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(self.path, flags), "r+b") as handle:
+            actual = _transaction_metadata(handle)
+            if (not stat.S_ISREG(actual.st_mode) or actual.st_nlink != 1
+                    or not os.path.samestat(actual, self.identity)
+                    or not _same_transaction_identity(self.path, actual)
+                    or actual.st_size != len(self.data) or handle.read(len(self.data) + 1) != self.data):
+                raise MatrixError("preparation custody changed; bytes retained")
+            # Append preserves the previously committed prefix even on a short
+            # write. Reset retains the first enrollment line, never rewriting it.
+            common = len(self.complete) if len(data) >= len(self.complete) else len(data)
+            handle.seek(common)
+            suffix = data[common:]
+            if handle.write(suffix) != len(suffix):
+                raise OSError("incomplete preparation custody write")
+            handle.truncate(len(data))
+            handle.flush()
+            os.fsync(handle.fileno())
+        self.data = self.complete = data
+
+    def enroll(self, artifact: Path, identity: os.stat_result) -> None:
+        if (not stat.S_ISREG(identity.st_mode) or not identity.st_ino or identity.st_nlink != 1
+                or not _same_transaction_identity(artifact, identity)):
+            raise MatrixError("preparation artifact identity unavailable; bytes retained")
+        self.append({"enrolled": {"path": str(artifact), "device": identity.st_dev, "inode": identity.st_ino}})
+
+    def cancel(self, artifact: Path) -> None:
+        # Only a live definitive failed create can cancel an intention. Restart
+        # never infers cancellation or ownership from absence or an occupant.
+        self.append({"cancelled": str(artifact)})
+
+    def artifacts(self) -> dict[Path, tuple[int, int] | None]:
+        artifacts: dict[Path, tuple[int, int] | None] = {}
+        destinations: set[Path] = set()
+        pending = self.journal.with_suffix(".pending")
+        try:
+            for event in self.events[1:]:
+                if not isinstance(event, dict):
+                    raise ValueError("invalid event")
+                if set(event) == {"create", "destination", "size", "sha256"}:
+                    path, destination = Path(event["create"]), Path(event["destination"])
+                    if (not destination.is_absolute() or destination.resolve() != destination
+                            or (path == pending and destination != self.journal)
+                            or (path != pending and (
+                                destination in (self.path, pending, self.journal, self.journal.with_suffix(".lock"))
+                                or path.parent != destination.parent
+                                or not re.fullmatch(r"\.acceptance-[0-9a-f]{32}", path.name)))
+                            or type(event["size"]) is not int or not 0 <= event["size"] <= _TRANSACTION_BYTES
+                            or path == pending and event["size"] > _JOURNAL_BYTES
+                            or not isinstance(event["sha256"], str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", event["sha256"])):
+                        raise ValueError("invalid artifact intention")
+                    if path != pending:
+                        destinations.add(destination)
+                    artifacts[path] = None
+                elif set(event) == {"enrolled"}:
+                    record = event["enrolled"]
+                    if not isinstance(record, dict) or set(record) != {"path", "device", "inode"}:
+                        raise ValueError("invalid artifact enrollment")
+                    path = Path(record["path"])
+                    if (path not in artifacts or artifacts[path] is not None
+                            or any(type(record[k]) is not int for k in ("device", "inode"))
+                            or record["device"] < 0 or record["inode"] <= 0):
+                        raise ValueError("invalid artifact identity")
+                    artifacts[path] = (record["device"], record["inode"])
+                elif set(event) == {"cancelled"}:
+                    path = Path(event["cancelled"])
+                    if path not in artifacts or artifacts[path] is not None:
+                        raise ValueError("invalid intention cancellation")
+                    del artifacts[path]
+                elif set(event) == {"bound"}:
+                    record = event["bound"]
+                    if (not isinstance(record, dict) or set(record) != {"path", "device", "inode", "size", "sha256"}
+                            or artifacts.get(Path(record["path"])) != (record["device"], record["inode"])
+                            or any(type(record[k]) is not int for k in ("device", "inode"))
+                            or type(record["size"]) is not int or not 0 <= record["size"] <= _TRANSACTION_BYTES
+                            or not isinstance(record["sha256"], str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])):
+                        raise ValueError("invalid artifact completion")
+                else:
+                    raise ValueError("unknown event")
+                if (len(destinations) > _TRANSACTION_OUTPUTS
+                        or sum(path != pending for path in artifacts) > 3 * _TRANSACTION_OUTPUTS):
+                    raise ValueError("artifact count exceeds bound")
+        except (ValueError, TypeError, KeyError) as exc:
+            raise MatrixError(f"uncertain recovery preparation; bytes retained: {exc}") from exc
+        return artifacts
+
+    def retained(self) -> list[dict[str, Any]]:
+        records = []
+        artifacts = self.artifacts()
+        # Verify the entire bounded set before any reset/removal. Missing files
+        # may have been consumed by a journaled publication or earlier cleanup.
+        for path, identity in artifacts.items():
+            if not os.path.lexists(path):
+                continue
+            data, actual = _read_transaction_file(path, _JOURNAL_BYTES if path == self.journal.with_suffix(".pending")
+                                                  else _TRANSACTION_BYTES)
+            if identity != (actual.st_dev, actual.st_ino) or actual.st_nlink != 1:
+                raise MatrixError("foreign or unenrolled preparation artifact; bytes retained")
+            records.append({"path": str(path), "device": actual.st_dev, "inode": actual.st_ino,
+                            "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        # An unlisted pending occupant is UNKNOWN, even if it parses as a journal.
+        pending = self.journal.with_suffix(".pending")
+        if os.path.lexists(pending) and pending not in artifacts:
+            raise MatrixError("uncertain recovery preparation; pending bytes retained")
+        return records
+
+    def reset(self, preserve: frozenset[Path] = frozenset()) -> None:
+        records = self.retained()
+        for record in records:
+            if Path(record["path"]) in preserve:
+                continue  # The fully validated journal now supplies custody.
+            _remove_transaction_file(record, _JOURNAL_BYTES if Path(record["path"]) == self.journal.with_suffix(".pending")
+                                     else _TRANSACTION_BYTES)
+        first = self.complete[:self.complete.index(b"\n") + 1]
+        self._rewrite(first)
+        self.events = [self.enrollment]
+        self.chain = hmac.digest(self.key, _custody_json(self.enrollment), "sha256")
+        self.pending = None
+
+    def clear_marker(self) -> None:
+        # Persistent enrollment survives handoff and successful cleanup.
+        _verify_transaction_file(self.record(), _JOURNAL_BYTES)
+
+    def handoff(self, record: dict[str, Any]) -> None:
+        _verify_transaction_file(record, _JOURNAL_BYTES)
+        self.pending = record
+
+    def finish(self) -> None:
+        self.clear_marker()
+
+    def retire(self) -> None:
+        if os.path.lexists(self.journal):
+            raise MatrixError("recover the journal before retiring preparation custody")
+        self.reset()
+        _remove_transaction_file(self.record(), _JOURNAL_BYTES)
+
+
 def _write_transaction(
     journal: Path, entries: list[dict[str, Any]], *, committed: bool,
     publications: list[dict[str, Any]] | None = None,
@@ -1332,6 +1639,8 @@ def _write_transaction(
     if len(data) > _JOURNAL_BYTES:
         raise MatrixError("recovery transaction exceeds its bound")
     candidate = journal.with_suffix(".pending")
+    if isinstance(preparation, _PreparationCustody):
+        preparation.intend(candidate, journal, data)
     # This fixed name is itself the write-ahead marker for journal creation.
     # Its empty/partial state is discoverable. Never truncate/adopt an occupant.
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1354,6 +1663,8 @@ def _write_transaction(
                     or metadata.st_nlink != 1 or not _same_transaction_identity(candidate, metadata)):
                 metadata = None
                 raise MatrixError("invalid recovery journal candidate")
+            if preparation is not None:
+                preparation.enroll(candidate, metadata)
             handle.truncate(0)
             if handle.write(data) != len(data):
                 raise OSError("incomplete recovery journal write")
@@ -1440,6 +1751,7 @@ def _stage_recovery_copy(
     try:
         with open(candidate, "xb", opener=creation) as handle:
             metadata = _transaction_metadata(handle)
+            preparation.enroll(candidate, metadata)
             record = {"path": str(candidate), "device": metadata.st_dev, "inode": metadata.st_ino,
                       "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             if handle.write(data) != len(data):
@@ -1453,6 +1765,8 @@ def _stage_recovery_copy(
         preparation.bind(record)
         return record
     except BaseException:
+        if creation.failed:
+            preparation.cancel(candidate)
         if metadata is not None:
             try:
                 _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata))
@@ -1464,10 +1778,22 @@ def _stage_recovery_copy(
         raise
 
 
-def _recover_outputs(journal: Path | None) -> None:
-    if _preparation_pending(journal):
+def _recover_outputs(journal: Path | None, custody: str | None = None, *, enroll_recovery: bool = False) -> None:
+    owner = _PreparationCustody(journal, custody) if journal is not None and custody is not None else None
+    if owner is not None:
+        # Validate before any journal recovery mutation. Pending bytes and torn
+        # suffixes are reset only after the entire journal also validates.
+        owner.retained()
+    elif _preparation_pending(journal):
         raise MatrixError(f"uncertain recovery preparation; outputs and recovery copies retained; inspect "
                           f"{journal.with_suffix('.preparation')} and {journal.with_suffix('.pending')}")
+    _recover_journal(journal, owner, enroll_recovery=enroll_recovery)
+    if owner is not None:
+        owner.reset()
+
+
+def _recover_journal(journal: Path | None, owner: _PreparationCustody | None = None,
+                     *, enroll_recovery: bool = False) -> None:
     if journal is None or not journal.exists():
         return
     if _same_path(journal, journal.with_suffix(".lock")):
@@ -1548,17 +1874,33 @@ def _recover_outputs(journal: Path | None) -> None:
         if entry["backup"] is not None:
             _verify_transaction_file(entry["backup"])
         restore.append(index)
+    automatic_owner = enroll_recovery and owner is None and bool(restore)
+    if automatic_owner:
+        # Legacy v1/v2 journals can need new restoration payloads too. Enroll
+        # only after their complete validation, and deliver restart authority
+        # before staging, exactly as for a new CLI publication.
+        receipt = _PreparationCustody.create(journal, journal_record)
+        print("preparation custody receipt: " + receipt, file=sys.stderr, flush=True)
+        owner = _PreparationCustody(journal, receipt)
+    if owner is not None:
+        # Compact only after every journal record and destination was validated.
+        # The journal retains discovery/identity authority for its files; extra
+        # enrolled staging files can be reset. Repeated interrupted recovery
+        # therefore never accumulates records or consumes the event budget.
+        owner.reset(frozenset(Path(record["path"]) for index, entry in enumerate(entries)
+                              for record in (entry["new"], entry["backup"], restorations[index])
+                              if record is not None))
     for index in reversed(restore):
         entry = entries[index]
         path = Path(entry["path"])
         _verify_transaction_file(dict(entry["new"], path=str(path)))
         if entry["backup"] is None:
-            # Recheck identity at removal; only remove our published candidate.
+            # Verify before named removal under the cooperating-writer model.
             path.unlink()
         else:
             record = restorations[index]
             if record is None or not Path(record["path"]).exists():
-                preparation = _OutputPreparation(journal.with_suffix(".preparation"))
+                preparation = owner if owner is not None else _OutputPreparation(journal.with_suffix(".preparation"))
                 publications: list[dict[str, Any]] = []
                 record = None
                 try:
@@ -1596,12 +1938,15 @@ def _recover_outputs(journal: Path | None) -> None:
             if record is not None and Path(record["path"]).exists():
                 _remove_transaction_file(record)
     _verify_transaction_file(journal_record, _JOURNAL_BYTES).unlink()
+    if automatic_owner:
+        owner.retire()
 
 
 def _replace_outputs(
     outputs: list[tuple[Path, str]], *, private_output: Path | None = None,
     verify: Callable[[dict[Path, bytes]], None] | None = None,
     journal: Path | None = None,
+    custody: str | None = None,
 ) -> None:
     """Stage closed files and rollback copies before publishing on either OS."""
     staged: list[tuple[Path, Path]] = []
@@ -1622,6 +1967,12 @@ def _replace_outputs(
     preparation = _OutputPreparation(journal.with_suffix(".preparation") if journal is not None else
                                      (outputs[0][0].parent / ".refresh-preparation" if outputs else
                                       Path(".refresh-preparation")))
+    if custody is not None:
+        if journal is None:
+            raise MatrixError("preparation custody requires a recovery journal")
+        preparation = _PreparationCustody(journal, custody)
+        if len(preparation.events) != 1 or preparation.data != preparation.complete:
+            raise MatrixError("recover enrolled preparation before replacing outputs")
 
     def stage(path: Path, data: bytes, mode: int | None, private: bool) -> Path:
         # A 128-bit random name plus exclusive creation prevents clobbering
@@ -1636,6 +1987,7 @@ def _replace_outputs(
                 temporary_paths.append(temporary)
                 metadata = _transaction_metadata(handle)
                 temporary_identities[temporary] = metadata
+                preparation.enroll(temporary, metadata)
                 temporary_records[temporary] = {
                     "path": str(temporary), "device": metadata.st_dev, "inode": metadata.st_ino,
                     "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
@@ -1645,6 +1997,8 @@ def _replace_outputs(
                 handle.flush()
                 os.fsync(handle.fileno())
         except BaseException:
+            if creation.failed:
+                preparation.cancel(temporary)
             if metadata is not None:
                 temporary_records[temporary] = _written_transaction_prefix(temporary, data, metadata)
             elif creation.attempted and not creation.failed:
@@ -1705,7 +2059,8 @@ def _replace_outputs(
             raise MatrixError("too many transaction outputs")
         markers = {path.parent / ".refresh-preparation" for path, _ in outputs} if journal is None else {
             preparation.path, journal.with_suffix(".pending")}
-        if any(os.path.lexists(marker) for marker in markers):
+        if any(os.path.lexists(marker) for marker in markers
+               if not isinstance(preparation, _PreparationCustody) or marker != preparation.path):
             raise MatrixError("uncertain recovery preparation; outputs and recovery copies retained; inspect "
                               + ", ".join(str(marker) for marker in sorted(markers)))
         reserved = list(markers)
@@ -1778,7 +2133,8 @@ def _replace_outputs(
         if verify is not None:
             verify(published)
         if journal is not None and transaction:
-            _write_transaction(journal, transaction, committed=True, publications=journal_publications)
+            _write_transaction(journal, transaction, committed=True, publications=journal_publications,
+                               preparation=preparation if isinstance(preparation, _PreparationCustody) else None)
     except BaseException as failure:
         keep_backups = True
         conflicts = []
@@ -1788,7 +2144,8 @@ def _replace_outputs(
         if len(journal_publications) == 2 and journal is not None and journal.exists():
             try:
                 if _transaction_record(journal, _JOURNAL_BYTES) == journal_publications[-1]:
-                    _write_transaction(journal, transaction, committed=False, publications=journal_publications)
+                    _write_transaction(journal, transaction, committed=False, publications=journal_publications,
+                                       preparation=preparation if isinstance(preparation, _PreparationCustody) else None)
             except BaseException as conflict:
                 raise MatrixError(f"{failure}\nrollback journal unavailable; all recovery copies retained: {conflict}") from failure
         for temporary, path in reversed(staged):
@@ -1849,7 +2206,7 @@ def _replace_outputs(
             journal_record = _transaction_record(journal, _JOURNAL_BYTES)
             if journal_record not in journal_publications:
                 # Check before discarding recovery copies, then check this same
-                # retained identity again at unlink instead of adopting a path.
+                # retained identity again before the named unlink.
                 keep_backups = True
                 raise MatrixError("recovery journal identity or content changed")
         recovery_paths = {backup for backup in backups.values() if backup is not None} if keep_backups else set()
@@ -1892,6 +2249,8 @@ def _replace_outputs(
             preparation.finish()
         if journal_record is not None:
             _verify_transaction_file(journal_record, _JOURNAL_BYTES).unlink()
+        if isinstance(preparation, _PreparationCustody) and cleanup_complete and not keep_backups:
+            preparation.reset()
 
 
 def _check_planned(add: Any, planned: Any) -> None:
@@ -2473,6 +2832,12 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--discovery", type=Path)
     parser.add_argument("--execution-receipt", type=Path)
     parser.add_argument("--ci-context", action="store_true")
+    parser.add_argument("--enroll-preparation", action="store_true",
+                        help="enroll an empty preparation marker and print its independent custody receipt")
+    parser.add_argument("--preparation-custody",
+                        help="JSON receipt returned by --enroll-preparation; retain outside recovery files")
+    parser.add_argument("--retire-preparation", action="store_true",
+                        help="recover and retire the marker bound by --preparation-custody")
     return parser
 
 
@@ -2483,6 +2848,13 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code or 0)
 
     root = args.root.resolve()
+    if ((args.enroll_preparation and (args.preparation_custody is not None or args.retire_preparation))
+            or args.retire_preparation and args.preparation_custody is None
+            or (args.enroll_preparation or args.retire_preparation) and (
+                args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None
+                or args.check_doc is not None or args.junit or args.discovery is not None or args.ci_context)):
+        print("error: enrollment/retirement requires a separate invocation; retirement requires custody", file=sys.stderr)
+        return 2
     if bool(args.junit) != bool(args.discovery) or ((args.execution_receipt or args.ci_context) and not args.junit):
         print("error: --junit and --discovery are required together for execution evidence", file=sys.stderr)
         return 2
@@ -2490,13 +2862,20 @@ def main(argv: list[str] | None = None) -> int:
         # At most one speculative read on a read-only checkout. A writer always
         # creates the persistent lock before publishing any journal or output;
         # its appearance invalidates even an unsuccessful speculative result.
-        writing = args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None
+        writing = (args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None
+                   or args.enroll_preparation or args.retire_preparation or args.preparation_custody is not None)
         for attempt in range(2):
             with _refresh_lock(root, shared=not writing) as synchronized:
                 lock = _refresh_lock_path(root, required=writing)
                 journal = lock.with_suffix(".transaction") if lock is not None else None
                 if writing:
-                    _recover_outputs(journal)
+                    if args.enroll_preparation:
+                        print(_PreparationCustody.create(journal))
+                        return 0
+                    _recover_outputs(journal, args.preparation_custody, enroll_recovery=True)
+                    if args.retire_preparation:
+                        _PreparationCustody(journal, args.preparation_custody).retire()
+                        return 0
                     return _run_locked(args, root)
                 if journal is not None and (journal.exists() or _preparation_pending(journal)):
                     break
@@ -2521,7 +2900,7 @@ def main(argv: list[str] | None = None) -> int:
         # Recovery needs exclusive ownership. Recheck under that lock before
         # reading inputs; another writer may have completed recovery meanwhile.
         with _refresh_lock(root):
-            _recover_outputs(journal)
+            _recover_outputs(journal, enroll_recovery=True)
             return _run_locked(args, root)
     except (MatrixError, OSError, UnicodeError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -2641,13 +3020,26 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
         except (MatrixError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+    automatic_custody = None
+    output_journal = _refresh_lock_path(root).with_suffix(".transaction") if outputs else None
     try:
+        if outputs and args.preparation_custody is None:
+            automatic_custody = _PreparationCustody.create(output_journal)
+            # Deliver independent authority before any payload creation. A
+            # caller retains this diagnostic with its run logs for restart.
+            print("preparation custody receipt: " + automatic_custody, file=sys.stderr, flush=True)
         _replace_outputs(outputs, private_output=args.execution_receipt,
                          verify=snapshot.verify if snapshot is not None else None,
-                         journal=(_refresh_lock_path(root).with_suffix(".transaction") if outputs else None))
+                         journal=output_journal,
+                         custody=(args.preparation_custody or automatic_custody) if outputs else None)
     except (MatrixError, OSError) as exc:
         print(f"error: cannot replace output: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if automatic_custody is not None and not os.path.lexists(output_journal):
+            owner = _PreparationCustody(output_journal, automatic_custody)
+            if len(owner.events) == 1 and owner.data == owner.complete:
+                owner.retire()
     if args.junit:
         for reference in receipt["references"]:
             if not reference["passed"]:

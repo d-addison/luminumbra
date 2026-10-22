@@ -22,6 +22,42 @@ SPEC.loader.exec_module(policy)
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_acceptance_partitions_have_effective_compiler_free_registrations(self):
+        # Evaluate the exact engine registrations without configuring targets or
+        # executing CTest entries. Hosted shards consume the same names/labels.
+        source = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        blocks = re.findall(
+            r'add_test\(\s*NAME AcceptanceMatrixContract\d*\s+COMMAND.*?\)\s*'
+            r'set_tests_properties\(AcceptanceMatrixContract\d*\s+PROPERTIES.*?\)', source, re.S)
+        self.assertEqual(len(blocks), 24)
+        with tempfile.TemporaryDirectory(prefix="acceptance registration ") as temporary:
+            fixture = Path(temporary)
+            cmake = ('cmake_minimum_required(VERSION 3.20)\nproject(AcceptanceRegistration LANGUAGES NONE)\n'
+                     'enable_testing()\nfind_package(Python3 COMPONENTS Interpreter REQUIRED)\n'
+                     f'set(_acceptance_source_dir "{(ROOT / "tools").as_posix()}")\n')
+            cmake += "\n".join(block.replace("${CMAKE_CURRENT_SOURCE_DIR}", "${_acceptance_source_dir}")
+                               for block in blocks)
+            (fixture / "CMakeLists.txt").write_text(cmake, encoding="utf-8")
+            build = fixture / "build"
+            subprocess.run(["cmake", "-S", str(fixture), "-B", str(build), "-G", "Ninja",
+                            f"-DPython3_EXECUTABLE={sys.executable}"], check=True, capture_output=True, text=True)
+            discovery = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                                       check=True, capture_output=True, text=True)
+            tests = json.loads(discovery.stdout)["tests"]
+            expected = {"AcceptanceMatrixContract" + (str(i + 1) if i else ""): i for i in range(24)}
+            self.assertEqual({test["name"] for test in tests}, set(expected))
+            self.assertEqual(len(tests), len(expected))
+            for test in tests:
+                properties = {item["name"]: item["value"] for item in test["properties"]}
+                self.assertEqual(properties["TIMEOUT"], 30)
+                self.assertEqual(properties["LABELS"], ["hygiene", "tools"])
+                self.assertFalse(properties.get("DISABLED", False))
+                self.assertNotIn("SKIP_RETURN_CODE", properties)
+                self.assertEqual(Path(test["command"][0]).resolve(), Path(sys.executable).resolve())
+                self.assertEqual(test["command"][1:3], ["-I", "-B"])
+                self.assertEqual(Path(test["command"][3]).resolve(), ROOT / "tools/ci/test_check_acceptance_matrix.py")
+                self.assertEqual(test["command"][4:], ["--contract-partition", str(expected[test["name"]])])
+
     def test_compiler_free_project_discovers_the_shared_production_registrations(self):
         # Configure only LANGUAGES NONE: no compiler probes, dependencies,
         # target builds or test execution. CTest itself supplies the model.

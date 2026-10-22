@@ -19,7 +19,7 @@ def _phase(token: str, *, selector: int | None = None, case: str = "") -> None:
             "selection-finish", "case-start", "case-finish"):
         return
     record = "acceptance-phase=" + token
-    if type(selector) is int and 0 <= selector < 8:
+    if type(selector) is int and 0 <= selector < 24:
         record += " selector=" + str(selector)
     if case:
         record += " case=" + "".join(char if char.isascii() and (char.isalnum() or char in "._")
@@ -362,10 +362,22 @@ class AcceptanceFixture(_PhaseCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = MODULE.main(list(args))
+        self.remember_custody(err.getvalue())
         return code, out.getvalue(), err.getvalue()
 
+    def remember_custody(self, diagnostics: str) -> None:
+        # Exercise the real caller receipt transport across invocations, rather
+        # than reconstructing authority from a recovery filename or its bytes.
+        for line in diagnostics.splitlines():
+            if line.startswith("preparation custody receipt: "):
+                self.caller_custody = line.removeprefix("preparation custody receipt: ")
+
     def base_args(self) -> list[str]:
-        return ["--root", str(self.root), "--matrix", str(self.matrix_path)]
+        args = ["--root", str(self.root), "--matrix", str(self.matrix_path)]
+        receipt = self.__dict__.get("caller_custody")
+        if receipt is not None and MODULE._refresh_lock_path(self.root).with_suffix(".preparation").exists():
+            args.extend(("--preparation-custody", receipt))
+        return args
 
     def prepare_refresh(self, *, generated_evidence: bool = True) -> dict[str, Any]:
         matrix = baseline_matrix()
@@ -412,6 +424,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
         child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
                                 str(MODULE_PATH), str(count), *self.base_args(), *options],
                                capture_output=True, text=True, timeout=5)
+        self.remember_custody(child.stderr)
         self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
 
     def execution_inputs(self, cases: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
@@ -3819,7 +3832,7 @@ script.write_text('changed input', encoding='utf-8')
         collision = self.tmp / (".acceptance-" + "a" * 32)
         collision.write_bytes(b"unrelated file\r\n")
         before = {path: path.read_bytes() for path in self.tmp.rglob("*") if path.is_file()}
-        with mock.patch.object(MODULE.secrets, "token_hex", return_value="a" * 32), \
+        with mock.patch.object(MODULE.secrets, "token_hex", side_effect=lambda size: "a" * (2 * size)), \
                 mock.patch.object(Path, "replace") as replace:
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(doc))
         self.assertEqual(code, 2, err)
@@ -5477,6 +5490,7 @@ raise SystemExit(module["main"](sys.argv[5:]))
                 child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
                                         str(inventory), str(first), str(second), *self.base_args(),
                                         "--refresh-inventory"], capture_output=True, text=True, timeout=5)
+                self.remember_custody(child.stderr)
                 self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
                 journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
                 entries = json.loads(journal.read_bytes())["outputs"]
@@ -5547,7 +5561,9 @@ raise SystemExit(module["main"](sys.argv[5:]))
         with mock.patch.object(os, "fsync", side_effect=sync):
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(synced), 20)  # Six payloads, twelve preparation records, two journals.
+        # Six payloads, eighteen artifact records, four pending records, two
+        # journals, initial enrollment, cleanup reset and automatic retirement.
+        self.assertEqual(len(synced), 33)
 
     def test_readonly_first_writer_journal_is_recovered_or_refused_before_retry_inputs(self) -> None:
         lock = MODULE._refresh_lock_path(self.root)
@@ -5817,6 +5833,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
                 child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
                                         str(MODULE_PATH), str(count), *self.base_args()],
                                        capture_output=True, text=True, timeout=5)
+                self.remember_custody(child.stderr)
                 self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
                 with mock.patch.object(MODULE, "load_matrix",
                                        side_effect=MODULE.MatrixError("stop after recovery")):
@@ -5906,9 +5923,13 @@ raise SystemExit(module["main"](sys.argv[3:]))
                 fdopen, replace, sync, metadata = os.fdopen, os.replace, os.fsync, MODULE._transaction_metadata
                 calls = 0
                 journal_syncs = 0
+                journal_descriptor = None
                 unknown_reported = False
                 def faulted_fdopen(descriptor: int, mode: str) -> Any:
+                    nonlocal journal_descriptor
                     handle = fdopen(descriptor, mode)
+                    if mode == "wb":
+                        journal_descriptor = descriptor
                     if mode == "wb" and failure in ("write", "flush"):
                         if failure == "write":
                             handle.write = lambda data: 0
@@ -5924,10 +5945,15 @@ raise SystemExit(module["main"](sys.argv[3:]))
                     replace(source, target)
                 def faulted_sync(descriptor: int) -> None:
                     nonlocal journal_syncs
-                    is_journal = candidate.exists()
+                    # Enrollment also syncs metadata while pending is open.
+                    # Fault the intended payload handle on both platforms.
+                    with fdopen(os.dup(descriptor), "rb") as handle:
+                        actual = metadata(handle)
+                    is_journal = candidate.exists() and descriptor == journal_descriptor
+                    is_marker = MODULE._same_transaction_identity(journal.with_suffix(".preparation"), actual)
                     if is_journal:
                         journal_syncs += 1
-                    if (failure == "payload-sync" or (is_journal and (
+                    if ((failure == "payload-sync" and not is_marker and not is_journal) or (is_journal and (
                             (failure == "sync" and journal_syncs == 1)
                             or (failure == "commit-sync" and journal_syncs == 2)))):
                         raise OSError("sync denied")
@@ -5935,7 +5961,8 @@ raise SystemExit(module["main"](sys.argv[3:]))
                 def unknown_candidate(handle: Any) -> Any:
                     nonlocal unknown_reported
                     result = metadata(handle)
-                    if failure == "candidate-identity" and candidate.exists() and not unknown_reported:
+                    if (failure == "candidate-identity" and handle.fileno() == journal_descriptor
+                            and candidate.exists() and not unknown_reported):
                         unknown_reported = True
                         fields = list(result)
                         fields[1] = 0
@@ -6506,12 +6533,428 @@ class PublicTreeScanTests(_PhaseCase):
                 self.assertFalse(PUBLIC_TREE._may_name_attribution("Ordinary public language."))
 
 
-# Eight disjoint selections bound each native entry's filesystem fault sweeps.
+class AcceptanceCustodyTests(AcceptanceFixture):
+    def custody(self) -> tuple[Path, str]:
+        journal = self.tmp / "refresh.transaction"
+        return journal, MODULE._PreparationCustody.create(journal)
+
+    def image(self) -> dict[Path, tuple[bytes, int, int]]:
+        return {p: (p.read_bytes(), p.stat().st_dev, p.stat().st_ino)
+                for p in self.tmp.rglob("*") if p.is_file()}
+
+    def test_enrollment_cli_recovery_reuse_and_retirement(self) -> None:
+        self.prepare_refresh()
+        code, receipt, err = self.run_main(*self.base_args(), "--enroll-preparation")
+        self.assertEqual(code, 0, err)
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        before = journal.with_suffix(".preparation").stat()
+        for text in ("first\r\n", "second\r\n"):
+            output = self.tmp / "output"
+            MODULE._replace_outputs([(output, text)], journal=journal, custody=receipt)
+            code, _, err = self.run_main(*self.base_args(), "--preparation-custody", receipt)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(output.read_bytes(), text.encode())
+            self.assertTrue(os.path.samestat(before, journal.with_suffix(".preparation").stat()))
+        code, _, err = self.run_main(*self.base_args(), "--preparation-custody", receipt, "--retire-preparation")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(journal.with_suffix(".preparation").exists())
+
+    def test_cli_rejects_incomplete_or_combined_enrollment_requests(self) -> None:
+        base = self.base_args()
+        for options in (("--retire-preparation",), ("--enroll-preparation", "--preparation-custody", "{}"),
+                        ("--enroll-preparation", "--write-doc", str(self.tmp / "document")),
+                        ("--retire-preparation", "--preparation-custody", "{}", "--refresh-inventory")):
+            with self.subTest(options=options):
+                before = self.image()
+                self.assertEqual(self.run_main(*base, *options)[0], 2)
+                self.assertEqual(self.image(), before)
+
+    def test_interrupted_enrollment_never_adopts_a_marker_or_returns_a_receipt(self) -> None:
+        journal = self.tmp / "refresh.transaction"
+        with mock.patch.object(os, "fdopen", side_effect=OSError("handle denied")), \
+                self.assertRaisesRegex(OSError, "handle denied"):
+            MODULE._PreparationCustody.create(journal)
+        before = self.image()
+        for action in (lambda: MODULE._PreparationCustody.create(journal), lambda: MODULE._recover_outputs(journal)):
+            with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                action()
+            self.assertEqual(self.image(), before)
+
+    def test_enrollment_short_write_flush_and_sync_failures_preserve_unknown_state(self) -> None:
+        for failure in ("write", "flush", "sync"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory).resolve() / "refresh.transaction"
+                fdopen = os.fdopen
+                def opened(*args: Any, **kwargs: Any) -> Any:
+                    handle = fdopen(*args, **kwargs)
+                    if failure == "write":
+                        write = handle.write
+                        handle.write = lambda data: write(data[:len(data) // 2])
+                    elif failure == "flush":
+                        handle.flush = mock.Mock(side_effect=OSError("flush failed"))
+                    return handle
+                with mock.patch.object(os, "fdopen", opened), \
+                        mock.patch.object(os, "fsync", side_effect=OSError("sync failed") if failure == "sync" else None), \
+                        self.assertRaises(OSError):
+                    MODULE._PreparationCustody.create(journal)
+                marker = journal.with_suffix(".preparation")
+                data, identity = marker.read_bytes(), marker.stat()
+                with self.assertRaises(MODULE.MatrixError):
+                    MODULE._recover_outputs(journal)
+                self.assertEqual(marker.read_bytes(), data)
+                self.assertTrue(os.path.samestat(marker.stat(), identity))
+
+    def test_restart_reacquires_enrolled_partial_output_and_pending_files(self) -> None:
+        program = r'''
+import builtins, os, pathlib, runpy, sys
+g = runpy.run_path(sys.argv[1])["main"].__globals__
+journal, receipt, phase = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+enroll = g["_PreparationCustody"].enroll
+def enrolled(owner, path, identity):
+    enroll(owner, path, identity)
+    if phase in ("output", "pending") and (path.suffix == ".pending") == (phase == "pending"):
+        os._exit(73)
+g["_PreparationCustody"].enroll = enrolled
+opened = builtins.open
+def opening(path, *args, **kwargs):
+    handle = opened(path, *args, **kwargs)
+    if phase == "payload" and pathlib.Path(path).name.startswith(".acceptance-"):
+        write = handle.write
+        def writing(data):
+            write(data[:len(data) // 2])
+            handle.flush()
+            os._exit(73)
+        handle.write = writing
+    return handle
+builtins.open = opening
+replace_path, replace = pathlib.Path.replace, os.replace
+def published(path, target):
+    result = replace_path(path, target)
+    if phase == "publication" and pathlib.Path(target).name == "output":
+        os._exit(73)
+    return result
+pathlib.Path.replace = published
+renames = 0
+def renamed(source, target):
+    global renames
+    result = replace(source, target)
+    if pathlib.Path(target) == journal:
+        renames += 1
+        if phase == "commit" and renames == 2:
+            os._exit(73)
+    return result
+os.replace = renamed
+g["_replace_outputs"]([(journal.parent / "output", "candidate\r\n")], journal=journal, custody=receipt)
+'''
+        for phase in ("output", "payload", "pending", "publication", "commit"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                journal, output = base / "refresh.transaction", base / "output"
+                output.write_bytes(b"original\r\n")
+                receipt = MODULE._PreparationCustody.create(journal)
+                child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
+                                        str(journal), receipt, phase], capture_output=True, text=True, timeout=5)
+                self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+                self.assertTrue(list(base.glob(".acceptance-*")))
+                restart = subprocess.run([sys.executable, "-I", "-B", "-c",
+                    'import pathlib,runpy,sys;runpy.run_path(sys.argv[1])["_recover_outputs"](pathlib.Path(sys.argv[2]),sys.argv[3])',
+                    str(MODULE_PATH), str(journal), receipt], capture_output=True, text=True, timeout=5)
+                self.assertEqual(restart.returncode, 0, (restart.stdout, restart.stderr))
+                self.assertEqual(output.read_bytes(), b"candidate\r\n" if phase == "commit" else b"original\r\n")
+                self.assertEqual(list(base.glob(".acceptance-*")), [])
+                MODULE._replace_outputs([(output, "retry")], journal=journal, custody=receipt)
+                self.assertEqual(output.read_bytes(), b"retry")
+
+    def test_reset_removes_only_enrolled_partial_content_and_preserves_unrelated_files(self) -> None:
+        journal, receipt = self.custody()
+        owner = MODULE._PreparationCustody(journal, receipt)
+        artifact, unrelated = self.tmp / (".acceptance-" + "a" * 32), self.tmp / "unrelated"
+        owner.intend(artifact, self.tmp / "output", b"whole payload")
+        artifact.touch()
+        with artifact.open("r+b") as handle:
+            owner.enroll(artifact, MODULE._transaction_metadata(handle))
+            handle.write(b"part")
+        unrelated.write_bytes(b"keep\r\n")
+        MODULE._recover_outputs(journal, receipt)
+        self.assertFalse(artifact.exists())
+        self.assertEqual(unrelated.read_bytes(), b"keep\r\n")
+        self.assertEqual(len(MODULE._PreparationCustody(journal, receipt).events), 1)
+
+    def test_torn_event_reset_retains_the_committed_enrollment(self) -> None:
+        journal, receipt = self.custody()
+        marker = journal.with_suffix(".preparation")
+        initial = marker.read_bytes()
+        with marker.open("ab") as handle:
+            handle.write(b'{"event":')
+        MODULE._recover_outputs(journal, receipt)
+        self.assertEqual(marker.read_bytes(), initial)
+        MODULE._recover_outputs(journal, receipt)
+
+    def test_uncommitted_artifact_enrollment_is_unknown_and_untouched(self) -> None:
+        journal, receipt = self.custody()
+        owner = MODULE._PreparationCustody(journal, receipt)
+        artifact = self.tmp / (".acceptance-" + "b" * 32)
+        owner.intend(artifact, self.tmp / "output", b"whole")
+        artifact.write_bytes(b"unknown")
+        before = self.image()
+        with self.assertRaisesRegex(MODULE.MatrixError, "unenrolled"):
+            MODULE._recover_outputs(journal, receipt)
+        self.assertEqual(self.image(), before)
+
+    def test_foreign_stale_and_forged_receipts_preserve_all_bytes_and_identities(self) -> None:
+        journal, receipt = self.custody()
+        value = json.loads(receipt)
+        for field, replacement in (("key", "0" * 64), ("nonce", "0" * 64), ("inode", value["inode"] + 1),
+                                   ("journal", str(self.tmp / "other.transaction")), ("version", 2)):
+            with self.subTest(field=field):
+                before = self.image()
+                with self.assertRaises(MODULE.MatrixError):
+                    MODULE._recover_outputs(journal, json.dumps(dict(value, **{field: replacement})))
+                self.assertEqual(self.image(), before)
+        marker = journal.with_suffix(".preparation")
+        marker.rename(self.tmp / "displaced")
+        marker.write_bytes(b"foreign\r\n")
+        before = self.image()
+        with self.assertRaises(MODULE.MatrixError):
+            MODULE._recover_outputs(journal, receipt)
+        self.assertEqual(self.image(), before)
+
+    def test_foreign_pending_and_replaced_enrolled_artifacts_refuse_before_cleanup(self) -> None:
+        for phase in ("unlisted-pending", "replaced", "hardlink"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                journal = base / "refresh.transaction"
+                receipt = MODULE._PreparationCustody.create(journal)
+                owner = MODULE._PreparationCustody(journal, receipt)
+                artifact = base / (".acceptance-" + "c" * 32)
+                owner.intend(artifact, base / "output", b"whole")
+                artifact.touch()
+                with artifact.open("r+b") as handle:
+                    owner.enroll(artifact, MODULE._transaction_metadata(handle))
+                if phase == "unlisted-pending":
+                    journal.with_suffix(".pending").write_bytes(b"foreign")
+                elif phase == "replaced":
+                    artifact.rename(base / "displaced")
+                    artifact.write_bytes(b"foreign")
+                else:
+                    os.link(artifact, base / "alias")
+                before = {p: (p.read_bytes(), p.stat()) for p in base.iterdir()}
+                with self.assertRaises(MODULE.MatrixError):
+                    MODULE._recover_outputs(journal, receipt)
+                self.assertEqual(set(base.iterdir()), set(before))
+                for path, (data, identity) in before.items():
+                    self.assertEqual(path.read_bytes(), data)
+                    self.assertTrue(os.path.samestat(path.stat(), identity))
+
+    def test_unknown_authenticated_metadata_and_tampering_refuse_without_reset(self) -> None:
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory).resolve() / "refresh.transaction"
+                receipt = MODULE._PreparationCustody.create(journal)
+                owner = MODULE._PreparationCustody(journal, receipt)
+                owner.append({"unknown": True})
+                if not unknown:
+                    owner.path.write_bytes(owner.path.read_bytes().replace(b"true", b"null"))
+                before = owner.path.read_bytes()
+                with self.assertRaises(MODULE.MatrixError):
+                    MODULE._recover_outputs(journal, receipt)
+                self.assertEqual(owner.path.read_bytes(), before)
+
+    def test_unreadable_marker_and_artifact_refuse_without_reset(self) -> None:
+        journal, receipt = self.custody()
+        owner = MODULE._PreparationCustody(journal, receipt)
+        artifact = self.tmp / (".acceptance-" + "d" * 32)
+        owner.intend(artifact, self.tmp / "output", b"whole")
+        artifact.touch()
+        with artifact.open("r+b") as handle:
+            owner.enroll(artifact, MODULE._transaction_metadata(handle))
+        read = MODULE._read_transaction_file
+        for denied in (owner.path, artifact):
+            before = self.image()
+            def reading(path: Path, limit: int) -> Any:
+                if path == denied:
+                    raise PermissionError("read denied")
+                return read(path, limit)
+            with mock.patch.object(MODULE, "_read_transaction_file", reading), self.assertRaises(PermissionError):
+                MODULE._recover_outputs(journal, receipt)
+            self.assertEqual(self.image(), before)
+
+    def test_record_metadata_file_and_output_bounds_are_enforced(self) -> None:
+        journal, receipt = self.custody()
+        owner = MODULE._PreparationCustody(journal, receipt)
+        for _ in range(MODULE._PREPARATION_EVENTS - 1):
+            owner.intend(self.tmp / (".acceptance-" + "e" * 32), self.tmp / "output", b"")
+        before = self.image()
+        with self.assertRaisesRegex(MODULE.MatrixError, "record bound"):
+            owner.intend(self.tmp / (".acceptance-" + "f" * 32), self.tmp / "output", b"")
+        self.assertEqual(self.image(), before)
+        owner.path.write_bytes(owner.data + owner.data.splitlines(keepends=True)[-1])
+        with self.assertRaisesRegex(MODULE.MatrixError, "record bound"):
+            MODULE._PreparationCustody(journal, receipt)
+        owner.path.write_bytes(owner.data)
+        MODULE._recover_outputs(journal, receipt)
+        for count in (6, 16):
+            owner = MODULE._PreparationCustody(journal, receipt)
+            for index in range(count):
+                owner.intend(self.tmp / (".acceptance-" + f"{index:032x}"),
+                             self.tmp / (str(index) if count == 6 else "output"), b"")
+            before = self.image()
+            with self.assertRaisesRegex(MODULE.MatrixError, "count exceeds bound"):
+                MODULE._recover_outputs(journal, receipt)
+            self.assertEqual(self.image(), before)
+            # This deliberately malformed authenticated fixture has no files;
+            # restore its committed enrollment for the next independent bound.
+            marker = journal.with_suffix(".preparation")
+            marker.write_bytes(marker.read_bytes().split(b"\n", 1)[0] + b"\n")
+        marker.write_bytes(b"x" * (MODULE._JOURNAL_BYTES + 1))
+        with self.assertRaisesRegex(MODULE.MatrixError, "size"):
+            MODULE._recover_outputs(journal, receipt)
+        for bad in ("", "{}", "[]", "x" * (MODULE._JOURNAL_BYTES + 1)):
+            with self.assertRaisesRegex(MODULE.MatrixError, "receipt"):
+                MODULE._PreparationCustody(journal, bad)
+
+    def test_invalid_journal_refuses_before_owned_pending_cleanup_or_marker_reset(self) -> None:
+        journal, receipt = self.custody()
+        owner = MODULE._PreparationCustody(journal, receipt)
+        pending = journal.with_suffix(".pending")
+        owner.intend(pending, journal, b"journal")
+        pending.touch()
+        with pending.open("r+b") as handle:
+            owner.enroll(pending, MODULE._transaction_metadata(handle))
+            handle.write(b"partial")
+        journal.write_bytes(b'{"version":99}')
+        with owner.path.open("ab") as handle:
+            handle.write(b'{"event":')
+        before = self.image()
+        with self.assertRaisesRegex(MODULE.MatrixError, "invalid recovery journal"):
+            MODULE._recover_outputs(journal, receipt)
+        self.assertEqual(self.image(), before)
+
+    def test_malformed_authenticated_events_and_byte_bounds_refuse_untouched(self) -> None:
+        for value in ('"\\\b\f\n\r\t\x00\x7f', "é雪🚀", {"keys": [None, True, False, 128, -128]}, []):
+            expected = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            with mock.patch.object(MODULE, "_JOURNAL_BYTES", len(expected)):
+                self.assertEqual(MODULE._custody_json(value), expected)
+            with mock.patch.object(MODULE, "_JOURNAL_BYTES", len(expected) - 1), \
+                    mock.patch.object(MODULE.json, "dumps", side_effect=AssertionError("allocated before size check")), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "exceeds its bound"):
+                MODULE._custody_json(value)
+        nested: Any = None
+        for _ in range(65):
+            nested = [nested]
+        with self.assertRaisesRegex(MODULE.MatrixError, "nesting"):
+            MODULE._custody_json(nested)
+        journal, receipt = self.custody()
+        initial = journal.with_suffix(".preparation").read_bytes()
+        artifact = self.tmp / (".acceptance-" + "d" * 32)
+        intention = {"create": str(artifact), "destination": str(self.tmp / "output"),
+                     "size": 0, "sha256": hashlib.sha256(b"").hexdigest()}
+        events = [[], {"enrolled": {}}, {"cancelled": str(artifact)}, {"bound": {}},
+                  dict(intention, destination="relative"), dict(intention, create=str(self.tmp / "foreign")),
+                  dict(intention, size=True), dict(intention, size=-1), dict(intention, sha256="unknown"),
+                  dict(intention, create=str(journal.with_suffix(".pending"))),
+                  {"enrolled": {"path": str(artifact), "device": False, "inode": 1}}]
+        for event in events:
+            with self.subTest(event=event):
+                owner = MODULE._PreparationCustody(journal, receipt)
+                owner.append(event)
+                before = self.image()
+                with self.assertRaises(MODULE.MatrixError):
+                    MODULE._recover_outputs(journal, receipt)
+                self.assertEqual(self.image(), before)
+                owner.path.write_bytes(initial)
+        owner = MODULE._PreparationCustody(journal, receipt)
+        before = self.image()
+        with mock.patch.object(MODULE, "_JOURNAL_BYTES", len(initial) + 1), \
+                self.assertRaisesRegex(MODULE.MatrixError, "exceeds its bound"):
+            owner.intend(artifact, self.tmp / "output", b"")
+        self.assertEqual(self.image(), before)
+        with self.assertRaisesRegex(MODULE.MatrixError, "requires a recovery journal"):
+            MODULE._replace_outputs([(self.tmp / "output", "new")], custody=receipt)
+        owner.intend(artifact, self.tmp / "output", b"")
+        with self.assertRaisesRegex(MODULE.MatrixError, "recover enrolled preparation"):
+            MODULE._replace_outputs([(self.tmp / "output", "new")], journal=journal, custody=receipt)
+        MODULE._recover_outputs(journal, receipt)
+        owner = MODULE._PreparationCustody(journal, receipt)
+        owner.retire()
+        new_receipt = MODULE._PreparationCustody.create(journal)
+        before = self.image()
+        with self.assertRaises(MODULE.MatrixError):
+            MODULE._recover_outputs(journal, receipt)
+        self.assertEqual(self.image(), before)
+        MODULE._recover_outputs(journal, new_receipt)
+
+    def test_cleanup_and_reset_failures_remain_restartable(self) -> None:
+        journal, receipt = self.custody()
+        owner = MODULE._PreparationCustody(journal, receipt)
+        artifact = self.tmp / (".acceptance-" + "f" * 32)
+        owner.intend(artifact, self.tmp / "output", b"whole")
+        artifact.touch()
+        with artifact.open("r+b") as handle:
+            owner.enroll(artifact, MODULE._transaction_metadata(handle))
+        with mock.patch.object(MODULE, "_remove_transaction_file", side_effect=PermissionError("remove denied")), \
+                self.assertRaises(PermissionError):
+            MODULE._recover_outputs(journal, receipt)
+        self.assertTrue(artifact.exists())
+        with mock.patch.object(os, "fsync", side_effect=OSError("sync denied")), self.assertRaises(OSError):
+            MODULE._recover_outputs(journal, receipt)
+        MODULE._recover_outputs(journal, receipt)
+        self.assertFalse(artifact.exists())
+        self.assertEqual(len(MODULE._PreparationCustody(journal, receipt).events), 1)
+        self.prepare_refresh()
+        cli_journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        for failure in (PermissionError("retirement denied"), MODULE.MatrixError("retirement uncertain")):
+            with self.subTest(failure=str(failure)):
+                with mock.patch.object(MODULE._PreparationCustody, "retire", side_effect=failure):
+                    code, _, err = self.run_main(*self.base_args(), "--write-doc", str(self.tmp / "document"))
+                self.assertEqual(code, 2, err)
+                self.assertIn(str(failure), err)
+                self.assertTrue(cli_journal.with_suffix(".preparation").exists())
+                self.assertFalse(cli_journal.exists())
+                code, _, err = self.run_main(*self.base_args(), "--retire-preparation")
+                self.assertEqual(code, 0, err)
+                self.assertFalse(cli_journal.with_suffix(".preparation").exists())
+
+    def test_v1_v2_journals_recover_with_custody_and_compact_before_restoration(self) -> None:
+        for version in (1, 2):
+            for committed in (False, True):
+                with self.subTest(version=version, committed=committed), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory).resolve()
+                    journal, output = base / "refresh.transaction", base / "output"
+                    receipt = MODULE._PreparationCustody.create(journal)
+                    owner = MODULE._PreparationCustody(journal, receipt)
+                    old, new = [base / (".acceptance-" + f"{i:032x}") for i in (1, 2)]
+                    old.write_bytes(b"old\r\n")
+                    new.write_bytes(b"new\r\n")
+                    backup, candidate = MODULE._transaction_record(old), MODULE._transaction_record(new)
+                    entry = {"path": str(output), "old": backup["sha256"], "backup": backup, "new": candidate}
+                    MODULE._write_transaction(journal, [entry], committed=committed,
+                                              restorations=[None] if version == 2 else None)
+                    new.replace(output)
+                    # A full preparation log must be compacted using validated
+                    # journal authority before new restoration enrollment.
+                    for _ in range(MODULE._PREPARATION_EVENTS - 1):
+                        owner.intend(base / (".acceptance-" + "e" * 32), output, b"")
+                    MODULE._recover_outputs(journal, receipt)
+                    self.assertEqual(output.read_bytes(), b"new\r\n" if committed else b"old\r\n")
+                    self.assertFalse(journal.exists())
+                    self.assertEqual(list(base.glob(".acceptance-*")), [])
+                    self.assertEqual(len(MODULE._PreparationCustody(journal, receipt).events), 1)
+
+
+# Disjoint selections bound each native entry's filesystem fault sweeps.
 # Direct execution still discovers the complete module, including recovery and
 # all four public-tree partitions.
-_CONTRACT_PARTITIONS = 8
+_CONTRACT_PARTITIONS = 24
 _MATRIX_CLASSES = (AcceptanceMatrixTests, ProductionAcceptanceMatrixTests,
                    AcceptanceMatrixPublishabilityTests, PublicTreeScanTests)
+# Measured whole-case moves keep filesystem sweeps away from the deliberate
+# five-second timeout control and distribute the remaining expensive sweeps.
+_CONTRACT_CASE_PARTITIONS = {
+    "AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files": 1,
+    "AcceptanceSelectionTests.test_rollback_payload_buffer_boundaries_are_discoverable": 6,
+    "AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication": 7,
+}
 
 
 def contract_suite(number: int) -> unittest.TestSuite:
@@ -6519,9 +6962,13 @@ def contract_suite(number: int) -> unittest.TestSuite:
         raise ValueError("invalid contract partition")
     _phase("selection-start", selector=number)
     loader = unittest.TestLoader()
-    cases = [case(name) for case in (*_MATRIX_CLASSES, AcceptanceSelectionTests)
+    cases = [case(name) for case in (*_MATRIX_CLASSES, AcceptanceSelectionTests,
+                                   AcceptanceRecoveryTests, AcceptanceCustodyTests)
              for name in loader.getTestCaseNames(case)]
-    suite = unittest.TestSuite(cases[number::_CONTRACT_PARTITIONS])
+    suite = unittest.TestSuite(case for index, case in enumerate(cases)
+                              if _CONTRACT_CASE_PARTITIONS.get(
+                                  type(case).__name__ + "." + case._testMethodName,
+                                  index % _CONTRACT_PARTITIONS) == number)
     _phase("selection-finish", selector=number)
     return suite
 
@@ -6840,7 +7287,7 @@ class AcceptanceSelectionTests(_PhaseCase):
             emit("unknown")
             self.assertEqual(namespace["_phase_records"], 0)
             emit("selection-start", selector=7)
-            for selector in (-1, 8, True, "private-selector", None):
+            for selector in (-1, 24, True, "private-selector", None):
                 emit("selection-finish", selector=selector)
             emit("case-start", case="a/\n\r\u96ea" * 256)
             for _ in range(800):
@@ -6856,7 +7303,7 @@ class AcceptanceSelectionTests(_PhaseCase):
         self.assertEqual(records[6], "acceptance-phase=case-start case=" + "a????" * 25 + "a??\n")
         for record in records:
             self.assertLessEqual(len(record.encode("ascii")), 256)
-            self.assertRegex(record, r"^acceptance-phase=[a-z-]+(?: selector=[0-7])?(?: case=[A-Za-z0-9._?]{1,128})?\n$")
+            self.assertRegex(record, r"^acceptance-phase=[a-z-]+(?: selector=(?:[0-9]|1[0-9]|2[0-3]))?(?: case=[A-Za-z0-9._?]{1,128})?\n$")
         # Failed/partial writes and failed flushes disable further diagnostics.
         # Neither retries nor stream errors may replace a test's result/exception.
         for stream in (None, object(), mock.Mock(write=mock.Mock(return_value=0)),
@@ -6918,7 +7365,7 @@ class AcceptanceSelectionTests(_PhaseCase):
         output = io.StringIO()
         with mock.patch.dict(globals(), _phase_records=0), contextlib.redirect_stderr(output):
             suite = contract_suite(7)
-        self.assertEqual(suite.countTestCases(), 32)
+        self.assertEqual(suite.countTestCases(), 14)
         self.assertEqual(output.getvalue(), "acceptance-phase=selection-start selector=7\n"
                          "acceptance-phase=selection-finish selector=7\n")
 
@@ -7747,7 +8194,7 @@ deep(10)
     def test_native_selections_match_complete_python_discovery_once(self) -> None:
         loader = unittest.TestLoader()
         expected = [case(name).id() for case in (*_MATRIX_CLASSES, AcceptanceSelectionTests,
-                                                  AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
+                                                  AcceptanceRecoveryTests, AcceptanceCustodyTests, AcceptanceMatrixPublicTreeTests)
                     for name in loader.getTestCaseNames(case)]
         original = sorted(case.__name__ + "." + name
                           for case in (*_MATRIX_CLASSES, AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
@@ -7756,6 +8203,11 @@ deep(10)
         self.assertEqual(hashlib.sha256("\n".join(original).encode("utf-8")).hexdigest(),
                          "4806f17639f51770b6cf64722bc7539f8cd8c97cd08ae49e396c85dc58f70b0d")
         selected = [test.id() for number in range(_CONTRACT_PARTITIONS) for test in contract_suite(number)]
+        known = {type(test).__name__ + "." + test._testMethodName for number in range(_CONTRACT_PARTITIONS)
+                 for test in contract_suite(number)}
+        self.assertTrue(set(_CONTRACT_CASE_PARTITIONS) <= known)
+        self.assertTrue(all(type(number) is int and 0 <= number < _CONTRACT_PARTITIONS
+                            for number in _CONTRACT_CASE_PARTITIONS.values()))
         cmake = (MODULE.DEFAULT_ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         blocks = re.findall(r'add_test\(\s*NAME (Acceptance\w+Contract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
         native = []
@@ -7765,11 +8217,8 @@ deep(10)
                 selector = re.search(r'AcceptanceMatrixPublicTreeTests\.test_partition_[0-3]', command)
                 self.assertIsNotNone(selector, name)
                 native.extend(test.id() for test in loader.loadTestsFromName(selector[0], sys.modules[__name__]))
-            elif name == "AcceptanceRecoveryContract":
-                self.assertIn("AcceptanceRecoveryTests", command)
-                native.extend(test.id() for test in loader.loadTestsFromTestCase(AcceptanceRecoveryTests))
             else:
-                partition = re.search(r'--contract-partition ([0-7])\s*$', command)
+                partition = re.search(r'--contract-partition ([0-9]+)\s*$', command)
                 self.assertIsNotNone(partition, name)
                 number = int(partition[1])
                 partitions.append(number)
@@ -7777,7 +8226,7 @@ deep(10)
             self.assertRegex(cmake, rf'set_tests_properties\(\s*{name}\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)'
                              if not name.startswith("AcceptanceMatrixPublicTreeContract") else
                              r'AcceptanceMatrixPublicTreeContract4\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)')
-        selected.extend(test.id() for case in (AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
+        selected.extend(test.id() for case in (AcceptanceMatrixPublicTreeTests,)
                         for test in loader.loadTestsFromTestCase(case))
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         names = {"AcceptanceMatrixContract" + (str(number + 1) if number else "")
@@ -7793,11 +8242,11 @@ deep(10)
         self.assertEqual(len(selected), len(set(selected)))
         discovered = loader.loadTestsFromModule(sys.modules[__name__])
         self.assertEqual(discovered.countTestCases(), len(expected))
-        self.assertEqual(len(expected), 286)
+        self.assertEqual(len(expected), 303)
         self.assert_phase_contract()
 
     def test_partition_entrypoint_refuses_invalid_selection(self) -> None:
-        for value in ("-1", "8", "unknown"):
+        for value in ("-1", "24", "unknown"):
             with self.subTest(value=value):
                 child = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
                                         "--contract-partition", value],
