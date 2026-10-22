@@ -24,6 +24,12 @@ SPEC = importlib.util.spec_from_file_location("ctest_shards", Path(__file__).wit
 shards = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(shards)
 
+COST_HINTS = {name: 830 for name in shards.HEAVY_NAMES} | {
+    "FarLodWorker.CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership": 180,
+    "FarWorldCaveSelection.ProductionFacadeAdjacentTilesShareBordersHalosAndVerticalBrickSamples": 125,
+    "WaterDeterminism.WaterResolutionMigrationConvergesAtLoadBothWays": 120,
+}
+
 
 def test(name, **properties):
     return {"name": name, "command": ["test-binary", name], "properties": [{"name": key, "value": value} for key, value in properties.items()]}
@@ -1065,7 +1071,7 @@ class CTestShardTests(unittest.TestCase):
                            ("WILL_FAIL", True), ("PASS_REGULAR_EXPRESSION", ["changed"]),
                            ("FAIL_REGULAR_EXPRESSION", ["changed"]), ("SKIP_RETURN_CODE", 42),
                            ("SKIP_REGULAR_EXPRESSION", ["changed"]), ("TIMEOUT", 1),
-                           ("PROCESSORS", 4), ("COST", 30), ("RESOURCE_LOCK", ["python-contracts"]),
+                           ("PROCESSORS", 4), ("COST", 30), ("COST", 830), ("RESOURCE_LOCK", ["python-contracts"]),
                            ("DISABLED", True), ("FUTURE_EXECUTION_PROPERTY", {"setting": [1, "new"]})):
             changed = copy.deepcopy(self.tests)
             changed[0]["properties"] = [prop for prop in changed[0]["properties"] if prop["name"] != key]
@@ -1484,7 +1490,57 @@ class CTestShardTests(unittest.TestCase):
                 with self.subTest(mutation=mutation, selection=selection), self.assertRaisesRegex(ValueError, "heavy roster"):
                     shards.select_tests(shards.filtered_tests(tests), "gcc", selection)
 
-    def test_ctest_loads_heavy_hook_preserving_labels_and_quick_cases(self):
+    def test_reviewed_cost_hints_use_discovered_lists_and_refuse_missing_cases(self):
+        root = Path(__file__).resolve().parents[2]
+        cmake = (root / "test/CMakeLists.txt").read_text()
+        hook = (root / "test/HeavyTestsCTest.cmake").read_text()
+        self.assertIn('PROPERTIES LABELS heavy COST 830)', hook)
+        expected = {
+            name: ("far_lod_worker_test_TESTS" if name.startswith("FarLodWorker.")
+                   else "common_tests_TESTS", str(cost))
+            for name, cost in COST_HINTS.items() if name not in shards.HEAVY_NAMES
+        }
+        actual = {name: (test_list, cost) for test_list, name, cost in
+                  re.findall(r'"(\w+_TESTS);([^";]+);(\d+)"', hook)}
+        self.assertEqual(actual, expected)
+        self.assertIn('list(FIND LUMINUMBRA_WORLD_OPEN_TESTS "${_lum_heavy_name}" _lum_heavy_index)', hook)
+        for kind in ("heavy", "cost"):
+            message = "heavy" if kind == "heavy" else "long"
+            indent = "        " if kind == "heavy" else "    "
+            self.assertIn(f'{indent}if(_lum_{kind}_index EQUAL -1)\n'
+                          f'{indent}    message(FATAL_ERROR "Reviewed {message} correctness case missing: '
+                          f'${{_lum_{kind}_name}}")\n{indent}endif()', hook)
+        self.assertIn('list(FIND ${_lum_cost_test_list} "${_lum_cost_name}" _lum_cost_index)', hook)
+        self.assertIn('set_tests_properties("${_lum_cost_name}" PROPERTIES COST "${_lum_cost_seconds}")', hook)
+        self.assertIn('TEST_LIST ${_lum_gtest_target}_TESTS\n'
+                      '            PROPERTIES RESOURCE_LOCK luminumbra_gl_context)', cmake)
+        self.assertIn('TEST_LIST ${_lum_gtest_target}_TESTS)', cmake)
+        self.assertIn("NO_PRETTY_VALUES\n            TEST_LIST LUMINUMBRA_WORLD_OPEN_TESTS\n            PROPERTIES TIMEOUT 1800", cmake)
+        self.assertGreater(cmake.index('"${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake"'),
+                           cmake.rindex("TEST_LIST "))
+
+    def test_cost_hints_preserve_selections_partitions_and_indices_in_every_profile(self):
+        for profile in shards.PROFILES:
+            tests = self.policy_roster(profile) + [test(name) for name in COST_HINTS if name not in shards.HEAVY_NAMES]
+            hinted = copy.deepcopy(tests)
+            for row in hinted:
+                if row["name"] in COST_HINTS:
+                    row["properties"].append({"name": "COST", "value": COST_HINTS[row["name"]]})
+            for selection in ("full", "light", "heavy"):
+                with self.subTest(profile=profile, selection=selection):
+                    self.assertEqual(shards.select_tests(tests, profile, selection),
+                                     shards.select_tests(hinted, profile, selection))
+                    for shard in (1, 2):
+                        before = self.write_plan(self.root, shard, tests=tests, profile=profile, selection=selection)
+                        indices = (self.root / "ctest.shard-index.txt").read_bytes()
+                        after = self.write_plan(self.root, shard, tests=hinted, profile=profile, selection=selection)
+                        self.assertEqual((self.root / "ctest.shard-index.txt").read_bytes(), indices)
+                        self.assertEqual(after["partitions"], before["partitions"])
+                        self.assertEqual(after["partition_digest"], before["partition_digest"])
+                        self.assertNotEqual(after["inventory_digest"], before["inventory_digest"])
+                        self.assertEqual(after["timings"], before["timings"])
+
+    def test_ctest_loads_heavy_hook_preserving_properties_and_adding_cost_hints(self):
         root = Path(__file__).resolve().parents[2]
         cmake = (root / "test/CMakeLists.txt").read_text()
         self.assertIn("NO_PRETTY_VALUES\n            TEST_LIST LUMINUMBRA_WORLD_OPEN_TESTS\n            PROPERTIES TIMEOUT 1800", cmake)
@@ -1496,7 +1552,9 @@ class CTestShardTests(unittest.TestCase):
         fixture.mkdir()
         heavy = sorted(shards.HEAVY_NAMES)
         quick = ["WorldOpenRefusal.QuickCatalogCheck", "WorldOpenRefusal.QuickUnlabelled"]
-        names = [*heavy, *quick]
+        long = [name for name in COST_HINTS if name not in shards.HEAVY_NAMES]
+        light = [*quick, *long]
+        names = [*heavy, *light]
         # Model GoogleTest's generated discovery file, including its TEST_LIST.
         discovery = "\n".join(
             f'add_test([==[{name}]==] [==[{Path(sys.executable).as_posix()}]==])\n'
@@ -1506,8 +1564,12 @@ class CTestShardTests(unittest.TestCase):
         discovery += (
             f'\nset_tests_properties([==[{heavy[0]}]==] PROPERTIES LABELS "parity;simulation")\n'
             f'set_tests_properties([==[{quick[0]}]==] PROPERTIES LABELS "quick;refusal")\n'
-            'set(LUMINUMBRA_WORLD_OPEN_TESTS ' + " ".join(f'[==[{name}]==]' for name in names) + ')\n'
+            f'set_tests_properties([==[{long[0]}]==] PROPERTIES RESOURCE_LOCK luminumbra_gl_context)\n'
         )
+        for variable, roster in (("LUMINUMBRA_WORLD_OPEN_TESTS", [*heavy, *quick]),
+                                 ("far_lod_worker_test_TESTS", long[:1]),
+                                 ("common_tests_TESTS", long[1:])):
+            discovery += f'set({variable} ' + " ".join(f'[==[{name}]==]' for name in roster) + ')\n'
         discovered = fixture / "discovered.cmake"
         discovered.write_text(discovery, encoding="utf-8")
         testfile = fixture / "CTestTestfile.cmake"
@@ -1526,7 +1588,7 @@ class CTestShardTests(unittest.TestCase):
         expected = json.loads(before.stdout)["tests"]
         hook = root / "test/HeavyTestsCTest.cmake"
         testfile.write_text(includes + f'include([==[{hook.as_posix()}]==])\n', encoding="utf-8")
-        for filters, selected in (((), names), (("-L", "heavy"), heavy), (("-LE", "heavy"), quick)):
+        for filters, selected in (((), names), (("-L", "heavy"), heavy), (("-LE", "heavy"), light)):
             with self.subTest(filters=filters):
                 result = discover(*filters)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1540,15 +1602,18 @@ class CTestShardTests(unittest.TestCase):
                             original["properties"].append({"name": "LABELS", "value": ["heavy"]})
                         else:
                             labels["value"] = sorted([*labels["value"], "heavy"])
+                    if row["name"] in COST_HINTS:
+                        original["properties"].append({"name": "COST", "value": COST_HINTS[row["name"]]})
                     self.assertEqual(row["command"], original["command"])
                     self.assertEqual(sorted(row["properties"], key=lambda prop: prop["name"]),
                                      sorted(original["properties"], key=lambda prop: prop["name"]))
-        for name in heavy:
+        for name in COST_HINTS:
             with self.subTest(renamed=name):
                 discovered.write_text(discovery.replace(name, name + "Renamed"), encoding="utf-8")
                 result = discover()
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn(f"Reviewed heavy correctness case missing: {name}", " ".join(result.stderr.split()))
+                kind = "heavy" if name in shards.HEAVY_NAMES else "long"
+                self.assertIn(f"Reviewed {kind} correctness case missing: {name}", " ".join(result.stderr.split()))
 
     def heavy_hook_fixture(self, names, roster):
         ctest = shutil.which("ctest")
@@ -1614,6 +1679,60 @@ class CTestShardTests(unittest.TestCase):
                     actual = json.loads(result.stdout)["tests"]
                     self.assertEqual([row["name"] for row in actual], selected)
                     self.assertEqual(actual, expected[filters])
+
+    def test_ctest_cost_hints_follow_each_discovered_target_in_partial_builds(self):
+        hook = Path(__file__).resolve().parents[2] / "test/HeavyTestsCTest.cmake"
+        groups = (
+            ("LUMINUMBRA_WORLD_OPEN_TESTS", sorted(shards.HEAVY_NAMES)),
+            ("far_lod_worker_test_TESTS", [name for name in COST_HINTS if name.startswith("FarLodWorker.")]),
+            ("common_tests_TESTS", [name for name in COST_HINTS
+                                    if name not in shards.HEAVY_NAMES and not name.startswith("FarLodWorker.")]),
+        )
+        # Seven nonempty subsets cover each target alone and every combination.
+        for mask in range(1, 8):
+            selected = [group for index, group in enumerate(groups) if mask & (1 << index)]
+            names = ["Preview.Frame", *(name for _, roster in selected for name in roster)]
+            testfile, includes, discover = self.heavy_hook_fixture(names, None)
+            declarations = "".join(f'set({variable} "' + ";".join(roster) + '")\n'
+                                   for variable, roster in selected)
+            declarations += "".join(f'set_tests_properties([==[{name}]==] PROPERTIES COST 25 PROCESSORS 4)\n'
+                                    for name in names)
+            testfile.write_text(includes + declarations, encoding="utf-8")
+            before = discover()
+            self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+            expected = json.loads(before.stdout)["tests"]
+            testfile.write_text(includes + declarations + f'include([==[{hook.as_posix()}]==])\n',
+                                encoding="utf-8")
+            with self.subTest(targets=[variable for variable, _ in selected]):
+                result = discover()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                actual = json.loads(result.stdout)["tests"]
+                self.assertEqual([row["name"] for row in actual], names)
+                for row, original in zip(actual, expected):
+                    for prop in original["properties"]:
+                        if prop["name"] == "COST":
+                            prop["value"] = COST_HINTS.get(row["name"], 25)
+                        elif prop["name"] == "LABELS" and row["name"] in shards.HEAVY_NAMES:
+                            prop["value"] = sorted([*prop["value"], "heavy"])
+                    self.assertEqual(row, original)
+        for variable, roster in groups[1:]:
+            # Undefined targets are covered above; defined empty, false-looking,
+            # partial and renamed discovery lists must still refuse.
+            invalid = [[], ["OFF"], ["NOTFOUND"], ["Preview.Frame"]]
+            for name in roster:
+                invalid.extend(([item for item in roster if item != name],
+                                [item + "Renamed" if item == name else item for item in roster]))
+            for discovered in invalid:
+                testfile, includes, discover = self.heavy_hook_fixture(["Preview.Frame", *roster], None)
+                declarations = f'set({variable} "' + ";".join(discovered) + '")\n'
+                testfile.write_text(includes + declarations + f'include([==[{hook.as_posix()}]==])\n',
+                                    encoding="utf-8")
+                missing = next(name for name in roster if name not in discovered)
+                with self.subTest(variable=variable, roster=discovered):
+                    result = discover("-R", "^Preview\\.Frame$")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"Reviewed long correctness case missing: {missing}",
+                                  " ".join(result.stderr.split()))
 
     def test_ctest_defined_invalid_target_lists_refuse_even_filtered(self):
         hook = Path(__file__).resolve().parents[2] / "test/HeavyTestsCTest.cmake"
