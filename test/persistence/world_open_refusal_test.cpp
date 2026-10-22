@@ -2317,7 +2317,7 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRef
     runner.Shutdown();
 }
 
-TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata) {
+TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeExtensions) {
     auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
     metadata["extension"] = std::string(std::size_t{1024} * 1024, 'x');
     Write(save / "world_info.json", metadata.dump());
@@ -2329,7 +2329,9 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
     for (const bool full_snapshot : {false, true}) {
         EXPECT_TRUE(session.SaveWorldStateTo(save, nullptr, full_snapshot));
-        EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
+        auto expected = metadata;
+        expected["waterSimCursor"] = 0;
+        EXPECT_EQ(Read(save / "world_info.json"), expected.dump(4) + "\n");
     }
 }
 

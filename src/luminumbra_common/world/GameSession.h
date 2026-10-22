@@ -511,10 +511,11 @@ private:
                               WorldStateSaveReport* report,
                               bool full_snapshot,
                               bool write_metadata);
-    bool ReconcileWorldCalendarMetadataTo(const std::filesystem::path& save_dir,
-                                          bool has_saved_render_calendar);
-    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir,
-                                      bool* has_render_calendar = nullptr) const;
+    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
+    struct LoadedWorldState;
+    bool ReadWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
+    void AdoptWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
+    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
     std::optional<WorldCalendar> m_renderCalendar;

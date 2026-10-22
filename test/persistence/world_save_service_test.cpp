@@ -899,9 +899,10 @@ TEST(WorldSaveService, EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop)
     nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion},
                                {"extension", {{"unknown", "preserved"}}}};
     clock.write_metadata(metadata);
-    const auto valid = metadata.dump();
     ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
-    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
+    ASSERT_TRUE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path()));
+    const auto valid = ReadFileBytes(save_dir.path() / "world_info.json");
+    ASSERT_EQ(nlohmann::json::parse(valid), metadata);
     EXPECT_FALSE(std::filesystem::exists(metadata_staging));
     ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
     for (const auto* invalid : {R"({"simulationTick":"invalid"})",
