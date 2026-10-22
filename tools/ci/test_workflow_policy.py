@@ -1495,6 +1495,18 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn("python3 -I -B tools/ci/test_ctest_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
 
     def test_acceptance_execution_uses_verified_union_and_retains_networking_evidence(self):
+        # Hosted shards discover these unchanged labels from the engine CTest
+        # inventory. Recovery belongs to the same disjoint partition roster.
+        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.findall(
+            r'add_test\(\s*NAME (AcceptanceMatrixContract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
+        self.assertEqual(len(registrations), 225)
+        self.assertEqual({int(re.search(r'--contract-partition ([0-9]+)', command)[1])
+                          for _, command in registrations}, set(range(225)))
+        self.assertNotIn("NAME AcceptanceRecoveryContract", cmake)
+        for name, command in registrations:
+            self.assertIn('ci/test_check_acceptance_matrix.py', command)
+            self.assertRegex(cmake, rf'set_tests_properties\({name}\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)')
         ci = jobs(self.workflows["ci.yml"])
         producer, aggregate = ci["linux"], ci["linux-result"]
         self.assertNotIn("check_acceptance_matrix.py", producer)
@@ -1513,7 +1525,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(" ".join(command.replace("\\\n", "").split()),
                          "--junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml "
                          "--discovery build/release/ctest-discovery.json --ci-context "
-                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json")
+                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json "
+                         '--preparation-receipt-file "$RUNNER_TEMP/acceptance-preparation-custody.json"')
         upload = named["Upload merged JUnit"]
         self.assertEqual(value(upload, "if", 8),
                          "always() && needs.linux.result == 'success' && "

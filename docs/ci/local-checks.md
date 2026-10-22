@@ -385,3 +385,19 @@ rmdir scratch/helper-check-tmp
 Both suites are registered in `tools/CMakeLists.txt` and in the standalone
 Python plan in `tools/ci/ci_paths.py`. Their CI infrastructure paths retain
 native qualification routing.
+
+## Acceptance inventory checks
+
+Acceptance refresh and restart custody are specified in
+[acceptance-refresh.md](acceptance-refresh.md). Its 24 contract partitions include
+recovery and custody tests, with four separate public-tree partitions; all keep
+the existing labels and 30-second deadlines. Run the complete Python suite and
+static inventories without a project build:
+
+```bash
+python3 -I -B tools/ci/test_check_acceptance_matrix.py
+python3 -I -B tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
+python3 -I -B tools/ci/validate_public_tree.py --root .
+python3 -I -B tools/ci/test_validate_public_tree.py
+python3 -I -B tools/ci/validate_assets.py --check config/public-asset-inventory.json
+```

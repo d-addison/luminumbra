@@ -545,3 +545,67 @@ Build products belong under `build/`. Test captures belong under the active buil
 tree unless a tool explicitly selects another local artifact directory. Do not
 commit audio sources, generated captures, compiler caches, IDE state, or local task
 records.
+
+### Acceptance matrix
+
+`tools/ci/acceptance_requirements.json` accounts for every extracted prose, bullet,
+and table statement in `docs/distant-world.md` and `docs/active-regions.md`.
+`tools/ci/acceptance_matrix.json` maps requirement IDs to evidence and status.
+Validate both inventories and the generated view with:
+
+```sh
+python3 -I -B tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
+python3 -I -B tools/ci/validate_public_tree.py --root .
+```
+
+After moving contract text or merging documentation changes, set `callerMetadata`
+to an existing directory outside the checkout and Git metadata, then run with a
+new receipt filename:
+
+```sh
+python3 -I -B tools/ci/check_acceptance_matrix.py --refresh-inventory --preparation-receipt-file "$callerMetadata/enrollment.json"
+```
+
+Refresh reserves unchanged occurrences, then updates a locator only when one
+unmatched inventory entry and one unmatched source statement have identical full
+extracted text. Soft line wrapping is already normalized by extraction;
+punctuation and wording changes require review. Ambiguous duplicate statements
+are never paired. Stable IDs, requirement mappings, evidence, and statuses are
+preserved. A matrix row's source follows its mapped requirements when they all
+resolve to one locator. Changed inventory entries and matrix rows are sorted by
+stable ID and written as deterministic JSON. A consistent tree is left untouched.
+
+An audited exclusion can follow only a unique exact quote that has disappeared
+from its reviewed locator. Its ID, category, full quote hash, and existing
+historical or Current behaviour context checks remain enforced. Refresh cannot
+create exclusions or extend the closed audit table.
+
+New or reworded statements still fail validation. Each `inventory decision:` line
+contains a JSON fragment with the exact full statement and suggested stable ID,
+plus candidate matrix rows for review. These candidates are suggestions only;
+edit the inventory and row mappings explicitly after reviewing the statement.
+Inventoried requirements without a row mapping receive fragments with their
+existing IDs.
+Removed entries remain in the inventory and are printed in decision fragments
+with their existing IDs and candidate rows. Review their removal or replacement
+explicitly. Rows with several possible source locators also receive a fragment.
+Any unresolved decision or static validation error makes refresh exit unsuccessfully
+without changing any outputs. Repeating refresh reports the same decisions until
+the inventory and mappings are explicitly resolved.
+
+Refresh regenerates `docs/acceptance-matrix.md` through the existing renderer when
+the view changes and all decisions and validation errors are resolved. Writers
+hold an operating-system lock in the checkout's Git metadata from input reads
+through the final replacement. Lock acquisition fails clearly after two seconds;
+a crashed holder releases its lock automatically. The persistent lock file stays
+outside the public tree and must not be removed while a writer is running.
+Refresh also checks the input bytes and discovered test sources before and during
+publication, refusing changes made while it was running. All output bytes and
+rollback copies are staged before replacing any file. A failed replacement,
+including a locked file on Windows, restores the previous outputs. Close the
+locking program and retry after resolving concurrent source edits. After manual
+accounting or evidence edits, use `--write-doc docs/acceptance-matrix.md` with a new
+`--preparation-receipt-file` outside the checkout and Git metadata, and rerun
+`--check-doc`.
+The inventory-completeness error for `iss.126` clears exactly when the inventory
+and mappings are complete; refresh does not change that row's status to hide it.
