@@ -36,6 +36,12 @@ _PATHS = importlib.util.module_from_spec(_PATH_SPEC)
 _PATH_SPEC.loader.exec_module(_PATHS)
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".inc"}
+# Total GCC + Clang variants after union/target expansion. At 60 CPU-s per
+# GCC compile and 90 per tidy configuration (two per Clang variant), five
+# variants take at most seven replay minutes on two workers, including
+# partially occupied batches: a nonempty union has at least one variant in
+# each compiler database. Dependency scans remain exhaustive.
+CI_REPLAY_VARIANT_BUDGET = 5
 INPUT_VALUE_OPTIONS = {"-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros",
                        "-isysroot", "--sysroot", "-D", "-U", "-x", "-target", "--target"}
 # Arity and replay policy are shared by cleaning and source identification.
@@ -1153,6 +1159,28 @@ def publish_ci_summary(destination: Path | None, report: dict) -> None:
                          "</pre>\n")
 
 
+def publish_ci_evidence(destination: Path | None, report: dict) -> None:
+    """Replace evidence only after serialization, writing and closing succeed.
+
+    The temporary file shares the destination filesystem and is closed before
+    replacement, including on Windows. Failed writes preserve prior evidence.
+    """
+    if destination is None:
+        return
+    text = json.dumps(report, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent,
+                                         prefix="fast-evidence-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+        os.replace(temporary, destination)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def ci_route(args, root: Path) -> int:
     """Only proven non-native changes avoid provisioning; uncertainty validates."""
     full, reason = args.full_selection, "configured native validation"
@@ -1311,7 +1339,30 @@ def ci_checks(args, root: Path) -> int:
                 {"file": e["file"].relative_to(root).as_posix(), "directory": str(e["directory"]),
                  "arguments": clean_arguments(e["arguments"])} for e in selections[label]]
         gcc = selections["gcc"]
+        # Admission and identity precede budget deferral. In particular, a
+        # warning-policy refusal or unsafe Clang replay cannot become success.
+        commands = {
+            "gcc": [{"file": str(e["file"]), "directory": str(e["directory"]),
+                     "arguments": compile_command(e, Path("selected.o"),
+                                                  warning_profile="msvc-approx", fatal_profile=True)}
+                    for e in gcc],
+            "clang": [{"file": str(e["file"]), "directory": str(e["directory"]),
+                       "arguments": replay_arguments(e)} for e in selections["clang"]],
+        }
+        fingerprint_data = {"commands": commands, "tidy_policy": {
+            name: hashlib.sha256(checked_resolve(root / name).read_bytes()).hexdigest()
+            for name in (".clang-tidy", "scripts/tidy.sh")}}
+        report["command_fingerprint"] = hashlib.sha256(
+            json.dumps(fingerprint_data, sort_keys=True).encode()).hexdigest()
         report["cache_namespace"] = ci_cache_key(root, gcc, tracked)
+        report["selected_count"] = sum(len(selected) for selected in selections.values())
+        report["replay_variant_budget"] = CI_REPLAY_VARIANT_BUDGET
+        if report["selected_count"] > CI_REPLAY_VARIANT_BUDGET:
+            report["status"] = "deferred"
+            report["reason"] = (
+                f"Selection of {report['selected_count']} command variants exceeds the fast-lane "
+                f"budget of {CI_REPLAY_VARIANT_BUDGET}; deferred to the full required builds.")
+            return 0
         os.environ["CCACHE_NAMESPACE"] = report["cache_namespace"]
         if not shutil.which("ccache"):
             raise SelectionError("ccache not found")
@@ -1346,7 +1397,12 @@ def ci_checks(args, root: Path) -> int:
             os.environ.pop("CCACHE_NAMESPACE", None)
         else:
             os.environ["CCACHE_NAMESPACE"] = namespace_before
-        publish_ci_summary(args.summary_file, report)
+        try:
+            publish_ci_summary(args.summary_file, report)
+            publish_ci_evidence(args.evidence_file, report)
+        except (ValueError, OSError, TypeError) as error:
+            print(f"fast checks: evidence/summary publication failed: {error}", file=sys.stderr)
+            return 1
 
 
 def main(argv=None) -> int:
@@ -1357,6 +1413,8 @@ def main(argv=None) -> int:
     parser.add_argument("--clang-build-dir", type=Path)
     parser.add_argument("--full-selection", action="store_true")
     parser.add_argument("--summary-file", type=Path)
+    parser.add_argument("--evidence-file", type=Path,
+                        help="atomically publish the CI selection and replay result as JSON")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--base-ref", default=os.environ.get("LUMINUMBRA_BASE_REF") or "origin/devel",
                         help="override LUMINUMBRA_BASE_REF (unset or empty defaults to origin/devel)")

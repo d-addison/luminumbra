@@ -3,6 +3,23 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "ci.fast-replay-budget",
+      "source": "docs/ci/local-checks.md#fast-hosted-validation",
+      "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Refusals, missing database entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_workflow_policy.py"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.target-warning-policy",
       "source": "docs/ci/local-checks.md#fast-hosted-validation",
       "statement": "The first-party CMake helper emits a private warning-policy definition for every compiler and configuration. Fast compile applies the strict fatal profile only to command variants carrying that definition; other selected variants replay their normal database flags. Unsupported marker values and undefines refuse before compilation. Mixed-policy variants of the same source remain selected and cache identity includes their effective commands.",

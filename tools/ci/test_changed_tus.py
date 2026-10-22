@@ -2321,7 +2321,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
 
     def ci_args(self, **updates):
         values = dict(jobs=2, build_dir=self.build, clang_build_dir=self.build,
-                      base_ref="base", full_selection=False, summary_file=self.root / "summary.md")
+                      base_ref="base", full_selection=False, summary_file=self.root / "summary.md",
+                      evidence_file=self.root / "evidence.json")
         values.update(updates)
         return argparse.Namespace(**values)
 
@@ -2638,9 +2639,240 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             count = getattr(select, "count", 0)
             select.count = count + 1
             return ([entries[0]] if count == 0 else [entries[1]]), {}
-        with patch.object(tus, "select", side_effect=select):
+        with patch.object(tus, "select", side_effect=select), \
+                patch.object(tus, "read_database", side_effect=[entries, entries[:2]]):
             self.assertEqual(self.run_ci(), 0)
         self.assertEqual(len([c for c, _ in self.commands if c[0] == "ccache"]), 3)
+        self.assertEqual(json.loads((self.root / "evidence.json").read_text())["selected_count"], 5)
+
+    def budget_databases(self, clang_variants=3):
+        self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+        self.save_db()
+        clang = self.root / "clang build"
+        clang.mkdir()
+        raw = [dict(record, arguments=["clang++", *record["arguments"][1:]])
+               for record in self.raw[:clang_variants]]
+        (clang / "compile_commands.json").write_text(json.dumps(raw))
+        return clang
+
+    def ci_evidence(self):
+        return json.loads((self.root / "evidence.json").read_text())
+
+    def test_ci_over_budget_defers_after_scans_and_reports_success_evidence(self):
+        clang = self.budget_databases()
+        namespace = os.environ.get("CCACHE_NAMESPACE")
+        self.assertEqual(self.run_ci([self.header], clang_build_dir=clang), 0)
+        report = self.ci_evidence()
+        self.assertEqual(report["status"], "deferred")
+        self.assertEqual(report["selected_count"], 6)
+        self.assertEqual(report["replay_variant_budget"], 5)
+        self.assertEqual(sum(len(records) for records in report["command_variants"].values()), 6)
+        self.assertIn("deferred to the full required builds", report["reason"])
+        self.assertEqual(sum("-M" in c for c, _ in self.commands), 12)
+        self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+        self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+        self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+        # Each compiler initially selects one different file. Only the union
+        # and target expansion exceed the budget; counting earlier is unsafe.
+        entries = self.entries()
+        with patch.object(tus, "select", side_effect=[(entries[:1], {}), (entries[1:2], {})]):
+            self.assertEqual(self.run_ci(clang_build_dir=clang), 0)
+        report = self.ci_evidence()
+        self.assertEqual(report["status"], "deferred")
+        self.assertEqual(report["selected_count"], 6)
+        self.assertTrue(all(len(records) == 3 for records in report["command_variants"].values()))
+
+    def test_ci_at_budget_replays_every_variant_and_both_tidy_configurations(self):
+        clang = self.budget_databases(clang_variants=2)
+        self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+        report = self.ci_evidence()
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["selected_count"], report["replay_variant_budget"])
+        self.assertEqual(report["selected_count"], 5)
+        self.assertEqual(sum(c[0] == "ccache" for c, _ in self.commands), 3)
+        self.assertEqual(sum("-p" in c for c, _ in self.commands), 2)
+        self.assertEqual(sum("--files0-from" in c for c, _ in self.commands), 2)
+        self.commands.clear()
+        with patch.object(tus, "select", return_value=([], {})):
+            self.assertEqual(self.run_ci(clang_build_dir=clang), 0)
+        self.assertEqual(self.ci_evidence()["selected_count"], 0)
+        self.assertEqual(self.ci_evidence()["status"], "No native work selected.")
+        self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+
+    def test_ci_over_budget_refusals_and_incomplete_inputs_still_fail(self):
+        clang = self.budget_databases()
+        gcc_database = self.build / "compile_commands.json"
+        clang_database = clang / "compile_commands.json"
+        original = gcc_database.read_text()
+        for failure in ("warning policy", "clang metadata", "malformed", "partial",
+                        "unreadable", "deadline", "fingerprint"):
+            self.commands.clear()
+            gcc_database.write_text(original)
+            clang_database.write_text(original)
+            patches = []
+            if failure == "warning policy":
+                invalid = json.loads(original)
+                invalid[0]["arguments"] += [self.cmake_policy_marker(), "-Wno-error=conversion"]
+                gcc_database.write_text(json.dumps(invalid))
+            elif failure == "clang metadata":
+                invalid = json.loads(original)
+                invalid[0]["arguments"].append("-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY=0")
+                clang_database.write_text(json.dumps(invalid))
+            elif failure == "malformed":
+                clang_database.write_text('[{"file":')
+            elif failure == "partial":
+                def partial(command, directory, check=True):
+                    if "-M" in command:
+                        return subprocess.CompletedProcess(command, 0, "selected-tu: missing.hpp\n", "")
+                    return self.fake_execute(command, directory, check)
+                patches.append(patch.object(tus, "execute", side_effect=partial))
+            elif failure in {"unreadable", "deadline"}:
+                error = PermissionError("unreadable dependency") if failure == "unreadable" else \
+                    subprocess.TimeoutExpired("dependency probe", 1800)
+                patches.append(patch.object(tus, "dependencies", side_effect=error))
+            else:
+                patches.append(patch.object(tus, "ci_cache_key", side_effect=OSError("unreadable fingerprint input")))
+            with self.subTest(failure=failure):
+                for mocked in patches:
+                    mocked.start()
+                try:
+                    self.assertEqual(self.run_ci([self.header], clang_build_dir=clang), 1)
+                finally:
+                    for mocked in reversed(patches):
+                        mocked.stop()
+                self.assertEqual(self.ci_evidence()["status"], "failed")
+                self.assertIn("error", self.ci_evidence())
+                self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+        gcc_database.write_text(original)
+        original_read = Path.read_bytes
+        for name in (".clang-tidy", "scripts/tidy.sh"):
+            def unreadable(path):
+                if path == self.root / name:
+                    raise PermissionError("unreadable tidy fingerprint policy")
+                return original_read(path)
+            with self.subTest(policy=name), patch.object(Path, "read_bytes", unreadable):
+                self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 1)
+            self.assertEqual(self.ci_evidence()["status"], "failed")
+            self.assertIn("unreadable tidy fingerprint policy", self.ci_evidence()["error"])
+
+    def test_ci_over_budget_missing_database_entry_fails_before_deferral(self):
+        clang = self.budget_databases()
+        database = clang / "compile_commands.json"
+        raw = json.loads(database.read_text())
+        database.write_text(json.dumps([record for record in raw if record["file"] != str(self.b)]))
+        for paths, full in (([self.b], False), ([self.a], True)):
+            with self.subTest(full=full):
+                self.assertEqual(self.run_ci(paths, full_selection=full, clang_build_dir=clang), 1)
+                report = self.ci_evidence()
+                self.assertEqual(report["status"], "failed")
+                self.assertIn("missing", report["error"])
+                self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+
+    def test_ci_deferred_summary_names_counts_budget_and_combined_fingerprint(self):
+        clang = self.budget_databases()
+        reports = []
+        database = clang / "compile_commands.json"
+        for changed in (False, True):
+            if changed:
+                raw = json.loads(database.read_text())
+                raw[0]["arguments"].append("-DCLANG_ONLY_CHANGE=1")
+                database.write_text(json.dumps(raw))
+            self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+            reports.append(self.ci_evidence())
+        summary = (self.root / "summary.md").read_text()
+        for fragment in ('"status": "deferred"', '"selected_count": 6',
+                         '"replay_variant_budget": 5', "exceeds the fast-lane budget of 5",
+                         "deferred to the full required builds", "command_fingerprint"):
+            self.assertIn(fragment, summary)
+        self.assertRegex(reports[0]["command_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(reports[0]["command_fingerprint"], reports[1]["command_fingerprint"])
+        self.assertEqual(reports[0]["cache_namespace"], reports[1]["cache_namespace"])
+        for name in (".clang-tidy", "scripts/tidy.sh"):
+            policy = self.root / name
+            original = policy.read_text()
+            policy.write_text(original + "\n# policy content changed\n")
+            self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+            self.assertNotEqual(reports[1]["command_fingerprint"], self.ci_evidence()["command_fingerprint"])
+            policy.write_text(original)
+        self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+        self.assertEqual(reports[1]["command_fingerprint"], self.ci_evidence()["command_fingerprint"])
+
+    def test_ci_atomic_evidence_closes_before_replace_and_preserves_previous_on_failure(self):
+        destination = self.root / "evidence.json"
+        with patch.object(tus.tempfile, "NamedTemporaryFile") as unopened:
+            tus.publish_ci_evidence(None, {})
+            unopened.assert_not_called()
+        destination.write_text("previous evidence")
+        with self.assertRaises(TypeError):
+            tus.publish_ci_evidence(destination, {"unsupported": object()})
+        self.assertEqual(destination.read_text(), "previous evidence")
+        original_temporary = tempfile.NamedTemporaryFile
+        original_replace = os.replace
+        for failure in (None, "write", "close", "replace"):
+            streams = []
+            destination.write_text("previous evidence")
+
+            @contextmanager
+            def temporary(**kwargs):
+                with original_temporary(**kwargs) as stream:
+                    streams.append(stream)
+                    if failure == "write":
+                        def partial_write(text):
+                            stream.buffer.write(text[:3].encode())
+                            raise OSError("partial evidence write")
+                        with patch.object(stream, "write", side_effect=partial_write):
+                            yield stream
+                    else:
+                        yield stream
+                    if failure == "close":
+                        raise OSError("evidence flush failed")
+
+            def replace(source, target):
+                self.assertTrue(all(stream.closed for stream in streams))
+                self.assertEqual(destination.read_text(), "previous evidence")
+                self.assertEqual(Path(source).parent, destination.parent)
+                if failure == "replace":
+                    raise PermissionError("evidence replace failed")
+                original_replace(source, target)
+
+            with self.subTest(failure=failure), \
+                    patch.object(tus.tempfile, "NamedTemporaryFile", side_effect=temporary), \
+                    patch.object(tus.os, "replace", side_effect=replace):
+                if failure is None:
+                    tus.publish_ci_evidence(destination, {"status": "deferred"})
+                    self.assertEqual(json.loads(destination.read_text()), {"status": "deferred"})
+                else:
+                    with self.assertRaises(OSError):
+                        tus.publish_ci_evidence(destination, {"status": "deferred"})
+                    self.assertEqual(destination.read_text(), "previous evidence")
+                self.assertEqual(list(self.root.glob("fast-evidence-*")), [])
+
+    def test_ci_over_budget_publication_failure_is_not_success(self):
+        clang = self.budget_databases()
+        destination = self.root / "evidence.json"
+        destination.write_text("previous evidence")
+        for publisher in ("publish_ci_summary", "publish_ci_evidence"):
+            with self.subTest(publisher=publisher), \
+                    patch.object(tus, publisher, side_effect=OSError("publication failed")):
+                self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 1)
+            self.assertEqual(destination.read_text(), "previous evidence")
+        self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang,
+                                     evidence_file=self.root / "missing" / "evidence.json"), 1)
+
+    def test_ci_budget_disabled_negative_control_exposes_compile_failure(self):
+        clang = self.budget_databases()
+        def fail_compile(command, directory, check=True):
+            if command[0] == "ccache":
+                raise tus.SelectionError("compile failed without budget deferral")
+            return self.fake_execute(command, directory, check)
+        with patch.object(tus, "execute", side_effect=fail_compile):
+            self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+            self.assertEqual(self.ci_evidence()["status"], "deferred")
+            with patch.object(tus, "CI_REPLAY_VARIANT_BUDGET", 100):
+                self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 1)
+            self.assertEqual(self.ci_evidence()["status"], "failed")
+            self.assertIn("compile failed without budget deferral", self.ci_evidence()["error"])
 
     def test_ci_missing_cross_compiler_tu_and_malformed_db_fail_before_compile(self):
         entries = self.entries()
@@ -2723,8 +2955,10 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             self.assertEqual(route.call_args.args[1], self.root)
         with patch.object(tus, "ci_checks", return_value=1) as ci:
             self.assertEqual(tus.main(["ci", "--root", str(self.root), "--build-dir", str(self.build),
-                                       "--clang-build-dir", str(self.build), "--full-selection"]), 1)
+                                       "--clang-build-dir", str(self.build), "--full-selection",
+                                       "--evidence-file", str(self.root / "evidence.json")]), 1)
             self.assertTrue(ci.call_args.args[0].full_selection)
+            self.assertEqual(ci.call_args.args[0].evidence_file, self.root / "evidence.json")
         for command in ("route", "ci"):
             for option in ("--warning-baseline", "--write-warning-baseline", "--conversion-clean-prefix"):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:

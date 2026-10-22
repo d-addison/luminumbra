@@ -815,8 +815,14 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn('--output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"', route)
         self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
         self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
-        for step in steps(fast)[3:-1]:
+        for step in steps(fast)[3:6]:
             self.assertEqual(value(step, "if", 8), "steps.route.outputs.native != 'false'")
+        evidence = steps(fast)[6]
+        self.assertEqual(value(evidence, "if", 8), "always() && steps.route.outputs.native != 'false'")
+        self.assertIn("uses: actions/upload-artifact@", evidence)
+        self.assertIn("path: build/fast-checks-evidence.json", evidence)
+        self.assertIn("if-no-files-found: error", evidence)
+        self.assertIn("--evidence-file build/fast-checks-evidence.json", steps(fast)[5])
         for compiler in ("gcc", "clang"):
             self.assertIn(f"cmake -S . -B build/fast-{compiler}", fast)
             self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)

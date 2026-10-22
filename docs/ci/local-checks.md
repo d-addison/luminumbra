@@ -374,7 +374,8 @@ including draft pull requests, with a separate 20-minute timeout. It starts
 as a non-required check while warning baselines and duration are calibrated.
 Existing native lanes, full-tree tidy and draft merge guards remain authoritative.
 A successful fast result never substitutes for them. Ordinary small changes
-target ten minutes; shared-header changes can select the full configured tree.
+target ten minutes; shared-header changes can select the full configured tree
+and exceed the replay budget described below.
 
 The job uses `tools/ci/changed_tus.py route` against the locally fetched merge
 base (pull-request base SHA or push predecessor). Only paths already proven
@@ -390,10 +391,29 @@ Release GCC and Clang compile databases with tests exposed and Diligent off.
 Configuration generates engine/stb headers; the only build target is `glad`
 for its generated headers. It does not link engine/test targets or run CTest.
 The `ci` command shares the local dependency selector, scans ordinary and
-analyzer contexts, unions both compiler selections and replays all variants
-of every selected file. A changed or cross-selected TU missing from either
-database fails visibly. Unconfigured sources and unsupported platforms/backends
+analyzer contexts and unions both compiler selections. Within the replay budget
+it replays all variants of every selected file. A changed or cross-selected TU
+missing from either database fails visibly. Unconfigured sources and unsupported platforms/backends
 are listed explicitly and retain their specialized full gates.
+
+The single default `CI_REPLAY_VARIANT_BUDGET` in `tools/ci/changed_tus.py` is
+5 total command variants across GCC and Clang, counted after union and target
+expansion. Selection, coverage, command admission and fingerprint checks run
+before the budget decision. Above 5 variants the lane reports `status: deferred`,
+the selected count and budget, and states that the selection exceeds the
+fast-lane budget and is deferred to the full required builds. Only that explicit
+over-budget decision can turn omitted replay into success; refusals, missing
+database entries, unreadable or malformed inputs, publication failures and
+compiler/tidy failures remain failures. At or below 5 variants replay proceeds.
+Dependency scans remain exhaustive; the budget bounds replay work only.
+
+The sizing estimate is 60 CPU-seconds per GCC compile and 90 CPU-seconds per
+tidy configuration, with two tidy configurations per Clang variant. Five total
+variants allow at most 7 replay minutes on two vCPUs, including partially
+occupied worker batches: a nonempty union requires at least one variant in each
+compiler database. This leaves roughly five minutes for other work in a
+12-minute target; the job timeout stays 20 minutes. These are estimates, not
+completed per-variant measurements; hosted duration qualification is pending.
 
 GCC compiles use isolated scratch object paths. The first-party CMake helper
 adds the private `LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1` definition for every
@@ -438,7 +458,13 @@ to the existing at-most-10-GB Actions policy and requires no retention-prefix
 registration. Selected files, every command variant (working directory and
 command digest; full arguments in the log), unsupported configurations,
 scan/compile/tidy timings and local cache statistics appear in the job summary,
-including failure diagnostics when validation fails.
+including failure diagnostics when validation fails. A combined command
+fingerprint covers both compiler contexts, effective GCC warning flags and both
+tidy policy files. The `--evidence-file` JSON records the same result, including
+deferrals, and is uploaded under the native-route condition even after failure.
+Evidence is published atomically from a temporary file closed before replacement;
+failed serialization, writes or replacement preserve prior evidence. Summary or
+evidence publication failure fails the lane.
 
 Hosted validation is still needed for dependency provisioning, generated headers,
 real GCC/Clang warning baselines, both tidy configurations, duration on small
