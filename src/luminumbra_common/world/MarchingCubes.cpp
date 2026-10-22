@@ -2065,19 +2065,20 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
                        Chunk& chunk) {
     (void)water_system;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
-    std::vector<VoxelVertex> water_vertices;
-    std::vector<u32> water_indices;
-    water_vertices.reserve(static_cast<std::size_t>(resolution) *
-                           static_cast<std::size_t>(resolution) * 4u);
-    water_indices.reserve(static_cast<std::size_t>(resolution) *
-                          static_cast<std::size_t>(resolution) * 6u);
-
-    if (!HasCompleteWaterGrid(chunk, resolution)) {
+    if (resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)) {
         chunk.water_mesh_vertices.clear();
         chunk.water_mesh_indices.clear();
         chunk.water_mesh_generated.store(false, std::memory_order_release);
         return;
     }
+
+    // Resolution is validated before multiplication/allocation: at most 32*32
+    // quads, four vertices and six indices per quad.
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    std::vector<VoxelVertex> water_vertices;
+    std::vector<u32> water_indices;
+    water_vertices.reserve(cells * 4u);
+    water_indices.reserve(cells * 6u);
 
     const IVec3 chunk_base_pos =
         chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);

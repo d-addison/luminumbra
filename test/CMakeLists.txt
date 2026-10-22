@@ -4,6 +4,7 @@ add_executable(world_generation_test
     shield/test_meshing_determinism.cpp
     shield/worldgen_hardening_test.cpp
     shield/meshing_hardening_test.cpp
+    shield/async_water_meshing_test.cpp
 )
 
 target_include_directories(world_generation_test PRIVATE

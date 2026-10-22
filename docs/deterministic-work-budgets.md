@@ -70,9 +70,13 @@ live fixture also bounds the unpublished generation/promotion/meshing items,
 idle chunks and deferred candidates, and their positive backlog growth. Ready
 chunks with an active mesh and pending LOD remain in that backlog until
 publication, even after their workers finish. Queue telemetry and the fixture
-subtract only accepted dispatches from meshing candidates; promotions refused
-by an occupied lane remain outstanding. The existing selection counters and
-work budgets are unchanged. The generation and water counters retain their units.
+subtract only accepted dispatches that belong to the current meshing candidate
+scan. A retained descriptor outside that scan remains outstanding until admission.
+An occupied promotion lane holds the sorted suffix, including ordinary remeshes
+behind the refused promotion. Scheduled meshing counts actual admissions under
+the shared 256 KiB snapshot allowance; deferred descriptors and promotion stage B
+retain the original due tick. Work ceilings are unchanged. Generation and water
+counters retain their units.
 
 Collection adds an optional `work_items` object with schema
 `luminumbra.sim_work.v1` to the enabled `sim_budget` artifact, with ordered named
