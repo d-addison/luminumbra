@@ -4916,6 +4916,7 @@ int main(int argc, char* argv[]) {
                             g_rb_active, terrain_coverage_bypass_camera_region_guard);
                     // Upload waits may omit intermediate images after required
                     // settling frames. Every measured traversal frame draws.
+                    // Residency retries preserve the selected sun and cloud phase.
                     const bool settling_benchmark_uploads =
                         g_rb_active &&
                         ((!upload_warmup_complete && g_app.benchmark.warmupFrames + 1 >=
@@ -4932,7 +4933,7 @@ int main(int argc, char* argv[]) {
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),
                         *g_camera,
-                        deltaTime,
+                        settling_benchmark_uploads || settling_capture_uploads ? 0.0f : deltaTime,
                         g_app.overlay.wireframe_mode,
                         settling_benchmark_uploads || settling_capture_uploads
                             ? Luminumbra::Rendering::UploadPresentation::Settled

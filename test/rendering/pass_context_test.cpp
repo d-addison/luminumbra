@@ -1157,6 +1157,18 @@ TEST(PassContext, QualificationUploadsDrainBeforeDispatchAndTemporalHistory) {
     Systems::TerrainGenParams params;
     params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
     Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({8, 80, 8}, {0, 1, 0}, -90, 0);
+    CloudRenderState clouds;
+    clouds.enabled = true;
+    pipeline.set_cloud_state(clouds);
+    pipeline.set_time_of_day(0.37f);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    const float time_of_day = pipeline.get_time_of_day();
+    const auto sun_direction = pipeline.sun_direction();
+    const auto cloud_offset = pipeline.get_cloud_state().scroll_offset;
+    pipeline.set_taau_enabled(false);
+    pipeline.set_taau_enabled(true);
     // Nine tiny public streaming adoptees exceed the eight-attempt ceiling,
     // independent of machine speed. No generation, workers or physics are needed.
     constexpr int chunks = 9;
@@ -1169,17 +1181,19 @@ TEST(PassContext, QualificationUploadsDrainBeforeDispatchAndTemporalHistory) {
         chunk->set_state(ChunkState::Ready);
         ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
     }
-    entt::registry registry;
-    Camera camera({8, 80, 8}, {0, 1, 0}, -90, 0);
-    pipeline.render_frame(
-        registry, world, camera, 1.0f / 30.0f, false, UploadPresentation::Settled);
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
     ASSERT_FALSE(pipeline.render_uploads_settled());
     EXPECT_TRUE(pipeline.frame_stage_trace().empty());
     EXPECT_FALSE(pipeline.taau_history_valid());
+    EXPECT_EQ(pipeline.get_time_of_day(), time_of_day);
+    EXPECT_EQ(pipeline.sun_direction(), sun_direction);
+    EXPECT_EQ(pipeline.get_cloud_state().scroll_offset, cloud_offset);
     // The progress floor guarantees completion within one pass per chunk.
     for (int frame = 1; frame < chunks && !pipeline.render_uploads_settled(); ++frame) {
-        pipeline.render_frame(
-            registry, world, camera, 1.0f / 30.0f, false, UploadPresentation::Settled);
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        EXPECT_EQ(pipeline.get_time_of_day(), time_of_day);
+        EXPECT_EQ(pipeline.sun_direction(), sun_direction);
+        EXPECT_EQ(pipeline.get_cloud_state().scroll_offset, cloud_offset);
         if (!pipeline.render_uploads_settled()) {
             EXPECT_TRUE(pipeline.frame_stage_trace().empty());
             EXPECT_FALSE(pipeline.taau_history_valid());
@@ -1192,6 +1206,9 @@ TEST(PassContext, QualificationUploadsDrainBeforeDispatchAndTemporalHistory) {
     for (auto* chunk : world.get_renderable_chunks())
         chunk->mesh_version.store(2);
     pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_GT(pipeline.get_time_of_day(), time_of_day);
+    EXPECT_NE(pipeline.sun_direction(), sun_direction);
+    EXPECT_NE(pipeline.get_cloud_state().scroll_offset, cloud_offset);
     EXPECT_FALSE(pipeline.render_uploads_settled());
     EXPECT_FALSE(pipeline.frame_stage_trace().empty());
     EXPECT_EQ(glGetError(), GL_NO_ERROR);

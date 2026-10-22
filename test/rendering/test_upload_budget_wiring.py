@@ -210,6 +210,33 @@ class UploadBudgetWiring(unittest.TestCase):
             drain = drain[drain.index("settle_uploads("):]
             self.assertIn("UploadPresentation::Settled", drain.split("return false;", 1)[0])
 
+    def test_residency_retries_freeze_sun_and_cloud_elapsed_time(self):
+        # Check the actual render arguments in both synchronous drain callbacks.
+        for path in (RENDERING / "SceneSurvey.cpp",
+                     ROOT / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp"):
+            with self.subTest(path=path.name):
+                source = compact(read(path))
+                drain = source[source.index("settle_uploads("):]
+                calls = re.findall(r"\.render_frame\((.*?)\);", drain)
+                self.assertEqual(len(calls), 1)
+                arguments = [argument.strip() for argument in calls[0].split(",")]
+                self.assertEqual(len(arguments), 6)
+                self.assertEqual(arguments[3], "0.0f")
+                self.assertTrue(arguments[5].endswith("UploadPresentation::Settled"))
+
+        # The main loop uses the same wait selector for elapsed time and drawing.
+        source = compact(self.main)
+        wait = source[source.index("const bool settling_benchmark_uploads"):]
+        call = re.search(r"\.render_frame\((.*?)\);", wait).group(1)
+        arguments = [argument.strip() for argument in call.split(",")]
+        self.assertEqual(len(arguments), 6)
+        self.assertEqual(arguments[3], "settling_benchmark_uploads || "
+                         "settling_capture_uploads ? 0.0f : deltaTime")
+        self.assertEqual(arguments[5], "settling_benchmark_uploads || "
+                         "settling_capture_uploads "
+                         "? Luminumbra::Rendering::UploadPresentation::Settled "
+                         ": Luminumbra::Rendering::UploadPresentation::Streaming")
+
     def test_retention_uses_pool_transaction_and_water_staging(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
         update = body(pool, "u32 ChunkGeometryPool::update(")

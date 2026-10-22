@@ -302,10 +302,11 @@ bool RunSceneSurvey(GLFWwindow* window,
                                      pending.terrain_budget.adopted + pending.water_budget.adopted};
                 },
                 [&] {
+                    // Adoption retries preserve the selected sun and cloud phase.
                     pipeline.render_frame(session.GetRegistry(),
                                           *w,
                                           camera,
-                                          1.0f / 60.0f,
+                                          0.0f,
                                           wireframe,
                                           UploadPresentation::Settled);
                 })) {
