@@ -5,6 +5,9 @@ from __future__ import annotations
 import sys
 
 
+_CHILD_TIMEOUT = 12
+_CONTRACT_PARTITIONS = 176
+_EXPECTED_CASES = 420
 _PHASE_LIMIT = 768
 _phase_records = 0
 
@@ -19,7 +22,7 @@ def _phase(token: str, *, selector: int | None = None, case: str = "") -> None:
             "selection-finish", "case-start", "case-finish"):
         return
     record = "acceptance-phase=" + token
-    if type(selector) is int and 0 <= selector < 24:
+    if type(selector) is int and 0 <= selector < _CONTRACT_PARTITIONS:
         record += " selector=" + str(selector)
     if case:
         record += " case=" + "".join(char if char.isascii() and (char.isalnum() or char in "._")
@@ -60,6 +63,9 @@ import xml.etree.ElementTree as ET
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+
+_NATIVE_FSYNC = os.fsync
 
 
 _phase("imports-finish")
@@ -262,7 +268,7 @@ class AcceptanceFixture(_PhaseCase):
         # Logical fault/interleaving tests exercise flush ordering and injected
         # sync failures. Physical disk barriers are qualified separately below
         # and in every actual process-termination case, not repeated per fault.
-        sync_patch = mock.patch.object(os, "fsync", autospec=True)
+        sync_patch = mock.patch.object(os, "fsync", autospec=_NATIVE_FSYNC)
         self.sync = sync_patch.start()
         self.addCleanup(sync_patch.stop)
 
@@ -407,8 +413,12 @@ class AcceptanceFixture(_PhaseCase):
 
     def crash_publication(self, count: int, options: list[str]) -> None:
         program = """
-import os, pathlib, runpy, sys
-module = runpy.run_path(sys.argv[1])["main"].__globals__
+import os, pathlib, importlib.util, sys
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+module = checker.__dict__
 replace = pathlib.Path.replace
 remaining = int(sys.argv[2])
 def publish(path, target):
@@ -423,7 +433,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
 """
         child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
                                 str(MODULE_PATH), str(count), *self.base_args(), *options],
-                               capture_output=True, text=True, timeout=5)
+                               capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
         self.remember_custody(child.stderr)
         self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
 
@@ -573,13 +583,18 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                         def interrupted(source: Path, target: Path) -> Path:
                             if target != second:
                                 return replace(source, target)
+                            # Keep the old inode allocated. A same-byte external
+                            # occupant must not reuse the just-unlinked original's
+                            # inode and accidentally satisfy restoration identity.
+                            target.rename(base / "retained-original")
                             if occupant == "source":
                                 source.rename(displaced)
                                 source.write_bytes(contents)
-                            result = replace(source, target)
+                            replace(source, target)
                             if occupant == "output":
                                 target.rename(displaced)
                                 target.write_bytes(contents)
+                            self.assertFalse(os.path.samestat(target.stat(), (base / "retained-original").stat()))
                             raise KeyboardInterrupt("external occupant after native publication")
                         with mock.patch.object(Path, "replace", interrupted), \
                                 self.assertRaisesRegex(MODULE.MatrixError, "rollback incomplete"):
@@ -1400,8 +1415,12 @@ class AcceptanceMatrixTests(AcceptanceFixture):
         ready = self.tmp / "refresh-ready"
         ready.unlink(missing_ok=True)
         program = """
-import pathlib, runpy, sys
-module = runpy.run_path(sys.argv[1])["main"].__globals__
+import pathlib, importlib.util, sys
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+module = checker.__dict__
 original = module["refresh_inventory"]
 replace = pathlib.Path.replace
 def pause():
@@ -1430,9 +1449,10 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         def cleanup() -> None:
             if child.poll() is None:
                 child.kill()
-            child.communicate(timeout=5)
+            child.communicate(timeout=_CHILD_TIMEOUT)
         self.addCleanup(cleanup)
-        deadline = time.monotonic() + 5
+        child._acceptance_deadline = time.monotonic() + _CHILD_TIMEOUT
+        deadline = child._acceptance_deadline
         while not ready.exists():
             if child.poll() is not None:
                 self.fail(f"refresh exited before synchronization: {child.communicate()}")
@@ -1721,7 +1741,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         self.assertIn("cannot acquire inventory refresh lock within deadline", err)
         self.assertIsNone(child.poll())
         self.assertEqual([path.read_bytes() for path in paths], before)
-        out, err = child.communicate("x", timeout=5)
+        out, err = child.communicate("x", timeout=max(0, child._acceptance_deadline - time.monotonic()))
         self.assertEqual(child.returncode, 0, (out, err))
         after = [path.read_bytes() for path in paths]
         self.assertTrue(all(old != new for old, new in zip(before, after)))
@@ -1734,7 +1754,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         lock = MODULE._refresh_lock_path(self.root)
         identity = os.stat(lock)
         child.kill()
-        child.communicate(timeout=5)
+        child.communicate(timeout=_CHILD_TIMEOUT)
         self.assertTrue(lock.exists())
         code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 0, err)
@@ -1780,7 +1800,8 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         self.assertEqual(code, 2, err)
         self.assertIn("lock open denied", err)
         # A real Git listing excludes private metadata even with untracked files.
-        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True, capture_output=True)
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True, capture_output=True,
+                       timeout=_CHILD_TIMEOUT)
         self.assertNotIn(".git/acceptance-refresh.lock", PUBLIC_TREE.tracked_paths(self.root))
         self.assertEqual(PUBLIC_TREE.validate(self.root), [])
 
@@ -2171,7 +2192,7 @@ script.write_text('changed input', encoding='utf-8')
 """
         child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
                                 str(self.root), str(args.write_doc)],
-                               capture_output=True, text=True, timeout=5)
+                               capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
         self.assertEqual(child.returncode, 0, (child.stdout, child.stderr))
         self.assertIn("ExternalContract", MODULE.index_tests(self.root).ctest_names)
         self.assertErrorContains(baseline_matrix(), "file not found: tools/run.ps1")
@@ -5455,12 +5476,16 @@ class AcceptanceRecoveryTests(AcceptanceFixture):
                 self.assertEqual(identity.st_size, len(data))
                 self.assertEqual(requests, [len(data) + 1])
 
-    def test_retargeted_inventory_alias_recovers_the_actual_publication_destinations(self) -> None:
+    def _check_retargeted_inventory_alias_recovers_the_actual_publication_destinations(self, denied) -> None:
         paths, before = self.prepare_rollback()
         inventory = paths[2]
         program = """
-import os, pathlib, runpy, sys
-module = runpy.run_path(sys.argv[1])["main"].__globals__
+import os, pathlib, importlib.util, sys
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+module = checker.__dict__
 alias, first, second = map(pathlib.Path, sys.argv[2:5])
 current = first
 resolve, replace = pathlib.Path.resolve, pathlib.Path.replace
@@ -5485,49 +5510,61 @@ pathlib.Path.replace = publish
 module["_RefreshSnapshot"].verify = terminate_on_refusal
 raise SystemExit(module["main"](sys.argv[5:]))
 """
-        for denied in (False, True):
-            with self.subTest(denied=denied), self.retargetable_path(inventory, denied=denied) as (first, second, retarget):
-                child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
-                                        str(inventory), str(first), str(second), *self.base_args(),
-                                        "--refresh-inventory"], capture_output=True, text=True, timeout=5)
-                self.remember_custody(child.stderr)
-                self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
-                journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
-                entries = json.loads(journal.read_bytes())["outputs"]
-                self.assertEqual([Path(entry["path"]) for entry in entries], [*paths[:2], first])
-                retarget()
-                identity = inventory.lstat()
-                with mock.patch.object(MODULE, "load_matrix", side_effect=MODULE.MatrixError("stop after recovery")):
-                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
-                self.assertEqual(code, 2, err)
-                self.assertIn("stop after recovery", err)
-                self.assertEqual(first.read_bytes(), before[inventory])
-                self.assertEqual(second.read_bytes(), before[inventory])
-                self.assertEqual(inventory.resolve(), second)
-                self.assertTrue(os.path.samestat(identity, inventory.lstat()))
-                self.assertEqual({path: path.read_bytes() for path in paths[:2]},
-                                 {path: before[path] for path in paths[:2]})
-                self.assertFalse(journal.exists())
-                self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+        with self.subTest(denied=denied), self.retargetable_path(inventory, denied=denied) as (first, second, retarget):
+            child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
+                                    str(inventory), str(first), str(second), *self.base_args(),
+                                    "--refresh-inventory"], capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
+            self.remember_custody(child.stderr)
+            self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+            journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+            entries = json.loads(journal.read_bytes())["outputs"]
+            self.assertEqual([Path(entry["path"]) for entry in entries], [*paths[:2], first])
+            retarget()
+            identity = inventory.lstat()
+            with mock.patch.object(MODULE, "load_matrix", side_effect=MODULE.MatrixError("stop after recovery")):
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+            self.assertEqual(code, 2, err)
+            self.assertIn("stop after recovery", err)
+            self.assertEqual(first.read_bytes(), before[inventory])
+            self.assertEqual(second.read_bytes(), before[inventory])
+            self.assertEqual(inventory.resolve(), second)
+            self.assertTrue(os.path.samestat(identity, inventory.lstat()))
+            self.assertEqual({path: path.read_bytes() for path in paths[:2]},
+                             {path: before[path] for path in paths[:2]})
+            self.assertFalse(journal.exists())
+            self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
 
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        # One genuinely terminated writer supplies the reusable crash image.
-        # Each use gets fresh file identities; no subprocess is needed to test
-        # journal damage or recovery refusal against the same published bytes.
+        # Capture the actual staged bytes without a child per partition.
+        # A dedicated terminated-writer regression qualifies this image; every
+        # recovery refusal still gets fresh files and identities.
         seed = cls("runTest")
         try:
             seed.setUp()
             paths, _ = seed.prepare_rollback()
-            seed.crash_publication(3, ["--refresh-inventory"])
-            journal = MODULE._refresh_lock_path(seed.root).with_suffix(".transaction")
-            entries = json.loads(journal.read_bytes())["outputs"]
-            cls.crash_image = tuple((paths.index(Path(entry["path"])),
-                                     Path(entry["backup"]["path"]).read_bytes(),
-                                     Path(entry["path"]).read_bytes()) for entry in entries)
+            def capture(journal, entries, **kwargs):
+                cls.crash_image = tuple((paths.index(Path(entry["path"])),
+                                         Path(entry["backup"]["path"]).read_bytes(),
+                                         Path(entry["new"]["path"]).read_bytes()) for entry in entries)
+                raise OSError("captured unpublished recovery fixture")
+            with mock.patch.object(MODULE, "_write_transaction", side_effect=capture):
+                code, _, error = seed.run_main(*seed.base_args(), "--refresh-inventory")
+            if code != 2 or "captured unpublished recovery fixture" not in error:
+                raise AssertionError(error)
         finally:
             seed.doCleanups()
+
+    def test_crash_fixture_matches_terminated_publication(self) -> None:
+        paths, _ = self.prepare_rollback()
+        self.crash_publication(3, ["--refresh-inventory"])
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        entries = json.loads(journal.read_bytes())["outputs"]
+        actual = tuple((paths.index(Path(entry["path"])),
+                        Path(entry["backup"]["path"]).read_bytes(),
+                        Path(entry["path"]).read_bytes()) for entry in entries)
+        self.assertEqual(actual, self.crash_image)
 
     def interrupted_refresh(self, count: int) -> None:
         paths = (self.root / "docs/acceptance-matrix.md", self.matrix_path,
@@ -5634,43 +5671,40 @@ raise SystemExit(module["main"](sys.argv[5:]))
                 self.assertIn("static references ok", out)
         self.assertFalse(metadata.exists())
 
-    def test_termination_at_every_publication_boundary_recovers_before_reading(self) -> None:
-        for refresh in (False, True):
-            for existing in (False, True):
-                for count in range(1, 6 if refresh else 3):
-                    with self.subTest(refresh=refresh, existing=existing, count=count):
-                        paths, before = self.prepare_rollback()
-                        if not refresh:
-                            (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
-                                "# Contract\nEvery requirement has evidence.\n", encoding="utf-8")
-                        discovery, report = self.execution_inputs()
-                        doc, receipt = self.tmp / "additional.md", self.tmp / "receipt.json"
-                        doc.write_bytes(b"previous document\n")
-                        before[doc] = doc.read_bytes()
-                        receipt.unlink(missing_ok=True)
-                        if existing:
-                            receipt.write_bytes(b"previous receipt\n")
-                            before[receipt] = receipt.read_bytes()
-                        options = ["--write-doc", str(doc), "--junit", str(report),
-                                   "--discovery", str(discovery), "--execution-receipt", str(receipt)]
-                        if refresh:
-                            options.append("--refresh-inventory")
-                        self.crash_publication(count, options)
-                        self.assertTrue(any(path.read_bytes() != data for path, data in before.items())
-                                        or receipt.exists() != existing)
-                        # Stop at the very first input read: recovery must have
-                        # restored all outputs, rather than hiding damage by regenerating.
-                        with mock.patch.object(MODULE, "load_matrix",
-                                               side_effect=MODULE.MatrixError("stop after recovery")):
-                            code, _, err = self.run_main(*self.base_args())
-                        self.assertEqual(code, 2, err)
-                        self.assertIn("stop after recovery", err)
-                        self.assertEqual({path: path.read_bytes() for path in before}, before)
-                        self.assertEqual(receipt.exists(), existing)
-                        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
-                        self.assertFalse(MODULE._refresh_lock_path(self.root).with_suffix(".transaction").exists())
-                        code, _, err = self.run_main(*self.base_args(), *options)
-                        self.assertEqual(code, 0, err)
+    def _check_termination_at_every_publication_boundary_recovers_before_reading(self, refresh, existing, count) -> None:
+        with self.subTest(refresh=refresh, existing=existing, count=count):
+            paths, before = self.prepare_rollback()
+            if not refresh:
+                (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+                    "# Contract\nEvery requirement has evidence.\n", encoding="utf-8")
+            discovery, report = self.execution_inputs()
+            doc, receipt = self.tmp / "additional.md", self.tmp / "receipt.json"
+            doc.write_bytes(b"previous document\n")
+            before[doc] = doc.read_bytes()
+            receipt.unlink(missing_ok=True)
+            if existing:
+                receipt.write_bytes(b"previous receipt\n")
+                before[receipt] = receipt.read_bytes()
+            options = ["--write-doc", str(doc), "--junit", str(report),
+                       "--discovery", str(discovery), "--execution-receipt", str(receipt)]
+            if refresh:
+                options.append("--refresh-inventory")
+            self.crash_publication(count, options)
+            self.assertTrue(any(path.read_bytes() != data for path, data in before.items())
+                            or receipt.exists() != existing)
+            # Stop at the very first input read: recovery must have
+            # restored all outputs, rather than hiding damage by regenerating.
+            with mock.patch.object(MODULE, "load_matrix",
+                                   side_effect=MODULE.MatrixError("stop after recovery")):
+                code, _, err = self.run_main(*self.base_args())
+            self.assertEqual(code, 2, err)
+            self.assertIn("stop after recovery", err)
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+            self.assertEqual(receipt.exists(), existing)
+            self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+            self.assertFalse(MODULE._refresh_lock_path(self.root).with_suffix(".transaction").exists())
+            code, _, err = self.run_main(*self.base_args(), *options)
+            self.assertEqual(code, 0, err)
 
     def test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read(self) -> None:
         paths, _ = self.prepare_rollback()
@@ -5810,10 +5844,14 @@ raise SystemExit(module["main"](sys.argv[5:]))
                 self.assertFalse(journal.exists())
                 self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
 
-    def test_recovery_can_itself_be_terminated_between_restores(self) -> None:
+    def _check_recovery_can_itself_be_terminated_between_restores(self, count) -> None:
         program = """
-import os, pathlib, runpy, sys
-module = runpy.run_path(sys.argv[1])["main"].__globals__
+import os, pathlib, importlib.util, sys
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+module = checker.__dict__
 replace = os.replace
 remaining = int(sys.argv[2])
 def restore(source, target):
@@ -5826,22 +5864,21 @@ def restore(source, target):
 os.replace = restore
 raise SystemExit(module["main"](sys.argv[3:]))
 """
-        for count in (1, 2, 3):
-            with self.subTest(count=count):
-                paths, before = self.prepare_rollback()
-                self.interrupted_refresh(3)
-                child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
-                                        str(MODULE_PATH), str(count), *self.base_args()],
-                                       capture_output=True, text=True, timeout=5)
-                self.remember_custody(child.stderr)
-                self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
-                with mock.patch.object(MODULE, "load_matrix",
-                                       side_effect=MODULE.MatrixError("stop after recovery")):
-                    code, _, err = self.run_main(*self.base_args())
-                self.assertEqual(code, 2, err)
-                self.assertIn("stop after recovery", err)
-                self.assertEqual({path: path.read_bytes() for path in paths}, before)
-                self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+        with self.subTest(count=count):
+            paths, before = self.prepare_rollback()
+            self.interrupted_refresh(3)
+            child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
+                                    str(MODULE_PATH), str(count), *self.base_args()],
+                                   capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
+            self.remember_custody(child.stderr)
+            self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+            with mock.patch.object(MODULE, "load_matrix",
+                                   side_effect=MODULE.MatrixError("stop after recovery")):
+                code, _, err = self.run_main(*self.base_args())
+            self.assertEqual(code, 2, err)
+            self.assertIn("stop after recovery", err)
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+            self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
 
     def test_committed_recovery_keeps_new_outputs_and_handles_windows_readonly_cleanup(self) -> None:
         paths, before = self.prepare_rollback()
@@ -6604,10 +6641,14 @@ class AcceptanceCustodyTests(AcceptanceFixture):
                 self.assertEqual(marker.read_bytes(), data)
                 self.assertTrue(os.path.samestat(marker.stat(), identity))
 
-    def test_restart_reacquires_enrolled_partial_output_and_pending_files(self) -> None:
+    def _check_restart_reacquires_enrolled_partial_output_and_pending_files(self, phase) -> None:
         program = r'''
-import builtins, os, pathlib, runpy, sys
-g = runpy.run_path(sys.argv[1])["main"].__globals__
+import builtins, os, pathlib, importlib.util, sys
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+g = checker.__dict__
 journal, receipt, phase = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
 enroll = g["_PreparationCustody"].enroll
 def enrolled(owner, path, identity):
@@ -6646,24 +6687,25 @@ def renamed(source, target):
 os.replace = renamed
 g["_replace_outputs"]([(journal.parent / "output", "candidate\r\n")], journal=journal, custody=receipt)
 '''
-        for phase in ("output", "payload", "pending", "publication", "commit"):
-            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
-                base = Path(directory).resolve()
-                journal, output = base / "refresh.transaction", base / "output"
-                output.write_bytes(b"original\r\n")
-                receipt = MODULE._PreparationCustody.create(journal)
-                child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
-                                        str(journal), receipt, phase], capture_output=True, text=True, timeout=5)
-                self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
-                self.assertTrue(list(base.glob(".acceptance-*")))
-                restart = subprocess.run([sys.executable, "-I", "-B", "-c",
-                    'import pathlib,runpy,sys;runpy.run_path(sys.argv[1])["_recover_outputs"](pathlib.Path(sys.argv[2]),sys.argv[3])',
-                    str(MODULE_PATH), str(journal), receipt], capture_output=True, text=True, timeout=5)
-                self.assertEqual(restart.returncode, 0, (restart.stdout, restart.stderr))
-                self.assertEqual(output.read_bytes(), b"candidate\r\n" if phase == "commit" else b"original\r\n")
-                self.assertEqual(list(base.glob(".acceptance-*")), [])
-                MODULE._replace_outputs([(output, "retry")], journal=journal, custody=receipt)
-                self.assertEqual(output.read_bytes(), b"retry")
+        with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            journal, output = base / "refresh.transaction", base / "output"
+            output.write_bytes(b"original\r\n")
+            receipt = MODULE._PreparationCustody.create(journal)
+            child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
+                                    str(journal), receipt, phase], capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
+            self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+            self.assertTrue(list(base.glob(".acceptance-*")))
+            restart = subprocess.run([sys.executable, "-I", "-B", "-c",
+                'import importlib.util,pathlib,sys;spec=importlib.util.spec_from_file_location("acceptance_child",sys.argv[1]);'
+                'checker=importlib.util.module_from_spec(spec);sys.modules[spec.name]=checker;spec.loader.exec_module(checker);'
+                'checker._recover_outputs(pathlib.Path(sys.argv[2]),sys.argv[3])',
+                str(MODULE_PATH), str(journal), receipt], capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
+            self.assertEqual(restart.returncode, 0, (restart.stdout, restart.stderr))
+            self.assertEqual(output.read_bytes(), b"candidate\r\n" if phase == "commit" else b"original\r\n")
+            self.assertEqual(list(base.glob(".acceptance-*")), [])
+            MODULE._replace_outputs([(output, "retry")], journal=journal, custody=receipt)
+            self.assertEqual(output.read_bytes(), b"retry")
 
     def test_reset_removes_only_enrolled_partial_content_and_preserves_unrelated_files(self) -> None:
         journal, receipt = self.custody()
@@ -6945,11 +6987,9 @@ g["_replace_outputs"]([(journal.parent / "output", "candidate\r\n")], journal=jo
 # Disjoint selections bound each native entry's filesystem fault sweeps.
 # Direct execution still discovers the complete module, including recovery and
 # all four public-tree partitions.
-_CONTRACT_PARTITIONS = 24
 _MATRIX_CLASSES = (AcceptanceMatrixTests, ProductionAcceptanceMatrixTests,
                    AcceptanceMatrixPublishabilityTests, PublicTreeScanTests)
-# Measured whole-case moves keep filesystem sweeps away from the deliberate
-# five-second timeout control and distribute the remaining expensive sweeps.
+# Whole-case moves distribute the launch-free filesystem sweeps.
 _CONTRACT_CASE_PARTITIONS = {
     "AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files": 1,
     "AcceptanceSelectionTests.test_rollback_payload_buffer_boundaries_are_discoverable": 6,
@@ -6968,7 +7008,7 @@ def contract_suite(number: int) -> unittest.TestSuite:
     suite = unittest.TestSuite(case for index, case in enumerate(cases)
                               if _CONTRACT_CASE_PARTITIONS.get(
                                   type(case).__name__ + "." + case._testMethodName,
-                                  index % _CONTRACT_PARTITIONS) == number)
+                                  index % 24) == number)
     _phase("selection-finish", selector=number)
     return suite
 
@@ -6976,6 +7016,12 @@ def contract_suite(number: int) -> unittest.TestSuite:
 class AcceptanceSelectionTests(_PhaseCase):
     def setUp(self) -> None:
         super().setUp()
+        # Logical fault sweeps need ordering and injected failures, just as in
+        # AcceptanceFixture. Every terminating/restarting child still uses real
+        # disk barriers; avoid repeating them in the parent's fault grid.
+        sync_patch = mock.patch.object(os, "fsync", autospec=_NATIVE_FSYNC)
+        sync_patch.start()
+        self.addCleanup(sync_patch.stop)
         # Extend the registered preparation owner without changing selection IDs
         # or its existing assertions. These controls use the actual openers.
         if self._testMethodName == "test_preparation_bound_is_checked_before_creating_an_artifact":
@@ -7287,8 +7333,9 @@ class AcceptanceSelectionTests(_PhaseCase):
             emit("unknown")
             self.assertEqual(namespace["_phase_records"], 0)
             emit("selection-start", selector=7)
-            for selector in (-1, 24, True, "private-selector", None):
+            for selector in (-1, _CONTRACT_PARTITIONS, True, "private-selector", None):
                 emit("selection-finish", selector=selector)
+            emit("selection-finish", selector=_CONTRACT_PARTITIONS - 1)
             emit("case-start", case="a/\n\r\u96ea" * 256)
             for _ in range(800):
                 emit("case-finish", case="AcceptanceSelectionTests.test_contract_partition_refuses_invalid_selection")
@@ -7298,12 +7345,13 @@ class AcceptanceSelectionTests(_PhaseCase):
         self.assertEqual(namespace["_phase_records"], 768)
         self.assertEqual(len(events), 2 * 768)
         self.assertEqual([event[0] for event in events], ["write", "flush"] * 768)
-        self.assertEqual(records[:6], ["acceptance-phase=selection-start selector=7\n"] +
-                         ["acceptance-phase=selection-finish\n"] * 5)
-        self.assertEqual(records[6], "acceptance-phase=case-start case=" + "a????" * 25 + "a??\n")
+        self.assertEqual(records[:7], ["acceptance-phase=selection-start selector=7\n"] +
+                         ["acceptance-phase=selection-finish\n"] * 5 +
+                         [f"acceptance-phase=selection-finish selector={_CONTRACT_PARTITIONS - 1}\n"])
+        self.assertEqual(records[7], "acceptance-phase=case-start case=" + "a????" * 25 + "a??\n")
         for record in records:
             self.assertLessEqual(len(record.encode("ascii")), 256)
-            self.assertRegex(record, r"^acceptance-phase=[a-z-]+(?: selector=(?:[0-9]|1[0-9]|2[0-3]))?(?: case=[A-Za-z0-9._?]{1,128})?\n$")
+            self.assertRegex(record, r"^acceptance-phase=[a-z-]+(?: selector=[0-9]{1,3})?(?: case=[A-Za-z0-9._?]{1,128})?\n$")
         # Failed/partial writes and failed flushes disable further diagnostics.
         # Neither retries nor stream errors may replace a test's result/exception.
         for stream in (None, object(), mock.Mock(write=mock.Mock(return_value=0)),
@@ -7365,7 +7413,7 @@ class AcceptanceSelectionTests(_PhaseCase):
         output = io.StringIO()
         with mock.patch.dict(globals(), _phase_records=0), contextlib.redirect_stderr(output):
             suite = contract_suite(7)
-        self.assertEqual(suite.countTestCases(), 14)
+        self.assertEqual(suite.countTestCases(), 11)
         self.assertEqual(output.getvalue(), "acceptance-phase=selection-start selector=7\n"
                          "acceptance-phase=selection-finish selector=7\n")
 
@@ -7431,35 +7479,9 @@ class AcceptanceSelectionTests(_PhaseCase):
             with mock.patch.object(tempfile, "tempdir", str(unicode_root)):
                 self.preparation_exit("original", "create", True)
 
-    def preparation_exit(self, phase: str, boundary: str, after: bool, *, candidate: bool = False) -> None:
-        # Both the terminating process and its restart load the actual checker.
-        # Five small destinations exercise the complete atomic output set.
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory).resolve()
-            paths = [base / str(index) for index in range(5)]
-            before = {path: ("original " + path.name + "\r\n").encode() for path in paths}
-            for path, data in before.items():
-                path.write_bytes(data)
-                path.chmod(0o640)
-            modes = {path: stat.S_IMODE(path.stat().st_mode) for path in paths}
-            journal = base / "refresh.transaction"
-            if phase in ("recovery", "pending"):
-                entries = []
-                for index, path in enumerate(paths):
-                    old, new = [base / (".acceptance-" + f"{2 * index + offset:032x}") for offset in (0, 1)]
-                    old.write_bytes(before[path])
-                    old.chmod(modes[path])
-                    new.write_bytes(b"candidate\r\n")
-                    entries.append({"path": str(path), "old": MODULE._transaction_record(old)["sha256"],
-                                    "backup": MODULE._transaction_record(old), "new": MODULE._transaction_record(new)})
-                if phase == "recovery":
-                    MODULE._write_transaction(journal, entries, committed=False)
-                    for entry in entries:
-                        Path(entry["new"]["path"]).replace(entry["path"])
-                else:
-                    MODULE._write_transaction(journal, entries, committed=False)
-                    (base / "entries.json").write_bytes(json.dumps(entries).encode())
-            program = r'''
+    @staticmethod
+    def preparation_program() -> str:
+        return r'''
 import os, sys
 os.write(2, b"phase=imports\n")
 import atexit, threading
@@ -7491,12 +7513,17 @@ watchdog = threading.Timer(3, dump_stack)
 watchdog.daemon = True
 atexit.register(watchdog.cancel)
 watchdog.start()
-import json, pathlib, runpy
-mark(b"runpy")
-g = runpy.run_path(sys.argv[1])["main"].__globals__
+import json, pathlib, importlib.util
+mark(b"loader")
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+g = checker.__dict__
 mark(b"ready")
+output_count = int(sys.argv[7])
 base, phase, boundary, after, number = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
-paths = [base / str(index) for index in range(5)]
+paths = [base / str(index) for index in range(output_count)]
 journal = base / "refresh.transaction"
 active = phase != "rollback"
 selected = None
@@ -7637,10 +7664,40 @@ else:
     g["_replace_outputs"]([(path, "candidate\r\n") for path in paths], journal=None if phase == "direct" else journal)
 raise SystemExit("termination boundary was not reached")
 '''
+
+    def preparation_exit(self, phase: str, boundary: str, after: bool, *, candidate: bool = False, output_count: int = 1) -> None:
+        # Both processes load the actual checker. Boundary checks need one
+        # destination; the full-set regression separately exercises all five.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            paths = [base / str(index) for index in range(output_count)]
+            before = {path: ("original " + path.name + "\r\n").encode() for path in paths}
+            for path, data in before.items():
+                path.write_bytes(data)
+                path.chmod(0o640)
+            modes = {path: stat.S_IMODE(path.stat().st_mode) for path in paths}
+            journal = base / "refresh.transaction"
+            if phase in ("recovery", "pending"):
+                entries = []
+                for index, path in enumerate(paths):
+                    old, new = [base / (".acceptance-" + f"{2 * index + offset:032x}") for offset in (0, 1)]
+                    old.write_bytes(before[path])
+                    old.chmod(modes[path])
+                    new.write_bytes(b"candidate\r\n")
+                    entries.append({"path": str(path), "old": MODULE._transaction_record(old)["sha256"],
+                                    "backup": MODULE._transaction_record(old), "new": MODULE._transaction_record(new)})
+                if phase == "recovery":
+                    MODULE._write_transaction(journal, entries, committed=False)
+                    for entry in entries:
+                        Path(entry["new"]["path"]).replace(entry["path"])
+                else:
+                    MODULE._write_transaction(journal, entries, committed=False)
+                    (base / "entries.json").write_bytes(json.dumps(entries).encode())
+            program = self.preparation_program()
             try:
                 child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
-                                        str(base), phase, boundary, str(int(after)), "2" if candidate else "1"],
-                                       capture_output=True, text=True, timeout=5)
+                                        str(base), phase, boundary, str(int(after)), "2" if candidate else "1", str(output_count)],
+                                       capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
             except subprocess.TimeoutExpired as error:
                 # subprocess.run has killed/reaped the child. Keep the original
                 # exception and streams; expose bounded stderr in hosted logs.
@@ -7664,21 +7721,26 @@ raise SystemExit("termination boundary was not reached")
                 self.assert_artifact_discoverable(artifact, authority)
             snapshot = {path: (path.read_bytes(), path.stat()) for path in base.iterdir() if path.is_file()}
             restart = r'''
-import pathlib, runpy, sys
-g = runpy.run_path(sys.argv[1])["main"].__globals__
+import pathlib, importlib.util, sys
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+g = checker.__dict__
 try:
     journal = pathlib.Path(sys.argv[2])
+    output_count = int(sys.argv[4])
     if sys.argv[3] == "direct":
         g["_replace_outputs"]([(journal.parent / str(index), "original " + str(index) + "\r\n")
-                               for index in range(5)])
+                               for index in range(output_count)])
     else:
         g["_recover_outputs"](journal)
 except (g["MatrixError"], OSError) as error:
     print(str(error), file=sys.stderr)
     raise SystemExit(2)
 '''
-            resumed = subprocess.run([sys.executable, "-I", "-B", "-c", restart, str(MODULE_PATH), str(journal), phase],
-                                     capture_output=True, text=True, timeout=5)
+            resumed = subprocess.run([sys.executable, "-I", "-B", "-c", restart, str(MODULE_PATH), str(journal), phase, str(output_count)],
+                                     capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
             if any(path.exists() for path in markers):
                 self.assertEqual(resumed.returncode, 2, (resumed.stdout, resumed.stderr))
                 self.assertIn("uncertain recovery preparation", resumed.stderr)
@@ -7693,6 +7755,9 @@ except (g["MatrixError"], OSError) as error:
                 self.assertEqual(list(base.glob(".acceptance-*")), [])
                 self.assertFalse(journal.exists())
 
+    def _check_full_output_set_native_publication_is_discoverable(self, phase, boundary) -> None:
+        self.preparation_exit(phase, boundary, True, output_count=MODULE._TRANSACTION_OUTPUTS)
+
     def test_interruption_diagnostics_bound_stderr_and_preserve_selected_exit(self) -> None:
         run = subprocess.run
         observed = []
@@ -7703,20 +7768,23 @@ except (g["MatrixError"], OSError) as error:
         with mock.patch.object(subprocess, "run", capture):
             self.preparation_exit("rollback", "write", True)
         command, child = observed[0]
-        self.assertEqual(command[-4:], ["rollback", "write", "1", "1"])
+        self.assertEqual(command[-5:], ["rollback", "write", "1", "1", "1"])
         self.assertEqual(child.returncode, 73)
         self.assertEqual(child.stdout, "")
         self.assertEqual([line for line in child.stderr.splitlines() if line.startswith("phase=")], [
-            "phase=imports", "phase=runpy", "phase=ready", "phase=staging",
+            "phase=imports", "phase=loader", "phase=ready", "phase=staging",
             "phase=metadata", "phase=publication", "phase=rollback", "phase=selected-exit"])
         records = child.stderr.encode("ascii").splitlines(keepends=True)
         self.assertLessEqual(child.stderr.count("stack-main-limit6="), 1)
         self.assertLessEqual(len(records), 9)
         self.assertLessEqual(max(map(len, records)), 256)
         self.assertLessEqual(len(child.stderr.encode("ascii")), 2304)
+
+    def test_interruption_stack_diagnostics_are_bounded(self) -> None:
+        run = subprocess.run
         # Exercise the exact diagnostic prefix with a deeper stack and long,
         # non-ASCII code names; no source lines, paths or locals are printed.
-        prefix = command[4].split("import json, pathlib, runpy\n", 1)[0]
+        prefix = self.preparation_program().split("import json, pathlib, importlib.util\n", 1)[0]
         control = prefix.replace("watchdog.start()", "watchdog.cancel()\nwatchdog.start()") + r'''
 watchdog.cancel()
 watchdog.join()
@@ -7728,18 +7796,30 @@ def deep(depth):
         dump_stack()
 deep.__code__ = deep.__code__.replace(co_name="x\u96ea" * 40)
 deep(10)
+# Qualify the real timer callback too, without depending on elapsed startup
+# time or on which main-thread frame it happens to observe.
+watchdog = threading.Timer(0, dump_stack)
+watchdog.daemon = True
+watchdog.start()
+watchdog.join()
 '''
         bounded = run([sys.executable, "-I", "-B", "-c", control],
-                      capture_output=True, text=True, timeout=5)
+                      capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
         self.assertEqual(bounded.returncode, 0, bounded.stderr)
         self.assertEqual(bounded.stdout, "")
         records = bounded.stderr.encode("ascii").splitlines(keepends=True)
-        self.assertEqual(len(records), 2)
+        self.assertEqual(len(records), 3)
         self.assertEqual(records[0], b"phase=imports\n")
         self.assertEqual(records[1].count(b";"), 5)
         self.assertIn(b"x?" * 12 + b":", records[1])
+        self.assertTrue(records[2].startswith(b"stack-main-limit6="))
+        self.assertLessEqual(records[2].count(b";"), 5)
         self.assertLessEqual(max(map(len, records)), 256)
         self.assertLessEqual(len(bounded.stderr.encode("ascii")), 4096)
+
+    def test_interruption_watchdog_is_cancelled_on_normal_exit(self) -> None:
+        run = subprocess.run
+        prefix = self.preparation_program().split("import json, pathlib, importlib.util\n", 1)[0]
         # Exit handlers run in reverse registration order: observe cancellation
         # after the real handler, even on ordinary interpreter exit.
         control = prefix.replace("watchdog.start()", "").replace("atexit.register(watchdog.cancel)",
@@ -7748,7 +7828,7 @@ deep(10)
                                  "atexit.register(watchdog.cancel)")
         control += "main_thread = -1\ndump_stack()\n"
         normal = run([sys.executable, "-I", "-B", "-c", control],
-                     capture_output=True, text=True, timeout=5)
+                     capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
         self.assertEqual(normal.returncode, 0, normal.stderr)
         self.assertEqual(normal.stdout, "")
         self.assertEqual(normal.stderr, "phase=imports\nstack-main-limit6=\ncancelled\n")
@@ -7763,11 +7843,23 @@ deep(10)
         def blocked(command: list[str], **kwargs: Any) -> Any:
             command = list(command)
             # The block is in the actual child, at the selected stop after the
-            # buffered write. subprocess.run's unchanged timeout kills/reaps it,
-            # including its event waiter and one-shot daemon watchdog.
+            # buffered write. Capture the stack at entry to the real wait call;
+            # startup latency must not decide which frame the oracle sees.
+            # The separate timer control qualifies the actual watchdog callback.
             anchor = '\n        mark(b"selected-exit")\n'
             self.assertEqual(command[4].count(anchor), 1)
-            command[4] = command[4].replace(anchor, "\n        threading.Event().wait()" + anchor, 1)
+            self.assertEqual(command[4].count("watchdog.start()"), 1)
+            command[4] = command[4].replace("watchdog.start()", "", 1)
+            block = '''
+        def waiting(frame, event, argument):
+            if event == "call" and frame.f_code is threading.Event.wait.__code__:
+                sys.settrace(None)
+                dump_stack()
+                return None
+            return waiting
+        sys.settrace(waiting)
+        threading.Event().wait()'''
+            command[4] = command[4].replace(anchor, block + anchor, 1)
             try:
                 return run(command, **kwargs)
             except subprocess.TimeoutExpired as error:
@@ -7780,7 +7872,7 @@ deep(10)
                 self.preparation_exit("rollback", "write", True)
         self.assertEqual(len(failures), 1)
         self.assertIs(raised.exception, failures[0])
-        self.assertEqual(raised.exception.timeout, 5)
+        self.assertEqual(raised.exception.timeout, _CHILD_TIMEOUT)
         captured = raised.exception.stderr
         # Windows run() drains text pipes after kill; POSIX retains bytes.
         self.assertIsInstance(captured, (bytes, str))
@@ -7809,142 +7901,105 @@ deep(10)
                 self.assertIs(raised.exception, error)
                 self.assertIs(error.stderr, stderr)
                 self.assertEqual(error.stdout, b"retained")
-                self.assertEqual(invoked.call_args.kwargs["timeout"], 5)
+                self.assertEqual(invoked.call_args.kwargs["timeout"], _CHILD_TIMEOUT)
                 expected = "?" * 4096 if stderr in (b"\xff" * 5000, "\u96ea" * 5000) else (
                     "x" * 4096 if stderr else "")
                 self.assertEqual(output.getvalue(), "isolated child diagnostics (stderr, limit 4096):\n" +
                                  expected + "\n")
 
-    def test_initial_backup_creation_is_discoverable_on_both_sides(self) -> None:
-        for after in (False, True):
-            with self.subTest(after=after):
-                self.preparation_exit("original", "create", after)
+    def _check_initial_backup_creation_is_discoverable_on_both_sides(self, after) -> None:
+        with self.subTest(after=after):
+            self.preparation_exit("original", "create", after)
 
-    def test_initial_candidate_creation_is_discoverable_on_both_sides(self) -> None:
-        for after in (False, True):
-            with self.subTest(after=after):
-                self.preparation_exit("original", "create", after, candidate=True)
+    def _check_initial_candidate_creation_is_discoverable_on_both_sides(self, after) -> None:
+        with self.subTest(after=after):
+            self.preparation_exit("original", "create", after, candidate=True)
 
-    def test_initial_payload_buffer_boundaries_are_discoverable(self) -> None:
-        for operation in ("write", "flush", "close", "sync"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("original", operation, after)
+    def _check_initial_payload_buffer_boundaries_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("original", operation, after)
 
-    def test_initial_candidate_binding_and_partial_writes_are_discoverable(self) -> None:
-        for operation in ("bind", "partial"):
-            for after in (False, True) if operation == "bind" else (True,):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("original", operation, after, candidate=True)
+    def _check_initial_candidate_binding_and_partial_writes_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("original", operation, after, candidate=True)
 
-    def test_initial_candidate_buffer_boundaries_are_discoverable(self) -> None:
-        for operation in ("write", "flush", "close", "sync"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("original", operation, after, candidate=True)
+    def _check_initial_candidate_buffer_boundaries_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("original", operation, after, candidate=True)
 
-    def test_initial_metadata_and_publication_bookkeeping_are_restartable(self) -> None:
-        for operation in ("metadata", "rename", "publication", "handoff"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("original", operation, after)
+    def _check_initial_metadata_and_publication_bookkeeping_are_restartable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("original", operation, after)
 
-    def test_rollback_creation_and_binding_are_discoverable(self) -> None:
-        for operation in ("create", "bind"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("rollback", operation, after)
+    def _check_rollback_creation_and_binding_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("rollback", operation, after)
 
-    def test_rollback_payload_buffer_boundaries_are_discoverable(self) -> None:
-        for operation in ("write", "flush", "close", "sync"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("rollback", operation, after)
+    def _check_rollback_payload_buffer_boundaries_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("rollback", operation, after)
 
-    def test_rollback_partial_writes_and_native_bookkeeping_are_discoverable(self) -> None:
-        for operation in ("partial", "rename"):
-            for after in (False, True) if operation == "rename" else (True,):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("rollback", operation, after)
+    def _check_rollback_partial_writes_and_native_bookkeeping_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("rollback", operation, after)
 
-    def test_rollback_marker_release_preserves_restart_discovery(self) -> None:
-        for after in (False, True):
-            with self.subTest(after=after):
-                self.preparation_exit("rollback", "handoff", after)
+    def _check_rollback_marker_release_preserves_restart_discovery(self, after) -> None:
+        with self.subTest(after=after):
+            self.preparation_exit("rollback", "handoff", after)
 
-    def test_restart_creation_and_binding_are_discoverable(self) -> None:
-        for operation in ("create", "bind"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("recovery", operation, after)
+    def _check_restart_creation_and_binding_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("recovery", operation, after)
 
-    def test_restart_payload_buffer_boundaries_are_discoverable(self) -> None:
-        for operation in ("write", "flush", "close", "sync"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("recovery", operation, after)
+    def _check_restart_payload_buffer_boundaries_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("recovery", operation, after)
 
-    def test_restart_metadata_and_native_bookkeeping_are_restartable(self) -> None:
-        for operation in ("metadata", "rename", "handoff"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("recovery", operation, after)
+    def _check_restart_metadata_and_native_bookkeeping_are_restartable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("recovery", operation, after)
 
     def test_restart_partial_writes_are_discoverable(self) -> None:
         self.preparation_exit("recovery", "partial", True)
 
-    def test_pending_journal_creation_and_binding_are_discoverable(self) -> None:
-        for operation in ("create", "bind"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("pending", operation, after)
+    def _check_pending_journal_creation_and_binding_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("pending", operation, after)
 
-    def test_pending_journal_buffer_boundaries_are_discoverable(self) -> None:
-        for operation in ("write", "flush", "close", "sync"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("pending", operation, after)
+    def _check_pending_journal_buffer_boundaries_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("pending", operation, after)
 
-    def test_owned_interrupted_journal_native_publication_recovers_successfully(self) -> None:
-        for after in (False, True):
-            with self.subTest(after=after):
-                self.preparation_exit("pending", "rename", after)
+    def _check_owned_interrupted_journal_native_publication_recovers_successfully(self, after) -> None:
+        with self.subTest(after=after):
+            self.preparation_exit("pending", "rename", after)
 
     def test_pending_journal_partial_writes_are_discoverable(self) -> None:
         self.preparation_exit("pending", "partial", True)
 
-    def test_first_marker_creation_is_discoverable_without_changing_outputs(self) -> None:
-        for after in (False, True):
-            with self.subTest(after=after):
-                self.preparation_exit("marker", "create", after)
+    def _check_first_marker_creation_is_discoverable_without_changing_outputs(self, after) -> None:
+        with self.subTest(after=after):
+            self.preparation_exit("marker", "create", after)
 
-    def test_first_marker_buffer_boundaries_are_discoverable_without_changing_outputs(self) -> None:
-        for operation in ("write", "flush", "close", "sync", "partial"):
-            for after in (False, True) if operation != "partial" else (True,):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("marker", operation, after)
+    def _check_first_marker_buffer_boundaries_are_discoverable_without_changing_outputs(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("marker", operation, after)
 
-    def test_first_marker_binding_is_discoverable_without_changing_outputs(self) -> None:
-        for after in (False, True):
-            with self.subTest(after=after):
-                self.preparation_exit("marker", "bind", after)
+    def _check_first_marker_binding_is_discoverable_without_changing_outputs(self, after) -> None:
+        with self.subTest(after=after):
+            self.preparation_exit("marker", "bind", after)
 
-    def test_direct_preparation_creation_and_binding_are_discoverable(self) -> None:
-        for operation in ("create", "bind"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("direct", operation, after)
+    def _check_direct_preparation_creation_and_binding_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("direct", operation, after)
 
-    def test_direct_preparation_buffer_boundaries_are_discoverable(self) -> None:
-        for operation in ("write", "flush", "close", "sync"):
-            for after in (False, True):
-                with self.subTest(operation=operation, after=after):
-                    self.preparation_exit("direct", operation, after)
+    def _check_direct_preparation_buffer_boundaries_are_discoverable(self, operation, after) -> None:
+        with self.subTest(operation=operation, after=after):
+            self.preparation_exit("direct", operation, after)
 
-    def test_direct_preparation_native_publication_is_discoverable(self) -> None:
-        for after in (False, True):
-            with self.subTest(after=after):
-                self.preparation_exit("direct", "publication", after)
+    def _check_direct_preparation_native_publication_is_discoverable(self, after) -> None:
+        with self.subTest(after=after):
+            self.preparation_exit("direct", "publication", after)
 
     def test_foreign_preparation_and_pending_occupants_are_never_opened_or_modified(self) -> None:
         for suffix in (".preparation", ".pending"):
@@ -8196,9 +8251,10 @@ deep(10)
         expected = [case(name).id() for case in (*_MATRIX_CLASSES, AcceptanceSelectionTests,
                                                   AcceptanceRecoveryTests, AcceptanceCustodyTests, AcceptanceMatrixPublicTreeTests)
                     for name in loader.getTestCaseNames(case)]
-        original = sorted(case.__name__ + "." + name
+        original = sorted({case.__name__ + "." + getattr(getattr(case, name), "_contract_origin", name)
                           for case in (*_MATRIX_CLASSES, AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
-                          for name in loader.getTestCaseNames(case))
+                          for name in loader.getTestCaseNames(case)
+                          if name != "test_crash_fixture_matches_terminated_publication"})
         self.assertEqual(len(original), 249)
         self.assertEqual(hashlib.sha256("\n".join(original).encode("utf-8")).hexdigest(),
                          "4806f17639f51770b6cf64722bc7539f8cd8c97cd08ae49e396c85dc58f70b0d")
@@ -8242,25 +8298,210 @@ deep(10)
         self.assertEqual(len(selected), len(set(selected)))
         discovered = loader.loadTestsFromModule(sys.modules[__name__])
         self.assertEqual(discovered.countTestCases(), len(expected))
-        self.assertEqual(len(expected), 303)
+        self.assertEqual(len(expected), _EXPECTED_CASES)
         self.assert_phase_contract()
 
-    def test_partition_entrypoint_refuses_invalid_selection(self) -> None:
-        for value in ("-1", "24", "unknown"):
-            with self.subTest(value=value):
-                child = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
-                                        "--contract-partition", value],
-                                       capture_output=True, text=True, timeout=5)
-                self.assertEqual(child.returncode, 1)
-                self.assertIn("invalid contract partition" if value != "unknown" else
-                              "invalid literal for int()", child.stderr)
-                self.assertEqual(child.stdout, "")
+    def _check_partition_entrypoint_refuses_invalid_selection(self, value) -> None:
+        with self.subTest(value=value):
+            child = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                                    "--contract-partition", value],
+                                   capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
+            self.assertEqual(child.returncode, 1)
+            self.assertIn("invalid contract partition" if value != "unknown" else
+                          "invalid literal for int()", child.stderr)
+            self.assertEqual(child.stdout, "")
+
+    def test_child_allowances_fit_every_registered_partition(self) -> None:
+        import ast
+        functions = [node for node in ast.walk(ast.parse(Path(__file__).read_text(encoding="utf-8")))
+                     if isinstance(node, ast.FunctionDef)]
+        # Inventory all launch sites, aliases and self-helper calls. This also
+        # catches a new child hidden in an otherwise launch-free fault sweep.
+        direct, helpers = set(), {}
+        for function in functions:
+            nodes = list(ast.walk(function))
+            aliases = {target.id for node in nodes if isinstance(node, ast.Assign)
+                       and any(isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                               and value.value.id == "subprocess" and value.attr in ("run", "Popen")
+                               for value in ast.walk(node.value))
+                       for target in ast.walk(node) if isinstance(target, ast.Name)
+                       and isinstance(target.ctx, ast.Store)}
+            calls = [node.func for node in nodes if isinstance(node, ast.Call)]
+            if any((isinstance(call, ast.Attribute) and isinstance(call.value, ast.Name)
+                    and call.value.id == "subprocess" and call.attr in ("run", "Popen"))
+                   or (isinstance(call, ast.Name) and call.id in aliases) for call in calls):
+                direct.add(function.name)
+            helpers.setdefault(function.name, set()).update(
+                call.attr for call in calls if isinstance(call, ast.Attribute)
+                and isinstance(call.value, ast.Name) and call.value.id == "self")
+        # At most one new helper per pass; the source's function count bounds
+        # the transitive closure, independently of execution or runner speed.
+        for _ in functions:
+            expanded = direct | {name for name, calls in helpers.items() if calls & direct}
+            if expanded == direct:
+                break
+            direct = expanded
+        launched = set()
+        loader = unittest.TestLoader()
+        for owner in (*_MATRIX_CLASSES, AcceptanceSelectionTests, AcceptanceRecoveryTests, AcceptanceCustodyTests):
+            for name in loader.getTestCaseNames(owner):
+                implementation = getattr(getattr(owner, name), "_contract_check", name)
+                if implementation in direct:
+                    launched.add(owner.__name__ + "." + name)
+        self.assertEqual(set(_CHILD_ALLOWANCES), launched)
+        selected = {}
+        for number in range(_CONTRACT_PARTITIONS):
+            cases = list(contract_suite(number))
+            allowances = sum(_CHILD_ALLOWANCES.get(type(case).__name__ + "." + case._testMethodName, 0)
+                           for case in cases)
+            self.assertLessEqual(allowances * _CHILD_TIMEOUT, 24, number)
+            self.assertTrue(cases, number)
+            if allowances:
+                self.assertEqual(len(cases), 1, number)
+                self.assertGreaterEqual(number, 24)
+            else:
+                self.assertLess(number, 24)
+            selected.update((type(case).__name__ + "." + case._testMethodName, number) for case in cases)
+        self.assertTrue(set(_CHILD_ALLOWANCES) <= selected.keys())
+        self.assertEqual(len(set(selected[name] for name in _CHILD_ALLOWANCES)), len(_CHILD_ALLOWANCES))
 
     def test_contract_partition_refuses_invalid_selection(self) -> None:
         for number in (-1, _CONTRACT_PARTITIONS, True, "0", None):
             with self.subTest(number=number), self.assertRaises(ValueError):
                 contract_suite(number)
 
+
+# Each parameter tuple remains a separately discoverable unittest case. Keep
+# the first tuple's historical name so existing direct selectors still work.
+def _child_case(check, values):
+    def run(self):
+        check(self, *values)
+    return run
+
+
+_CHILD_ALLOWANCES = {}
+
+
+def _register_child_cases(owner, name, check, values, children):
+    for index, arguments in enumerate(values):
+        selected = name + ("_case_" + str(index) if index else "")
+        case = _child_case(check, arguments)
+        case.__name__ = selected
+        case._contract_origin = name
+        case._contract_check = check.__name__
+        setattr(owner, selected, case)
+        _CHILD_ALLOWANCES[owner.__name__ + "." + selected] = children
+
+
+_register_child_cases(AcceptanceRecoveryTests, 'test_retargeted_inventory_alias_recovers_the_actual_publication_destinations',
+                      AcceptanceRecoveryTests._check_retargeted_inventory_alias_recovers_the_actual_publication_destinations,
+                      ((False,), (True,)), 1)
+_register_child_cases(AcceptanceRecoveryTests, 'test_termination_at_every_publication_boundary_recovers_before_reading',
+                      AcceptanceRecoveryTests._check_termination_at_every_publication_boundary_recovers_before_reading,
+                      ((False, False, 1), (False, False, 2), (False, True, 1), (False, True, 2), (True, False, 1), (True, False, 2), (True, False, 3), (True, False, 4), (True, False, 5), (True, True, 1), (True, True, 2), (True, True, 3), (True, True, 4), (True, True, 5)), 1)
+_register_child_cases(AcceptanceRecoveryTests, 'test_recovery_can_itself_be_terminated_between_restores',
+                      AcceptanceRecoveryTests._check_recovery_can_itself_be_terminated_between_restores,
+                      ((1,), (2,), (3,)), 1)
+_register_child_cases(AcceptanceCustodyTests, 'test_restart_reacquires_enrolled_partial_output_and_pending_files',
+                      AcceptanceCustodyTests._check_restart_reacquires_enrolled_partial_output_and_pending_files,
+                      (('output',), ('payload',), ('pending',), ('publication',), ('commit',)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_initial_backup_creation_is_discoverable_on_both_sides',
+                      AcceptanceSelectionTests._check_initial_backup_creation_is_discoverable_on_both_sides,
+                      ((False,), (True,)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_initial_candidate_creation_is_discoverable_on_both_sides',
+                      AcceptanceSelectionTests._check_initial_candidate_creation_is_discoverable_on_both_sides,
+                      ((False,), (True,)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_initial_payload_buffer_boundaries_are_discoverable',
+                      AcceptanceSelectionTests._check_initial_payload_buffer_boundaries_are_discoverable,
+                      (('write', False), ('write', True), ('flush', False), ('flush', True), ('close', False), ('close', True), ('sync', False), ('sync', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_initial_candidate_binding_and_partial_writes_are_discoverable',
+                      AcceptanceSelectionTests._check_initial_candidate_binding_and_partial_writes_are_discoverable,
+                      (('bind', False), ('bind', True), ('partial', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_initial_candidate_buffer_boundaries_are_discoverable',
+                      AcceptanceSelectionTests._check_initial_candidate_buffer_boundaries_are_discoverable,
+                      (('write', False), ('write', True), ('flush', False), ('flush', True), ('close', False), ('close', True), ('sync', False), ('sync', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_initial_metadata_and_publication_bookkeeping_are_restartable',
+                      AcceptanceSelectionTests._check_initial_metadata_and_publication_bookkeeping_are_restartable,
+                      (('metadata', False), ('metadata', True), ('rename', False), ('rename', True), ('publication', False), ('publication', True), ('handoff', False), ('handoff', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_rollback_creation_and_binding_are_discoverable',
+                      AcceptanceSelectionTests._check_rollback_creation_and_binding_are_discoverable,
+                      (('create', False), ('create', True), ('bind', False), ('bind', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_rollback_payload_buffer_boundaries_are_discoverable',
+                      AcceptanceSelectionTests._check_rollback_payload_buffer_boundaries_are_discoverable,
+                      (('write', False), ('write', True), ('flush', False), ('flush', True), ('close', False), ('close', True), ('sync', False), ('sync', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_rollback_partial_writes_and_native_bookkeeping_are_discoverable',
+                      AcceptanceSelectionTests._check_rollback_partial_writes_and_native_bookkeeping_are_discoverable,
+                      (('partial', True), ('rename', False), ('rename', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_rollback_marker_release_preserves_restart_discovery',
+                      AcceptanceSelectionTests._check_rollback_marker_release_preserves_restart_discovery,
+                      ((False,), (True,)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_restart_creation_and_binding_are_discoverable',
+                      AcceptanceSelectionTests._check_restart_creation_and_binding_are_discoverable,
+                      (('create', False), ('create', True), ('bind', False), ('bind', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_restart_payload_buffer_boundaries_are_discoverable',
+                      AcceptanceSelectionTests._check_restart_payload_buffer_boundaries_are_discoverable,
+                      (('write', False), ('write', True), ('flush', False), ('flush', True), ('close', False), ('close', True), ('sync', False), ('sync', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_restart_metadata_and_native_bookkeeping_are_restartable',
+                      AcceptanceSelectionTests._check_restart_metadata_and_native_bookkeeping_are_restartable,
+                      (('metadata', False), ('metadata', True), ('rename', False), ('rename', True), ('handoff', False), ('handoff', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_pending_journal_creation_and_binding_are_discoverable',
+                      AcceptanceSelectionTests._check_pending_journal_creation_and_binding_are_discoverable,
+                      (('create', False), ('create', True), ('bind', False), ('bind', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_pending_journal_buffer_boundaries_are_discoverable',
+                      AcceptanceSelectionTests._check_pending_journal_buffer_boundaries_are_discoverable,
+                      (('write', False), ('write', True), ('flush', False), ('flush', True), ('close', False), ('close', True), ('sync', False), ('sync', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_owned_interrupted_journal_native_publication_recovers_successfully',
+                      AcceptanceSelectionTests._check_owned_interrupted_journal_native_publication_recovers_successfully,
+                      ((False,), (True,)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_first_marker_creation_is_discoverable_without_changing_outputs',
+                      AcceptanceSelectionTests._check_first_marker_creation_is_discoverable_without_changing_outputs,
+                      ((False,), (True,)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_first_marker_buffer_boundaries_are_discoverable_without_changing_outputs',
+                      AcceptanceSelectionTests._check_first_marker_buffer_boundaries_are_discoverable_without_changing_outputs,
+                      (('write', False), ('write', True), ('flush', False), ('flush', True), ('close', False), ('close', True), ('sync', False), ('sync', True), ('partial', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_first_marker_binding_is_discoverable_without_changing_outputs',
+                      AcceptanceSelectionTests._check_first_marker_binding_is_discoverable_without_changing_outputs,
+                      ((False,), (True,)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_direct_preparation_creation_and_binding_are_discoverable',
+                      AcceptanceSelectionTests._check_direct_preparation_creation_and_binding_are_discoverable,
+                      (('create', False), ('create', True), ('bind', False), ('bind', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_direct_preparation_buffer_boundaries_are_discoverable',
+                      AcceptanceSelectionTests._check_direct_preparation_buffer_boundaries_are_discoverable,
+                      (('write', False), ('write', True), ('flush', False), ('flush', True), ('close', False), ('close', True), ('sync', False), ('sync', True)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_direct_preparation_native_publication_is_discoverable',
+                      AcceptanceSelectionTests._check_direct_preparation_native_publication_is_discoverable,
+                      ((False,), (True,)), 2)
+_register_child_cases(AcceptanceSelectionTests, 'test_partition_entrypoint_refuses_invalid_selection',
+                      AcceptanceSelectionTests._check_partition_entrypoint_refuses_invalid_selection,
+                      (('-1',), (str(_CONTRACT_PARTITIONS),), ('unknown',)), 1)
+
+_register_child_cases(AcceptanceSelectionTests, 'test_full_output_set_native_publication_is_discoverable',
+                      AcceptanceSelectionTests._check_full_output_set_native_publication_is_discoverable,
+                      (('direct', 'publication'), ('original', 'publication'), ('rollback', 'rename'),
+                       ('recovery', 'rename'), ('pending', 'rename'), ('marker', 'bind')), 2)
+
+_CHILD_ALLOWANCES.update({
+    'AcceptanceMatrixTests.test_crashed_holder_releases_lock_without_removing_persistent_file': 2,
+    'AcceptanceMatrixTests.test_external_edits_invalidate_path_discovery_and_evidence_answers': 1,
+    'AcceptanceMatrixTests.test_overlapping_refresh_is_refused_without_stealing_live_lock': 2,
+    'AcceptanceMatrixTests.test_refresh_lock_location_and_failures_are_private_and_clear': 1,
+    'AcceptanceRecoveryTests.test_crash_fixture_matches_terminated_publication': 1,
+    'AcceptanceSelectionTests.test_interruption_diagnostics_bound_stderr_and_preserve_selected_exit': 2,
+    'AcceptanceSelectionTests.test_interruption_stack_diagnostics_are_bounded': 1,
+    'AcceptanceSelectionTests.test_interruption_timeout_retains_exception_and_captured_stack': 1,
+    'AcceptanceSelectionTests.test_interruption_watchdog_is_cancelled_on_normal_exit': 1,
+    'AcceptanceSelectionTests.test_pending_journal_partial_writes_are_discoverable': 2,
+    'AcceptanceSelectionTests.test_artifact_discovery_requires_complete_json_path_tokens': 2,
+    'AcceptanceSelectionTests.test_restart_partial_writes_are_discoverable': 2,
+})
+
+# Paused holders reserve two allowances: their shared startup/completion
+# deadline and a separate kill/drain cleanup allowance. Ordinary run() children
+# each reserve one allowance, including the deliberate timeout control.
+# Child allowances total at most 24 seconds per entry, leaving six seconds
+# inside CTest's unchanged 30-second deadline for parent work and cleanup.
+# Launch-free cases retain the original 24-way distribution.
+_CONTRACT_CASE_PARTITIONS.update({name: 24 + index for index, name in enumerate(sorted(_CHILD_ALLOWANCES))})
 
 _phase("module-ready")
 

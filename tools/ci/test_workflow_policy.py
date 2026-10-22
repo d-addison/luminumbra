@@ -1500,9 +1500,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         registrations = re.findall(
             r'add_test\(\s*NAME (AcceptanceMatrixContract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
-        self.assertEqual(len(registrations), 24)
+        self.assertEqual(len(registrations), 176)
         self.assertEqual({int(re.search(r'--contract-partition ([0-9]+)', command)[1])
-                          for _, command in registrations}, set(range(24)))
+                          for _, command in registrations}, set(range(176)))
         self.assertNotIn("NAME AcceptanceRecoveryContract", cmake)
         for name, command in registrations:
             self.assertIn('ci/test_check_acceptance_matrix.py', command)

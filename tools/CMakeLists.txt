@@ -362,6 +362,1070 @@ if(BUILD_TESTING)
     set_tests_properties(AcceptanceMatrixContract24
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME AcceptanceMatrixContract25
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 24)
+    set_tests_properties(AcceptanceMatrixContract25
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract26
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 25)
+    set_tests_properties(AcceptanceMatrixContract26
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract27
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 26)
+    set_tests_properties(AcceptanceMatrixContract27
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract28
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 27)
+    set_tests_properties(AcceptanceMatrixContract28
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract29
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 28)
+    set_tests_properties(AcceptanceMatrixContract29
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract30
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 29)
+    set_tests_properties(AcceptanceMatrixContract30
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract31
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 30)
+    set_tests_properties(AcceptanceMatrixContract31
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract32
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 31)
+    set_tests_properties(AcceptanceMatrixContract32
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract33
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 32)
+    set_tests_properties(AcceptanceMatrixContract33
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract34
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 33)
+    set_tests_properties(AcceptanceMatrixContract34
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract35
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 34)
+    set_tests_properties(AcceptanceMatrixContract35
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract36
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 35)
+    set_tests_properties(AcceptanceMatrixContract36
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract37
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 36)
+    set_tests_properties(AcceptanceMatrixContract37
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract38
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 37)
+    set_tests_properties(AcceptanceMatrixContract38
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract39
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 38)
+    set_tests_properties(AcceptanceMatrixContract39
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract40
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 39)
+    set_tests_properties(AcceptanceMatrixContract40
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract41
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 40)
+    set_tests_properties(AcceptanceMatrixContract41
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract42
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 41)
+    set_tests_properties(AcceptanceMatrixContract42
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract43
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 42)
+    set_tests_properties(AcceptanceMatrixContract43
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract44
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 43)
+    set_tests_properties(AcceptanceMatrixContract44
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract45
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 44)
+    set_tests_properties(AcceptanceMatrixContract45
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract46
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 45)
+    set_tests_properties(AcceptanceMatrixContract46
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract47
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 46)
+    set_tests_properties(AcceptanceMatrixContract47
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract48
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 47)
+    set_tests_properties(AcceptanceMatrixContract48
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract49
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 48)
+    set_tests_properties(AcceptanceMatrixContract49
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract50
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 49)
+    set_tests_properties(AcceptanceMatrixContract50
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract51
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 50)
+    set_tests_properties(AcceptanceMatrixContract51
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract52
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 51)
+    set_tests_properties(AcceptanceMatrixContract52
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract53
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 52)
+    set_tests_properties(AcceptanceMatrixContract53
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract54
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 53)
+    set_tests_properties(AcceptanceMatrixContract54
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract55
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 54)
+    set_tests_properties(AcceptanceMatrixContract55
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract56
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 55)
+    set_tests_properties(AcceptanceMatrixContract56
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract57
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 56)
+    set_tests_properties(AcceptanceMatrixContract57
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract58
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 57)
+    set_tests_properties(AcceptanceMatrixContract58
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract59
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 58)
+    set_tests_properties(AcceptanceMatrixContract59
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract60
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 59)
+    set_tests_properties(AcceptanceMatrixContract60
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract61
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 60)
+    set_tests_properties(AcceptanceMatrixContract61
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract62
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 61)
+    set_tests_properties(AcceptanceMatrixContract62
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract63
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 62)
+    set_tests_properties(AcceptanceMatrixContract63
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract64
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 63)
+    set_tests_properties(AcceptanceMatrixContract64
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract65
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 64)
+    set_tests_properties(AcceptanceMatrixContract65
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract66
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 65)
+    set_tests_properties(AcceptanceMatrixContract66
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract67
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 66)
+    set_tests_properties(AcceptanceMatrixContract67
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract68
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 67)
+    set_tests_properties(AcceptanceMatrixContract68
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract69
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 68)
+    set_tests_properties(AcceptanceMatrixContract69
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract70
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 69)
+    set_tests_properties(AcceptanceMatrixContract70
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract71
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 70)
+    set_tests_properties(AcceptanceMatrixContract71
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract72
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 71)
+    set_tests_properties(AcceptanceMatrixContract72
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract73
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 72)
+    set_tests_properties(AcceptanceMatrixContract73
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract74
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 73)
+    set_tests_properties(AcceptanceMatrixContract74
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract75
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 74)
+    set_tests_properties(AcceptanceMatrixContract75
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract76
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 75)
+    set_tests_properties(AcceptanceMatrixContract76
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract77
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 76)
+    set_tests_properties(AcceptanceMatrixContract77
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract78
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 77)
+    set_tests_properties(AcceptanceMatrixContract78
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract79
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 78)
+    set_tests_properties(AcceptanceMatrixContract79
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract80
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 79)
+    set_tests_properties(AcceptanceMatrixContract80
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract81
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 80)
+    set_tests_properties(AcceptanceMatrixContract81
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract82
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 81)
+    set_tests_properties(AcceptanceMatrixContract82
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract83
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 82)
+    set_tests_properties(AcceptanceMatrixContract83
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract84
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 83)
+    set_tests_properties(AcceptanceMatrixContract84
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract85
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 84)
+    set_tests_properties(AcceptanceMatrixContract85
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract86
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 85)
+    set_tests_properties(AcceptanceMatrixContract86
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract87
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 86)
+    set_tests_properties(AcceptanceMatrixContract87
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract88
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 87)
+    set_tests_properties(AcceptanceMatrixContract88
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract89
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 88)
+    set_tests_properties(AcceptanceMatrixContract89
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract90
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 89)
+    set_tests_properties(AcceptanceMatrixContract90
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract91
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 90)
+    set_tests_properties(AcceptanceMatrixContract91
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract92
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 91)
+    set_tests_properties(AcceptanceMatrixContract92
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract93
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 92)
+    set_tests_properties(AcceptanceMatrixContract93
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract94
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 93)
+    set_tests_properties(AcceptanceMatrixContract94
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract95
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 94)
+    set_tests_properties(AcceptanceMatrixContract95
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract96
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 95)
+    set_tests_properties(AcceptanceMatrixContract96
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract97
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 96)
+    set_tests_properties(AcceptanceMatrixContract97
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract98
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 97)
+    set_tests_properties(AcceptanceMatrixContract98
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract99
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 98)
+    set_tests_properties(AcceptanceMatrixContract99
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract100
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 99)
+    set_tests_properties(AcceptanceMatrixContract100
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract101
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 100)
+    set_tests_properties(AcceptanceMatrixContract101
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract102
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 101)
+    set_tests_properties(AcceptanceMatrixContract102
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract103
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 102)
+    set_tests_properties(AcceptanceMatrixContract103
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract104
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 103)
+    set_tests_properties(AcceptanceMatrixContract104
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract105
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 104)
+    set_tests_properties(AcceptanceMatrixContract105
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract106
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 105)
+    set_tests_properties(AcceptanceMatrixContract106
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract107
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 106)
+    set_tests_properties(AcceptanceMatrixContract107
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract108
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 107)
+    set_tests_properties(AcceptanceMatrixContract108
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract109
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 108)
+    set_tests_properties(AcceptanceMatrixContract109
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract110
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 109)
+    set_tests_properties(AcceptanceMatrixContract110
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract111
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 110)
+    set_tests_properties(AcceptanceMatrixContract111
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract112
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 111)
+    set_tests_properties(AcceptanceMatrixContract112
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract113
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 112)
+    set_tests_properties(AcceptanceMatrixContract113
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract114
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 113)
+    set_tests_properties(AcceptanceMatrixContract114
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract115
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 114)
+    set_tests_properties(AcceptanceMatrixContract115
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract116
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 115)
+    set_tests_properties(AcceptanceMatrixContract116
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract117
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 116)
+    set_tests_properties(AcceptanceMatrixContract117
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract118
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 117)
+    set_tests_properties(AcceptanceMatrixContract118
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract119
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 118)
+    set_tests_properties(AcceptanceMatrixContract119
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract120
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 119)
+    set_tests_properties(AcceptanceMatrixContract120
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract121
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 120)
+    set_tests_properties(AcceptanceMatrixContract121
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract122
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 121)
+    set_tests_properties(AcceptanceMatrixContract122
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract123
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 122)
+    set_tests_properties(AcceptanceMatrixContract123
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract124
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 123)
+    set_tests_properties(AcceptanceMatrixContract124
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract125
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 124)
+    set_tests_properties(AcceptanceMatrixContract125
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract126
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 125)
+    set_tests_properties(AcceptanceMatrixContract126
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract127
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 126)
+    set_tests_properties(AcceptanceMatrixContract127
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract128
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 127)
+    set_tests_properties(AcceptanceMatrixContract128
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract129
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 128)
+    set_tests_properties(AcceptanceMatrixContract129
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract130
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 129)
+    set_tests_properties(AcceptanceMatrixContract130
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract131
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 130)
+    set_tests_properties(AcceptanceMatrixContract131
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract132
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 131)
+    set_tests_properties(AcceptanceMatrixContract132
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract133
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 132)
+    set_tests_properties(AcceptanceMatrixContract133
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract134
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 133)
+    set_tests_properties(AcceptanceMatrixContract134
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract135
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 134)
+    set_tests_properties(AcceptanceMatrixContract135
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract136
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 135)
+    set_tests_properties(AcceptanceMatrixContract136
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract137
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 136)
+    set_tests_properties(AcceptanceMatrixContract137
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract138
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 137)
+    set_tests_properties(AcceptanceMatrixContract138
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract139
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 138)
+    set_tests_properties(AcceptanceMatrixContract139
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract140
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 139)
+    set_tests_properties(AcceptanceMatrixContract140
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract141
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 140)
+    set_tests_properties(AcceptanceMatrixContract141
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract142
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 141)
+    set_tests_properties(AcceptanceMatrixContract142
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract143
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 142)
+    set_tests_properties(AcceptanceMatrixContract143
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract144
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 143)
+    set_tests_properties(AcceptanceMatrixContract144
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract145
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 144)
+    set_tests_properties(AcceptanceMatrixContract145
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract146
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 145)
+    set_tests_properties(AcceptanceMatrixContract146
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract147
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 146)
+    set_tests_properties(AcceptanceMatrixContract147
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract148
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 147)
+    set_tests_properties(AcceptanceMatrixContract148
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract149
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 148)
+    set_tests_properties(AcceptanceMatrixContract149
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract150
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 149)
+    set_tests_properties(AcceptanceMatrixContract150
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract151
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 150)
+    set_tests_properties(AcceptanceMatrixContract151
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract152
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 151)
+    set_tests_properties(AcceptanceMatrixContract152
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract153
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 152)
+    set_tests_properties(AcceptanceMatrixContract153
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract154
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 153)
+    set_tests_properties(AcceptanceMatrixContract154
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract155
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 154)
+    set_tests_properties(AcceptanceMatrixContract155
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract156
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 155)
+    set_tests_properties(AcceptanceMatrixContract156
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract157
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 156)
+    set_tests_properties(AcceptanceMatrixContract157
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract158
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 157)
+    set_tests_properties(AcceptanceMatrixContract158
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract159
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 158)
+    set_tests_properties(AcceptanceMatrixContract159
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract160
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 159)
+    set_tests_properties(AcceptanceMatrixContract160
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract161
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 160)
+    set_tests_properties(AcceptanceMatrixContract161
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract162
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 161)
+    set_tests_properties(AcceptanceMatrixContract162
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract163
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 162)
+    set_tests_properties(AcceptanceMatrixContract163
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract164
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 163)
+    set_tests_properties(AcceptanceMatrixContract164
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract165
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 164)
+    set_tests_properties(AcceptanceMatrixContract165
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract166
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 165)
+    set_tests_properties(AcceptanceMatrixContract166
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract167
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 166)
+    set_tests_properties(AcceptanceMatrixContract167
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract168
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 167)
+    set_tests_properties(AcceptanceMatrixContract168
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract169
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 168)
+    set_tests_properties(AcceptanceMatrixContract169
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract170
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 169)
+    set_tests_properties(AcceptanceMatrixContract170
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract171
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 170)
+    set_tests_properties(AcceptanceMatrixContract171
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract172
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 171)
+    set_tests_properties(AcceptanceMatrixContract172
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract173
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 172)
+    set_tests_properties(AcceptanceMatrixContract173
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract174
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 173)
+    set_tests_properties(AcceptanceMatrixContract174
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract175
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 174)
+    set_tests_properties(AcceptanceMatrixContract175
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixContract176
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                --contract-partition 175)
+    set_tests_properties(AcceptanceMatrixContract176
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
         NAME AcceptanceMatrixPublicTreeContract1
         COMMAND "${Python3_EXECUTABLE}"
                 -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
