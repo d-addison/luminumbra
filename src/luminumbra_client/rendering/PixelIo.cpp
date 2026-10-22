@@ -39,6 +39,12 @@ bool WritePixelBufferPpm(const std::filesystem::path& path,
         output.write(reinterpret_cast<const char*>(pixels.data() + offset),
                      static_cast<std::streamsize>(row_stride));
     }
+    output.flush();
+    output.close();
+    if (!output) {
+        LUMINUMBRA_CORE_ERROR("Failed to finish screenshot artifact: {}", path.string());
+        return false;
+    }
     return true;
 }
 

@@ -1177,7 +1177,8 @@ TEST(PersistenceHardening, SimHashMatchesCanonicalSnapshotProjection) {
     // then apply the declared projection and checksum its canonical bytes.
     const std::string bytes = projected.dump(4) + "\n";
     std::uint64_t hash = 14695981039346656037ull;
-    for (unsigned char byte : bytes) {
+    for (const char ch : bytes) {
+        const auto byte = static_cast<unsigned char>(ch);
         hash ^= byte;
         hash *= 1099511628211ull;
     }

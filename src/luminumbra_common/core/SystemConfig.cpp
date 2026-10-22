@@ -22,11 +22,23 @@
 #include <vector>
 
 #include "core/Environment.h"
+#include "core/FilesystemPath.h"
 #include "core/FramePacing.h"
 #include "core/GraphicsPresets.h"
 #include "core/Log.h"
 #include "nlohmann/json.hpp"
 #include "persistence/WorldPersistenceRoundtrip.h" // Luminumbra::Persistence::StableChecksum
+#include "persistence/WorldSaveService.h"
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace luminumbra::core {
 namespace {
@@ -576,38 +588,44 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
     return cfg;
 }
 
-SystemConfig SystemConfig::LoadFromFile(const std::string& path) {
+SystemConfig SystemConfig::LoadFromFile(const std::filesystem::path& path) {
     std::ifstream file(path);
     if (!file)
         return SystemConfig{}; // missing/unreadable -> defaults
     std::ostringstream buffer;
     buffer << file.rdbuf();
+    if (file.bad() || buffer.bad())
+        return SystemConfig{};
     return FromJsonString(buffer.str());
 }
 
-bool SystemConfig::TryLoadFromFile(const std::string& path,
+bool SystemConfig::TryLoadFromFile(const std::filesystem::path& path,
                                    SystemConfig& config,
                                    std::string& error) {
     std::ifstream file(path);
     if (!file) {
-        error = "cannot read systems config: " + path;
+        error =
+            "cannot read systems config: " + Luminumbra::Filesystem::GenericUtf8PathString(path);
         return false;
     }
     std::ostringstream buffer;
     buffer << file.rdbuf();
-    if (file.bad()) {
-        error = "cannot read systems config: " + path;
+    if (file.bad() || buffer.bad()) {
+        error =
+            "cannot read systems config: " + Luminumbra::Filesystem::GenericUtf8PathString(path);
         return false;
     }
     try {
         const auto document = nlohmann::json::parse(buffer.str());
         if (!document.is_object()) {
-            error = "systems config must be a JSON object: " + path;
+            error = "systems config must be a JSON object: " +
+                    Luminumbra::Filesystem::GenericUtf8PathString(path);
             return false;
         }
         config.ReplaceSystemsFrom(FromJsonString(document.dump()));
     } catch (const nlohmann::json::exception& exception) {
-        error = "invalid systems config: " + path + ": " + exception.what();
+        error = "invalid systems config: " + Luminumbra::Filesystem::GenericUtf8PathString(path) +
+                ": " + exception.what();
         return false;
     }
     error.clear();
@@ -803,8 +821,13 @@ void SystemConfig::OverlayUserFromJsonString(const std::string& json_text) {
     }
 }
 
-SystemConfig SystemConfig::LoadLayered(const std::string& defaults_path,
-                                       const std::string& overlay_path) {
+SystemConfig SystemConfig::LoadFromRuntimeRoot(const std::filesystem::path& root,
+                                               const std::filesystem::path& overlay_path) {
+    return LoadLayered(root / "data/common/systems.json", overlay_path);
+}
+
+SystemConfig SystemConfig::LoadLayered(const std::filesystem::path& defaults_path,
+                                       const std::filesystem::path& overlay_path) {
     SystemConfig cfg =
         LoadFromFile(defaults_path); // sim/render/user from defaults (missing -> defaults)
     std::error_code ec;
@@ -829,7 +852,7 @@ SystemConfig SystemConfig::LoadLayered(const std::string& defaults_path,
     return cfg;
 }
 
-bool SystemConfig::SaveUserOverlay(const std::string& path) const {
+bool SystemConfig::SaveUserOverlay(const std::filesystem::path& path) const {
     if (m_settings_load_report.state == SettingsLoadState::Recovery)
         return false;
     ResolvedGraphics resolved;
@@ -933,47 +956,29 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
     if (serialized.size() > kMaxSettingsBytes)
         return false;
 
-    std::error_code ec;
-    const std::filesystem::path out(path);
-    if (out.has_parent_path())
-        std::filesystem::create_directories(out.parent_path(), ec);
-    if (ec)
-        return false;
-
-    // Atomic-ish write: temp file then rename over the target.
-    const std::filesystem::path tmp = out.string() + ".tmp";
-    bool written = false;
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file)
-            return false;
-        file << serialized;
-        file.close(); // Detect flush/close failures before publishing, on every platform.
-        written = !file.fail();
-    }
-    if (!written) {
-        std::filesystem::remove(tmp, ec);
-        return false;
-    }
-    std::filesystem::rename(tmp, out, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ec);
-        return false;
-    }
-    return true;
+    return Luminumbra::Persistence::WorldSaveService::write_file_durably(path, serialized);
 }
 
-std::string SystemConfig::DefaultUserOverlayPath() {
+std::filesystem::path SystemConfig::DefaultUserOverlayPath() {
 #if defined(_WIN32)
-    if (const auto appdata = Luminumbra::Core::ReadEnvironment("APPDATA")) {
-        return (std::filesystem::path(*appdata) / "Luminumbra" / "settings.json").string();
+    // The environment path is native UTF-16, independent of the active code page.
+    const DWORD required = ::GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+    if (required != 0) {
+        // Allocate exactly the reported capacity, including its terminator. A
+        // changed value must still fit that bound in the second call below.
+        std::wstring appdata(required, L'\0');
+        const DWORD length = ::GetEnvironmentVariableW(L"APPDATA", appdata.data(), required);
+        if (length != 0 && length < required) {
+            appdata.resize(length);
+            return std::filesystem::path(appdata) / "Luminumbra" / "settings.json";
+        }
     }
 #else
     if (const auto xdg = Luminumbra::Core::ReadEnvironment("XDG_CONFIG_HOME")) {
-        return (std::filesystem::path(*xdg) / "luminumbra" / "settings.json").string();
+        return (std::filesystem::path(*xdg) / "luminumbra" / "settings.json");
     }
     if (const auto home = Luminumbra::Core::ReadEnvironment("HOME")) {
-        return (std::filesystem::path(*home) / ".config" / "luminumbra" / "settings.json").string();
+        return (std::filesystem::path(*home) / ".config" / "luminumbra" / "settings.json");
     }
 #endif
     return "settings.json"; // last-resort: cwd

@@ -1568,9 +1568,8 @@ TEST_P(SavedWorldPresetTest, UnmarkedLegacySaveUsesFrozenPresetAndEmbedsItOnResa
 
 INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
 
-// Older Windows energy records used text-mode CRLF; durable replacement writes
-// binary LF on every platform. Normalize historical records for content checks.
-// Failure-preservation checks compare the original binary bytes directly.
+// Normalize historical text-mode energy records and current durable binary
+// records for content assertions. Exact-byte assertions use ReadClockTestFile.
 std::string ReadClockTestTextRecord(const fs::path& path) {
     std::string text = ReadClockTestFile(path);
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
@@ -1983,11 +1982,19 @@ TEST(GameSessionHeadlessWorldTest, FailedForwardLedgerWriteReloadsAndSavesImmedi
     ASSERT_TRUE(session.CreateWorld("Forward failure", "1337", "default"));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.SaveWorld());
+    const auto directory = session.GetWorldSaveDir();
+    const auto previous_ledger =
+        ReadClockTestFile(P::WorldSaveService::active_regions_path(directory));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
     const bool saved = session.SaveWorld();
     P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
     ASSERT_FALSE(saved);
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(directory / "world_info.json"))
+                  .at("simulationTick"),
+              2u);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(directory)),
+              previous_ledger);
     ASSERT_NO_FATAL_FAILURE(CheckPartialPairReloadAndSave(
         root, jobs, session.GetMetadata().worldId, session.GetWorldSaveDir()));
 }
@@ -2020,7 +2027,10 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
         },
         testing::ExitedWithCode(73),
         "");
-    const auto save = fs::directory_iterator(root.path() / "worlds/saves")->path();
+    const auto catalog = P::EnumerateSavedWorlds(root.path());
+    ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    const auto save = root.path() / "worlds/saves" / catalog.worlds.front().metadata.worldId;
     std::vector<fs::path> debris;
     for (const auto& entry : fs::recursive_directory_iterator(save)) {
         if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
@@ -2028,6 +2038,9 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
     }
     ASSERT_EQ(debris.size(), 1u);
     EXPECT_EQ(debris.front().parent_path(), save);
+    EXPECT_EQ(
+        nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")).at("simulationTick"),
+        2u);
     Luminumbra::world::ActiveRegionLedger staged;
     std::string error;
     ASSERT_TRUE(Luminumbra::world::ActiveRegionLedger::decode(
@@ -2656,8 +2669,10 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledCallbacksKeepLegacySavesLoa
         EXPECT_TRUE(session.IsSimulationTickBoundary());
         EXPECT_TRUE(session.SaveWorld());
         EXPECT_TRUE(session.SaveWorldState());
-        EXPECT_TRUE(session.SaveWorldStateTo(root.path() / "legacy-explicit"));
-        EXPECT_FALSE(fs::exists(root.path() / "legacy-explicit"));
+        EXPECT_TRUE(session.SaveWorldStateTo(
+            root.path() / "legacy-explicit", nullptr, /*full_snapshot=*/true));
+        EXPECT_EQ(ReadClockTestFile(root.path() / "legacy-explicit/world_info.json"), before);
+        EXPECT_TRUE(P::WorldSaveService::validate_save(root.path() / "legacy-explicit"));
         EXPECT_TRUE(session.LoadWorldState());
         EXPECT_TRUE(session.LoadWorldStateFrom(save));
         EXPECT_EQ(session.TickSimulation(dt), 1u);
@@ -2942,6 +2957,8 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
     }
     const auto save = root.path() / "golden-save";
     ASSERT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_FALSE(fs::exists(save / "preset.json"));
+    EXPECT_FALSE(fs::exists(save / "world_info.json"));
     ExpectSameWorldHash(session, expected);
     EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
     const auto fixture =
@@ -3004,6 +3021,8 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(expected_live, 32));
     const auto save = root.path() / "plant-golden-save";
     ASSERT_NO_FATAL_FAILURE(SavePlantRosterThenMultiRegionEdit(session, save));
+    EXPECT_FALSE(fs::exists(save / "preset.json"));
+    EXPECT_FALSE(fs::exists(save / "world_info.json"));
     EXPECT_FALSE(session.ActiveRegionsEnabled());
     EXPECT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 1, 0)));
     const auto fixture =
@@ -4470,7 +4489,9 @@ TEST(GameSessionHeadlessWorldTest,
         EXPECT_TRUE(ownership.expired()) << region;
     }
     const auto alternate = root.path() / "bounded-snapshot";
+    const auto canonical_authority = world->authority_directory();
     ASSERT_TRUE(session.SaveWorldStateTo(alternate));
+    EXPECT_EQ(world->authority_directory(), canonical_authority);
     for (int region = 0; region < 12; ++region) {
         const Luminumbra::world::RegionKey key{10 + region * 4, -40};
         EXPECT_EQ(

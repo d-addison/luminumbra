@@ -1,4 +1,5 @@
 #include "world/WorldgenPreview.h"
+#include "app/FrameAttribution.h"
 
 #include <algorithm>
 #include <cmath>
@@ -145,7 +146,7 @@ void WorldgenPreview::ensure_target(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
+bool WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
                                     const std::filesystem::path& data_root,
                                     int seed) {
     // Build candidate TerrainGenParams IN MEMORY via the additive loader seam,
@@ -158,11 +159,12 @@ void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
         m_last_error =
             result.errors.empty() ? "candidate preset parse failed" : result.errors.front();
         LUMINUMBRA_CORE_WARN("WorldgenPreview candidate parse failed: {}", m_last_error);
-        return;
+        return false;
     }
     // Remember the data root so the foliage scatter set resolves.
     m_data_root = data_root;
     set_params(result.params, seed);
+    return true;
 }
 
 void WorldgenPreview::set_params(const Systems::TerrainGenParams& params, int seed) {
@@ -292,6 +294,8 @@ void WorldgenPreview::build_world_pending() {
 }
 
 void WorldgenPreview::swap_pending_into_live(Rendering::RenderPipeline& pipeline) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::PreviewAdoption);
     // GL/MAIN THREAD. Called only after observing m_build_done == true, at which
     // point the worker is BLOCKED (its loop waits for m_build_done to clear before
     // touching pending again), so the main thread solely owns the pending members
@@ -579,6 +583,7 @@ void WorldgenPreview::clear_precipitation(Rendering::RenderPipeline& pipeline) {
 }
 
 bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
+    const Attribution::PhaseScope scene_phase(Attribution::Phase::MenuScene);
     if (!m_active)
         return false;
     m_drain_pipeline =
@@ -638,6 +643,7 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
 }
 
 bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt) {
+    const Attribution::PhaseScope scene_phase(Attribution::Phase::MenuScene);
     if (!m_active)
         return false;
     m_drain_pipeline =

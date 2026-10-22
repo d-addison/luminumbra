@@ -10,6 +10,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -372,9 +373,9 @@ FarLodTile BuildPristineFarLodTile(const Systems::SHIELD_WorldSystem& world_syst
     // sample-array layout exactly.
     std::size_t index = 0;
     for (u32 z = 0; z < n; ++z) {
-        const float world_z = origin_z + static_cast<float>(z * step);
+        const float world_z = origin_z + static_cast<float>(z * static_cast<u32>(step));
         for (u32 x = 0; x < n; ++x, ++index) {
-            const float world_x = origin_x + static_cast<float>(x * step);
+            const float world_x = origin_x + static_cast<float>(x * static_cast<u32>(step));
             // coarse sampler anti-aliases the river
             // carve over the tile's sample step so a sub-step-width channel no
             // longer aliases into an isolated deep notch (the FarLodHorizon
@@ -469,10 +470,12 @@ ReduceChunkSdfIntoFarTile(FarLodTile& tile, const FarLodSdfSnapshot& snapshot, s
         const std::size_t payload_offset = insert_index * samples_per_brick;
         const bool same_payload =
             found->payload_crc32 == descriptor.payload_crc32 &&
-            std::equal(
-                density_q.begin(), density_q.end(), tile.sdf_density_q.begin() + payload_offset) &&
-            std::equal(
-                material.begin(), material.end(), tile.sdf_material.begin() + payload_offset);
+            std::equal(density_q.begin(),
+                       density_q.end(),
+                       tile.sdf_density_q.begin() + static_cast<std::ptrdiff_t>(payload_offset)) &&
+            std::equal(material.begin(),
+                       material.end(),
+                       tile.sdf_material.begin() + static_cast<std::ptrdiff_t>(payload_offset));
         if (same_payload && (found->source_kind == descriptor.source_kind ||
                              found->source_kind == FarLodBrickSourceKind::Authoritative)) {
             return FarLodSdfReduceResult::Unchanged;
@@ -494,17 +497,23 @@ ReduceChunkSdfIntoFarTile(FarLodTile& tile, const FarLodSdfSnapshot& snapshot, s
             }
         }
         *found = descriptor;
-        std::copy(density_q.begin(), density_q.end(), tile.sdf_density_q.begin() + payload_offset);
-        std::copy(material.begin(), material.end(), tile.sdf_material.begin() + payload_offset);
+        std::copy(density_q.begin(),
+                  density_q.end(),
+                  tile.sdf_density_q.begin() + static_cast<std::ptrdiff_t>(payload_offset));
+        std::copy(material.begin(),
+                  material.end(),
+                  tile.sdf_material.begin() + static_cast<std::ptrdiff_t>(payload_offset));
         tile.edited = tile.edited || descriptor.source_kind == FarLodBrickSourceKind::Authoritative;
         return FarLodSdfReduceResult::Replaced;
     }
 
     tile.sdf_bricks.insert(found, descriptor);
-    tile.sdf_density_q.insert(tile.sdf_density_q.begin() + insert_index * samples_per_brick,
+    tile.sdf_density_q.insert(tile.sdf_density_q.begin() +
+                                  static_cast<std::ptrdiff_t>(insert_index * samples_per_brick),
                               density_q.begin(),
                               density_q.end());
-    tile.sdf_material.insert(tile.sdf_material.begin() + insert_index * samples_per_brick,
+    tile.sdf_material.insert(tile.sdf_material.begin() +
+                                 static_cast<std::ptrdiff_t>(insert_index * samples_per_brick),
                              material.begin(),
                              material.end());
     tile.edited = tile.edited || descriptor.source_kind == FarLodBrickSourceKind::Authoritative;

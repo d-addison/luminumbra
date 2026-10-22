@@ -625,7 +625,8 @@ std::string StableDump(const nlohmann::json& value) {
 
 std::string Checksum(const std::string& text) {
     std::uint64_t hash = 14695981039346656037ull;
-    for (unsigned char byte : text) {
+    for (const char character : text) {
+        const auto byte = static_cast<unsigned char>(character);
         hash ^= static_cast<std::uint64_t>(byte);
         hash *= 1099511628211ull;
     }

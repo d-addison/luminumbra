@@ -251,11 +251,24 @@ class ReplaySourceContract(unittest.TestCase):
                 primitive))
         for admission in admissions:
             self.assertIsNotNone(admission)
-        drains = list(re.finditer(r'wait_for_(?:generation|meshing|promotion)_jobs\(\);',
+        drains = list(re.finditer(r'wait_for_(?:generation|meshing|streaming)_jobs\(\);',
                                   primitive))
         self.assertEqual([drain[0] for drain in drains], [
             "wait_for_generation_jobs();", "wait_for_meshing_jobs();",
-            "wait_for_promotion_jobs();", "wait_for_meshing_jobs();"])
+            "wait_for_streaming_jobs();"])
+        # The final synchronous wrapper settles both promotion stages and the
+        # finite descriptor suffix introduced by bounded snapshot admission.
+        admitted = source.split("void SHIELD_WorldSystem::wait_for_admitted_streaming_jobs()", 1)[1].split(
+            "void SHIELD_WorldSystem::wait_for_streaming_jobs()", 1)[0]
+        stages = list(re.finditer(r'wait_for_(?:generation|hydro_prefetch|meshing|promotion)_jobs\(\);', admitted))
+        self.assertEqual([stage[0] for stage in stages], [
+            "wait_for_generation_jobs();", "wait_for_hydro_prefetch_jobs();",
+            "wait_for_meshing_jobs();", "wait_for_promotion_jobs();", "wait_for_meshing_jobs();"])
+        settled = source.split("void SHIELD_WorldSystem::wait_for_streaming_jobs()", 1)[1].split(
+            "SHIELD_WorldSystem::snapshot_streamed_chunks()", 1)[0]
+        self.assertIn("while (deferred_meshing_pending())", settled)
+        self.assertIn("dispatch_deferred_meshing();", settled)
+        self.assertEqual(settled.count("wait_for_admitted_streaming_jobs();"), 2)
         for admission in admissions:
             self.assertLess(admission.end(), drains[0].start())
         self.assertLess(primitive.index("JobWatchdogEnabled()"), drains[0].start())
@@ -524,6 +537,66 @@ class ReplaySourceContract(unittest.TestCase):
                          "EXPECT_FALSE(fs::exists(save_root));"):
             with self.subTest(helper=original), self.assertRaises(AssertionError):
                 self.assert_runtime_surface_owner(cmake, native.replace(original, "", 1))
+
+
+class FarVolumeAdmissionSourceContract(unittest.TestCase):
+    """Guard bounded publication structure; native behaviour stays a native test."""
+
+    def method(self, path, start, end):
+        source = read_source("src/luminumbra_client/rendering/" + path)
+        return source.split(start, 1)[1].split(end, 1)[0]
+
+    def test_admission_uses_bounded_sorted_scratch_and_monotonic_free_cursors(self):
+        for path, start, end in (
+                ("FarVolumeHandoff.cpp", "bool FarVolumeHandoff::StageTarget(",
+                 "void FarVolumeHandoff::Reject("),
+                ("FarVolumeResidency.cpp", "bool FarVolumeResidency::ReplaceWanted(",
+                 "void FarVolumeResidency::Reject(")):
+            with self.subTest(path=path):
+                body = self.method(path, start, end)
+                self.assertIn("std::sort(incoming.begin(), incoming.end()", body)
+                self.assertIn("tier.key_index[tier.entries.size() + count++]", body)
+                self.assertLess(body.index("count == tier.entries.size()"),
+                                body.index("tier.key_index[tier.entries.size() + count++]"))
+                self.assertIn("tier.order[index] == 0", body)
+                self.assertIn("auto& cursor = next_free[number]", body)
+                self.assertIn("entry = &tier.entries[cursor++]", body)
+                self.assertIn("tier.queue.ForgetMatching", body)
+                self.assertNotIn("queue.Forget(", body)
+                self.assertNotRegex(body, r"std::(?:none_of|find_if|count_if)")
+                self.assertNotRegex(body, r"for\s*\([^;]*;\s*j\s*<\s*(?:i|index)\b")
+
+    def test_live_lookup_and_rebuild_have_no_hash_collision_chains(self):
+        for owner in ("FarVolumeHandoff", "FarVolumeResidency"):
+            with self.subTest(owner=owner):
+                lookup = self.method(owner + ".cpp", "const " + owner + "::Entry* " +
+                                     owner + "::Find(", owner + "::Entry* " + owner + "::Find(")
+                self.assertIn("std::lower_bound", lookup)
+                self.assertNotIn("for (", lookup)
+                self.assertNotIn("while (", lookup)
+                rebuild = self.method(owner + ".cpp", "void " + owner +
+                                      "::Tier::RebuildIndex(", owner + "::" + owner + "(")
+                self.assertIn("std::sort", rebuild)
+                self.assertNotIn("while (", rebuild)
+                self.assertIn("++work.key_comparisons", rebuild)
+                drain = read_source("src/luminumbra_client/rendering/" + owner + ".cpp").split(
+                    "void " + owner + "::CancelAndDrain()", 1)[1]
+                self.assertIn("index_count = 0", drain)
+
+    def test_batch_retirement_does_not_search_descriptors_per_selected_key(self):
+        header = read_source("src/luminumbra_client/rendering/FarVolumeBuildQueue.h")
+        batch = header.split("std::size_t ForgetMatching(", 1)[1].split(
+            "bool Retry(", 1)[0]
+        self.assertIn("noexcept(predicate", batch)
+        self.assertIn("index < descriptors_.size()", batch)
+        self.assertIn("ForgetAt(index)", batch)
+        self.assertNotIn("Find(", batch)
+        self.assertNotIn("Cancel(", batch)
+        forget = self.method("FarVolumeBuildQueue.cpp", "void FarVolumeBuildQueue::ForgetAt(",
+                             "bool FarVolumeBuildQueue::Retry(")
+        self.assertIn("CancelAt(index)", forget)
+        self.assertNotIn("Find(", forget)
+        self.assertNotIn("Cancel(", forget)
 
 
 if __name__ == "__main__":

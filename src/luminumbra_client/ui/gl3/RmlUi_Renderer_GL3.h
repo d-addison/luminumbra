@@ -29,6 +29,7 @@
 #ifndef RMLUI_BACKENDS_RENDERER_GL3_H
 #define RMLUI_BACKENDS_RENDERER_GL3_H
 
+#include "UiFilterCache.h"
 #include <RmlUi/Core/RenderInterface.h>
 #include <RmlUi/Core/Types.h>
 #include <bitset>
@@ -157,6 +158,9 @@ private:
     int viewport_offset_y = 0;
 
     Rml::CompiledGeometryHandle fullscreen_quad_geometry = {};
+    Luminumbra::Client::UiFilterCache<Luminumbra::Client::FilterQuadKey,
+                                      Rml::CompiledGeometryHandle>
+        filter_quad_cache;
 
     Rml::UniquePtr<const Gfx::ProgramData> program_data;
 

@@ -109,7 +109,25 @@ TEST_F(WorldGenerationTest, ChunkIsGeneratedWithSDFAndHeightmap) {
 }
 
 TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
-    SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world_system(&jobs, nullptr, params_guaranteed_surface, 1337);
+    // Keep real generation pending: an unticked inline dispatch has already
+    // completed and published Idle before returning to its caller.
+    struct WorkerRelease {
+        std::promise<void> promise;
+        ~WorkerRelease() {
+            promise.set_value();
+        }
+    } release;
+    auto entered = std::make_shared<std::promise<void>>();
+    auto started = entered->get_future();
+    const auto resume = release.promise.get_future().share();
+    jobs.dispatch([entered, resume]() {
+        entered->set_value();
+        resume.wait();
+    });
+    started.get();
     const IVec3 coords{0, 0, 0};
 
     world_system.dispatch_generation_jobs({coords});
@@ -124,6 +142,8 @@ TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
     EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
     EXPECT_TRUE(chunk->mesh_vertices.empty());
     EXPECT_TRUE(chunk->mesh_indices.empty());
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_EQ(world_system.get_last_streaming_budget_stats().scheduled_meshing, 0u);
 }
 
 TEST_F(WorldGenerationTest, SimulationPreparationDoesNotDrainUnrelatedGeneration) {

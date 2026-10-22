@@ -72,7 +72,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("m_simulationBatchInProgress", capture)
         batch = function(session, "std::uint32_t GameSession::TickSimulation(")
         self.assertIn("const BatchGuard guard(m_simulationBatchInProgress);", batch)
-        self.assertIn("active = true;", batch)
+        self.assertIn("m_active = true;", batch)
         self.assertNotIn("active = enabled;", batch)
         self.assertIn("return m_worldSystem->compute_chunk_hashes();", capture)
         heavy = (ROOT / "src/luminumbra_server/modes/Heavy.cpp").read_text(encoding="utf-8")
@@ -250,13 +250,13 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("u32 voxel_revision = 0;", record)
         self.assertIn("chunk->authority_hash_revision(), chunk->voxel_revision()", dispatch)
         self.assertLess(dispatch.index("chunk->voxel_revision()"),
-                        dispatch.index("input->sdf_data = chunk->sdf_data"))
-        self.assertLess(dispatch.index("input->sdf_data = chunk->sdf_data"),
+                        dispatch.index("snapshot.sdf_data = chunk->sdf_data"))
+        self.assertLess(dispatch.index("snapshot.sdf_data = chunk->sdf_data"),
                         dispatch.index("lane_jobs.emplace_back("))
         worker = dispatch.split("lane_jobs.emplace_back(", 1)[1]
         # Strong owners hold both the destination and immutable input until the
         # job exits. No mutable live arrays or revisions may be read by workers.
-        self.assertIn("[this, chunk, input, step, transition_faces, terrain_mesh_required]", worker)
+        self.assertIn("[this, chunk, scratch_owner = std::move(scratch_owner), step, transition_faces, terrain_mesh_required]", worker)
         for live_read in ("chunk->sdf_data", "chunk->heightmap_data", "chunk->material_data",
                           "chunk->water_level_data", "chunk->water_depth_mm",
                           "chunk->voxel_revision()", "chunk->authority_hash_revision()"):
@@ -271,7 +271,7 @@ class RegionAuthorityWiring(unittest.TestCase):
                       "chunk->authority_hash_revision() == job_chunk.authority_revision);", publish)
         guard = "if (job_chunk.terrain_mesh_required && terrain_current)"
         terrain = function(source, guard)
-        success = function(source, "if (mesh_ready && !mesh_failed)")
+        success = function(source, "if (mesh_ready && !mesh_failed && current_result)")
         self.assertNotIn("continue;", success)
         self.assertNotIn("return ", success)
         for write in ("chunk->mesh_vertices =", "chunk->mesh_indices =",
@@ -284,7 +284,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         # Failure/refusal never restores a completed LOD or clears edit truth.
         self.assertEqual(publish.count("current_lod.store("), 1)
         self.assertLess(publish.index("resident->second != chunk"), publish.index(guard))
-        self.assertLess(publish.index("if (mesh_ready && !mesh_failed)"), publish.index(guard))
+        self.assertLess(publish.index("if (mesh_ready && !mesh_failed && current_result)"), publish.index(guard))
 
     def test_water_publication_and_cleanup_are_independent_of_terrain_guard(self):
         source = SOURCE.read_text(encoding="utf-8")
@@ -353,14 +353,15 @@ class RegionAuthorityWiring(unittest.TestCase):
         source = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
             encoding="utf-8")
         for name, interruption in (
-                ("bool WorldSaveService::write_file_durably(",
+                ("bool WriteFileDurably(",
                  "InterruptBeforeRegionReplaceForTesting().exchange"),
                 ("bool RewriteRegionFile(", "InterruptBeforeRegionReplaceForTesting().exchange"),
                 ("bool WriteWorldManifest(", "InterruptBeforeRegionReplaceForTesting().exchange"),
                 ("bool WorldSaveService::save_regions_validated(",
                  "BeforeActiveRegionsReplaceForTesting()")):
             with self.subTest(writer=name):
-                writer = function(source, name)
+                implementation = source[source.index("namespace {\nbool WriteFileDurably"): ] if name == "bool WriteFileDurably(" else source
+                writer = function(implementation, name)
                 self.assertLess(writer.index("WriteDurableRegionTemp"),
                                 writer.index(interruption))
                 self.assertIn("CreatePayloadDirectory", writer)

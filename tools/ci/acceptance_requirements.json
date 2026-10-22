@@ -2043,8 +2043,8 @@
     {
       "id": "ar.file.008",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Clock/ledger pair saves are synchronous and non-reentrant on the process's host thread.",
-      "text": "Clock/ledger pair saves are synchronous and non-reentrant on the process's host thread."
+      "quote": "Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process.",
+      "text": "Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process."
     },
     {
       "id": "ar.file.009",
@@ -2073,26 +2073,26 @@
     {
       "id": "ar.file.013",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "No overlapping production pair writers were found, including across sessions in one process.",
-      "text": "No overlapping production pair writers were found, including across sessions in one process."
+      "quote": "Public persistence APIs permit overlapping calls with stable caller-owned inputs.",
+      "text": "Public persistence APIs permit overlapping calls with stable caller-owned inputs."
     },
     {
       "id": "ar.file.014",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The call sites state this ownership contract, and a debug-only atomic assertion guards the whole pair writer against concurrent or reentrant calls.",
-      "text": "The call sites state this ownership contract, and a debug-only atomic assertion guards the whole pair writer against concurrent or reentrant calls."
+      "quote": "A process-wide recursive mutex guards region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup.",
+      "text": "A process-wide recursive mutex guards region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup."
     },
     {
       "id": "ar.file.015",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "It does not serialize saves;",
-      "text": "It does not serialize saves;"
+      "quote": "It serializes writers through reclamation and replacement;",
+      "text": "It serializes writers through reclamation and replacement;"
     },
     {
       "id": "ar.file.016",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "there is no production locking scheme.",
-      "text": "there is no production locking scheme."
+      "quote": "nested calls retain ownership until the outer call returns.",
+      "text": "nested calls retain ownership until the outer call returns."
     },
     {
       "id": "ar.file.017",
@@ -2145,14 +2145,14 @@
     {
       "id": "ar.file.025",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "loading and later saves ignore it, and the next successful ledger save reclaims it, so repeated interruptions cannot accumulate ledger copies until the volume is exhausted.",
-      "text": "loading and later saves ignore it, and the next successful ledger save reclaims it, so repeated interruptions cannot accumulate ledger copies until the volume is exhausted."
+      "quote": "loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim it.",
+      "text": "loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim it."
     },
     {
       "id": "ar.file.026",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Reclamation is safe because saves are serialized per destination by construction, so a staging file that already exists was abandoned by a process that is no longer writing it.",
-      "text": "Reclamation is safe because saves are serialized per destination by construction, so a staging file that already exists was abandoned by a process that is no longer writing it."
+      "quote": "Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer.",
+      "text": "Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer."
     },
     {
       "id": "ar.file.027",
