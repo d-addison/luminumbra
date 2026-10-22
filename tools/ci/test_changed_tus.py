@@ -541,6 +541,30 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         with self.assertRaisesRegex(tus.SelectionError, "disabled configuration"):
             self.select([missing])
 
+    def test_profile_only_fixture_uses_excluded_source_full_selection(self):
+        fixture = self.root / "test/core/profiler_enabled_compile.cpp"
+        fixture.parent.mkdir(parents=True)
+        fixture.write_text("// enabled configuration only\n")
+        selected, report = self.select([fixture])
+        self.assertEqual({entry["file"] for entry in selected}, {self.a, self.b})
+        self.assertTrue(report["full_selection"])
+        self.assertEqual(report["scan_variants"], 2)
+        self.assertEqual(report["included_sources"], [])
+        # Exemption is exact: disabled and unknown fixtures still need commands.
+        for name in ("profiler_disabled_compile.cpp", "unknown_enabled_compile.cpp"):
+            sibling = fixture.with_name(name)
+            sibling.write_text("// needs a database command\n")
+            with self.assertRaisesRegex(tus.SelectionError, "missing compile database"):
+                self.select([sibling])
+        # An excluded source cannot bypass empty or failed dependency scans.
+        with patch.object(tus, "dependencies", side_effect=tus.SelectionError("scan failed")):
+            with self.assertRaisesRegex(tus.SelectionError, "scan failed"):
+                self.select([fixture])
+        self.raw = []
+        self.save_db()
+        with self.assertRaisesRegex(tus.SelectionError, "incomplete selection"):
+            self.select([fixture])
+
     def test_native_python_generators_invalidate_selection(self):
         selected, report = self.select([self.root / "tools/config_codegen.py"])
         self.assertEqual(len(selected), 2)

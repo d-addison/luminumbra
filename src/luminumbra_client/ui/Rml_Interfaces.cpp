@@ -1,6 +1,6 @@
 #include "Rml_Interfaces.h"
-#include "core/Profiler.h"
 #include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 #include <GLFW/glfw3.h> // For glfwGetTime
 #include <SOIL2/SOIL2.h>

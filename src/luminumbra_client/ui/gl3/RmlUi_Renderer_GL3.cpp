@@ -27,8 +27,8 @@
  *
  */
 
-#include "core/Profiler.h"
 #include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>

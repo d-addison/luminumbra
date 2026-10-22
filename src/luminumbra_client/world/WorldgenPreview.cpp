@@ -1,6 +1,6 @@
 #include "world/WorldgenPreview.h"
-#include "core/Profiler.h"
 #include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 
 #include <algorithm>
 #include <cmath>

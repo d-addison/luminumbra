@@ -105,8 +105,12 @@ _PCH_SEARCH_CACHE: dict[tuple, tuple[dict, Path | None, int]] = {}
 
 
 def first_party(relative: Path) -> bool:
+    # This fixture requires the Tracy-enabled configuration, qualified by the
+    # existing profile compile probe. Like the GL3 backend, changes still force
+    # full selection instead of claiming replay coverage in the default build.
     return (relative.parts[0] in {"src", "include", "test", "tools"}
-            and relative.parts[:4] != ("src", "luminumbra_client", "ui", "gl3"))
+            and relative.parts[:4] != ("src", "luminumbra_client", "ui", "gl3")
+            and relative.as_posix() != "test/core/profiler_enabled_compile.cpp")
 
 
 def changed_paths(root: Path, base_ref: str, worktree=True, include_untracked=True) -> set[Path]:

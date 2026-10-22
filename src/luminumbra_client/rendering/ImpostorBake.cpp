@@ -1,6 +1,6 @@
 #include "ImpostorBake.h"
-#include "core/Profiler.h"
 #include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "Mesh.h"

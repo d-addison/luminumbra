@@ -4622,9 +4622,46 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "result.region_authority_revision = sdf_snapshot->region_authority_revision;",
          "result.persistence_allowed = persistence_allowed;",
          "result.mesh = std::move(outcome.mesh);",
-         "result.tile = std::move(tile);",
-         "std::lock_guard<std::mutex> lock(shared->mutex);",
-         "shared->completed.push_back(std::move(result));"});
+         "result.tile = std::move(tile);"});
+
+    // Both spellings construct the same guard in the enclosing scope. Require
+    // publication immediately after acquiring the shared mutex, on both the
+    // failed-build and successful-build paths, with no intervening scope exit.
+    const auto has_guarded_completion = [](std::string_view text) {
+        std::string compact;
+        for (const char ch : text) {
+            if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+                compact.push_back(ch);
+        }
+        const std::string publish = "shared->completed.push_back(std::move(result));";
+        return compact.find("std::lock_guard<std::mutex>lock(shared->mutex);" + publish) !=
+                   std::string::npos ||
+               compact.find("LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,lock,shared->mutex,"
+                            "\"Farbuildlockwait\");" +
+                            publish) != std::string::npos;
+    };
+    EXPECT_TRUE(has_guarded_completion(
+        section(schedule, "if (!outcome.ok)", "World::FarLodTile& tile = outcome.tile;")));
+    EXPECT_TRUE(has_guarded_completion(
+        section(schedule, "result.tile = std::move(tile);", "JobPriority::Normal")));
+
+    const std::string plain_guard = "std::lock_guard<std::mutex> lock(shared->mutex);";
+    const std::string profiled_guard =
+        "LUMIN_PROFILE_LOCK(\r\n std::lock_guard<std::mutex>, lock, shared->mutex, "
+        "\"Far build lock wait\");";
+    const std::string publication = "shared->completed.push_back(std::move(result));";
+    for (const auto& guard : {plain_guard, profiled_guard}) {
+        EXPECT_TRUE(has_guarded_completion(guard + "\n" + publication));
+        EXPECT_FALSE(has_guarded_completion("{" + guard + "}\n" + publication));
+        EXPECT_FALSE(has_guarded_completion(publication + guard));
+        std::string wrong_mutex = guard;
+        wrong_mutex.replace(wrong_mutex.find("shared->mutex"), 13, "other->mutex");
+        EXPECT_FALSE(has_guarded_completion(wrong_mutex + publication));
+        EXPECT_FALSE(has_guarded_completion(guard));
+    }
+    EXPECT_FALSE(has_guarded_completion(publication));
+    EXPECT_FALSE(has_guarded_completion(""));
+    EXPECT_FALSE(has_guarded_completion("LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>"));
 
     const auto integrate = section(
         source, "void FarLodSystem::integrate_completed_builds()", "void FarLodSystem::update(");
