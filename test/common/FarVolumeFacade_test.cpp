@@ -159,7 +159,8 @@ TEST(FarVolumeFacade, SameAuthorityCompilesAllTiersAndNegativeCoordinates) {
             ADD_FAILURE() << "mesh bounds missing";
             return;
         }
-        EXPECT_EQ(result.mesh.origin_meters.y + result.mesh.bounds->min[1], -.25);
+        EXPECT_EQ(static_cast<double>(result.mesh.origin_meters.y) + result.mesh.bounds->min[1],
+                  -.25);
         EXPECT_GT(result.work.height_samples, 129u * 129u) << "actual normal halo must be sampled";
         EXPECT_LE(result.work.height_samples, 131u * 131u);
         EXPECT_EQ(result.work.density_samples,
@@ -525,7 +526,7 @@ TEST(FarVolumeFacade, OriginalFiniteBoxFilterRetainsTapOrderAndRefusals) {
             });
         EXPECT_EQ(value, 4.5f);
         ASSERT_EQ(taps.size(), 8u);
-        const float half_tap = spacing * .25f;
+        const float half_tap = static_cast<float>(spacing) * .25f;
         EXPECT_EQ(taps.front(), (glm::vec3{-256 - half_tap, 8 - half_tap, 512 - half_tap}));
         EXPECT_EQ(taps.back(), (glm::vec3{-256 + half_tap, 8 + half_tap, 512 + half_tap}));
     }

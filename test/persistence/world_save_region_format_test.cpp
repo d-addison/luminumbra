@@ -416,6 +416,8 @@ TEST(WorldSaveRegionFormat,
     EXPECT_TRUE(updated_target->is_voxel_data_dirty());
     EXPECT_EQ(ReadFileBytes(region), prior_region_bytes);
     EXPECT_FALSE(HasRegionTemporaryFile(region));
+    // Relocated staging lives in the save root, outside the strict region scan.
+    EXPECT_FALSE(HasRegionTemporaryFile(save_dir.path / region.filename()));
 
     // The live path is still a complete, loadable image of the prior region.
     WorldStreamingState after_interruption;

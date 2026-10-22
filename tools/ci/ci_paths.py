@@ -13,11 +13,24 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_station_discovery.py",
+    "tools/gates/test_common_library_isa.py",
+    "test/tools/test_runtime_config_contract.py",
+    "test/tools/check_audio_shutdown_contract.py",
+    "tools/ci/test_audio_propagation_metrics.py",
     "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_asan_shards.py",
+    "tools/ci/test_ctest_shards.py",
+    "tools/ci/test_workflow_policy.py",
     "tools/ci/test_replay_source_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
+    "tools/ci/test_check_acceptance_matrix.py",
+    "tools/ci/test_changed_tus.py",
+    "tools/ci/test_offline_deps.py",
+    "tools/ci/test_jolt_startup.py",
+    "tools/ci/test_local_check_contracts.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_compare_ambient_receipts.py",
@@ -30,13 +43,18 @@ PYTHON_TESTS = (
     "tools/ci/test_tidy_cache.py",
     "tools/perf/test_capture_sim_budget.py",
     "tools/perf/test_check_residency.py",
+    "tools/perf/test_check_gl_debug_log.py",
     "tools/perf/test_fixture_hash.py",
     "tools/perf/test_foliage_evidence.py",
     "tools/perf/test_perf.py",
+    "tools/perf/test_plan_qualification.py",
     "tools/perf/test_render_budget.py",
     "tools/perf/test_render_contract.py",
     "tools/perf/test_render_runner_evidence.py",
+    "tools/perf/test_run_qualification.py",
     "tools/perf/test_sim_budget_gate.py",
+    "tools/perf/test_summarize_process_receipts.py",
+    "tools/perf/test_terrain_aov_paths.py",
     "tools/perf/test_terrain_aovs.py",
     "tools/release/test_sbom.py",
     "tools/release/test_sbom_schema.py",
@@ -48,13 +66,16 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
-    "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
+    "tools/ci/check_acceptance_matrix.py",
+    "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
+    "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",
     "tools/ci/validate_public_tree.py", "tools/ci/validate_visual_catalog.py",
     "tools/perf/check_residency.py", "tools/perf/check_sim_budgets.py",
     "tools/perf/propose_sim_budgets.py", "tools/perf/sim_budget_compare.py",
     "tools/perf/sim_budget_io.py", "tools/perf/render_budget.py",
+    "tools/perf/fixture_paths.py",
     "tools/perf/inspect_terrain_aovs.py", "tools/perf/validate_foliage_evidence.py",
     "tools/perf/validate_render_capture.py",
     "tools/release/generate_sbom.py", "tools/release/validate_sbom.py",
@@ -134,6 +155,21 @@ CI_ENTRYPOINTS = (
 )
 
 
+# Exact membership only: UI primitives do not open worlds or drive simulation.
+# New documentation, tooling and client files require a separate review.
+HEAVY_EXEMPT_FILES = {
+    "README.md", "LICENSE", "docs/index.md", "docs/development.md",
+    "src/luminumbra_client/ui/components/common/Button.cpp",
+    "src/luminumbra_client/ui/components/common/Button.h",
+    "src/luminumbra_client/ui/components/common/Panel.cpp",
+    "src/luminumbra_client/ui/components/common/Panel.h",
+}
+
+
+def needs_heavy(path: str) -> bool:
+    return path not in HEAVY_EXEMPT_FILES
+
+
 def covered_python(path: str) -> bool:
     return path in COVERED_PYTHON_FILES
 
@@ -176,9 +212,11 @@ def changed_paths(root: Path, base: str, head: str) -> list[str]:
 
 
 def classify(root: Path, event: str, base: str, head: str,
-             repository: str, head_repository: str) -> tuple[bool, bool]:
+             repository: str, head_repository: str, base_ref: str = "") -> tuple[bool, bool, bool, str]:
     if event != "pull_request":
-        return True, True
+        return True, True, True, "non_pr_event"
+    if base_ref != "devel":
+        return True, True, True, "main_or_unknown_base"
     try:
         if not repository or not head_repository or repository != head_repository:
             raise ValueError("fork PR or missing repository identity")
@@ -194,8 +232,13 @@ def classify(root: Path, event: str, base: str, head: str,
             raise ValueError("empty PR diff")
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         print(f"Cannot classify PR diff; running all lanes: {error}", file=sys.stderr)
-        return True, True
-    return any(needs_cpp(path) for path in paths), any(needs_python(path) for path in paths)
+        return True, True, True, "classification_uncertain"
+    heavy = any(needs_heavy(path) for path in paths)
+    # Persistence and other heavy-sensitive tooling must reach native tests even
+    # if it used to qualify for a standalone Python route.
+    return (heavy or any(needs_cpp(path) for path in paths),
+            any(needs_python(path) for path in paths), heavy,
+            "heavy_sensitive_paths" if heavy else "reviewed_presentation_or_docs")
 
 
 def python_test_commands(root: Path) -> list[tuple[str, ...]]:
@@ -210,6 +253,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--event", default=os.environ.get("CI_EVENT", ""))
     parser.add_argument("--base", default=os.environ.get("CI_BASE_SHA", ""))
+    parser.add_argument("--base-ref", default=os.environ.get("CI_BASE_REF", os.environ.get("GITHUB_BASE_REF", "")))
     parser.add_argument("--head", default=os.environ.get("CI_HEAD_SHA", ""))
     parser.add_argument("--repository", default=os.environ.get("CI_REPOSITORY", ""))
     parser.add_argument("--head-repository", default=os.environ.get("CI_HEAD_REPOSITORY", ""))
@@ -221,9 +265,10 @@ def main() -> int:
             print("Running:", " ".join(command), flush=True)
             subprocess.run([sys.executable, "-B", *command], cwd=root, check=True)
         return 0
-    cpp, python = classify(root, args.event, args.base, args.head,
-                           args.repository, args.head_repository)
-    output = f"needs_cpp={str(cpp).lower()}\nneeds_python={str(python).lower()}\n"
+    cpp, python, heavy, reason = classify(root, args.event, args.base, args.head,
+                           args.repository, args.head_repository, args.base_ref)
+    output = (f"needs_cpp={str(cpp).lower()}\nneeds_python={str(python).lower()}\n"
+              f"needs_heavy={str(heavy).lower()}\nheavy_reason={reason}\n")
     print(output, end="")
     if args.output:
         with args.output.open("a", encoding="utf-8") as stream:

@@ -1,4 +1,6 @@
 #include "ImpostorBake.h"
+#include "app/FrameAttribution.h"
+#include "rendering/AttributedGl.h"
 
 #include "Mesh.h"
 #include "RenderPipeline.h"
@@ -25,7 +27,9 @@ const BakePart kParts[] = {
 };
 constexpr glm::vec3 kPreviewBackground(1.0f, 0.0f, 1.0f); // Diagnostic export only.
 
-GLuint CompileBakeProgram(std::string& err) {
+Luminumbra::Rendering::AttributedGl::Program CompileBakeProgram(std::string& err) {
+    const Luminumbra::Client::Attribution::PhaseScope shader_phase(
+        Luminumbra::Client::Attribution::Phase::ShaderLoad);
     const char* kVert = R"GLSL(#version 450 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNorm;
@@ -95,13 +99,13 @@ void main() {
     };
     GLuint vs = compile(GL_VERTEX_SHADER, kVert);
     if (!vs)
-        return 0;
+        return {};
     GLuint fs = compile(GL_FRAGMENT_SHADER, kFrag);
     if (!fs) {
         glDeleteShader(vs);
-        return 0;
+        return {};
     }
-    GLuint prog = glCreateProgram();
+    auto prog = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
     glLinkProgram(prog);
@@ -113,8 +117,8 @@ void main() {
         char log[512];
         glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
         err = log;
-        glDeleteProgram(prog);
-        return 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, prog);
+        return {};
     }
     return prog;
 }
@@ -196,7 +200,7 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
     out.radius = unionR;
 
     std::string err;
-    const GLuint prog = CompileBakeProgram(err);
+    const auto prog = CompileBakeProgram(err);
     if (!prog) {
         out.err = "bake shader: " + err;
         return out;
@@ -231,12 +235,12 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
         glDeleteTextures(1, &out.albedo);
         glDeleteTextures(1, &out.normal);
         glDeleteRenderbuffers(1, &depthRb);
-        glDeleteProgram(prog);
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, prog);
         out.albedo = out.normal = 0;
         return out;
     }
 
-    glUseProgram(prog);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, prog);
     const GLint locMVP = glGetUniformLocation(prog, "uMVP");
     const GLint locLayer = glGetUniformLocation(prog, "uLayer");
     const GLint locNormal = glGetUniformLocation(prog, "uNormalLayer");
@@ -280,17 +284,19 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
                 glUniform1i(locDoubleSided, lp.doubleSided ? 1 : 0);
                 glUniform1i(locNormal, lp.normalLayer);
                 glBindVertexArray(lp.mesh->vao);
-                glDrawElements(GL_TRIANGLES,
-                               static_cast<GLsizei>(lp.mesh->indexCount),
-                               GL_UNSIGNED_INT,
-                               nullptr);
+                Luminumbra::Rendering::AttributedGl::Submit(
+                    glDrawElements,
+                    GL_TRIANGLES,
+                    static_cast<GLsizei>(lp.mesh->indexCount),
+                    GL_UNSIGNED_INT,
+                    nullptr);
             }
         }
     }
     glBindVertexArray(0);
     glDeleteFramebuffers(1, &fbo);
     glDeleteRenderbuffers(1, &depthRb);
-    glDeleteProgram(prog);
+    Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, prog);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     out.ok = true;
     return out;
