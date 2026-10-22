@@ -341,6 +341,59 @@ TEST(UploadBudget, QualificationSettlesThroughBoundedFramesWithoutChangingPerFra
     EXPECT_EQ(failed_frames, 2u);
 }
 
+TEST(UploadBudget, SlowPreparationDrainsWithoutDrawingEveryIntermediateImage) {
+    for (const auto presentation : {UploadPresentation::Streaming, UploadPresentation::Settled}) {
+        UploadQueue<Work> queue;
+        std::vector<Work> items;
+        // Fixed bound: a surface backlog exceeding the slow runner's frame
+        // allowance. Preparation alone exhausts the time budget every pass.
+        constexpr std::size_t backlog = 512;
+        for (std::size_t id = 0; id < backlog; ++id)
+            items.push_back({id, id, 10, 0, 1});
+        refresh(queue, items);
+        std::size_t frames = 0, draws = 0, adopted = 0;
+        EXPECT_TRUE(settle_uploads([&] { return std::pair{queue.size(), adopted}; },
+                                   [&] {
+                                       ++frames;
+                                       const auto work = drain_uploads(
+                                           queue,
+                                           kTerrainUploadLimits,
+                                           [](const Work& item) { return item.bytes; },
+                                           [](const Work&) { return true; },
+                                           [] { return 5.0; });
+                                       adopted = work.adopted;
+                                       EXPECT_EQ(adopted, 1u);
+                                       EXPECT_EQ(work.attempts, 1u);
+                                       draws += draw_upload_frame(presentation, queue.size() == 0)
+                                                    ? 1u
+                                                    : 0u;
+                                   }));
+        EXPECT_EQ(frames, backlog);
+        EXPECT_EQ(draws, presentation == UploadPresentation::Settled ? 1u : backlog);
+        EXPECT_TRUE(draw_upload_frame(presentation, true)); // empty input draws immediately
+    }
+}
+
+TEST(UploadBudget, FailedQualificationNeverDrawsAnUnsettledImage) {
+    UploadQueue<Work> queue;
+    refresh(queue, {{1, 0, 10, 0, 1}});
+    std::size_t draws = 0, adopted = 0;
+    EXPECT_FALSE(settle_uploads(
+        [&] { return std::pair{queue.size(), adopted}; },
+        [&] {
+            const auto work = drain_uploads(
+                queue,
+                kWaterUploadLimits,
+                [](const Work& item) { return item.bytes; },
+                [](const Work&) { return false; },
+                [] { return 5.0; });
+            adopted = work.adopted;
+            draws += draw_upload_frame(UploadPresentation::Settled, queue.size() == 0) ? 1u : 0u;
+        }));
+    EXPECT_EQ(draws, 0u);
+    EXPECT_EQ(queue.size(), 1u);
+}
+
 TEST(UploadBudget, DrainAcceptsPublicationDuringRenderAndCountsBothLanes) {
     std::size_t pending = 1;
     std::size_t adopted = 0;

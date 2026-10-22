@@ -4914,11 +4914,29 @@ int main(int argc, char* argv[]) {
                     if (!terrain_coverage_dir.empty())
                         renderPipeline.set_terrain_coverage_diagnostics_enabled(
                             g_rb_active, terrain_coverage_bypass_camera_region_guard);
-                    renderPipeline.render_frame(gameSession->GetRegistry(),
-                                                *gameSession->GetWorldSystem(),
-                                                *g_camera,
-                                                deltaTime,
-                                                g_app.overlay.wireframe_mode);
+                    // Upload waits may omit intermediate images after required
+                    // settling frames. Every measured traversal frame draws.
+                    const bool settling_benchmark_uploads =
+                        g_rb_active &&
+                        ((!upload_warmup_complete && g_app.benchmark.warmupFrames + 1 >=
+                                                         g_app.capture.render_benchmark_warmup) ||
+                         g_app.benchmark.measuredFrames >= g_app.capture.render_benchmark_frames);
+                    const bool settling_capture_uploads =
+                        (g_app.capture.scene_active &&
+                         g_app.capture.render_benchmark_path.empty() &&
+                         g_app.sceneCapture.settleFrames >= 55) ||
+                        (g_app.capture.survey_active && g_app.capture.survey_settle >= 45) ||
+                        (g_app.capture.frame_scan_active &&
+                         g_app.capture.frame_scan_settle >= g_app.capture.frame_scan_settle_target);
+                    renderPipeline.render_frame(
+                        gameSession->GetRegistry(),
+                        *gameSession->GetWorldSystem(),
+                        *g_camera,
+                        deltaTime,
+                        g_app.overlay.wireframe_mode,
+                        settling_benchmark_uploads || settling_capture_uploads
+                            ? Luminumbra::Rendering::UploadPresentation::Settled
+                            : Luminumbra::Rendering::UploadPresentation::Streaming);
                     rb_render_call_ms = std::chrono::duration<double, std::milli>(
                                             std::chrono::steady_clock::now() - _rb_rcall_t0)
                                             .count();
@@ -5453,10 +5471,14 @@ int main(int argc, char* argv[]) {
                     frame_attribution_enabled
                         ? buckets.other(_wallMs, phase_scope.snapshot())
                         : _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
+                const auto& slow_uploads = renderPipeline.get_last_mesh_upload_stats();
                 LUMINUMBRA_CORE_WARN("SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} "
                                      "render={:.1f} present={:.1f} other={:.1f} | "
                                      "foliage_inst={:.1f} scatter={:.1f} rebake={:.1f} poll={:.1f} "
-                                     "foliage={:.1f} menu={:.1f} ui={:.1f}",
+                                     "foliage={:.1f} menu={:.1f} ui={:.1f} | "
+                                     "terrain_pending={} terrain_adopted={} terrain_failures={} "
+                                     "terrain_ms={:.1f} water_pending={} water_adopted={} "
+                                     "water_failures={} water_ms={:.1f}",
                                      _wallMs,
                                      1000.0 / _wallMs,
                                      rb_sim_ms,
@@ -5470,7 +5492,15 @@ int main(int argc, char* argv[]) {
                                      rb_poll_ms,
                                      foliage_frame.rebuild_ms,
                                      rb_menu_ms,
-                                     rb_ui_ms);
+                                     rb_ui_ms,
+                                     slow_uploads.terrain_uploads_deferred,
+                                     slow_uploads.terrain_budget.adopted,
+                                     slow_uploads.terrain_upload_failures,
+                                     slow_uploads.terrain_budget.elapsed_ms,
+                                     slow_uploads.water_uploads_deferred,
+                                     slow_uploads.water_budget.adopted,
+                                     slow_uploads.water_upload_failures,
+                                     slow_uploads.water_budget.elapsed_ms);
                 if (frame_attribution_enabled) {
                     const auto& phases = phase_scope.snapshot();
                     for (std::size_t index = 0; index < Attribution::kPhaseCount; ++index)

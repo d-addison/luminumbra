@@ -1287,12 +1287,27 @@ public:
         indices.resize(index_capacity * 2);
         vertices[0].position = {1, 2, 3};
         indices[0] = 2;
+        // Create the full backing store before reserving the shorter resident.
+        // Otherwise add_block sizes the index store to 2 * capacity - tail,
+        // leaving tail * sizeof(u32) bytes outside the intended full pool.
+        const auto backing = pool.allocate(
+            vertices.data(), vertex_capacity, indices.data(), index_capacity * 2, nullptr);
+        ASSERT_NE(backing, ChunkGeometryPool::kInvalid);
+        const auto backing_bytes = pool.storage_bytes();
+        pool.free(backing); // Unsubmitted storage is immediately reusable.
+        ASSERT_EQ(pool.live_allocation_count(), 0u);
         resident.pool_handle = pool.allocate(vertices.data(),
                                              vertex_capacity - tail,
                                              indices.data(),
                                              index_capacity * 2 - tail,
                                              nullptr);
         ASSERT_NE(resident.pool_handle, ChunkGeometryPool::kInvalid);
+        ASSERT_EQ(pool.storage_bytes(), backing_bytes);
+        const auto& block = pool.blocks()[pool.allocation(resident.pool_handle).block_index];
+        ASSERT_EQ(block.vertex_capacity, vertex_capacity);
+        ASSERT_EQ(block.index_capacity, index_capacity * 2);
+        ASSERT_EQ(block.vertex_high_water, vertex_capacity - tail);
+        ASSERT_EQ(block.index_high_water, index_capacity * 2 - tail);
         resident.element_count = index_capacity * 2 - tail;
         resident.mesh_version = 7;
         const auto remaining = ChunkGeometryPool::kMaxStorageBytes - pool.storage_bytes();

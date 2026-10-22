@@ -91,6 +91,125 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertLess(copy.index("mesh_upload_bytes("), copy.index("payload.vertices ="))
             self.assertLess(copy.index("mesh_upload_bytes("), copy.index("payload.indices ="))
 
+    def test_unmeasured_benchmark_waits_drain_before_drawing(self):
+        prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        guard = "if (!draw_upload_frame(presentation, render_uploads_settled()))"
+        self.assertLess(prepare.index("m_frame_prepared.valid = false;"),
+                        prepare.index("manage_chunk_gpu_resources("))
+        self.assertLess(prepare.index("manage_water_gpu_resources("), prepare.index(guard))
+        self.assertLess(prepare.index(guard), prepare.index("ensure_terrain_culling_hierarchy("))
+        self.assertLess(prepare.index(guard), prepare.index("AdvanceSelectedFarWorld("))
+        self.assertIn("return;", body(prepare, guard))
+        render = body(self.pipeline, "void RenderPipeline::render_frame(")
+        self.assertLess(render.index("if (!m_frame_prepared.valid)"),
+                        render.index("dispatch_stages(camera)"))
+        self.assertIn("UploadPresentation presentation = UploadPresentation::Streaming",
+                      compact(self.header))
+        # Evaluate the shipping selector for all phase boundaries. A measured
+        # frame must never receive the settled-only drawing policy.
+        expression = re.search(r"const bool settling_benchmark_uploads = (.*?);",
+                               compact(self.main)).group(1)
+        names = {
+            "g_app.benchmark.warmupFrames": "warm",
+            "g_app.capture.render_benchmark_warmup": "minimum",
+            "g_app.benchmark.measuredFrames": "measured",
+            "g_app.capture.render_benchmark_frames": "total",
+        }
+        for source, target in names.items():
+            expression = expression.replace(source, target)
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        expression = expression.replace("!", "not ")
+        for active in (False, True):
+            for minimum in (0, 1, 2, 60):
+                for warm in range(minimum + 1):
+                    for measured in (0, 3, 4):
+                        complete = warm >= minimum
+                        actual = eval(expression, {"__builtins__": {}}, dict(
+                            g_rb_active=active, upload_warmup_complete=complete,
+                            warm=warm, minimum=minimum, measured=measured, total=4))
+                        expected = active and ((not complete and warm + 1 >= minimum)
+                                               or measured >= 4)
+                        self.assertEqual(actual, expected)
+        call = compact(self.main[self.main.index("const bool settling_benchmark_uploads"):])
+        self.assertRegex(call, r"renderPipeline.render_frame\(.*?settling_benchmark_uploads "
+                         r"\|\| settling_capture_uploads "
+                         r"\? Luminumbra::Rendering::UploadPresentation::Settled "
+                         r": Luminumbra::Rendering::UploadPresentation::Streaming\)")
+        native = read(ROOT / "test/rendering/upload_budget_test.cpp")
+        for name in ("SlowPreparationDrainsWithoutDrawingEveryIntermediateImage",
+                     "FailedQualificationNeverDrawsAnUnsettledImage"):
+            self.assertIn("TEST(UploadBudget, " + name + ")", native)
+        integration = read(ROOT / "test/rendering/pass_context_test.cpp")
+        self.assertIn("TEST(PassContext, QualificationUploadsDrainBeforeDispatchAndTemporalHistory)",
+                      integration)
+        slow = body(self.main, "if (_wallMs > 12.0")
+        for lane in ("terrain", "water"):
+            for field in ("pending={}", "adopted={}", "failures={}", "ms={:.1f}"):
+                self.assertIn(lane + "_" + field, slow)
+            self.assertIn(f"slow_uploads.{lane}_uploads_deferred", slow)
+            self.assertIn(f"slow_uploads.{lane}_upload_failures", slow)
+            self.assertIn(f"slow_uploads.{lane}_budget.adopted", slow)
+            self.assertIn(f"slow_uploads.{lane}_budget.elapsed_ms", slow)
+
+    def test_shipping_draw_policy_omits_backlog_images_and_refuses_unsettled_output(self):
+        scheduler = read(RENDERING / "UploadBudget.h")
+        expression = re.search(r"return (.*?);", body(scheduler, "constexpr bool draw_upload_frame(")).group(1)
+        expression = expression.replace("UploadPresentation::Streaming", repr("Streaming"))
+        expression = expression.replace("||", " or ").replace("&&", " and ")
+        expression = expression.replace("true", "True").replace("false", "False")
+
+        def draws(presentation, settled):
+            return eval(expression, {"__builtins__": {}}, dict(
+                presentation=presentation, settled=settled))
+
+        # With preparation over budget, the unchanged progress floor permits
+        # one adoption per pass. Run the shipping draw predicate at every pass.
+        for presentation, expected in (("Streaming", 512), ("Settled", 1)):
+            self.assertEqual(sum(draws(presentation, remaining == 0)
+                                 for remaining in range(511, -1, -1)), expected)
+            self.assertTrue(draws(presentation, True))  # empty backlog
+        self.assertFalse(draws("Settled", False))  # failed or partial adoption
+        self.assertTrue(draws("Streaming", False))  # measured streaming frame
+
+    def test_capture_wait_siblings_defer_only_after_required_settling_frames(self):
+        expression = re.search(r"const bool settling_capture_uploads = (.*?);",
+                               compact(self.main)).group(1)
+        names = {
+            "g_app.capture.scene_active": "scene",
+            "g_app.capture.render_benchmark_path.empty()": "no_benchmark",
+            "g_app.sceneCapture.settleFrames": "scene_frames",
+            "g_app.capture.survey_active": "survey",
+            "g_app.capture.survey_settle": "survey_frames",
+            "g_app.capture.frame_scan_active": "scan",
+            "g_app.capture.frame_scan_settle_target": "scan_target",
+            "g_app.capture.frame_scan_settle": "scan_frames",
+        }
+        for source, target in names.items():
+            expression = expression.replace(source, target)
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        for scene in (False, True):
+            for survey in (False, True):
+                for scan in (False, True):
+                    for no_benchmark in (False, True):
+                        for scene_frames in (0, 54, 55, 56):
+                            for survey_frames in (0, 44, 45, 46):
+                                for scan_frames in (0, 59, 60, 61):
+                                    values = dict(scene=scene, survey=survey, scan=scan,
+                                                  no_benchmark=no_benchmark,
+                                                  scene_frames=scene_frames,
+                                                  survey_frames=survey_frames,
+                                                  scan_frames=scan_frames, scan_target=60)
+                                    expected = ((scene and no_benchmark and scene_frames >= 55)
+                                                or (survey and survey_frames >= 45)
+                                                or (scan and scan_frames >= 60))
+                                    self.assertEqual(eval(expression, {"__builtins__": {}}, values),
+                                                     expected)
+        for path in (RENDERING / "SceneSurvey.cpp",
+                     ROOT / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp"):
+            drain = read(path)
+            drain = drain[drain.index("settle_uploads("):]
+            self.assertIn("UploadPresentation::Settled", drain.split("return false;", 1)[0])
+
     def test_retention_uses_pool_transaction_and_water_staging(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
         update = body(pool, "u32 ChunkGeometryPool::update(")

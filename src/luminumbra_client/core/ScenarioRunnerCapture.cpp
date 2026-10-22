@@ -155,11 +155,13 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                             pending.terrain_budget.adopted + pending.water_budget.adopted};
                     },
                     [&] {
-                        renderPipeline.render_frame(gameSession->GetRegistry(),
-                                                    *gameSession->GetWorldSystem(),
-                                                    *g_camera,
-                                                    1.0f / 60.0f,
-                                                    g_app.overlay.wireframe_mode);
+                        renderPipeline.render_frame(
+                            gameSession->GetRegistry(),
+                            *gameSession->GetWorldSystem(),
+                            *g_camera,
+                            1.0f / 60.0f,
+                            g_app.overlay.wireframe_mode,
+                            Luminumbra::Rendering::UploadPresentation::Settled);
                     }))
                 return false;
             glfwGetFramebufferSize(window, &w, &h);

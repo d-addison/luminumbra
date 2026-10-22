@@ -671,6 +671,14 @@ settled zero-adoption frames against per-frame streaming work and overshoot.
 Additional settling does not advance traversal ticks or measured frame IDs.
 The benchmark records extra presented settling frames in `upload_settling_frames`
 (`warmup` and `capture`), separately from the requested minimum `warmup_frames`.
+The held final benchmark warmup and report frames, standalone capture waits and
+synchronous survey/sweep upload drains advance both upload lanes with the same
+limits, but defer scene preparation after adoption and omit GPU drawing while
+either queue remains pending. The frame that reaches residency draws normally
+before warmup completes or capture proceeds. This avoids repeating a full
+software-rendered scene for each single-upload progress pass. Required settling
+frames, every measured frame, interactive rendering and previews draw normally;
+there is no software-renderer exemption from the upload budget.
 
 Settling uses work counts, with no clock input to world state. The initial pending
 terrain-plus-water backlog allows one render pass per item. Work published by a

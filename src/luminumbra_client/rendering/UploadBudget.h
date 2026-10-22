@@ -28,6 +28,17 @@ inline constexpr UploadLimits kTerrainUploadLimits{};
 inline constexpr UploadLimits kWaterUploadLimits{1024 * 1024, 8, 1, 1.0};
 static_assert(kTerrainUploadLimits.valid() && kWaterUploadLimits.valid());
 
+// Unmeasured qualification waits still advance the normal upload budgets, but
+// need no intermediate image. Interactive and measured frames always draw.
+enum class UploadPresentation {
+    Streaming,
+    Settled
+};
+
+constexpr bool draw_upload_frame(UploadPresentation presentation, bool settled) {
+    return presentation == UploadPresentation::Streaming || settled;
+}
+
 // Check exact sizes before copying payloads or allocating graphics storage.
 inline bool mesh_upload_bytes(std::size_t vertices,
                               std::size_t vertex_size,

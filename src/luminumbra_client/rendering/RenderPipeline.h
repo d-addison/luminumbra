@@ -388,7 +388,8 @@ public:
                       Systems::SHIELD_WorldSystem& world_system,
                       const Camera& camera,
                       float deltaTime,
-                      bool wireframe = false);
+                      bool wireframe = false,
+                      UploadPresentation presentation = UploadPresentation::Streaming);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -1085,7 +1086,8 @@ private:
                        Systems::SHIELD_WorldSystem& world_system,
                        const Camera& camera,
                        float deltaTime,
-                       bool wireframe);
+                       bool wireframe,
+                       UploadPresentation presentation);
     void dispatch_stages(const Camera& camera);
     FarReplayCamera replay_camera(const Camera& camera) const;
 

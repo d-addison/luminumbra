@@ -2422,7 +2422,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   Systems::SHIELD_WorldSystem& world_system,
                                   const Camera& camera,
                                   float deltaTime,
-                                  bool wireframe) {
+                                  bool wireframe,
+                                  UploadPresentation presentation) {
     if (!m_started) {
         return;
     }
@@ -2446,7 +2447,9 @@ void RenderPipeline::render_frame(entt::registry& registry,
         camera);
     m_far_world_advanced = false;
     ++m_far_world_frame;
-    prepare_frame(registry, world_system, camera, deltaTime, wireframe);
+    prepare_frame(registry, world_system, camera, deltaTime, wireframe, presentation);
+    if (!m_frame_prepared.valid)
+        return;
     // Retain the exact ON temporal inputs before the frame epilogue updates them.
     m_far_world_pair_prev_view_proj = m_prev_view_proj;
     m_far_world_pair_prev_time = m_prev_time;
@@ -2608,7 +2611,10 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                                    Systems::SHIELD_WorldSystem& world_system,
                                    const Camera& camera,
                                    float deltaTime,
-                                   bool wireframe) {
+                                   bool wireframe,
+                                   UploadPresentation presentation) {
+    m_frame_prepared.valid = false;
+    m_frame_stage_trace.clear();
     m_cpu_frame_t0 = std::chrono::steady_clock::now(); // CPU per-phase submit cost
 
     //  (Group K): ONE wall-clock snapshot per frame, shared by every pass
@@ -2662,6 +2668,16 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
             .count();
     manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms);
     manage_water_gpu_resources(renderable_chunk_snapshots, camera);
+    if (!draw_upload_frame(presentation, render_uploads_settled())) {
+        // No consumer is submitted while an unmeasured capture wait drains.
+        // Keep the count/byte/time limits unchanged and do not advance temporal
+        // history, far-world scheduling, particles or the GPU query ring.
+        m_last_render_pass_stats.cpu_prepare_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                      m_cpu_frame_t0)
+                .count();
+        return;
+    }
     ensure_terrain_culling_hierarchy(renderable_chunk_snapshots);
     if (m_frame_far_selection.effective == FarWorldMode::Ladder) {
         m_far_world->BeginLiveOwnership(m_far_world_frame);

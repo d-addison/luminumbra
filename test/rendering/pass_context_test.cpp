@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1141,6 +1142,59 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
     pass.reset_shader();
     glDeleteFramebuffers(1, &target.fbo);
     glDeleteTextures(1, &target.tex);
+}
+
+TEST(PassContext, QualificationUploadsDrainBeforeDispatchAndTemporalHistory) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(true);
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    // Nine tiny public streaming adoptees exceed the eight-attempt ceiling,
+    // independent of machine speed. No generation, workers or physics are needed.
+    constexpr int chunks = 9;
+    for (int x = 0; x < chunks; ++x) {
+        auto chunk = std::make_shared<Chunk>(IVec3{x, 0, 0});
+        chunk->mesh_vertices = {
+            {{0, 0, 0}, {0, 1, 0}, 1}, {{0, 0, 1}, {0, 1, 0}, 1}, {{1, 0, 0}, {0, 1, 0}, 1}};
+        chunk->mesh_indices = {0, 1, 2};
+        chunk->mesh_version.store(1);
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    }
+    entt::registry registry;
+    Camera camera({8, 80, 8}, {0, 1, 0}, -90, 0);
+    pipeline.render_frame(
+        registry, world, camera, 1.0f / 30.0f, false, UploadPresentation::Settled);
+    ASSERT_FALSE(pipeline.render_uploads_settled());
+    EXPECT_TRUE(pipeline.frame_stage_trace().empty());
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    // The progress floor guarantees completion within one pass per chunk.
+    for (int frame = 1; frame < chunks && !pipeline.render_uploads_settled(); ++frame) {
+        pipeline.render_frame(
+            registry, world, camera, 1.0f / 30.0f, false, UploadPresentation::Settled);
+        if (!pipeline.render_uploads_settled()) {
+            EXPECT_TRUE(pipeline.frame_stage_trace().empty());
+            EXPECT_FALSE(pipeline.taau_history_valid());
+        }
+    }
+    ASSERT_TRUE(pipeline.render_uploads_settled());
+    EXPECT_FALSE(pipeline.frame_stage_trace().empty());
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    // A normal measured/interactive frame still dispatches with pending work.
+    for (auto* chunk : world.get_renderable_chunks())
+        chunk->mesh_version.store(2);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_FALSE(pipeline.render_uploads_settled());
+    EXPECT_FALSE(pipeline.frame_stage_trace().empty());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 TEST(PassContext, ShippingTemporalResolveBuildsHistoryJittersAndResets) {

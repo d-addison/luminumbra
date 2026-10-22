@@ -302,8 +302,12 @@ bool RunSceneSurvey(GLFWwindow* window,
                                      pending.terrain_budget.adopted + pending.water_budget.adopted};
                 },
                 [&] {
-                    pipeline.render_frame(
-                        session.GetRegistry(), *w, camera, 1.0f / 60.0f, wireframe);
+                    pipeline.render_frame(session.GetRegistry(),
+                                          *w,
+                                          camera,
+                                          1.0f / 60.0f,
+                                          wireframe,
+                                          UploadPresentation::Settled);
                 })) {
             LUMINUMBRA_CORE_ERROR("SceneSurvey '{}': render uploads did not settle", t.label);
             return false;
