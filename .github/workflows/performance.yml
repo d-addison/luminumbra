@@ -171,7 +171,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install measurement dependencies
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get install -y --no-install-recommends \
@@ -271,7 +271,7 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.event.before }}
           path: base
       - name: Install build dependencies
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get install -y --no-install-recommends \
@@ -654,7 +654,7 @@ jobs:
         id: identity
         run: python3 tools/ci/qualification_capture.py preflight --lane server-capture --expected-sha "$QUALIFICATION_EXPECTED_SHA"
       - name: Install candidate build dependencies
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get install -y --no-install-recommends \

@@ -806,7 +806,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     continue
                 install_jobs.append(job_id)
                 with self.subTest(job=job_id):
-                    self.assertEqual(value(step, "timeout-minutes", 8), "10")
+                    self.assertEqual(value(step, "timeout-minutes", 8), "25")
                     self.assertIsNone(value(step, "continue-on-error", 8))
                     self.assertEqual(script.count("apt-get"), 2)
                     self.assertEqual(script.splitlines()[:2], [
