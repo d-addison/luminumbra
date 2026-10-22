@@ -1687,9 +1687,11 @@ bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
         has_live_grid = true;
         const float lx = world_pos.x - static_cast<float>(coords.x * CHUNK_SIZE_X);
         const float lz = world_pos.z - static_cast<float>(coords.z * CHUNK_SIZE_Z);
-        const int x = std::clamp(static_cast<int>(lx * res / CHUNK_SIZE_X), 0, res - 1);
-        const int z = std::clamp(static_cast<int>(lz * res / CHUNK_SIZE_Z), 0, res - 1);
-        const std::size_t cell = static_cast<std::size_t>(z) * side + x;
+        const int x =
+            std::clamp(static_cast<int>(lx * static_cast<float>(res) / CHUNK_SIZE_X), 0, res - 1);
+        const int z =
+            std::clamp(static_cast<int>(lz * static_cast<float>(res) / CHUNK_SIZE_Z), 0, res - 1);
+        const std::size_t cell = static_cast<std::size_t>(z) * side + static_cast<std::size_t>(x);
         const float bed = static_cast<float>(chunk->water_bed_mm[cell]) / 1000.0f;
         const float depth = static_cast<float>(chunk->water_depth_mm[cell]) / 1000.0f;
         if (depth > 0.05f && world_pos.y >= bed && world_pos.y < bed + depth - 0.05f)
@@ -4241,11 +4243,13 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float dx = wx - center.x, dz = wz - center.z;
                 if (dx * dx + dz * dz <= r2)
-                    sum += c->water_depth_mm[z * res + x];
+                    sum += c->water_depth_mm[static_cast<std::size_t>(z * res + x)];
             }
         }
     }
@@ -4290,12 +4294,14 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z)
             for (int x = 0; x < res; ++x) {
-                const std::int32_t b = c->water_bed_mm[z * res + x];
+                const std::int32_t b = c->water_bed_mm[static_cast<std::size_t>(z * res + x)];
                 if (b > 2000 &&
                     b < lowest) { // above sea (valley floor, not coast) and the lowest so far
                     lowest = b;
-                    const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                    const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                    const float wx = static_cast<float>(cc.x * CHUNK_SIZE_X) +
+                                     (static_cast<float>(x) + 0.5f) * cw_x;
+                    const float wz = static_cast<float>(cc.z * CHUNK_SIZE_Z) +
+                                     (static_cast<float>(z) + 0.5f) * cw_z;
                     pos_out = Vec3(wx, static_cast<float>(b) / 1000.0f, wz);
                     bed_m_out = static_cast<float>(b) / 1000.0f;
                     found = true;
@@ -4334,13 +4340,16 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                if (c->water_depth_mm[z * res + x] < 2500)
+                if (c->water_depth_mm[static_cast<std::size_t>(z * res + x)] < 2500)
                     continue; // need real depth (>=2.5 m)
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                const float surf = static_cast<float>(c->water_bed_mm[z * res + x] +
-                                                      c->water_depth_mm[z * res + x]) /
-                                   1000.0f;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float surf =
+                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] +
+                                       c->water_depth_mm[static_cast<std::size_t>(z * res + x)]) /
+                    1000.0f;
                 for (int a = 0; a < 8; ++a) {
                     const float ang = static_cast<float>(a) * 0.7853981634f;
                     const float ox = std::cos(ang), oz = std::sin(ang);
@@ -4398,13 +4407,17 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const std::int32_t d = c->water_depth_mm[z * res + x];
+                const std::int32_t d = c->water_depth_mm[static_cast<std::size_t>(z * res + x)];
                 if (d <= best)
                     continue;
                 best = d;
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                const float surf_y = static_cast<float>(c->water_bed_mm[z * res + x] + d) / 1000.0f;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float surf_y =
+                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] + d) /
+                    1000.0f;
                 best_pos = Vec3(wx, surf_y, wz);
             }
         }
@@ -4475,9 +4488,11 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
         return terrain;
     const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
     const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
-    const int sx = std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * res), 0, res - 1);
-    const int sz = std::clamp(static_cast<int>((lz / CHUNK_SIZE_Z) * res), 0, res - 1);
-    return c->water_level_data[sz * res + sx];
+    const int sx =
+        std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * static_cast<float>(res)), 0, res - 1);
+    const int sz =
+        std::clamp(static_cast<int>((lz / CHUNK_SIZE_Z) * static_cast<float>(res)), 0, res - 1);
+    return c->water_level_data[static_cast<std::size_t>(sz * res + sx)];
 }
 
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {

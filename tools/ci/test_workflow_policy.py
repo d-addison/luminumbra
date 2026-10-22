@@ -20,6 +20,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import closing
 from itertools import islice
 import fnmatch
+import hashlib
 import io
 import os
 import re
@@ -794,6 +795,98 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             filename: (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             for filename in GUARDED
         }
+
+    def test_fast_lane_runs_drafts_on_a_standard_runner_with_its_own_bound(self):
+        fast = jobs(self.workflows["ci.yml"])["fast-compile"]
+        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
+        self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
+        self.assertEqual(value(fast, "timeout-minutes", 4), "20")
+        self.assertIsNone(value(fast, "if", 4))
+        self.assertIsNone(value(fast, "needs", 4))
+        self.assertNotIn("draft", fast)
+        self.assertNotIn("continue-on-error", fast)
+        self.assertIn("fetch-depth: 0", fast)
+
+    def test_fast_lane_explicit_route_dual_configure_glad_and_bounded_execution(self):
+        fast = jobs(self.workflows["ci.yml"])["fast-compile"]
+        route = steps(fast)[1]
+        self.assertIn("changed_tus.py route", route)
+        self.assertIn("github.event.pull_request.base.sha || github.event.before", route)
+        self.assertIn('--output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"', route)
+        self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
+        self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
+        for step in steps(fast)[3:6]:
+            self.assertEqual(value(step, "if", 8), "steps.route.outputs.native != 'false'")
+        evidence = steps(fast)[6]
+        self.assertEqual(value(evidence, "if", 8), "always() && steps.route.outputs.native != 'false'")
+        self.assertIn("uses: actions/upload-artifact@", evidence)
+        self.assertIn("path: build/fast-checks-evidence.json", evidence)
+        self.assertIn("if-no-files-found: error", evidence)
+        self.assertIn("--evidence-file build/fast-checks-evidence.json", steps(fast)[5])
+        for compiler in ("gcc", "clang"):
+            self.assertIn(f"cmake -S . -B build/fast-{compiler}", fast)
+            self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)
+        self.assertEqual(fast.count("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"), 2)
+        for flag in ("-DLUMINUMBRA_WARNINGS_AS_ERRORS=ON", "-DBUILD_TESTING=ON",
+                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF"):
+            self.assertEqual(fast.count(flag), 2)
+        for flag in ("-DCMAKE_C_COMPILER=gcc", "-DCMAKE_CXX_COMPILER=g++",
+                     "-DCMAKE_C_COMPILER=clang-18", "-DCMAKE_CXX_COMPILER=clang++-18"):
+            self.assertIn(flag, fast)
+        self.assertIn("--build-dir build/fast-gcc --clang-build-dir build/fast-clang", fast)
+        self.assertIn('--jobs 2 --summary-file "$GITHUB_STEP_SUMMARY"', fast)
+        self.assertNotIn("ctest", fast.lower())
+        self.assertNotIn("--preset", fast)
+        self.assertNotIn("-Wno", fast)
+
+    def test_fast_lane_has_only_bounded_local_cache_and_no_required_consumers(self):
+        blocks = jobs(self.workflows["ci.yml"])
+        fast = blocks["fast-compile"]
+        self.assertIn("CCACHE_DIR: ${{ github.workspace }}/scratch/fast-ccache", fast)
+        self.assertIn("CCACHE_MAXSIZE: 250M", fast)
+        self.assertIn("CCACHE_COMPILERCHECK: content", fast)
+        self.assertIn('CCACHE_REMOTE_STORAGE: ""', fast)
+        self.assertIn("ccache --max-size 250M", fast)
+        self.assertNotIn("actions/cache", fast)
+        self.assertNotIn("save", fast.lower())
+        self.assertIn("Advisory during warning and duration calibration; never a required gate.", fast)
+        for name, job in blocks.items():
+            if name != "fast-compile":
+                self.assertNotIn("fast-compile", value(job, "needs", 4) or "")
+        for path in sorted((ROOT / ".github").rglob("*")):
+            if path.is_file() and any(word in path.name for word in ("ruleset", "required")):
+                self.assertNotIn("Fast compile / GCC + clang-tidy", path.read_text())
+        inventory = blocks["public-tree"]
+        contracts = steps(fast)[2]
+        self.assertIn("python3 -I -B tools/ci/test_changed_tus.py", contracts)
+        self.assertIsNone(value(contracts, "if", 8))
+        for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
+            self.assertIn("tools/ci/" + suite, inventory)
+
+    def test_every_preexisting_ci_job_definition_is_unchanged(self):
+        # Freeze existing routing, limits, required names and authoritative gates.
+        expected = {
+            "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
+            # Require all three offline-dependency partitions in local-check evidence.
+            "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
+            "gns-compile-probe": "8ba48b3b08d1b8c8b3c566827d1c07b850f3d21b3ee2c4765952169a7c13532b",
+            "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
+            # Pin Python 3.14.8 across consumers and require partitioned local-check evidence.
+            "windows-msvc": "763218a207e024d39c82df14c933c89ac1d090342d7f4a794baa046a7a8d10f5",
+            # Pin Python 3.14.8 and pass the selected runtime to UCRT64 configuration.
+            "windows-ucrt64": "00890b97a7e49d22c50d046972b2f272fe0a63ca8ff90fb132f99fb410797eb1",
+            "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
+            "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
+            "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
+            "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
+            "tidy-shard": "522c626dce80dc98e1f474bea381d9eaac93eb17979a2d5389e2d4358ca2ded6",
+            "tidy": "6be4e21d810e25d0cef9b84528e5ef8772ee26723b75018a01f86992aef7a074",
+            "public-tree": "f9f59910f6674d861330ee21b21acdf61043b00dfee998939f8c59564cdd58e2",
+        }
+        actual = jobs(self.workflows["ci.yml"])
+        self.assertEqual(set(actual), set(expected) | {"fast-compile"})
+        for name, digest in expected.items():
+            self.assertEqual(hashlib.sha256(actual[name].encode()).hexdigest(), digest, name)
 
     def test_bash_uses_git_installation_and_falls_back_when_unavailable(self):
         with patch.object(shutil, "which", return_value=None):

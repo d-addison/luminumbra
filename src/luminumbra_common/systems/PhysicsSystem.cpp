@@ -382,8 +382,8 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     float max_h = -99999.0f;
 
     for (int i = 0; i < resolution * resolution; ++i) {
-        float h = chunk.heightmap_data[i];
-        height_samples[i] = h;
+        float h = chunk.heightmap_data[static_cast<std::size_t>(i)];
+        height_samples[static_cast<std::size_t>(i)] = h;
         if (h < min_h)
             min_h = h;
         if (h > max_h)
@@ -394,7 +394,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     const float chunk_min_y = static_cast<float>(cc.y) * static_cast<float>(CHUNK_SIZE_Y);
     const float chunk_max_y = static_cast<float>(cc.y + 1) * static_cast<float>(CHUNK_SIZE_Y);
     const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
-    const float center_height = chunk.heightmap_data[center_index];
+    const float center_height = chunk.heightmap_data[static_cast<std::size_t>(center_index)];
     if (center_height < chunk_min_y || center_height >= chunk_max_y) {
         return;
     }
@@ -897,7 +897,8 @@ float PhysicsSystem::calculate_audio_occlusion(const glm::vec3& source,
     }
 
     // Reduce occlusion if we have alternative paths
-    float path_factor = 1.0f - (static_cast<float>(clear_paths) / offsets.size() * 0.6f);
+    float path_factor =
+        1.0f - (static_cast<float>(clear_paths) / static_cast<float>(offsets.size()) * 0.6f);
     total_occlusion *= path_factor;
 
     return std::clamp(total_occlusion, 0.0f, 0.95f); // Max 95% occlusion

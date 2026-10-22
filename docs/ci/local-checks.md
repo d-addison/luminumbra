@@ -82,8 +82,10 @@ hand. A failed snapshot leaves a partial cache; retry into a new empty cache.
 FastNoise and the RenderDoc header are committed locally. Keep Diligent, Tracy,
 GNS and Steam disabled for this baseline. Changes to those configurations need
 separately provisioned dependency profiles; Steam needs an owner-provided SDK.
-The baseline database cannot validate disabled configurations. A changed TU
-missing from that database fails explicitly.
+The baseline database cannot validate disabled configurations. A changed source
+fails explicitly when neither a database entry nor a configured translation
+unit's dependency closure consumes it. Sources included only by unconfigured
+translation units also fail.
 
 ## Worker recipe
 
@@ -250,8 +252,10 @@ Other pass-through, unknown separate-value options and MSVC/clang-cl driver
 syntax are refused, including plugins, specs, tool wrappers, profile-data paths
 and response files.
 There is no cached dependency graph. Each invocation reports selected files,
-variant/scan counts, scope, selection time and check time. No-native selections
-report success.
+variant/scan counts, scope, selection time and check time. `included_sources`
+lists first-party source inputs without their own database entries that the
+ordinary or analyzer scans prove are consumed. No-native selections report
+success.
 
 Compile commands retain configuration/determinism options and replace object
 and dependency outputs with isolated scratch objects; objects are removed on
@@ -367,24 +371,143 @@ Each command variant gets a
 separate temporary database so all target-specific configurations are analyzed.
 Failed compiler or tidy processes return nonzero with their diagnostics.
 
+## Fast hosted validation
+
+`Fast compile / GCC + clang-tidy` runs on a standard `ubuntu-24.04` runner,
+including draft pull requests, with a separate 20-minute timeout. It starts
+as a non-required check while warning baselines and duration are calibrated.
+Existing native lanes, full-tree tidy and draft merge guards remain authoritative.
+A successful fast result never substitutes for them. Ordinary small changes
+target ten minutes; shared-header changes can select the full configured tree
+and exceed the replay budget described below.
+
+The job uses `tools/ci/changed_tus.py route` against the locally fetched merge
+base (pull-request base SHA or push predecessor). Only paths already proven
+non-native by `tools/ci/ci_paths.py` qualify for an explicit
+`No native work: verified documentation/Python-only changes` success. Python
+CI infrastructure, generators and unknown files take the native path. Missing
+history and empty diffs require conservative full selection; manual runs use
+that path too. Routing does not fetch or change the existing lane classifier.
+
+For native work the job installs Linux configuration dependencies plus GCC,
+Clang 18, clang-tidy 18 and ccache. It configures separate
+Release GCC and Clang compile databases with tests exposed and Diligent off.
+Configuration generates engine/stb headers; the only build target is `glad`
+for its generated headers. It does not link engine/test targets or run CTest.
+The `ci` command shares the local dependency selector, scans ordinary and
+analyzer contexts and unions both compiler selections. Within the replay budget
+it replays all variants of every selected file. Each compiler's dependency scan
+must prove consumption of changed sources, including included `.cpp` inputs
+without their own database entries. A changed source with no configured consumer
+fails with `missing compile database entry (possibly disabled configuration)`;
+this includes standalone sources and sources included only by absent targets.
+A cross-selected TU missing from either database also fails visibly.
+The `gcc_unconfigured_sources` and `clang_unconfigured_sources` report fields
+list tracked first-party sources with neither their own entry nor a proven
+consumer in that compiler's scans. Included sources with proven consumers are
+excluded. Unsupported platforms/backends retain their specialized full gates.
+
+The single default `CI_REPLAY_VARIANT_BUDGET` in `tools/ci/changed_tus.py` is
+5 total command variants across GCC and Clang, counted after union and target
+expansion. Selection, coverage, command admission and fingerprint checks run
+after the cheap dependency scans and before expensive replay or the budget
+decision. Missing-consumer refusals still fail when full selection would exceed
+the replay budget. Above 5 variants the lane reports `status: deferred`,
+the selected count and budget, and states that the selection exceeds the
+fast-lane budget and is deferred to the full required builds. Only that explicit
+over-budget decision can turn omitted replay into success; refusals, missing
+database entries, unreadable or malformed inputs, publication failures and
+compiler/tidy failures remain failures. At or below 5 variants replay proceeds.
+Dependency scans remain exhaustive; the budget bounds replay work only.
+
+The sizing estimate is 60 CPU-seconds per GCC compile and 90 CPU-seconds per
+tidy configuration, with two tidy configurations per Clang variant. Five total
+variants allow at most 7 replay minutes on two vCPUs, including partially
+occupied worker batches: a nonempty union requires at least one variant in each
+compiler database. This leaves roughly five minutes for other work in a
+12-minute target; the job timeout stays 20 minutes. These are estimates, not
+completed per-variant measurements; hosted duration qualification is pending.
+
+GCC compiles use isolated scratch object paths. The first-party CMake helper
+adds the private `LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1` definition for every
+configuration and compiler. CI reads that definition from each command variant:
+helper targets use the shared `msvc-approx` profile and independently make
+all/extra/pedantic, shadow=global, conversion, sign-conversion, narrowing, unused
+and missing-field-initializers fatal, even when a target already configures a
+warning family. Other targets remain selected and replay only their normal
+compile-database flags, including their own fatal/nonfatal warning policy.
+Source ownership does not imply helper membership; variants of the same file
+can have different policies. Unsupported marker values or undefines refuse
+before compilation. Reconfigure existing databases to include the marker.
+CI accepts the first-party CMake helper's `-Wno-error=unused-parameter`, then
+appends `-Werror=unused-parameter`: that helper's MSVC `/W4 /WX` policy enforces
+C4100 without an exception. Local calibration preserves the original demotion.
+For helper targets, CI conservatively refuses other per-diagnostic disables
+and demotions because subgroup precedence can defeat group enforcement.
+Entirely warning-disabled helper commands are also refused. The fast lane never
+reads or writes warning-calibration baselines and adds no diagnostic suppressions.
+MSVC remains necessary to validate C4456–C4459 and native conversion diagnostics.
+
+Each selected Clang command variant gets an isolated temporary database.
+clang-tidy-18 (falling back to clang-tidy) first runs the repository `.clang-tidy`
+configuration, whose additional findings remain advisory; parsing/tool failures
+still fail the lane. It also runs the curated fatal configuration through
+`scripts/tidy.sh --files0-from FILE`. That option accepts a strict NUL-terminated
+list of existing first-party sources present in the database, preserves unusual
+filenames, rejects malformed/missing/outside-checkout entries, and cannot be
+combined with `--changed-from`. An explicitly empty list succeeds. The CI
+orchestrator allows at most four workers and uses two; each per-variant shell
+gate uses one worker. Temporary databases, manifests and objects are removed
+on success and failure. The existing full-scope tidy invocation is unchanged.
+
+There are no new Actions cache restores, saves or remote cache prefixes.
+Runner-local ccache has a separate directory and a 250 MB maximum. Its namespace
+includes compiler version/path identity, Release configuration, resolved ordered
+arguments and working directories, the fatal warning profile, build/dependency
+CMake content, the dependency lock and selector/tidy policy content. ccache's
+own keys additionally cover compiler content and preprocessed dependencies.
+No result cache can omit selection scans or tidy. This adds zero remote storage
+to the existing at-most-10-GB Actions policy and requires no retention-prefix
+registration. Selected files, every command variant (working directory and
+command digest; full arguments in the log), unsupported configurations,
+scan/compile/tidy timings and local cache statistics appear in the job summary,
+including failure diagnostics when validation fails. A combined command
+fingerprint covers both compiler contexts, effective GCC warning flags and both
+tidy policy files. The `--evidence-file` JSON records the same result, including
+deferrals, and is uploaded under the native-route condition even after failure.
+Evidence is published atomically from a temporary file closed before replacement;
+failed serialization, writes or replacement preserve prior evidence. Summary or
+evidence publication failure fails the lane.
+
+Hosted validation is still needed for dependency provisioning, generated headers,
+real GCC/Clang warning baselines, both tidy configurations, duration on small
+and shared-header changes, and actual ccache resource usage. Mocked helper tests
+do not establish native success.
+
 ## Python helper checks
 
 These checks use stdlib Python, local Git fixtures and mocked compiler/tidy/network execution. They
 do not require configuration, native compilation, linking or a test runner.
 Their fixtures live under `scratch/` and are removed on completion. Use a
-fresh temporary directory and remove it after both suites:
+fresh temporary directory and remove it after the suites:
 
 ```bash
 mkdir -p scratch/helper-check-tmp
 export TMPDIR="$PWD/scratch/helper-check-tmp"
 nice -n 10 python3 -I -B tools/ci/test_changed_tus.py
 nice -n 10 python3 -I -B tools/ci/test_offline_deps.py
+nice -n 10 python3 -I -B tools/ci/test_tidy_shard.py
+nice -n 10 python3 -I -B tools/ci/test_workflow_policy.py
 rmdir scratch/helper-check-tmp
 ```
 
-Both suites are registered in `tools/CMakeLists.txt` and in the standalone
+The selector and dependency suites are registered in `tools/CMakeLists.txt` and in the standalone
 Python plan in `tools/ci/ci_paths.py`. Their CI infrastructure paths retain
 native qualification routing.
+
+The selector regressions also run in the fast lane; shell-selection and
+workflow-policy regressions run in the public-tree job. Shell tests isolate PATH and record every analyzer
+invocation, including tool fallback and failure propagation.
 
 ## Acceptance inventory checks
 

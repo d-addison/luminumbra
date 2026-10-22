@@ -185,7 +185,7 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
     pred(-6.0f, 9.0f);
     pred(6.0f, 9.0f);
     for (int i = 0; i < 6; ++i)
-        prey(-7.0f + i * 2.4f, -2.0f);
+        prey(-7.0f + static_cast<float>(i) * 2.4f, -2.0f);
 }
 
 //  spawn a deterministic PLANT roster so the headless smoke exercises the plant

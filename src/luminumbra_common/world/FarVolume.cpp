@@ -279,7 +279,7 @@ bool ValidCompatibilityTile(const FarVolumeTile& tile, FarCaveMode caves) {
                     if (other == tile.bricks.end() || other->origin_meters != key)
                         continue;
                     const auto index = [](int x, int y, int z) {
-                        return x + 5 * (y + 5 * z);
+                        return static_cast<std::size_t>(x + 5 * (y + 5 * z));
                     };
                     for (int z = std::max(0, dz * 4); z <= std::min(4, dz * 4 + 4); ++z)
                         for (int y = std::max(0, dy * 4); y <= std::min(4, dy * 4 + 4); ++y)

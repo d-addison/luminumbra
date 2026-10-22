@@ -796,7 +796,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 const float x0 = anchor.x - N * sp * 0.5f, z0 = anchor.z - N * sp * 0.5f;
                 for (int iz = 0; iz < N; ++iz)
                     for (int ix = 0; ix < N; ++ix) {
-                        const float cx = x0 + ix * sp, cz = z0 + iz * sp;
+                        const float cx = x0 + static_cast<float>(ix) * sp,
+                                    cz = z0 + static_cast<float>(iz) * sp;
                         const auto e = reg.create();
                         auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                         tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
@@ -1183,8 +1184,11 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                     (g_app.hud.farmSelectedSpecies + 1) % static_cast<int>(n);
                 if (audioManager)
                     audioManager->PlayOneShot2D("ui_button_click");
-                LUMINUMBRA_CORE_INFO("Farm: selected species '{}'",
-                                     g_app.hud.farmSpecies.all()[g_app.hud.farmSelectedSpecies].id);
+                LUMINUMBRA_CORE_INFO(
+                    "Farm: selected species '{}'",
+                    g_app.hud.farmSpecies
+                        .all()[static_cast<std::size_t>(g_app.hud.farmSelectedSpecies)]
+                        .id);
             }
             g_app.interactions.farmCycleSpecies = fv_now;
         }
@@ -2306,7 +2310,9 @@ int main(int argc, char* argv[]) {
     if (!game_asset_startup_error.empty())
         LUMINUMBRA_CORE_WARN("{}", game_asset_startup_error);
     renderPipeline.enable_static_model_content(game_asset_startup_error.empty());
-    if (!graphics_ready || !renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
+    if (!graphics_ready || !renderPipeline.startup(static_cast<Luminumbra::u32>(framebufferWidth),
+                                                   static_cast<Luminumbra::u32>(framebufferHeight),
+                                                   root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed",
                                        &jobSystem,
@@ -3887,7 +3893,10 @@ int main(int argc, char* argv[]) {
                     float maxScent = 0.0f;
                     for (int z = 0; z < n; ++z) {
                         for (int x = 0; x < n; ++x) {
-                            const std::size_t i = (static_cast<std::size_t>(z) * n + x) * 2;
+                            const std::size_t i =
+                                (static_cast<std::size_t>(z) * static_cast<std::size_t>(n) +
+                                 static_cast<std::size_t>(x)) *
+                                2;
                             const float food = static_cast<float>(sf->Sample(2, x, z));
                             const float home = static_cast<float>(sf->Sample(3, x, z));
                             g_app.foragers.scentMirror.rg[i + 0] = food;
@@ -3940,8 +3949,8 @@ int main(int argc, char* argv[]) {
                                g_app.loading.initial_chunks_to_load.size() &&
                            static_cast<int>(batch_to_generate.size()) < JOBS_PER_FRAME) {
                         batch_to_generate.push_back(
-                            g_app.loading.initial_chunks_to_load
-                                [batch_start_index + static_cast<int>(batch_to_generate.size())]);
+                            g_app.loading.initial_chunks_to_load[static_cast<std::size_t>(
+                                batch_start_index + static_cast<int>(batch_to_generate.size()))]);
                     }
                     if (!batch_to_generate.empty()) {
                         gameSession->GetWorldSystem()->dispatch_generation_jobs(batch_to_generate);
@@ -3958,10 +3967,11 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                float progress = g_app.loading.initial_chunks_to_load.empty()
-                                     ? 1.0f
-                                     : static_cast<float>(g_app.loading.generation_dispatch_index) /
-                                           g_app.loading.initial_chunks_to_load.size();
+                float progress =
+                    g_app.loading.initial_chunks_to_load.empty()
+                        ? 1.0f
+                        : static_cast<float>(g_app.loading.generation_dispatch_index) /
+                              static_cast<float>(g_app.loading.initial_chunks_to_load.size());
 
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f); // Dark blue background
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -5030,14 +5040,15 @@ int main(int argc, char* argv[]) {
                                             static_cast<std::uint32_t>(vw) &&
                                         renderPipeline.screen_height() ==
                                             static_cast<std::uint32_t>(vh)) {
-                                        pos_rgb16f.resize(static_cast<std::size_t>(vw) * vh * 3u);
+                                        pos_rgb16f.resize(static_cast<std::size_t>(vw) *
+                                                          static_cast<std::size_t>(vh) * 3u);
                                         glBindTexture(GL_TEXTURE_2D, gb_h.position_texture);
                                         glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                         glGetTexImage(
                                             GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, pos_rgb16f.data());
                                         if (gb_h.albedo_texture != 0) {
-                                            albedo_rgb8.resize(static_cast<std::size_t>(vw) * vh *
-                                                               3u);
+                                            albedo_rgb8.resize(static_cast<std::size_t>(vw) *
+                                                               static_cast<std::size_t>(vh) * 3u);
                                             glBindTexture(GL_TEXTURE_2D, gb_h.albedo_texture);
                                             glGetTexImage(GL_TEXTURE_2D,
                                                           0,
@@ -5228,7 +5239,8 @@ int main(int argc, char* argv[]) {
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
                 glReadBuffer(GL_BACK);
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 3u);
+                std::vector<unsigned char> pixels(static_cast<size_t>(width) *
+                                                  static_cast<size_t>(height) * 3u);
                 glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
                 WritePixelBufferPpm(
                     std::filesystem::path(g_app.capture.render_benchmark_screenshot),

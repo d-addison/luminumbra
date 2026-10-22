@@ -2892,7 +2892,7 @@ void RenderPipeline::execute_stage_shadow(const Camera& camera) {
         shadow_input.glass_items = &m_glass_pane_items;
         shadow_input.glass_vao = m_glass_quad_vao;
         const auto shadow_stats = m_shadow_pass->execute(shadow_ctx, shadow_input);
-        for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
+        for (std::size_t i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
             m_last_render_pass_stats.shadow_cascade_visible_chunks[i] =
                 shadow_stats[i].visible_chunks;
             m_last_render_pass_stats.shadow_cascade_draws[i] += shadow_stats[i].draws;
@@ -5009,7 +5009,7 @@ void RenderPipeline::init_terrain_textures() {
                  GL_UNSIGNED_BYTE,
                  nullptr);
     for (int i = 0; i < layer_count; ++i) {
-        upload_layer(assets[i].albedo, i, /*is_normal=*/false);
+        upload_layer(assets[static_cast<std::size_t>(i)].albedo, i, /*is_normal=*/false);
     }
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -5033,7 +5033,7 @@ void RenderPipeline::init_terrain_textures() {
                  GL_UNSIGNED_BYTE,
                  nullptr);
     for (int i = 0; i < layer_count; ++i) {
-        upload_layer(assets[i].normal, i, /*is_normal=*/true);
+        upload_layer(assets[static_cast<std::size_t>(i)].normal, i, /*is_normal=*/true);
     }
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -6073,8 +6073,9 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
     std::vector<glm::mat4> matrices;
     matrices.reserve(ShadowMap::CASCADE_COUNT);
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; i++) {
-        float split_near = (i == 0) ? camera.GetNearPlane() : shadow_map.cascade_splits[i];
-        float split_far = shadow_map.cascade_splits[i + 1];
+        float split_near = (i == 0) ? camera.GetNearPlane()
+                                    : shadow_map.cascade_splits[static_cast<std::size_t>(i)];
+        float split_far = shadow_map.cascade_splits[static_cast<std::size_t>(i + 1)];
         glm::mat4 proj = ReversedZPerspective(glm::radians(camera.Zoom),
                                               (float)m_screen_width / (float)m_screen_height,
                                               split_near,
@@ -6086,7 +6087,7 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
         glm::vec3 center = glm::vec3(0.0f);
         for (const auto& v : corners)
             center += glm::vec3(v);
-        center /= corners.size();
+        center /= static_cast<float>(corners.size());
         // moon-shadows: the single shadow cascade follows whichever luminary is
         // ABOVE the horizon. By day the sun direction is used (unchanged). Once the
         // sun drops below the horizon its direction is degenerate (points up, would

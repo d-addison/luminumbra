@@ -91,6 +91,8 @@ endif()
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/include"
+)
+target_include_directories(luminumbra_common SYSTEM PUBLIC
     "${CMAKE_SOURCE_DIR}/vendor"
 )
 

@@ -324,13 +324,14 @@ AudioPropagationSystem::AnalyzeEnvironment(const glm::vec3& position, float anal
         }
     }
 
-    analysis.is_enclosed = (enclosed_rays > sample_directions.size() * 0.5f);
+    analysis.is_enclosed =
+        (static_cast<float>(enclosed_rays) > static_cast<float>(sample_directions.size()) * 0.5f);
 
     if (analysis.is_enclosed) {
-        float avg_wall_distance = total_distance / sample_directions.size();
+        float avg_wall_distance = total_distance / static_cast<float>(sample_directions.size());
         analysis.room_volume = avg_wall_distance * avg_wall_distance * avg_wall_distance * 2.0f;
         analysis.surface_area = avg_wall_distance * avg_wall_distance * 6.0f;
-        analysis.avg_absorption = total_absorption / std::max(1, enclosed_rays);
+        analysis.avg_absorption = total_absorption / static_cast<float>(std::max(1, enclosed_rays));
         analysis.rt60_estimate =
             CalculateRT60(analysis.room_volume, analysis.surface_area, analysis.avg_absorption);
     } else {

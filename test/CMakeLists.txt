@@ -65,6 +65,8 @@ target_compile_definitions(asset_processor_round_trip_test PRIVATE
 target_include_directories(asset_processor_round_trip_test PRIVATE
 ../src
 ../tools
+)
+target_include_directories(asset_processor_round_trip_test SYSTEM PRIVATE
 ../vendor/cgltf
 ../third_party/cgltf
 ../third_party/meshoptimizer/src

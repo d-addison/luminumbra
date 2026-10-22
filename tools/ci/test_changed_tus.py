@@ -25,6 +25,94 @@ tus = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(tus)
 
 
+class DependencyIncludesTests(unittest.TestCase):
+    def test_common_dependencies_export_system_headers_to_all_consumers(self):
+        vendor = (ROOT / "vendor/CMakeLists.txt").read_text(encoding="utf-8")
+        common = (ROOT / "src/luminumbra_common/CMakeLists.txt").read_text(encoding="utf-8")
+        # Exercise the production export commands without fetching dependencies,
+        # probing a compiler, compiling a translation unit or running native code.
+        exports = re.search(r"foreach\(_common_dependency\b.*?endforeach\(\)", vendor, re.S)
+        self.assertIsNotNone(exports)
+        dependencies = ("EnTT", "Jolt", "nlohmann_json", "sol2", "lua", "spdlog",
+                        "lz4_static", "glm", "FastNoise")
+        aliases = {"EnTT": "entt", "lz4_static": "lz4"}
+        links = re.search(r"target_link_libraries\(luminumbra_common PUBLIC(.*?)\)", common, re.S)
+        self.assertIsNotNone(links)
+        self.assertEqual(links[1].split(), [aliases.get(name, name) for name in dependencies])
+        # Fetched tool/client dependencies must follow the same export policy.
+        # In particular meshoptimizer is declared by MakeAvailable before this
+        # loop; testing only common-library links would miss its headers.
+        self.assertLess(vendor.index("FetchContent_MakeAvailable(EnTT "), exports.start())
+        dependencies += ("meshoptimizer", "rmlui_core", "rmlui_debugger", "glfw",
+                         "miniaudio", "soil2", "glad")
+        with tempfile.TemporaryDirectory(prefix="dependency includes ") as temporary:
+            source = Path(temporary).resolve()
+            build = source / "build"
+            project = ["cmake_minimum_required(VERSION 3.20)",
+                       "project(DependencyIncludes LANGUAGES NONE)"]
+            # Optional dependencies may all be absent; the guarded export must
+            # configure successfully before any of these targets exists too.
+            project.append(exports[0])
+            for name in dependencies:
+                project += [f"add_library({name} INTERFACE)",
+                            f"target_include_directories({name} INTERFACE "
+                            f'"$<BUILD_INTERFACE:${{CMAKE_CURRENT_SOURCE_DIR}}/{name}>" '
+                            f'"$<INSTALL_INTERFACE:include/{name}>")']
+            project.append(exports[0])
+            # Late-added paths model generated overlays such as Jolt's startup
+            # headers. Exporting a snapshot would silently miss these paths.
+            for name in dependencies:
+                project += [f'target_include_directories({name} INTERFACE '
+                            f'"${{CMAKE_CURRENT_BINARY_DIR}}/{name}")',
+                            f'file(GENERATE OUTPUT "${{CMAKE_CURRENT_BINARY_DIR}}/{name}.txt" '
+                            f'CONTENT "$<TARGET_PROPERTY:{name},INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>")']
+            project += ["add_library(first_party INTERFACE)",
+                        'target_include_directories(first_party INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/src")',
+                        'file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/first_party.txt" '
+                        'CONTENT "$<TARGET_PROPERTY:first_party,INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>")']
+            (source / "CMakeLists.txt").write_text("\n".join(project) + "\n", encoding="utf-8")
+            subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja"],
+                           check=True, capture_output=True, text=True, timeout=10)
+            for name in dependencies:
+                with self.subTest(dependency=name):
+                    self.assertEqual((build / f"{name}.txt").read_text(encoding="utf-8").split(";"),
+                                     [(source / name).as_posix(), (build / name).as_posix()])
+            self.assertEqual((build / "first_party.txt").read_text(encoding="utf-8"), "")
+
+    def test_asset_round_trip_vendor_search_paths_are_system_includes(self):
+        source = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        blocks = re.findall(
+            r"target_include_directories\(asset_processor_round_trip_test\s+(.*?)\)",
+            source, re.S)
+        system_paths = [path for block in blocks if block.startswith("SYSTEM PRIVATE")
+                        for path in block.split()[2:]]
+        regular_paths = [path for block in blocks if block.startswith("PRIVATE")
+                         for path in block.split()[1:]]
+        for path in ("../vendor/cgltf", "../third_party/cgltf", "../third_party/meshoptimizer/src",
+                     "../external/cgltf", "../external/meshoptimizer/src"):
+            with self.subTest(path=path):
+                self.assertIn(path, system_paths)
+                self.assertNotIn(path, regular_paths)
+        for path in ("../src", "../tools"):
+            with self.subTest(path=path):
+                self.assertIn(path, regular_paths)
+                self.assertNotIn(path, system_paths)
+
+    def test_common_and_client_vendor_roots_are_system_includes(self):
+        for path, target in (("src/luminumbra_common/CMakeLists.txt", "luminumbra_common"),
+                             ("src/CMakeLists.txt", "luminumbra_client")):
+            with self.subTest(target=target):
+                source = (ROOT / path).read_text(encoding="utf-8")
+                source = re.sub(r"#[^\n]*", "", source)
+                blocks = re.findall(r"target_include_directories\(" + target + r"\s+(.*?)\)",
+                                    source, re.S)
+                vendor = '"${CMAKE_SOURCE_DIR}/vendor"' if target == "luminumbra_common" else "${CMAKE_SOURCE_DIR}/vendor"
+                self.assertTrue(any(block.startswith("SYSTEM PUBLIC") and vendor in block.split()
+                                    for block in blocks))
+                self.assertFalse(any(not block.startswith("SYSTEM") and vendor in block.split()
+                                     for block in blocks))
+
+
 class ChangedTranslationUnitsTests(unittest.TestCase):
     def test_windows_reparse_entries_are_refused_by_every_tree_consumer(self):
         real_lstat = os.lstat
@@ -1485,6 +1573,18 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         # from the same helper CI configures with warnings-as-errors enabled.
         return re.findall(r"(?<!\S)-W[a-zA-Z0-9=-]+", policy[1])
 
+    def cmake_policy_marker(self):
+        text = (ROOT / "CMakeLists.txt").read_text()
+        helper = re.search(r"function\(luminumbra_configure_first_party_target\b(.*?)endfunction\(\)",
+                           text, re.S)[1]
+        definitions = re.search(r"target_compile_definitions\(\$\{TARGET_NAME\} PRIVATE(.*?)\)",
+                                helper, re.S)
+        self.assertIsNotNone(definitions)
+        self.assertIn("LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1", definitions[1].split())
+        # The private marker applies to both compiler branches and every config.
+        self.assertLess(definitions.end(), helper.index("if(MSVC)"))
+        return "-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1"
+
     def warning_options(self, command):
         return [arg for arg in command if arg.startswith("-W") or arg in {"-w", "-pedantic", "-pedantic-errors"}]
 
@@ -2217,6 +2317,830 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             self.assertEqual(len({r["command_fingerprint"] for r in reports}), 3)
         with patch.object(tus, "changed_paths", side_effect=tus.SelectionError("incomplete")):
             self.assertEqual(tus.main(["compile", "--build-dir", str(self.build)]), 1)
+
+
+    def ci_args(self, **updates):
+        values = dict(jobs=2, build_dir=self.build, clang_build_dir=self.build,
+                      base_ref="base", full_selection=False, summary_file=self.root / "summary.md",
+                      evidence_file=self.root / "evidence.json")
+        values.update(updates)
+        return argparse.Namespace(**values)
+
+    def run_ci(self, changed=None, missing_tools=(), tracked=None, **updates):
+        failure = changed if isinstance(changed, Exception) else None
+        paths = set([self.a] if changed is None else changed) if failure is None else set()
+        with patch.object(tus, "changed_paths", return_value=paths, side_effect=failure), \
+                patch.object(tus.subprocess, "check_output", return_value=b"".join(
+                    os.fsencode(p.relative_to(self.root)) + b"\0" for p in (tracked or [self.a]))), \
+                patch.object(tus.shutil, "which", side_effect=lambda name: None if name in missing_tools else "/bin/" + name), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return tus.ci_checks(self.ci_args(**updates), self.root)
+
+    def test_ci_tidy_retains_local_replay_and_configuration_admission(self):
+        work = self.root / "tidy work"
+        work.mkdir()
+        entry = self.entries()[0]
+        for point in ("configuration", "replay"):
+            self.commands.clear()
+            failure = tus.SelectionError("reparse point refused")
+            with self.subTest(point=point), \
+                    patch.object(tus.shutil, "which", return_value="clang-tidy-18"), \
+                    patch.object(tus, "checked_resolve", side_effect=failure if point == "configuration" else None,
+                                 wraps=tus.checked_resolve), \
+                    patch.object(tus, "replay_arguments", side_effect=failure) as replay:
+                with self.assertRaisesRegex(tus.SelectionError, "reparse point"):
+                    tus.ci_tidy(self.root, [entry], work, 2)
+                self.assertEqual(replay.call_count, 0 if point == "configuration" else 1)
+                self.assertEqual(self.commands, [])
+                self.assertEqual(list(work.iterdir()), [])
+
+    def test_ci_rejects_reparse_roots_and_builds_before_resolution(self):
+        real_lstat = os.lstat
+        entries = self.entries()
+        for target in (self.root, self.build):
+            def metadata(path, *args, **kwargs):
+                info = real_lstat(path, *args, **kwargs)
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                fields["st_file_attributes"] = 0x400 if Path(path) == target else 0
+                return SimpleNamespace(**fields)
+
+            with self.subTest(target=target), \
+                    patch.object(tus._DEPS._PATH_SAFETY, "WINDOWS", True), \
+                    patch.object(os, "lstat", side_effect=metadata):
+                if target == self.root:
+                    for command in ("route", "ci"):
+                        with patch.object(tus, "ci_route") as route, \
+                                patch.object(tus, "ci_checks") as checks, redirect_stderr(io.StringIO()):
+                            self.assertEqual(tus.main([command, "--root", str(self.root)]), 1)
+                        route.assert_not_called()
+                        checks.assert_not_called()
+                else:
+                    for label in ("build_dir", "clang_build_dir"):
+                        # Stub dependency selection so admission can reach
+                        # the second context without launching any tool.
+                        safe = self.root / "safe build"
+                        safe.mkdir(exist_ok=True)
+                        (safe / "compile_commands.json").write_text("[]")
+                        with patch.object(tus, "select", return_value=([], {})), \
+                                patch.object(tus, "read_database", return_value=entries) as read:
+                            options = {"build_dir": safe, "clang_build_dir": safe, label: self.build}
+                            self.assertEqual(self.run_ci(**options), 1)
+                        self.assertEqual(read.call_count, 0 if label == "build_dir" else 1)
+                        self.assertIn("reparse point", (self.root / "summary.md").read_text())
+                self.assertEqual(self.commands, [])
+
+    def test_ci_route_only_proven_docs_python_skip_and_uncertainty_validates(self):
+        output = self.root / "route.txt"
+        args = self.ci_args(output=output)
+        cases = [({self.root / "docs/guide.md", self.root / "tools/audio/bank_validate.py"}, False),
+                 ({self.a}, True), ({self.root / "unreviewed.py"}, True),
+                 ({self.root / "tools/ci/changed_tus.py"}, True), (set(), True)]
+        for paths, native in cases:
+            output.write_text("")
+            with patch.object(tus, "changed_paths", return_value=paths), redirect_stdout(io.StringIO()):
+                self.assertEqual(tus.ci_route(args, self.root), 0)
+            self.assertIn(f"native={str(native).lower()}", output.read_text())
+        with patch.object(tus, "changed_paths", side_effect=tus.SelectionError("history unavailable")), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(tus.ci_route(args, self.root), 0)
+        self.assertTrue(output.read_text().endswith("native=true\nfull=true\n"))
+        self.assertIn("uncertain diff", args.summary_file.read_text())
+        self.assertIn("No native work", args.summary_file.read_text())
+        self.assertEqual(self.commands, [])
+
+    def test_ci_non_policy_commands_replay_normal_flags_for_both_drivers(self):
+        for driver in ("g++", "clang++"):
+            for flags in ([], ["-Werror"], self.cmake_warning_flags(),
+                          ["-w"], ["-Wno-everything"], ["-Wno-error=conversion"]):
+                with self.subTest(driver=driver, flags=flags):
+                    entry = self.entries()[0]
+                    entry["arguments"][0] = driver
+                    entry["arguments"] += flags
+                    before = list(entry["arguments"])
+                    command = tus.compile_command(entry, self.build / "ci.o", True,
+                                                  "msvc-approx", True)
+                    self.assertEqual(command, ["ccache", *tus.clean_arguments(before),
+                                               "-c", "-o", str(self.build / "ci.o")])
+                    self.assertEqual(entry["arguments"], before)
+                    self.assertEqual(self.commands, [])
+
+    def test_ci_policy_marker_uses_definitions_and_refuses_unknown_metadata(self):
+        marker = self.cmake_policy_marker()[2:]
+        for flags in (["-D" + marker], ["-D", marker]):
+            with self.subTest(flags=flags):
+                entry = dict(self.entries()[0])
+                entry["arguments"] = [*entry["arguments"], *flags]
+                self.assertTrue(tus.first_party_warning_policy(entry))
+                command = tus.compile_command(entry, self.build / "ci.o", fatal_profile=True)
+                self.assertIn("-Werror=conversion", command)
+        for flags in (["-DOTHER=" + marker], ["-I", marker],
+                      ["-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY_EXTRA=1"]):
+            with self.subTest(flags=flags):
+                entry = self.entries()[0]
+                entry["arguments"] += flags
+                self.assertFalse(tus.first_party_warning_policy(entry))
+        name = marker.split("=", 1)[0]
+        for definition in (name, name + "=", name + "=0", name + "=2", name + "=1=2"):
+            for flags in (["-D" + definition], ["-D", definition]):
+                with self.subTest(flags=flags):
+                    entry = self.entries()[0]
+                    entry["arguments"] += ["-D" + marker, *flags]
+                    before = list(entry["arguments"])
+                    with self.assertRaisesRegex(tus.SelectionError, "unsupported first-party warning policy"):
+                        tus.compile_command(entry, self.build / "ci.o", fatal_profile=True)
+                    self.assertEqual(entry["arguments"], before)
+        for flags in (["-U" + name], ["-U", name], ["-D"], ["-I", "-D" + marker]):
+            with self.subTest(flags=flags):
+                entry = self.entries()[0]
+                entry["arguments"] += flags
+                with self.assertRaises(tus.SelectionError):
+                    tus.compile_command(entry, self.build / "ci.o", fatal_profile=True)
+        self.assertEqual(self.commands, [])
+
+    def test_ci_mixed_policy_variants_of_same_source_are_both_replayed(self):
+        self.raw = [self.raw_entry(self.a),
+                    self.raw_entry(self.a, [self.cmake_policy_marker(), *self.cmake_warning_flags()])]
+        self.save_db()
+        self.assertEqual(self.run_ci(), 0)
+        compiles = [c for c, _ in self.commands if c[0] == "ccache"]
+        self.assertEqual(len(compiles), 2)
+        normal = [c for c in compiles if self.cmake_policy_marker() not in c]
+        strict = [c for c in compiles if self.cmake_policy_marker() in c]
+        self.assertEqual(len(normal), 1)
+        self.assertEqual(len(strict), 1)
+        self.assertEqual(normal[0][1:-3], tus.clean_arguments(self.raw[0]["arguments"]))
+        self.assertIn("-Werror=conversion", strict[0])
+        self.assertEqual(sum("--files0-from" in c for c, _ in self.commands), 2)
+        # Cache identity covers the effective command and the policy marker.
+        entries = self.entries()
+        normal_key = tus.ci_cache_key(self.root, entries[:1], [])
+        strict_key = tus.ci_cache_key(self.root, entries[1:], [])
+        self.assertNotEqual(normal_key, strict_key)
+
+    def test_ci_unknown_policy_refuses_before_compilation(self):
+        clang_build = self.root / "clang build"
+        clang_build.mkdir()
+        for context in ("gcc", "clang"):
+            with self.subTest(context=context):
+                self.commands.clear()
+                self.save_db()
+                invalid = [dict(raw, arguments=[*raw["arguments"],
+                           "-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY=2"]) for raw in self.raw]
+                database = clang_build / "compile_commands.json"
+                database.write_text(json.dumps(invalid if context == "clang" else self.raw))
+                if context == "gcc":
+                    (self.build / "compile_commands.json").write_text(json.dumps(invalid))
+                namespace = os.environ.get("CCACHE_NAMESPACE")
+                self.assertEqual(self.run_ci(clang_build_dir=clang_build), 1)
+                self.assertIn("unsupported first-party warning policy", (self.root / "summary.md").read_text())
+                self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+                self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+                self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+    def test_ci_fatal_profile_adds_categories_without_changing_local_policy(self):
+        entry = self.entries()[0]
+        entry["arguments"].append(self.cmake_policy_marker())
+        original = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
+        strict = tus.compile_command(entry, self.build / "ci.o", True, "msvc-approx", True)
+        self.assertEqual(strict[0], "ccache")
+        for category in ("all", "extra", "pedantic", "shadow=global", "conversion", "sign-conversion",
+                         "narrowing", "unused", "unused-parameter", "missing-field-initializers"):
+            self.assertIn("-Werror=" + category, strict)
+            self.assertNotIn("-Werror=" + category, original)
+        self.assertNotIn("original.o", strict)
+        self.assertNotIn("original.d", strict)
+        self.assertIn("-ffp-contract=off", strict)
+        for disabled in ("-w", "-Wno-everything"):
+            bad = dict(entry, arguments=entry["arguments"] + [disabled])
+            with self.assertRaisesRegex(tus.SelectionError, "warning-disabled"):
+                tus.compile_command(bad, self.build / "ci.o", True, "msvc-approx", True)
+
+    def test_ci_enforces_every_category_with_preconfigured_warning_families(self):
+        categories = ("all", "extra", "pedantic", "shadow=global", "conversion",
+                      "sign-conversion", "narrowing", "unused", "unused-parameter", "missing-field-initializers")
+        for flags in (["-Wconversion"], ["-Wsign-conversion"], ["-Wnarrowing"],
+                      ["-Wshadow=local"], ["-Werror=conversion"],
+                      ["-Wno-error"], ["-Wno-fatal-errors"],
+                      ["-W" + category for category in categories]):
+            with self.subTest(flags=flags):
+                entry = self.entries()[0]
+                entry["arguments"] += [self.cmake_policy_marker(), *flags]
+                replay = tus.clean_arguments(entry["arguments"])
+                local = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
+                self.assertFalse(any(f.startswith("-Werror=") for f in local[len(replay):-3]))
+                strict = tus.compile_command(entry, self.build / "ci.o", warning_profile="msvc-approx",
+                                             fatal_profile=True)
+                self.assertEqual(strict[:len(replay)], replay)
+                for category in categories:
+                    self.assertIn("-Werror=" + category, strict[len(replay):-3])
+                self.assertEqual(self.commands, [])
+
+    def test_ci_refuses_group_and_subgroup_demotions_without_changing_local_policy(self):
+        # Specific subgroups can defeat a later group flag. Test both orders;
+        # only the repository's exact unused-parameter demotion is accepted.
+        for category in ("all", "extra", "pedantic", "shadow", "shadow-local", "conversion",
+                         "sign-conversion", "float-conversion", "narrowing", "unused",
+                         "unused-parameter", "unused-but-set-variable", "missing-field-initializers",
+                         "sign-compare", "deprecated-declarations"):
+            for prefix in ("-Wno-", "-Wno-error="):
+                flag = prefix + category
+                if flag == "-Wno-error=unused-parameter":
+                    continue
+                for flags in ([flag, "-Wconversion", "-Wunused"], ["-Wconversion", "-Wunused", flag]):
+                    with self.subTest(flags=flags):
+                        entry = self.entries()[0]
+                        entry["arguments"] += [self.cmake_policy_marker(), *flags]
+                        before = list(entry["arguments"])
+                        local = tus.compile_command(entry, self.build / "local.o",
+                                                    warning_profile="msvc-approx")
+                        self.assertIn(flag, local)
+                        with self.assertRaisesRegex(tus.SelectionError, re.escape(flag)):
+                            tus.compile_command(entry, self.build / "ci.o", True, "msvc-approx", True)
+                        self.assertEqual(entry["arguments"], before)
+                        self.assertEqual(self.commands, [])
+
+    def test_ci_warning_enforcement_refusal_reports_failure_before_compiling(self):
+        self.raw[0]["arguments"] += [self.cmake_policy_marker(), "-Wno-error=unused-but-set-variable"]
+        self.save_db()
+        namespace = os.environ.get("CCACHE_NAMESPACE")
+        self.assertEqual(self.run_ci(), 1)
+        summary = (self.root / "summary.md").read_text()
+        self.assertIn('"status": "failed"', summary)
+        self.assertIn("CI cannot enforce fatal warning categories with -Wno-error=unused-but-set-variable", summary)
+        self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+        self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+        self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+    def test_ci_real_cmake_warning_policy_compiles_and_runs_both_tidy_configs(self):
+        flags = self.cmake_warning_flags()
+        self.assertEqual(flags, ["-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                                 "-Wno-error=unused-parameter"])
+        for raw in self.raw:
+            raw["arguments"] = self.raw_entry(Path(raw["file"]),
+                                              [self.cmake_policy_marker(), *flags])["arguments"]
+        self.save_db()
+        original = [list(raw["arguments"]) for raw in self.raw]
+        namespace = os.environ.get("CCACHE_NAMESPACE")
+        for full in (False, True):
+            with self.subTest(full_selection=full):
+                self.commands.clear()
+                self.assertEqual(self.run_ci(full_selection=full), 0)
+                compiles = [c for c, _ in self.commands if c[0] == "ccache"]
+                self.assertEqual(len(compiles), 2 if full else 1)
+                for command in compiles:
+                    self.assertEqual(self.warning_options(command)[:len(flags)], flags)
+                    self.assertGreater(command.index("-Werror=unused-parameter"),
+                                       command.index("-Wno-error=unused-parameter"))
+                self.assertEqual(sum("-p" in c for c, _ in self.commands), len(compiles))
+                self.assertEqual(sum("--files0-from" in c for c, _ in self.commands), len(compiles))
+                self.assertIn('"status": "passed"', (self.root / "summary.md").read_text())
+                self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+                self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+        self.assertEqual([raw["arguments"] for raw in self.raw], original)
+        for entry in self.entries():
+            local = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
+            self.assertIn("-Wno-error=unused-parameter", local)
+            self.assertNotIn("-Werror=unused-parameter", local)
+
+    def test_ci_replays_duplicate_variants_and_both_tidy_configs_and_cleans(self):
+        self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+        self.save_db()
+        databases = []
+        manifests = []
+        def execute(command, directory, check=True):
+            if "-p" in command:
+                db = Path(command[command.index("-p") + 1]) / "compile_commands.json"
+                databases.append(json.loads(db.read_text()))
+            if "--files0-from" in command:
+                manifests.append(Path(command[-1]).read_bytes())
+                self.assertEqual(command[command.index("--jobs") + 1], "1")
+            return self.fake_execute(command, directory, check)
+        with patch.object(tus, "execute", side_effect=execute):
+            self.assertEqual(self.run_ci(), 0)
+        compiles = [c for c, _ in self.commands if c[0] == "ccache"]
+        self.assertEqual(len(compiles), 2)
+        self.assertEqual(len({c[-1] for c in compiles}), 2)
+        self.assertTrue(all(not Path(c[-1]).exists() for c in compiles))
+        self.assertEqual(len(databases), 2)
+        self.assertTrue(all(len(db) == 1 for db in databases))
+        self.assertNotEqual(databases[0][0]["arguments"], databases[1][0]["arguments"])
+        self.assertEqual(manifests, [os.fsencode(self.a) + b"\0"] * 2)
+        summary = (self.root / "summary.md").read_text()
+        for field in ("scan_seconds", "compile_seconds", "tidy_seconds", "command_variants",
+                      "unsupported_configurations", "msvc-approx", "passed"):
+            self.assertIn(field, summary)
+        self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+    def test_ci_union_includes_each_compiler_context_and_all_target_variants(self):
+        self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+        self.save_db()
+        entries = self.entries()
+        def select(root, database, changed, jobs, build):
+            count = getattr(select, "count", 0)
+            select.count = count + 1
+            return ([entries[0]] if count == 0 else [entries[1]]), {}
+        with patch.object(tus, "select", side_effect=select), \
+                patch.object(tus, "read_database", side_effect=[entries, entries[:2]]):
+            self.assertEqual(self.run_ci(), 0)
+        self.assertEqual(len([c for c, _ in self.commands if c[0] == "ccache"]), 3)
+        self.assertEqual(json.loads((self.root / "evidence.json").read_text())["selected_count"], 5)
+
+    def budget_databases(self, clang_variants=3):
+        self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+        self.save_db()
+        clang = self.root / "clang build"
+        clang.mkdir()
+        raw = [dict(record, arguments=["clang++", *record["arguments"][1:]])
+               for record in self.raw[:clang_variants]]
+        (clang / "compile_commands.json").write_text(json.dumps(raw))
+        return clang
+
+    def ci_evidence(self):
+        return json.loads((self.root / "evidence.json").read_text())
+
+    def test_ci_included_source_selects_consumers_before_replay_or_deferral(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included input\n", encoding="utf-8")
+        dormant = self.src / "dormant.cpp"
+        dormant.write_text("// unconfigured input\n", encoding="utf-8")
+        clang = self.root / "clang build"
+        clang.mkdir()
+        execute = self.fake_execute
+
+        def including_execute(command, directory, check=True):
+            result = execute(command, directory, check)
+            # Both ordinary and analyzer-only consumers count, across compilers.
+            if "-M" in command and ((str(self.a) in command and "-D__clang_analyzer__" not in command)
+                                    or (str(self.b) in command and "-D__clang_analyzer__" in command)):
+                result.stdout = result.stdout.rstrip("\n") + " " + str(included).replace(" ", "\\ ") + "\n"
+            return result
+
+        for over_budget in (False, True):
+            if over_budget:
+                self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+                self.save_db()
+            (clang / "compile_commands.json").write_text(json.dumps([
+                dict(record, arguments=["clang++", *record["arguments"][1:]]) for record in self.raw]))
+            self.commands.clear()
+            with self.subTest(over_budget=over_budget), \
+                    patch.object(tus, "execute", side_effect=including_execute):
+                self.assertEqual(self.run_ci([included], tracked=[self.a, self.b, included, dormant],
+                                             clang_build_dir=clang), 0)
+                report = self.ci_evidence()
+                count = 6 if over_budget else 4
+                self.assertEqual(report["status"], "deferred" if over_budget else "passed")
+                self.assertEqual(report["selected_count"], count)
+                self.assertEqual(sum("-M" in c for c, _ in self.commands), 2 * count)
+                self.assertEqual(sum(c[0] == "ccache" for c, _ in self.commands), 0 if over_budget else 2)
+                self.assertEqual(sum("-p" in c for c, _ in self.commands), 0 if over_budget else 2)
+                for label in ("gcc", "clang"):
+                    self.assertEqual(set(report["selected"][label]),
+                                     {p.relative_to(self.root).as_posix() for p in (self.a, self.b)})
+                    self.assertEqual(report[label + "_selection"]["included_sources"], ["src/included.cpp"])
+                    self.assertIn({label + "_unconfigured_sources": ["src/dormant.cpp"]},
+                                  report["unsupported_configurations"])
+                self.assertRegex(report["command_fingerprint"], r"^[0-9a-f]{64}$")
+
+    def test_ci_unconsumed_sources_refuse_even_with_over_budget_selection(self):
+        source = self.src / "unconfigured.cpp"
+        source.write_text("// changed input\n", encoding="utf-8")
+        absent = self.src / "absent.cpp"
+        clang = self.budget_databases()
+        for included_by_absent in (False, True):
+            if included_by_absent:
+                absent.write_text('#include "unconfigured.cpp"\n', encoding="utf-8")
+            for over_budget in (False, True):
+                self.commands.clear()
+                with self.subTest(included_by_absent=included_by_absent, over_budget=over_budget):
+                    # Full selection would choose six variants; admission must
+                    # still fail before the budget can defer their replay.
+                    self.assertEqual(self.run_ci([source], full_selection=over_budget,
+                                                 clang_build_dir=clang), 1)
+                    report = self.ci_evidence()
+                    self.assertEqual(report["status"], "failed")
+                    self.assertEqual(report["error"],
+                                     "missing compile database entry (possibly disabled configuration): "
+                                     + str(Path("src") / "unconfigured.cpp"))
+                    self.assertEqual(sum("-M" in c for c, _ in self.commands), 6)
+                    self.assertTrue(all("-M" in c for c, _ in self.commands))
+                    self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+    def test_ci_included_source_requires_complete_scans_in_each_compiler(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included input\n", encoding="utf-8")
+        clang = self.budget_databases()
+        execute = self.fake_execute
+        for failure in ("unconsumed", "partial", "unreadable", "deadline"):
+            def scan(command, directory, check=True):
+                result = execute(command, directory, check)
+                if "-M" not in command:
+                    return result
+                if command[0] == "clang++":
+                    if failure == "partial":
+                        return subprocess.CompletedProcess(command, 0, "selected-tu: missing.hpp\n", "")
+                    if failure == "unreadable":
+                        raise PermissionError("unreadable included-source scan")
+                    if failure == "deadline":
+                        raise subprocess.TimeoutExpired("included-source scan", 1800)
+                    return result
+                result.stdout = result.stdout.rstrip("\n") + " " + str(included).replace(" ", "\\ ") + "\n"
+                return result
+
+            self.commands.clear()
+            with self.subTest(failure=failure), patch.object(tus, "execute", side_effect=scan):
+                self.assertEqual(self.run_ci([included], full_selection=True, clang_build_dir=clang), 1)
+            report = self.ci_evidence()
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("error", report)
+            self.assertIn("gcc_selection", report)
+            self.assertNotIn("clang_selection", report)
+            self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+
+    def test_local_compile_and_tidy_share_included_source_admission(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included input\n", encoding="utf-8")
+        absent = self.src / "absent.cpp"
+        absent.write_text('#include "included.cpp"\n', encoding="utf-8")
+        for command in ("compile", "tidy"):
+            for consumed in (False, True):
+                def dependencies(entry):
+                    return {entry["file"]} | ({included} if consumed and entry["file"] == self.b else set())
+
+                output, errors = io.StringIO(), io.StringIO()
+                with self.subTest(command=command, consumed=consumed), \
+                        patch.object(tus, "changed_paths", return_value={included}), \
+                        patch.object(tus, "dependencies", side_effect=dependencies), \
+                        patch.object(tus, "run_checks", return_value=[]) as replay, \
+                        redirect_stdout(output), redirect_stderr(errors):
+                    self.assertEqual(tus.main([command, "--root", str(self.root),
+                                               "--build-dir", str(self.build)]), 0 if consumed else 1)
+                    if consumed:
+                        self.assertEqual([e["file"] for e in replay.call_args.args[2]], [self.b])
+                        report = json.loads(output.getvalue().splitlines()[0])
+                        self.assertEqual(report["included_sources"], ["src/included.cpp"])
+                    else:
+                        replay.assert_not_called()
+                        self.assertIn("missing compile database entry (possibly disabled configuration)",
+                                      errors.getvalue())
+
+    def test_ci_over_budget_defers_after_scans_and_reports_success_evidence(self):
+        clang = self.budget_databases()
+        namespace = os.environ.get("CCACHE_NAMESPACE")
+        self.assertEqual(self.run_ci([self.header], clang_build_dir=clang), 0)
+        report = self.ci_evidence()
+        self.assertEqual(report["status"], "deferred")
+        self.assertEqual(report["selected_count"], 6)
+        self.assertEqual(report["replay_variant_budget"], 5)
+        self.assertEqual(sum(len(records) for records in report["command_variants"].values()), 6)
+        self.assertIn("deferred to the full required builds", report["reason"])
+        self.assertEqual(sum("-M" in c for c, _ in self.commands), 12)
+        self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+        self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+        self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+        # Each compiler initially selects one different file. Only the union
+        # and target expansion exceed the budget; counting earlier is unsafe.
+        entries = self.entries()
+        with patch.object(tus, "select", side_effect=[(entries[:1], {}), (entries[1:2], {})]):
+            self.assertEqual(self.run_ci(clang_build_dir=clang), 0)
+        report = self.ci_evidence()
+        self.assertEqual(report["status"], "deferred")
+        self.assertEqual(report["selected_count"], 6)
+        self.assertTrue(all(len(records) == 3 for records in report["command_variants"].values()))
+
+    def test_ci_at_budget_replays_every_variant_and_both_tidy_configurations(self):
+        clang = self.budget_databases(clang_variants=2)
+        self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+        report = self.ci_evidence()
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["selected_count"], report["replay_variant_budget"])
+        self.assertEqual(report["selected_count"], 5)
+        self.assertEqual(sum(c[0] == "ccache" for c, _ in self.commands), 3)
+        self.assertEqual(sum("-p" in c for c, _ in self.commands), 2)
+        self.assertEqual(sum("--files0-from" in c for c, _ in self.commands), 2)
+        self.commands.clear()
+        with patch.object(tus, "select", return_value=([], {})):
+            self.assertEqual(self.run_ci(clang_build_dir=clang), 0)
+        self.assertEqual(self.ci_evidence()["selected_count"], 0)
+        self.assertEqual(self.ci_evidence()["status"], "No native work selected.")
+        self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+
+    def test_ci_over_budget_refusals_and_incomplete_inputs_still_fail(self):
+        clang = self.budget_databases()
+        gcc_database = self.build / "compile_commands.json"
+        clang_database = clang / "compile_commands.json"
+        original = gcc_database.read_text()
+        for failure in ("warning policy", "clang metadata", "malformed", "partial",
+                        "unreadable", "deadline", "fingerprint"):
+            self.commands.clear()
+            gcc_database.write_text(original)
+            clang_database.write_text(original)
+            patches = []
+            if failure == "warning policy":
+                invalid = json.loads(original)
+                invalid[0]["arguments"] += [self.cmake_policy_marker(), "-Wno-error=conversion"]
+                gcc_database.write_text(json.dumps(invalid))
+            elif failure == "clang metadata":
+                invalid = json.loads(original)
+                invalid[0]["arguments"].append("-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY=0")
+                clang_database.write_text(json.dumps(invalid))
+            elif failure == "malformed":
+                clang_database.write_text('[{"file":')
+            elif failure == "partial":
+                def partial(command, directory, check=True):
+                    if "-M" in command:
+                        return subprocess.CompletedProcess(command, 0, "selected-tu: missing.hpp\n", "")
+                    return self.fake_execute(command, directory, check)
+                patches.append(patch.object(tus, "execute", side_effect=partial))
+            elif failure in {"unreadable", "deadline"}:
+                error = PermissionError("unreadable dependency") if failure == "unreadable" else \
+                    subprocess.TimeoutExpired("dependency probe", 1800)
+                patches.append(patch.object(tus, "dependencies", side_effect=error))
+            else:
+                patches.append(patch.object(tus, "ci_cache_key", side_effect=OSError("unreadable fingerprint input")))
+            with self.subTest(failure=failure):
+                for mocked in patches:
+                    mocked.start()
+                try:
+                    self.assertEqual(self.run_ci([self.header], clang_build_dir=clang), 1)
+                finally:
+                    for mocked in reversed(patches):
+                        mocked.stop()
+                self.assertEqual(self.ci_evidence()["status"], "failed")
+                self.assertIn("error", self.ci_evidence())
+                self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+        gcc_database.write_text(original)
+        original_read = Path.read_bytes
+        for name in (".clang-tidy", "scripts/tidy.sh"):
+            def unreadable(path):
+                if path == self.root / name:
+                    raise PermissionError("unreadable tidy fingerprint policy")
+                return original_read(path)
+            with self.subTest(policy=name), patch.object(Path, "read_bytes", unreadable):
+                self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 1)
+            self.assertEqual(self.ci_evidence()["status"], "failed")
+            self.assertIn("unreadable tidy fingerprint policy", self.ci_evidence()["error"])
+
+    def test_ci_over_budget_missing_database_entry_fails_before_deferral(self):
+        clang = self.budget_databases()
+        database = clang / "compile_commands.json"
+        raw = json.loads(database.read_text())
+        database.write_text(json.dumps([record for record in raw if record["file"] != str(self.b)]))
+        for paths, full in (([self.b], False), ([self.a], True)):
+            with self.subTest(full=full):
+                self.assertEqual(self.run_ci(paths, full_selection=full, clang_build_dir=clang), 1)
+                report = self.ci_evidence()
+                self.assertEqual(report["status"], "failed")
+                self.assertIn("missing", report["error"])
+                self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+
+    def test_ci_deferred_summary_names_counts_budget_and_combined_fingerprint(self):
+        clang = self.budget_databases()
+        reports = []
+        database = clang / "compile_commands.json"
+        for changed in (False, True):
+            if changed:
+                raw = json.loads(database.read_text())
+                raw[0]["arguments"].append("-DCLANG_ONLY_CHANGE=1")
+                database.write_text(json.dumps(raw))
+            self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+            reports.append(self.ci_evidence())
+        summary = (self.root / "summary.md").read_text()
+        for fragment in ('"status": "deferred"', '"selected_count": 6',
+                         '"replay_variant_budget": 5', "exceeds the fast-lane budget of 5",
+                         "deferred to the full required builds", "command_fingerprint"):
+            self.assertIn(fragment, summary)
+        self.assertRegex(reports[0]["command_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(reports[0]["command_fingerprint"], reports[1]["command_fingerprint"])
+        self.assertEqual(reports[0]["cache_namespace"], reports[1]["cache_namespace"])
+        for name in (".clang-tidy", "scripts/tidy.sh"):
+            policy = self.root / name
+            original = policy.read_text()
+            policy.write_text(original + "\n# policy content changed\n")
+            self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+            self.assertNotEqual(reports[1]["command_fingerprint"], self.ci_evidence()["command_fingerprint"])
+            policy.write_text(original)
+        self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+        self.assertEqual(reports[1]["command_fingerprint"], self.ci_evidence()["command_fingerprint"])
+
+    def test_ci_atomic_evidence_closes_before_replace_and_preserves_previous_on_failure(self):
+        destination = self.root / "evidence.json"
+        with patch.object(tus.tempfile, "NamedTemporaryFile") as unopened:
+            tus.publish_ci_evidence(None, {})
+            unopened.assert_not_called()
+        destination.write_text("previous evidence")
+        with self.assertRaises(TypeError):
+            tus.publish_ci_evidence(destination, {"unsupported": object()})
+        self.assertEqual(destination.read_text(), "previous evidence")
+        original_temporary = tempfile.NamedTemporaryFile
+        original_replace = os.replace
+        for failure in (None, "write", "close", "replace"):
+            streams = []
+            destination.write_text("previous evidence")
+
+            @contextmanager
+            def temporary(**kwargs):
+                with original_temporary(**kwargs) as stream:
+                    streams.append(stream)
+                    if failure == "write":
+                        def partial_write(text):
+                            stream.buffer.write(text[:3].encode())
+                            raise OSError("partial evidence write")
+                        with patch.object(stream, "write", side_effect=partial_write):
+                            yield stream
+                    else:
+                        yield stream
+                    if failure == "close":
+                        raise OSError("evidence flush failed")
+
+            def replace(source, target):
+                self.assertTrue(all(stream.closed for stream in streams))
+                self.assertEqual(destination.read_text(), "previous evidence")
+                self.assertEqual(Path(source).parent, destination.parent)
+                if failure == "replace":
+                    raise PermissionError("evidence replace failed")
+                original_replace(source, target)
+
+            with self.subTest(failure=failure), \
+                    patch.object(tus.tempfile, "NamedTemporaryFile", side_effect=temporary), \
+                    patch.object(tus.os, "replace", side_effect=replace):
+                if failure is None:
+                    tus.publish_ci_evidence(destination, {"status": "deferred"})
+                    self.assertEqual(json.loads(destination.read_text()), {"status": "deferred"})
+                else:
+                    with self.assertRaises(OSError):
+                        tus.publish_ci_evidence(destination, {"status": "deferred"})
+                    self.assertEqual(destination.read_text(), "previous evidence")
+                self.assertEqual(list(self.root.glob("fast-evidence-*")), [])
+
+    def test_ci_over_budget_publication_failure_is_not_success(self):
+        clang = self.budget_databases()
+        destination = self.root / "evidence.json"
+        destination.write_text("previous evidence")
+        for publisher in ("publish_ci_summary", "publish_ci_evidence"):
+            with self.subTest(publisher=publisher), \
+                    patch.object(tus, publisher, side_effect=OSError("publication failed")):
+                self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 1)
+            self.assertEqual(destination.read_text(), "previous evidence")
+        self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang,
+                                     evidence_file=self.root / "missing" / "evidence.json"), 1)
+
+    def test_ci_budget_disabled_negative_control_exposes_compile_failure(self):
+        clang = self.budget_databases()
+        def fail_compile(command, directory, check=True):
+            if command[0] == "ccache":
+                raise tus.SelectionError("compile failed without budget deferral")
+            return self.fake_execute(command, directory, check)
+        with patch.object(tus, "execute", side_effect=fail_compile):
+            self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 0)
+            self.assertEqual(self.ci_evidence()["status"], "deferred")
+            with patch.object(tus, "CI_REPLAY_VARIANT_BUDGET", 100):
+                self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang), 1)
+            self.assertEqual(self.ci_evidence()["status"], "failed")
+            self.assertIn("compile failed without budget deferral", self.ci_evidence()["error"])
+
+    def test_ci_missing_cross_compiler_tu_and_malformed_db_fail_before_compile(self):
+        entries = self.entries()
+        with patch.object(tus, "read_database", side_effect=[entries, entries[:1]]), \
+                patch.object(tus, "select", side_effect=[(entries, {}), (entries[:1], {})]):
+            self.assertEqual(self.run_ci(), 1)
+        self.assertIn("selected TU missing", (self.root / "summary.md").read_text())
+        self.assertEqual(self.commands, [])
+        for flag in ("-Xclang", "@response", "-include-pch"):
+            self.raw[0] = self.raw_entry(self.a, [flag])
+            self.save_db()
+            self.assertEqual(self.run_ci(), 1)
+            self.assertEqual(self.commands, [])
+
+    def test_ci_failed_scan_compile_and_tidy_fail_and_cleanup(self):
+        for stage in ("scan", "compile", "tidy"):
+            self.commands.clear()
+            def fail(command, directory, check=True):
+                if ((stage == "scan" and "-M" in command)
+                        or (stage == "compile" and command[0] == "ccache")
+                        or (stage == "tidy" and ("-p" in command or "--files0-from" in command))):
+                    raise tus.SelectionError("mock " + stage + " failure")
+                return self.fake_execute(command, directory, check)
+            with self.subTest(stage=stage), patch.object(tus, "execute", side_effect=fail):
+                self.assertEqual(self.run_ci([self.header]), 1)
+                self.assertIn("mock " + stage + " failure", (self.root / "summary.md").read_text())
+                self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+                if stage == "scan":
+                    self.assertFalse(any(c[0] == "ccache" for c, _ in self.commands))
+
+    def test_ci_cache_key_covers_profile_identity_config_and_resolved_build_content(self):
+        policy = self.root / "CMakeLists.txt"
+        pin = self.root / "vendor/CMakeLists.txt"
+        pin.parent.mkdir()
+        pin.write_text("dependency revision one")
+        entries = self.entries()
+        entries[0]["arguments"].append(self.cmake_policy_marker())
+        tracked = [policy, pin]
+        key = tus.ci_cache_key(self.root, entries, tracked)
+        self.assertTrue(key.startswith("fast-compile-msvc-approx-"))
+        self.assertEqual(key, tus.ci_cache_key(self.root, entries, list(reversed(tracked))))
+        pin.write_text("dependency revision two")
+        self.assertNotEqual(key, tus.ci_cache_key(self.root, entries, tracked))
+        pin.write_text("dependency revision one")
+        for field, value in (("arguments", entries[0]["arguments"] + ["-DNEW_CONFIG"]),
+                             ("directory", self.src)):
+            variant = dict(entries[0], **{field: value})
+            self.assertNotEqual(key, tus.ci_cache_key(self.root, [variant, entries[1]], tracked))
+        with patch.object(tus, "profile_flags", return_value=["-Wshadow"]):
+            self.assertNotEqual(key, tus.ci_cache_key(self.root, entries, tracked))
+        with patch.object(tus, "execute", return_value=subprocess.CompletedProcess([], 0, "compiler v2", "")):
+            self.assertNotEqual(key, tus.ci_cache_key(self.root, entries, tracked))
+
+    def test_ci_bounds_full_selection_namespace_restoration_and_missing_tu(self):
+        for jobs in (0, 5):
+            self.assertEqual(self.run_ci(jobs=jobs), 1)
+        for directory in ("build_dir", "clang_build_dir"):
+            self.assertEqual(self.run_ci(**{directory: None}), 1)
+        self.assertEqual(self.commands, [])
+        with patch.dict(os.environ, {"CCACHE_NAMESPACE": "prior"}):
+            self.assertEqual(self.run_ci(full_selection=True), 0)
+            self.assertEqual(os.environ["CCACHE_NAMESPACE"], "prior")
+        self.assertEqual(len([c for c, _ in self.commands if c[0] == "ccache"]), 2)
+        for changed in ([], tus.SelectionError("unknown history")):
+            self.commands.clear()
+            self.assertEqual(self.run_ci(changed, full_selection=True), 0)
+            self.assertEqual(len([c for c, _ in self.commands if c[0] == "ccache"]), 2)
+        self.commands.clear()
+        self.assertEqual(self.run_ci(tus.SelectionError("unknown history")), 1)
+        self.assertEqual(self.commands, [])
+        new = self.src / "new.cpp"
+        new.write_text("new")
+        self.assertEqual(self.run_ci([new]), 1)
+        self.assertIn("missing compile database", (self.root / "summary.md").read_text())
+        self.assertEqual(self.run_ci([new], full_selection=True), 1)
+
+    def test_ci_cli_dispatch_and_calibration_refusal(self):
+        with patch.object(tus, "ci_route", return_value=0) as route:
+            self.assertEqual(tus.main(["route", "--root", str(self.root)]), 0)
+            self.assertEqual(route.call_args.args[1], self.root)
+        with patch.object(tus, "ci_checks", return_value=1) as ci:
+            self.assertEqual(tus.main(["ci", "--root", str(self.root), "--build-dir", str(self.build),
+                                       "--clang-build-dir", str(self.build), "--full-selection",
+                                       "--evidence-file", str(self.root / "evidence.json")]), 1)
+            self.assertTrue(ci.call_args.args[0].full_selection)
+            self.assertEqual(ci.call_args.args[0].evidence_file, self.root / "evidence.json")
+        for command in ("route", "ci"):
+            for option in ("--warning-baseline", "--write-warning-baseline", "--conversion-clean-prefix"):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    tus.main([command, option, "scratch/baseline"])
+                self.assertEqual(error.exception.code, 2)
+        self.assertEqual(self.commands, [])
+
+    def test_ci_missing_tools_empty_database_and_symlink_scratch_fail_visibly(self):
+        for tools in (("ccache",), ("clang-tidy-18", "clang-tidy")):
+            self.assertEqual(self.run_ci(missing_tools=tools), 1)
+            self.assertIn("not found", (self.root / "summary.md").read_text())
+            self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+        with patch.object(tus, "read_database", return_value=[]):
+            self.assertEqual(self.run_ci(), 1)
+        self.assertIn("empty gcc", (self.root / "summary.md").read_text())
+        # Exercise the refusal on every host, including hosts without symlink
+        # privileges. Actual resolved-path behavior is covered by the selector.
+        original_is_symlink = Path.is_symlink
+        def is_symlink(path):
+            return path == self.root / "scratch" or original_is_symlink(path)
+        before = {p: p.read_bytes() for p in self.src.iterdir()}
+        with patch.object(Path, "is_symlink", is_symlink):
+            self.assertEqual(self.run_ci(), 1)
+        self.assertIn("scratch escapes", (self.root / "summary.md").read_text())
+        self.assertEqual({p: p.read_bytes() for p in self.src.iterdir()}, before)
+
+    def test_ci_reports_unconfigured_sources_and_failure_does_not_validate_them(self):
+        dormant = self.src / "DormantBackend.cpp"
+        dormant.write_text("optional source")
+        self.assertEqual(self.run_ci(tracked=[self.a, dormant]), 0)
+        summary = (self.root / "summary.md").read_text()
+        self.assertIn("gcc_unconfigured_sources", summary)
+        self.assertIn("clang_unconfigured_sources", summary)
+        self.assertIn("src/DormantBackend.cpp", summary)
+        self.commands.clear()
+        self.assertEqual(self.run_ci([dormant], tracked=[self.a, dormant]), 1)
+        self.assertEqual(len(self.commands), 4)
+        self.assertTrue(all("-M" in command for command, _ in self.commands))
+
+    def test_ci_summary_escapes_unusual_filenames(self):
+        summary = self.root / "safe-summary.md"
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            tus.publish_ci_summary(summary, {"status": "failed", "file": "src/<tag>&name\n.cpp",
+                                            "command_variants": {"gcc": [
+                                                {"file": "src/a.cpp", "directory": "/checkout",
+                                                 "arguments": ["g++", "-DVARIANT_A"]},
+                                                {"file": "src/a.cpp", "directory": "/checkout",
+                                                 "arguments": ["g++", "-DVARIANT_B"]}]}})
+        self.assertIn("&lt;tag&gt;&amp;name", summary.read_text())
+        self.assertNotIn("<tag>", summary.read_text())
+        self.assertEqual(json.loads(stream.getvalue())["file"], "src/<tag>&name\n.cpp")
+        self.assertEqual(summary.read_text().count("command_sha256"), 2)
+        self.assertNotIn("-DVARIANT", summary.read_text())
+        logged = json.loads(stream.getvalue())["command_variants"]["gcc"]
+        self.assertNotEqual(logged[0]["arguments"], logged[1]["arguments"])
+        self.assertIn("-DVARIANT_A", stream.getvalue())
 
 
 class BaseRefProcessTests(unittest.TestCase):

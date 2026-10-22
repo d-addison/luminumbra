@@ -9,7 +9,7 @@
 namespace Luminumbra::Client {
 
 AudioSpatialCluster::AudioSpatialCluster() {
-    m_sources_to_process.reserve(m_max_audio_sources);
+    m_sources_to_process.reserve(static_cast<std::size_t>(m_max_audio_sources));
     LUMINUMBRA_CORE_INFO("Audio Spatial Clustering System Initialized");
 }
 
@@ -60,7 +60,7 @@ void AudioSpatialCluster::Update(const glm::vec3& listener_pos, float delta_time
     // Limit processing to max sources
     if (m_sources_to_process.size() >
         static_cast<std::vector<AudioSource*>::size_type>(m_max_audio_sources)) {
-        m_sources_to_process.resize(m_max_audio_sources);
+        m_sources_to_process.resize(static_cast<std::size_t>(m_max_audio_sources));
     }
 
     if (m_clustering_enabled && m_sources_to_process.size() > MAX_SOURCES_PER_CLUSTER) {
@@ -191,7 +191,7 @@ void AudioSpatialCluster::BuildRecursive(ClusterNode* node,
     std::vector<std::vector<AudioSource*>> child_sources(8);
 
     for (auto* source : sources) {
-        int child_index = 0;
+        std::size_t child_index = 0;
         if (source->position.x >= center.x)
             child_index += 1;
         if (source->position.y >= center.y)
@@ -204,7 +204,7 @@ void AudioSpatialCluster::BuildRecursive(ClusterNode* node,
 
     // Create children for non-empty octants
     node->is_leaf = false;
-    for (int i = 0; i < 8; ++i) {
+    for (std::size_t i = 0; i < 8; ++i) {
         if (!child_sources[i].empty()) {
             node->children[i] = std::make_unique<ClusterNode>(child_bounds[i]);
             BuildRecursive(node->children[i].get(), child_sources[i], depth + 1);

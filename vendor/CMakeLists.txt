@@ -237,3 +237,17 @@ if(TARGET FastNoise)
     target_compile_options(FastNoise PRIVATE $<$<CONFIG:Debug>:-O3>)
   endif()
 endif()
+
+# Dependencies export third-party headers as system includes to
+# every consumer, including tools and their separately compiled test entries.
+# Keep the include expressions intact so build/install paths and generated
+# overlays follow the dependency targets rather than a copied directory list.
+foreach(_common_dependency IN ITEMS
+    EnTT Jolt nlohmann_json sol2 lua spdlog lz4_static glm FastNoise
+    meshoptimizer rmlui_core rmlui_debugger glfw miniaudio soil2 glad)
+  if(TARGET ${_common_dependency})
+    set_property(TARGET ${_common_dependency} APPEND PROPERTY
+      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+      "$<TARGET_PROPERTY:${_common_dependency},INTERFACE_INCLUDE_DIRECTORIES>")
+  endif()
+endforeach()
