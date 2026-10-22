@@ -1,6 +1,7 @@
 #include "ParticlePass.h"
 #include "../FarWorldReplay.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "PassGlHelpers.h"
@@ -735,7 +736,11 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     glBindVertexArray(m_vao);
     PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_frame_instance_count));
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
+                                                GL_TRIANGLE_STRIP,
+                                                0,
+                                                4,
+                                                static_cast<GLsizei>(m_frame_instance_count));
     glBindVertexArray(0);
 
     glActiveTexture(GL_TEXTURE0);

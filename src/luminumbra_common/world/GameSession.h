@@ -13,6 +13,7 @@
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "TerrainPresetLoader.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
@@ -92,6 +93,14 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Replay must preserve omitted historical selectors and their identity bytes.
+    // A required content identity is checked before directory creation or live-world replacement.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     TerrainPresetUse presetUse,
+                     const std::string& requiredPresetContentHash = {});
     // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
     // translation units compiled against the prior header still resolve a real symbol.
     bool
@@ -110,7 +119,7 @@ public:
     // and subsequent persistence retain this session's configured roots.
     bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
 
-    // Save the current world state
+    // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
 
     // Read-only destination preset/identity check, before any save writes or acknowledgements.
@@ -118,14 +127,20 @@ public:
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
-    // (worlds/saves/<world_id>). Incremental contract: nothing is written when
-    // no chunk carries unsaved voxel edits, so a never-edited world stays
-    // byte-for-byte on the fresh-world path. The first write of an edited
-    // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
+    // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
+    // plants and energy persist even when no chunks are dirty. Active-region saves
+    // also persist metadata; regions-disabled incremental saves preserve its bytes.
+    // A save without a prior container emits a full snapshot; later writes flush through
+    // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
+    // chunks, plants, energy and metadata succeed. Per-file atomic writes can persist
+    // partial progress on failure; metadata is saved after the required state.
+    // Full snapshots and persistent active-region save-as exports include every streamed chunk
+    // and commit metadata last. Pass full_snapshot=true for a complete regions-disabled export.
+    // Save-as exports retain canonical dirty flags and active-region save stamps.
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          bool full_snapshot = false);
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -485,7 +500,11 @@ private:
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir) const;
+    bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
+                              WorldStateSaveReport* report,
+                              bool full_snapshot,
+                              bool write_metadata);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
@@ -514,7 +533,9 @@ private:
                              const std::string& seed,
                              const std::string& worldType,
                              const std::string* customPresetJson,
-                             bool transient);
+                             bool transient,
+                             TerrainPresetUse presetUse,
+                             const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which

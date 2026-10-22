@@ -87,7 +87,8 @@ def targets_in(root, cmake):
     # The offline graph uses a symbolic binary directory; FetchContent's default
     # source location is resolved without configuring or downloading dependencies.
     variables = {"CMAKE_SOURCE_DIR": str(root), "ENGINE_SOURCE": str(root),
-                 "CMAKE_BINARY_DIR": str(root / 'build')}
+                 "CMAKE_BINARY_DIR": str(root / 'build'),
+                 "CMAKE_CURRENT_BINARY_DIR": str(root / 'build' / cmake.parent.relative_to(root))}
     targets = {}
     reading = set()
 
@@ -321,6 +322,21 @@ list(APPEND sources "${CMAKE_CURRENT_SOURCE_DIR}/extra (copy)#1.cpp")
 add_executable(developer_console_imgui_test ${sources})
 ''', names)
         self.assertEqual(targets['developer_console_imgui_test']['sources'], set(map(Path, names)))
+
+    def test_generated_sources_use_current_binary_directory(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                directory = self.root / 'audio' if nested else self.root
+                directory.mkdir(exist_ok=True)
+                source = directory / 'shutdown.cpp'
+                source.write_text('', encoding='utf-8')
+                cmake = directory / 'CMakeLists.txt'
+                cmake.write_text('''set(body "${CMAKE_CURRENT_BINARY_DIR}/shutdown_body.inc")
+add_executable(shutdown shutdown.cpp "${body}")
+''', encoding='utf-8')
+                targets = targets_in(self.root, cmake)
+                self.assertEqual(targets['shutdown']['sources'],
+                                 {source.relative_to(self.root)})
 
     def test_fetchcontent_properties_resolve_sources(self):
         names = tuple(f'build/_deps/imgui_src-src/{name}.cpp' for name in

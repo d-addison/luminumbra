@@ -249,8 +249,10 @@ ProcessedMesh ReadLmesh(const std::filesystem::path& path) {
     in.read(reinterpret_cast<char*>(&mesh.header), sizeof(mesh.header));
     mesh.vertices.resize(mesh.header.vertexCount);
     mesh.indices.resize(mesh.header.indexCount);
-    in.read(reinterpret_cast<char*>(mesh.vertices.data()), mesh.vertices.size() * sizeof(Vertex));
-    in.read(reinterpret_cast<char*>(mesh.indices.data()), mesh.indices.size() * sizeof(uint32_t));
+    in.read(reinterpret_cast<char*>(mesh.vertices.data()),
+            static_cast<std::streamsize>(mesh.vertices.size() * sizeof(Vertex)));
+    in.read(reinterpret_cast<char*>(mesh.indices.data()),
+            static_cast<std::streamsize>(mesh.indices.size() * sizeof(uint32_t)));
 
     return mesh;
 }
@@ -809,12 +811,12 @@ TEST(LtexRoundTrip, MaterialColorMipsFilterInLinearLight) {
     ASSERT_EQ(Import({input.string(), output.string(), "--srgb"}), 0);
     const auto image = ReadLtex(output);
     ASSERT_EQ(image.mips.size(), 2u);
-    for (int channel = 0; channel < 3; ++channel)
+    for (std::size_t channel = 0; channel < 3; ++channel)
         EXPECT_NEAR(image.mips.back().pixels[channel], 188, 1);
     EXPECT_EQ(image.mips.back().pixels[3], 255);
     ASSERT_EQ(Import({input.string(), output.string(), "--linear"}), 0);
     const auto linear = ReadLtex(output);
-    for (int channel = 0; channel < 3; ++channel)
+    for (std::size_t channel = 0; channel < 3; ++channel)
         EXPECT_NEAR(linear.mips.back().pixels[channel], 128, 1);
 }
 
@@ -923,7 +925,9 @@ TEST(LtexRoundTrip, OddCutoutRetainsCompiledBytesAcrossCoefficientPacking) {
     // mip dimensions and alpha. Alignment-safe copies must preserve every bit.
     ASSERT_EQ(bytes.size(), 329u);
     uint64_t checksum = 14695981039346656037ull;
-    for (const unsigned char byte : bytes)
+    for (const char ch : bytes) {
+        const auto byte = static_cast<unsigned char>(ch);
         checksum = (checksum ^ byte) * 1099511628211ull;
+    }
     EXPECT_EQ(checksum, 4632687360821141353ull);
 }

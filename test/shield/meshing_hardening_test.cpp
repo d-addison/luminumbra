@@ -406,8 +406,8 @@ TEST(MeshingHardening, HeightmapSeamContinuityAcrossXBoundary) {
 
     const int hm_stride = CHUNK_SIZE_X + 1;
     for (int z = 0; z < hm_stride; ++z) {
-        const f32 a = left.heightmap_data[CHUNK_SIZE_X + z * hm_stride];
-        const f32 b = right.heightmap_data[0 + z * hm_stride];
+        const f32 a = left.heightmap_data[static_cast<std::size_t>(CHUNK_SIZE_X + z * hm_stride)];
+        const f32 b = right.heightmap_data[static_cast<std::size_t>(z * hm_stride)];
         EXPECT_FLOAT_EQ(a, b) << "heightmap seam mismatch at z=" << z;
     }
 }

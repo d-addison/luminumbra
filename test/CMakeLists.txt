@@ -4,6 +4,7 @@ add_executable(world_generation_test
     shield/test_meshing_determinism.cpp
     shield/worldgen_hardening_test.cpp
     shield/meshing_hardening_test.cpp
+    shield/async_water_meshing_test.cpp
 )
 
 target_include_directories(world_generation_test PRIVATE
@@ -29,6 +30,7 @@ add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
     shield/worldgen_layers_hardening_test.cpp
+    shield/height_sampling_equivalence_test.cpp
 )
 
 target_compile_definitions(worldgen_layer_snapshot_test PRIVATE
@@ -64,6 +66,8 @@ target_compile_definitions(asset_processor_round_trip_test PRIVATE
 target_include_directories(asset_processor_round_trip_test PRIVATE
 ../src
 ../tools
+)
+target_include_directories(asset_processor_round_trip_test SYSTEM PRIVATE
 ../vendor/cgltf
 ../third_party/cgltf
 ../third_party/meshoptimizer/src
@@ -224,6 +228,9 @@ add_executable(common_tests
     ../src/luminumbra_client/rendering/ShaderSource.cpp
     ../src/luminumbra_client/rendering/FarWorldDiagnostics.cpp
     ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
+    ../src/luminumbra_client/rendering/FarVolumeHandoff.cpp
+    ../src/luminumbra_client/rendering/FarWorldHandoffRenderer.cpp
+    ../src/luminumbra_client/rendering/FarWorldHandoffDiagnostics.cpp
     ../src/luminumbra_client/rendering/FarWorldOwnership.cpp
     ../src/luminumbra_client/rendering/FarWorldDepthBias.cpp
     ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
@@ -1540,6 +1547,7 @@ target_compile_definitions(frontier_gates_test PRIVATE
 
 target_include_directories(frontier_gates_test PRIVATE
 ../src
+${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(frontier_gates_test PRIVATE
@@ -1550,16 +1558,37 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
+    common/EffectivePresetIdentity_test.cpp
+    common/SurfaceWorkBudget_test.cpp
+    ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
+    ../src/luminumbra_server/modes/Replay.cpp
 )
-target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
+target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
+
+# Surface admission exercises both shipping launch parsers without a device.
+add_executable(runtime_surface_options_test
+    client/runtime_surface_options_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+)
+target_include_directories(runtime_surface_options_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+target_link_libraries(runtime_surface_options_test PRIVATE
+    gtest_main
+    luminumbra_common
+    nlohmann_json
+    glm
+)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
@@ -1615,6 +1644,25 @@ target_link_libraries(audio_occlusion_test PRIVATE
     gtest_main
     luminumbra_common
 )
+
+# Metrics regressions exercise the production propagation API without an audio device.
+add_executable(audio_propagation_metrics_test
+    audio/audio_propagation_metrics_test.cpp
+    ../src/luminumbra_client/audio/AudioPropagationSystem.cpp
+)
+target_include_directories(audio_propagation_metrics_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../src/luminumbra_common
+)
+target_link_libraries(audio_propagation_metrics_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
+)
+luminumbra_configure_first_party_target(audio_propagation_metrics_test)
 
 # prune guard — compile-sentinel that the SURVIVING audio headers still build
 # (fails if anything leans on a deleted orphan) + asserts the 7 retired bank manifests are
@@ -1904,8 +1952,32 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
+add_executable(menu_presentation_test rendering/menu_presentation_test.cpp
+    ../src/luminumbra_client/app/FrameAttribution.cpp)
+target_include_directories(menu_presentation_test PRIVATE ../src)
+target_link_libraries(menu_presentation_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(menu_presentation_test)
+
+add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
+target_include_directories(jolt_startup_test PRIVATE ../src)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt luminumbra_common ${CMAKE_DL_LIBS})
+luminumbra_configure_first_party_target(jolt_startup_test)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(jolt_startup_test PRIVATE
+        "-Wl,--export-dynamic-symbol=pthread_create"
+        "-Wl,--export-dynamic-symbol=pthread_join"
+        "-Wl,--export-dynamic-symbol=sem_init"
+        "-Wl,--export-dynamic-symbol=sem_destroy")
+endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
+set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    jolt_startup_test
     frame_attribution_test
+    menu_presentation_test
     graphics_preset_classifier_test
     hardware_info_test
     far_volume_tile_test
@@ -1964,9 +2036,11 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     world_open_refusal_test
+    runtime_surface_options_test
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test
+    audio_propagation_metrics_test
     audio_prune_guard_test
     client_policy_test
     audio_physics_binding_test
@@ -2051,14 +2125,22 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         # than shorten the run. Everything else in this target is fast; the cost of
         # the wider bound is only that a genuine hang here surfaces later.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            NO_PRETTY_VALUES
+            TEST_LIST LUMINUMBRA_WORLD_OPEN_TESTS
             PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            TEST_LIST ${_lum_gtest_target}_TESTS
             PROPERTIES RESOURCE_LOCK luminumbra_gl_context)
     else()
-        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            TEST_LIST ${_lum_gtest_target}_TESTS)
     endif()
 endforeach()
+
+# GoogleTest's discovery includes must run before case labeling and COST hints.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")
 
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the
@@ -2146,28 +2228,32 @@ set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" 
 add_test(NAME ShieldRtTracerProfileGpu COMMAND shieldrt_tracer_profile_gpu)
 set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field ground-truth parity gate (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
 set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field G-buffer raymarch (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldGbufferGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldGbufferGpu COMMAND shieldrt_far_field_gbuffer_gpu)
 set_tests_properties(ShieldRtFarFieldGbufferGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # GPU max-mip reduction parity (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldMaxMipGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldMaxMipGpu COMMAND shieldrt_far_field_maxmip_gpu)
 set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 #  per-flag fixtures for the WorldVisualSweep objective
 # critique (tools/visual_critique.py). Pins every objective defect flag so a
@@ -2416,6 +2502,37 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 # on Windows and can exit inside the renderer without diagnostic output.
 
 # Pure CPU measurement contract, also runnable without a GL context.
+# Generate from the production destructor so a shutdown reversion also changes
+# the native ordering probe. No access hooks are added to the production class.
+set(audio_shutdown_source "${CMAKE_SOURCE_DIR}/src/luminumbra_client/audio/AudioPropagationSystem.cpp")
+set(audio_shutdown_generator "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py")
+set(audio_shutdown_body "${CMAKE_CURRENT_BINARY_DIR}/audio_shutdown_body.inc")
+# Configure-only compilation consumers need the same body before any build runs.
+# Reconfigure on either input change, and retain normal build-time regeneration.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${audio_shutdown_source}" "${audio_shutdown_generator}")
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+        --emit-destructor "${audio_shutdown_body}"
+    RESULT_VARIABLE audio_shutdown_result
+    ERROR_VARIABLE audio_shutdown_error)
+if(NOT "${audio_shutdown_result}" STREQUAL "0")
+    message(FATAL_ERROR "Audio shutdown body generation failed (${audio_shutdown_result}): ${audio_shutdown_error}")
+endif()
+add_custom_command(OUTPUT "${audio_shutdown_body}"
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+        --emit-destructor "${audio_shutdown_body}"
+    DEPENDS "${audio_shutdown_source}" "${audio_shutdown_generator}"
+    VERBATIM)
+add_executable(audio_shutdown_test "audio/audio_shutdown_test.cpp" "${audio_shutdown_body}")
+target_include_directories(audio_shutdown_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(audio_shutdown_test PRIVATE Threads::Threads)
+luminumbra_configure_first_party_target(audio_shutdown_test)
+add_test(NAME AudioShutdownTransition COMMAND audio_shutdown_test)
+set_tests_properties(AudioShutdownTransition PROPERTIES TIMEOUT 15)
+add_test(NAME AudioShutdownSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py")
+
 add_executable(render_measurement_test rendering/render_measurement_test.cpp)
 target_link_libraries(render_measurement_test PRIVATE gtest)
 target_include_directories(render_measurement_test PRIVATE ../src)
@@ -2453,6 +2570,8 @@ add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
+add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)
 add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -2473,6 +2592,10 @@ if(WIN32)
         set_tests_properties(RenderCrashCaptureWindows.${smoke_case} PROPERTIES TIMEOUT 30)
     endforeach()
 endif()
+add_test(NAME AudioPropagationMetricsContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_audio_propagation_metrics.py)
+add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_replay_source_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
@@ -2508,5 +2631,6 @@ foreach(case IN ITEMS
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+        RESOURCE_LOCK luminumbra_gl_context)
 endforeach()

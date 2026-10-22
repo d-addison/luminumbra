@@ -38,6 +38,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
@@ -184,7 +185,7 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
     pred(-6.0f, 9.0f);
     pred(6.0f, 9.0f);
     for (int i = 0; i < 6; ++i)
-        prey(-7.0f + i * 2.4f, -2.0f);
+        prey(-7.0f + static_cast<float>(i) * 2.4f, -2.0f);
 }
 
 //  spawn a deterministic PLANT roster so the headless smoke exercises the plant
@@ -228,6 +229,10 @@ ServerWorldRunner::~ServerWorldRunner() {
 }
 
 bool ServerWorldRunner::Boot() {
+    if (!World::SurfaceRadiiSupported(m_config.surface_radius, m_config.collision_radius)) {
+        m_bootError = "Surface and collision radii must be between 0 and 12 chunks";
+        return false;
+    }
     if (m_booted) {
         return true;
     }
@@ -253,21 +258,12 @@ bool ServerWorldRunner::Boot() {
     // host==peer: the headless host must run the SAME water-sim resolution the
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
-    // Resolved against the runner root with a CWD-relative fallback (the client's
-    // load path); a missing file uses the same shipping simulation defaults.
+    // Missing runtime defaults use compiled defaults, independently of the launch directory.
     {
-        namespace fsys = std::filesystem;
-        const fsys::path root =
-            m_config.root_path.empty() ? fsys::path(".") : fsys::path(m_config.root_path);
-        fsys::path systems_json = root / "data" / "common" / "systems.json";
-        std::error_code systems_ec;
-        if (!fsys::exists(systems_json, systems_ec)) {
-            systems_json = fsys::path("data") / "common" / "systems.json";
-        }
         const auto sys_cfg =
             m_config.systems_config_override
                 ? *m_config.systems_config_override
-                : luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+                : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(m_config.root_path);
         m_session->ApplySystemConfig(sys_cfg);
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
@@ -282,7 +278,9 @@ bool ServerWorldRunner::Boot() {
             m_config.world_name,
             m_config.seed,
             m_config.preset,
-            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr,
+            m_config.preset_use,
+            m_config.required_preset_content_hash);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();
@@ -1071,7 +1069,7 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // write the FULL in-memory streamed-chunk set (not dirty-gated) so
     // a loaded session can adopt exactly this set. Reuses WorldSaveService.
     if (!m_booted || !m_session || !m_session->GetWorldSystem() ||
-        !m_session->IsSimulationTickBoundary()) {
+        !m_session->IsSimulationTickBoundary() || !m_session->GetWorldOpenError().empty()) {
         return 0;
     }
     const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
@@ -1083,32 +1081,10 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
             "SaveFullSnapshot failed: destination preset or identity is incompatible");
         return 0;
     }
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-
-    Persistence::WorldSaveService service;
-    std::vector<std::string> errors;
-    if (!service.save_world(state, save_dir, &errors)) {
-        for (const std::string& error : errors) {
-            LUMINUMBRA_CORE_ERROR("SaveFullSnapshot failed: {}", error);
-        }
+    world::WorldStateSaveReport report;
+    if (!m_session->SaveWorldStateTo(save_dir, &report, /*full_snapshot=*/true))
         return 0;
-    }
-    // refresh world_info.json alongside the chunk snapshot so world-level
-    // sim state captured there (the water sim-window cursor) reflects THIS save
-    // moment, not world creation. Without this a loaded session resimulates from a
-    // stale cursor and the water evolution diverges from the original's.
-    if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
-        return 0;
-    const bool metadata_saved = m_session->SaveWorld();
-    if (m_session->ActiveRegionsEnabled() && !metadata_saved)
-        return 0;
-    return state.size();
+    return report.chunks_total;
 }
 
 std::size_t ServerWorldRunner::StreamedChunkCount() {
@@ -1155,7 +1131,7 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
     if (m_booted && m_session) {
         // The host tick loop has returned, so this cannot overlap autosave/snapshot.
         // Save on shutdown via WorldSaveService (incremental contract: a
-        // never-edited world writes nothing and stays on the fresh path).
+        // never-edited world writes no chunk snapshot).
         world::WorldStateSaveReport save_report;
         m_session->SaveWorldState(&save_report);
         if (shutdown_save_report) {

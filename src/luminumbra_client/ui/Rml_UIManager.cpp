@@ -1,4 +1,5 @@
 #include "ui/Rml_UIManager.h"
+#include "app/FrameAttribution.h"
 #include "audio/IAudioManager.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
@@ -353,6 +354,8 @@ void Rml_UIManager::Shutdown() {
 }
 
 void Rml_UIManager::Update() {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::UiUpdate);
     if (m_context) {
         ProcessDocumentLoadRequest(); // Process async loads
         PollWorldScan();
@@ -370,6 +373,8 @@ void Rml_UIManager::Update() {
 }
 
 void Rml_UIManager::Render() {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::UiRender);
     if (!m_context)
         return;
 
@@ -425,11 +430,15 @@ void Rml_UIManager::ProcessDocumentLoadRequest() {
 }
 
 void Rml_UIManager::LoadDocument(const std::string& rml_path) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::DocumentLoad);
     if (!m_context || rml_path == m_activeDocument)
         return;
 
+    ++m_documentGeneration;
     m_savedWorldScan.Cancel();
     m_worldScanPending = false;
+    m_pendingPresetOverwrite.reset();
     // Close existing documents (except the debugger)
     for (int i = m_context->GetNumDocuments() - 1; i >= 0; --i) {
         Rml::ElementDocument* doc = m_context->GetDocument(i);
@@ -787,16 +796,17 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         }
     }
 
-    // Save the current config as a named, reusable user preset. If the name's slug already
-    // has a saved preset, WorldPresetSaver silently overwrites — so gate it behind an explicit
-    // overwrite-confirm modal instead of clobbering the existing preset without warning.
+    // Save a new preset without replacement. An existing slug needs explicit
+    // overwrite consent, bound to the name shown when the modal opens.
     if (auto* save_btn = document->GetElementById("save_preset_btn")) {
         AddClickSoundListener(save_btn, [this, document](Rml::Event&) {
             if (!m_worldPresetSaver)
                 return;
             const std::string name =
                 ReadFormControlValue(document->GetElementById("save_preset_name"), "");
+            m_pendingPresetOverwrite.reset();
             if (m_worldPresetExists && m_worldPresetExists(name)) {
+                m_pendingPresetOverwrite = name;
                 // Show the overwrite-confirm modal; the confirm button commits the save.
                 if (auto* modal = document->GetElementById("preset_overwrite_modal"))
                     modal->SetClass("hidden", false);
@@ -813,13 +823,16 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         AddClickSoundListener(confirm, [this, document](Rml::Event&) {
             if (auto* modal = document->GetElementById("preset_overwrite_modal"))
                 modal->SetClass("hidden", true);
-            const std::string name =
-                ReadFormControlValue(document->GetElementById("save_preset_name"), "");
-            this->CommitSavePreset(document, name);
+            if (!m_pendingPresetOverwrite)
+                return;
+            const std::string name = *m_pendingPresetOverwrite;
+            m_pendingPresetOverwrite.reset();
+            this->CommitSavePreset(document, name, true);
         });
     }
     if (auto* cancel = document->GetElementById("cancel_overwrite_btn")) {
-        AddClickSoundListener(cancel, [document](Rml::Event&) {
+        AddClickSoundListener(cancel, [this, document](Rml::Event&) {
+            m_pendingPresetOverwrite.reset();
             if (auto* modal = document->GetElementById("preset_overwrite_modal"))
                 modal->SetClass("hidden", true);
         });
@@ -852,7 +865,7 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
             }
             const std::string renamed = m_worldPresetRenamer(worldType, newName);
             if (renamed.empty()) {
-                note("Could not rename preset");
+                note("Could not rename preset; choose an unused name or check file access");
                 return;
             }
             note("Preset renamed");
@@ -1069,12 +1082,15 @@ void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
     }
 }
 
-void Rml_UIManager::CommitSavePreset(Rml::ElementDocument* document, const std::string& name) {
+void Rml_UIManager::CommitSavePreset(Rml::ElementDocument* document,
+                                     const std::string& name,
+                                     bool overwrite_confirmed) {
     if (!document || !m_worldPresetSaver)
         return;
     const std::string baseType =
         ReadFormControlValue(document->GetElementById("world_type"), "default");
-    const std::string saved = m_worldPresetSaver(name, baseType, CollectWorldGenParams(document));
+    const std::string saved =
+        m_worldPresetSaver(name, baseType, CollectWorldGenParams(document), overwrite_confirmed);
     if (auto* note = document->GetElementById("notification")) {
         note->SetClass("hidden", false);
         if (auto* txt = document->GetElementById("notification_text"))

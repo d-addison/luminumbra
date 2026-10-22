@@ -1,4 +1,5 @@
 #include "AerialPass.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h"
 #include "PassGlHelpers.h"
@@ -98,7 +99,7 @@ void AerialPass::execute(const RenderContext& ctx) {
     m_shader->setInt("u_froxelIntegrated", 3);
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
     if (!blend_was_enabled) {

@@ -24,7 +24,7 @@ public:
         }
 
         GLenum srcFormat = GL_RGB;
-        GLenum internalFormat = GL_RGB8;
+        GLint internalFormat = GL_RGB8;
         if (nrComponents == 1) {
             srcFormat = GL_RED;
             internalFormat = GL_R8;

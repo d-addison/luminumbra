@@ -6,6 +6,8 @@ import math
 import re
 import struct
 from pathlib import Path
+
+from fixture_paths import read_bytes
 import perf
 
 SCHEMA = 'luminumbra.render_benchmark.v3'
@@ -119,7 +121,7 @@ def traversal_manifest(text):
         raise ValueError('incomplete traversal manifest') from error
     integer(result['expected_ticks'], 'expected_ticks', 1)
     integer(result['seed'], 'seed', 0, 2**32 - 1)
-    if (result['tick_rate'] != 30 or result['preset_revision'] not in (6, 7) or
+    if (result['tick_rate'] != 30 or result['preset_revision'] not in (6, 7, 8) or
         result['cold_cache'] != 'true' or not result['preset'] or
         not re.fullmatch(r'[0-9a-f]{16}', result['preset_identity']) or
         not re.fullmatch(r'[0-9]{1,20}', result['content_identity']) or
@@ -374,7 +376,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
         raise ValueError('warmup/report exclusions are incomplete')
     observed = data['workload']
     integer(observed['seed'], 'workload seed', 0, 2**32 - 1)
-    if observed['expected_frames'] != count or observed['preset_revision'] not in (6, 7) or not isinstance(observed['preset'], str) or not observed['preset']:
+    if observed['expected_frames'] != count or observed['preset_revision'] not in (6, 7, 8) or not isinstance(observed['preset'], str) or not observed['preset']:
         raise ValueError('workload manifest does not match')
     if (not isinstance(observed.get('preset_identity'), str) or
         not re.fullmatch(r'[0-9a-f]{16}', observed['preset_identity']) or
@@ -388,7 +390,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
             if observed.get(key) != value:
                 raise ValueError(f'workload manifest does not match: {key}')
     if observed['kind'] == 'traversal' or (data['schema'] == WORKLOAD_SCHEMA and observed['kind'] in WORKLOADS):
-        if traversal is None or observed['script'] != Path(traversal).read_bytes().decode('utf-8'):
+        if traversal is None or observed['script'] != read_bytes(Path(traversal).parent, Path(traversal)).decode('utf-8'):
             raise ValueError('traversal manifest does not match --traversal')
         manifest = traversal_manifest(observed['script'])
         if (data['schema'] == WORKLOAD_SCHEMA) != ('point_ticks' in manifest):

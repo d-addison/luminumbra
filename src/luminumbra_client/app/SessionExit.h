@@ -25,7 +25,7 @@ void PollSessionFault(world::GameSession& session, RequestQuit request_quit) {
 }
 
 // The client drains world readers before calling this and clears the world
-// afterwards. Preserve its existing state -> spawn anchor -> metadata order.
+// afterwards. Capture the spawn anchor before the complete save.
 // A refused capture must leave durable authority untouched, even if an older
 // in-memory session is still loaded after a rejected reload.
 template<typename UpdateSpawn, typename MarkSaved>
@@ -33,7 +33,7 @@ void SaveSessionOnExit(world::GameSession* session,
                        bool persistence_allowed,
                        UpdateSpawn update_spawn,
                        MarkSaved mark_saved) {
-    if (persistence_allowed && session && session->SaveWorldState()) {
+    if (persistence_allowed && session) {
         update_spawn();
         if (session->SaveWorld())
             mark_saved();

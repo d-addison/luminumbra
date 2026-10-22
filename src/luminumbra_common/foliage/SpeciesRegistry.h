@@ -71,8 +71,8 @@ inline float SpeciesClamp01(float v) {
 // is reserved for "unspecified", so a real species never collides with it.
 [[nodiscard]] inline std::uint16_t SpeciesId16(const std::string& id) {
     std::uint64_t h = 1469598103934665603ull; // FNV offset basis
-    for (unsigned char c : id) {
-        h ^= c;
+    for (const char ch : id) {
+        h ^= static_cast<unsigned char>(ch);
         h *= 1099511628211ull;
     }
     const std::uint16_t v = static_cast<std::uint16_t>((h ^ (h >> 32)) & 0xFFFFu);

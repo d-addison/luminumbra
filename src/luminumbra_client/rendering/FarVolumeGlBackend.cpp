@@ -1,4 +1,5 @@
 #include "FarVolumeGlBackend.h"
+#include "rendering/AttributedGl.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -241,7 +242,11 @@ bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
     if (success) {
         // farTileLocal SSBO addressing assumes zero index offset, zero base vertex, no
         // instancing and no multi-draw; update reconstruction if these change.
-        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(index_count), GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                    GL_TRIANGLES,
+                                                    static_cast<GLsizei>(index_count),
+                                                    GL_UNSIGNED_INT,
+                                                    nullptr);
         success = !HasError();
     }
     for (GLuint i = 0; i < saved.size(); ++i) {
