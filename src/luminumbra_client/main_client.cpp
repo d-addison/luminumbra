@@ -83,6 +83,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h" // Aether-field sampling.
 #include "luminumbra_common/systems/CreatureProcgen.h" // genome -> body-proportion build (procedural silhouette)
 #include "luminumbra_common/systems/FarmingSystem.h" //  MakePlantFromSpecies + SpeciesRegistry
@@ -795,7 +796,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 const float x0 = anchor.x - N * sp * 0.5f, z0 = anchor.z - N * sp * 0.5f;
                 for (int iz = 0; iz < N; ++iz)
                     for (int ix = 0; ix < N; ++ix) {
-                        const float cx = x0 + ix * sp, cz = z0 + iz * sp;
+                        const float cx = x0 + static_cast<float>(ix) * sp,
+                                    cz = z0 + static_cast<float>(iz) * sp;
                         const auto e = reg.create();
                         auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                         tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
@@ -1182,8 +1184,11 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                     (g_app.hud.farmSelectedSpecies + 1) % static_cast<int>(n);
                 if (audioManager)
                     audioManager->PlayOneShot2D("ui_button_click");
-                LUMINUMBRA_CORE_INFO("Farm: selected species '{}'",
-                                     g_app.hud.farmSpecies.all()[g_app.hud.farmSelectedSpecies].id);
+                LUMINUMBRA_CORE_INFO(
+                    "Farm: selected species '{}'",
+                    g_app.hud.farmSpecies
+                        .all()[static_cast<std::size_t>(g_app.hud.farmSelectedSpecies)]
+                        .id);
             }
             g_app.interactions.farmCycleSpecies = fv_now;
         }
@@ -2010,8 +2015,8 @@ int main(int argc, char* argv[]) {
 
     // Load player settings (defaults + per-user overlay) before window setup so VSync etc.
     // can be applied immediately. Never hashed; missing overlay -> struct defaults.
-    g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
-        "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    g_systemConfig = luminumbra::core::SystemConfig::LoadFromRuntimeRoot(
+        root_dir, luminumbra::core::SystemConfig::DefaultUserOverlayPath());
     if (scenario_config.systems_config_override) {
         // Retain player settings and their load report, including Recovery save protection.
         g_systemConfig.ReplaceSystemsFrom(*scenario_config.systems_config_override);
@@ -2187,8 +2192,8 @@ int main(int argc, char* argv[]) {
         // opt-in UI hot reload: watch data/ui and reload the active document on edits.
         if (HasCommandLineFlag(argc, argv, "--ui-hot-reload")) {
             uiHotReload.SetEnabled(true);
-            uiHotReload.WatchDirectory("data/ui", "rml");
-            uiHotReload.WatchDirectory("data/ui", "rcss");
+            uiHotReload.WatchDirectory(root_dir / "data/ui", "rml");
+            uiHotReload.WatchDirectory(root_dir / "data/ui", "rcss");
             uiHotReload.SetReloadCallback([&g_uiManager](const std::string&) {
                 if (g_uiManager)
                     g_uiManager->ReloadActiveDocument();
@@ -2305,7 +2310,9 @@ int main(int argc, char* argv[]) {
     if (!game_asset_startup_error.empty())
         LUMINUMBRA_CORE_WARN("{}", game_asset_startup_error);
     renderPipeline.enable_static_model_content(game_asset_startup_error.empty());
-    if (!graphics_ready || !renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
+    if (!graphics_ready || !renderPipeline.startup(static_cast<Luminumbra::u32>(framebufferWidth),
+                                                   static_cast<Luminumbra::u32>(framebufferHeight),
+                                                   root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed",
                                        &jobSystem,
@@ -2747,18 +2754,22 @@ int main(int argc, char* argv[]) {
         // (worlds/atlas/presets/user_<slug>.json). Worlds created from it still embed their own
         // resolved params, so the saved file is a starting template, not a load-bearing dependency.
         g_uiManager->SetWorldPresetSaver(
-            [root_path_str](
-                const std::string& displayName,
-                const std::string& baseType,
-                const std::vector<Luminumbra::Client::WorldGenParam>& params) -> std::string {
+            [root_dir](const std::string& displayName,
+                       const std::string& baseType,
+                       const std::vector<Luminumbra::Client::WorldGenParam>& params,
+                       bool overwrite_confirmed) -> std::string {
                 try {
                     const std::filesystem::path presets_dir =
-                        std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
+                        root_dir / "worlds" / "atlas" / "presets";
                     std::ifstream in(presets_dir / (baseType + ".json"));
                     if (!in)
                         return "";
-                    nlohmann::json base;
-                    in >> base;
+                    const auto base = nlohmann::json::parse(in);
+                    // The base may be the preset being overwritten. Release its
+                    // read handle before atomic replacement on Windows.
+                    in.close();
+                    if (in.fail())
+                        return "";
                     //  persist BOTH the knob layer (knob vector +
                     // baseline + override diff) AND the resolved params, so reloading
                     // the saved user preset restores the exact knob positions. Falls
@@ -2777,10 +2788,14 @@ int main(int argc, char* argv[]) {
                     }
                     const std::string worldType = "user_" + UserPresetSlug(displayName);
                     saved["name"] = displayName.empty() ? std::string("Custom") : displayName;
-                    std::ofstream out(presets_dir / (worldType + ".json"), std::ios::binary);
-                    if (!out)
+                    const auto destination = presets_dir / (worldType + ".json");
+                    const auto bytes = saved.dump(2);
+                    using Writer = Luminumbra::Persistence::WorldSaveService;
+                    const bool published = overwrite_confirmed
+                                               ? Writer::write_file_durably(destination, bytes)
+                                               : Writer::create_file_durably(destination, bytes);
+                    if (!published)
                         return "";
-                    out << saved.dump(2);
                     LUMINUMBRA_CORE_INFO("Saved user world preset: {}", worldType);
                     return worldType;
                 } catch (const std::exception& e) {
@@ -2790,11 +2805,11 @@ int main(int argc, char* argv[]) {
             });
         // Enumerate saved user presets (user_*.json) so create-world can offer them as chips.
         g_uiManager->SetWorldPresetList(
-            [root_path_str]() -> std::vector<std::pair<std::string, std::string>> {
+            [root_dir]() -> std::vector<std::pair<std::string, std::string>> {
                 std::vector<std::pair<std::string, std::string>> out;
                 try {
                     const std::filesystem::path presets_dir =
-                        std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
+                        root_dir / "worlds" / "atlas" / "presets";
                     if (!std::filesystem::exists(presets_dir))
                         return out;
                     for (const auto& entry : std::filesystem::directory_iterator(presets_dir)) {
@@ -2816,11 +2831,10 @@ int main(int argc, char* argv[]) {
                 return out;
             });
         // Collision check: does saving under this display name target an existing user preset?
-        // (The saver silently overwrites; the UI uses this to gate it behind a confirm.)
-        g_uiManager->SetWorldPresetExists([root_path_str](const std::string& displayName) -> bool {
+        // The saver also enforces no replacement unless the UI supplies explicit consent.
+        g_uiManager->SetWorldPresetExists([root_dir](const std::string& displayName) -> bool {
             try {
-                const std::filesystem::path pf = std::filesystem::path(root_path_str) / "worlds" /
-                                                 "atlas" / "presets" /
+                const std::filesystem::path pf = root_dir / "worlds" / "atlas" / "presets" /
                                                  ("user_" + UserPresetSlug(displayName) + ".json");
                 return std::filesystem::exists(pf);
             } catch (...) {
@@ -2829,17 +2843,21 @@ int main(int argc, char* argv[]) {
         });
         // Delete a saved user preset by its world-type id (user_<slug>). Guards against deleting
         // anything that isn't a user preset.
-        g_uiManager->SetWorldPresetDeleter([root_path_str](const std::string& worldType) -> bool {
+        g_uiManager->SetWorldPresetDeleter([root_dir](const std::string& worldType) -> bool {
             try {
                 if (worldType.rfind("user_", 0) != 0)
                     return false;
-                const std::filesystem::path pf = std::filesystem::path(root_path_str) / "worlds" /
-                                                 "atlas" / "presets" / (worldType + ".json");
+                const std::filesystem::path pf =
+                    root_dir / "worlds" / "atlas" / "presets" / (worldType + ".json");
                 std::error_code ec;
-                const bool removed = std::filesystem::remove(pf, ec);
+                const bool existed = std::filesystem::exists(pf, ec);
+                if (ec)
+                    return false;
+                const bool removed =
+                    Luminumbra::Persistence::WorldSaveService::remove_file_and_staging(pf);
                 if (removed)
                     LUMINUMBRA_CORE_INFO("Deleted user world preset: {}", worldType);
-                return removed && !ec;
+                return existed && removed;
             } catch (...) {
                 return false;
             }
@@ -2848,35 +2866,18 @@ int main(int argc, char* argv[]) {
         // id (user_<newslug>.json), removing the old file. Returns the new world-type id, "" on
         // fail.
         g_uiManager->SetWorldPresetRenamer(
-            [root_path_str](const std::string& worldType,
-                            const std::string& newDisplayName) -> std::string {
+            [root_dir](const std::string& worldType,
+                       const std::string& newDisplayName) -> std::string {
                 try {
                     if (worldType.rfind("user_", 0) != 0)
                         return "";
-                    const std::filesystem::path dir =
-                        std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
+                    const std::filesystem::path dir = root_dir / "worlds" / "atlas" / "presets";
                     const std::filesystem::path src = dir / (worldType + ".json");
-                    if (!std::filesystem::exists(src))
-                        return "";
-                    nlohmann::json j;
-                    {
-                        std::ifstream in(src);
-                        if (!in)
-                            return "";
-                        in >> j;
-                    }
-                    j["name"] = newDisplayName.empty() ? std::string("Custom") : newDisplayName;
                     const std::string newType = "user_" + UserPresetSlug(newDisplayName);
                     const std::filesystem::path dst = dir / (newType + ".json");
-                    {
-                        std::ofstream out(dst, std::ios::binary);
-                        if (!out)
-                            return "";
-                        out << j.dump(2);
-                    }
-                    if (newType != worldType) {
-                        std::error_code ec;
-                        std::filesystem::remove(src, ec);
+                    if (!Luminumbra::Client::RenameUserPreset(src, dst, newDisplayName)) {
+                        LUMINUMBRA_CORE_ERROR("Could not rename user preset {}", worldType);
+                        return "";
                     }
                     LUMINUMBRA_CORE_INFO("Renamed user preset {} -> {}", worldType, newType);
                     return newType;
@@ -3048,7 +3049,7 @@ int main(int argc, char* argv[]) {
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
                 // Synchronous main-thread save; shutdown cannot overlap this callback.
-                if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
+                if (!gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
                                                  "space and permissions before leaving.");
@@ -3892,7 +3893,10 @@ int main(int argc, char* argv[]) {
                     float maxScent = 0.0f;
                     for (int z = 0; z < n; ++z) {
                         for (int x = 0; x < n; ++x) {
-                            const std::size_t i = (static_cast<std::size_t>(z) * n + x) * 2;
+                            const std::size_t i =
+                                (static_cast<std::size_t>(z) * static_cast<std::size_t>(n) +
+                                 static_cast<std::size_t>(x)) *
+                                2;
                             const float food = static_cast<float>(sf->Sample(2, x, z));
                             const float home = static_cast<float>(sf->Sample(3, x, z));
                             g_app.foragers.scentMirror.rg[i + 0] = food;
@@ -3945,8 +3949,8 @@ int main(int argc, char* argv[]) {
                                g_app.loading.initial_chunks_to_load.size() &&
                            static_cast<int>(batch_to_generate.size()) < JOBS_PER_FRAME) {
                         batch_to_generate.push_back(
-                            g_app.loading.initial_chunks_to_load
-                                [batch_start_index + static_cast<int>(batch_to_generate.size())]);
+                            g_app.loading.initial_chunks_to_load[static_cast<std::size_t>(
+                                batch_start_index + static_cast<int>(batch_to_generate.size()))]);
                     }
                     if (!batch_to_generate.empty()) {
                         gameSession->GetWorldSystem()->dispatch_generation_jobs(batch_to_generate);
@@ -3963,10 +3967,11 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                float progress = g_app.loading.initial_chunks_to_load.empty()
-                                     ? 1.0f
-                                     : static_cast<float>(g_app.loading.generation_dispatch_index) /
-                                           g_app.loading.initial_chunks_to_load.size();
+                float progress =
+                    g_app.loading.initial_chunks_to_load.empty()
+                        ? 1.0f
+                        : static_cast<float>(g_app.loading.generation_dispatch_index) /
+                              static_cast<float>(g_app.loading.initial_chunks_to_load.size());
 
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f); // Dark blue background
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -5035,14 +5040,15 @@ int main(int argc, char* argv[]) {
                                             static_cast<std::uint32_t>(vw) &&
                                         renderPipeline.screen_height() ==
                                             static_cast<std::uint32_t>(vh)) {
-                                        pos_rgb16f.resize(static_cast<std::size_t>(vw) * vh * 3u);
+                                        pos_rgb16f.resize(static_cast<std::size_t>(vw) *
+                                                          static_cast<std::size_t>(vh) * 3u);
                                         glBindTexture(GL_TEXTURE_2D, gb_h.position_texture);
                                         glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                         glGetTexImage(
                                             GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, pos_rgb16f.data());
                                         if (gb_h.albedo_texture != 0) {
-                                            albedo_rgb8.resize(static_cast<std::size_t>(vw) * vh *
-                                                               3u);
+                                            albedo_rgb8.resize(static_cast<std::size_t>(vw) *
+                                                               static_cast<std::size_t>(vh) * 3u);
                                             glBindTexture(GL_TEXTURE_2D, gb_h.albedo_texture);
                                             glGetTexImage(GL_TEXTURE_2D,
                                                           0,
@@ -5233,7 +5239,8 @@ int main(int argc, char* argv[]) {
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
                 glReadBuffer(GL_BACK);
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 3u);
+                std::vector<unsigned char> pixels(static_cast<size_t>(width) *
+                                                  static_cast<size_t>(height) * 3u);
                 glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
                 WritePixelBufferPpm(
                     std::filesystem::path(g_app.capture.render_benchmark_screenshot),

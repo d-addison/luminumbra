@@ -36,6 +36,12 @@ _PATHS = importlib.util.module_from_spec(_PATH_SPEC)
 _PATH_SPEC.loader.exec_module(_PATHS)
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".inc"}
+# Total GCC + Clang variants after union/target expansion. At 60 CPU-s per
+# GCC compile and 90 per tidy configuration (two per Clang variant), five
+# variants take at most seven replay minutes on two workers, including
+# partially occupied batches: a nonempty union has at least one variant in
+# each compiler database. Dependency scans remain exhaustive.
+CI_REPLAY_VARIANT_BUDGET = 5
 INPUT_VALUE_OPTIONS = {"-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros",
                        "-isysroot", "--sysroot", "-D", "-U", "-x", "-target", "--target"}
 # Arity and replay policy are shared by cleaning and source identification.
@@ -155,6 +161,7 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
             cleaned, operands = parse_arguments(args)
             if len(operands) != 1 or checked_resolve(directory / operands[0]) != source:
                 raise SelectionError(f"command must compile exactly one database source: {source}")
+            first_party_warning_policy({"arguments": args})
             validate_textual_includes(cleaned, directory)
         except (_DEPS.CacheMiss, ValueError, TypeError) as error:
             raise SelectionError(str(error)) from error
@@ -733,6 +740,11 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
     if full or headers or sources:
         scans = parallel(dependencies, entries, jobs)
     matched_sources = set().union(*scans) if scans else set()
+    # A source without its own command is valid when a configured variant's
+    # ordinary or analyzer dependency closure consumes it.
+    included_sources = {p for p in matched_sources - by_file
+                        if p.is_relative_to(root) and p.suffix.lower() in SOURCE_SUFFIXES
+                        and first_party(p.relative_to(root))}
     missing_sources = sources - by_file - matched_sources
     if missing_sources:
         source = min(missing_sources)
@@ -773,7 +785,8 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
                 raise SelectionError(f"stale database entry for deleted TU: {entry['file']}")
             selected.append(entry)
     return selected, {"full_selection": full, "selection_fallback": fallback, "scan_variants": len(scans),
-                      "cache": "disabled; fresh dependency scans"}
+                      "cache": "disabled; fresh dependency scans",
+                      "included_sources": sorted(p.relative_to(root).as_posix() for p in included_sources)}
 
 
 def warning_family(option: str) -> str | None:
@@ -848,11 +861,38 @@ def check_arguments(entry: dict, profile="none") -> list[str]:
     return command
 
 
+def first_party_warning_policy(entry: dict) -> bool:
+    """Read the CMake helper's private marker, never a source/target name.
+
+    Walk option operands so a definition-looking include path cannot opt in.
+    Unknown marker versions and undefines refuse rather than weaken policy.
+    """
+    marker = "LUMINUMBRA_FIRST_PARTY_WARNING_POLICY"
+    command = clean_arguments(entry["arguments"])
+    enabled, index = False, 1
+    # One pass bounded by the validated compile command's argument count.
+    while index < len(command):
+        arg = command[index]
+        if arg in {"-D", "-U"}:
+            option, value = arg, command[index + 1]
+        else:
+            option, value = arg[:2], arg[2:]
+        if option in {"-D", "-U"} and value.split("=", 1)[0] == marker:
+            if option != "-D" or value != marker + "=1":
+                raise SelectionError("unsupported first-party warning policy marker: " + option + value)
+            enabled = True
+        index += 2 if arg in INPUT_VALUE_OPTIONS else 1
+    return enabled
+
+
 def compile_command(entry: dict, output: Path, ccache=False, warning_profile="none",
                     fatal_profile=False) -> list[str]:
     """Replay each variant exactly, then append the optional profile."""
-    command = check_arguments(entry, warning_profile)
-    if fatal_profile:
+    strict = fatal_profile and first_party_warning_policy(entry)
+    # CI replays targets outside the helper with only their normal flags.
+    # The explicit local approximation remains independent of target policy.
+    command = check_arguments(entry, "none" if fatal_profile and not strict else warning_profile)
+    if strict:
         # CI enforces the complete contract independently of the local profile,
         # which deliberately preserves target-family calibration exceptions.
         if "-w" in command or "-Wno-everything" in command:
@@ -1125,6 +1165,28 @@ def publish_ci_summary(destination: Path | None, report: dict) -> None:
                          "</pre>\n")
 
 
+def publish_ci_evidence(destination: Path | None, report: dict) -> None:
+    """Replace evidence only after serialization, writing and closing succeed.
+
+    The temporary file shares the destination filesystem and is closed before
+    replacement, including on Windows. Failed writes preserve prior evidence.
+    """
+    if destination is None:
+        return
+    text = json.dumps(report, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent,
+                                         prefix="fast-evidence-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+        os.replace(temporary, destination)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def ci_route(args, root: Path) -> int:
     """Only proven non-native changes avoid provisioning; uncertainty validates."""
     full, reason = args.full_selection, "configured native validation"
@@ -1168,7 +1230,7 @@ def ci_cache_key(root: Path, entries: list[dict], tracked: list[Path]) -> str:
                                            "scripts/tidy.sh", "scripts/tidy_cache.py"}):
             inputs[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     data = {"configuration": "Linux Release; Diligent OFF; warnings ON",
-            "warning_profile": "msvc-approx; fatal; no calibration",
+            "warning_profile": "msvc-approx; fatal for helper targets; other targets use database flags; no calibration",
             "compiler_identity": identity, "build_inputs": inputs,
             "commands": [{"directory": str(e["directory"]),
                           "arguments": compile_command(e, Path("selected.o"),
@@ -1182,20 +1244,22 @@ def ci_tidy(root: Path, selected: list[dict], work: Path, jobs: int) -> None:
     tidy = shutil.which("clang-tidy-18") or shutil.which("clang-tidy")
     if not tidy:
         raise SelectionError("clang-tidy-18 or clang-tidy not found")
+    config = checked_resolve(root / ".clang-tidy")
     def tidy_one(item):
         index, entry = item
+        arguments = replay_arguments(entry)
         directory = work / f"tidy-{index}"
         directory.mkdir()
         (directory / "compile_commands.json").write_text(json.dumps([{
             "file": str(entry["file"]), "directory": str(entry["directory"]),
-            "arguments": clean_arguments(entry["arguments"]) + ["-c", "-o", str(directory / "tidy.o")],
+            "arguments": arguments + ["-c", "-o", str(directory / "tidy.o")],
         }]), encoding="utf-8")
         manifest = directory / "selected.files0"
         manifest.write_bytes(os.fsencode(entry["file"]) + b"\0")
         outputs = []
         commands = [
             [tidy, "-quiet", "-p", str(directory),
-             "--config-file=" + str(root / ".clang-tidy"), str(entry["file"])],
+             "--config-file=" + str(config), str(entry["file"])],
             ["bash", str(root / "scripts/tidy.sh"), "--build-dir", str(directory.relative_to(root)),
              "--jobs", "1", "--files0-from", str(manifest)],
         ]
@@ -1217,7 +1281,7 @@ def ci_tidy(root: Path, selected: list[dict], work: Path, jobs: int) -> None:
 def ci_checks(args, root: Path) -> int:
     report = {"status": "failed", "selected": {}, "command_variants": {},
               "scan_seconds": 0, "compile_seconds": 0, "tidy_seconds": 0,
-              "warning_profile": "msvc-approx (fatal; no calibration)",
+              "warning_profile": "msvc-approx (fatal for helper targets; other targets use database flags; no calibration)",
               "unsupported_configurations": [
                   "Configured Linux Release only; Diligent OFF. Windows/MSVC, UCRT64, "
                   "ASan and optional backend coverage remain with existing full lanes."],
@@ -1246,6 +1310,9 @@ def ci_checks(args, root: Path) -> int:
             if not entries:
                 raise SelectionError(f"empty {label} first-party compile database")
             databases[label] = entries
+            # Dependency scanning proves consumption of included sources as well
+            # as standalone TUs. Its coverage refusal precedes expensive replay
+            # and cannot be bypassed by the replay deferral budget.
             selected, selection = select(root, entries, changed, args.jobs, build)
             selections[label] = selected
             report[label + "_selection"] = selection
@@ -1254,6 +1321,7 @@ def ci_checks(args, root: Path) -> int:
                 {"file": e["file"].relative_to(root).as_posix(), "directory": str(e["directory"]),
                  "arguments": clean_arguments(e["arguments"])} for e in selected]
             configured = {e["file"] for e in entries}
+            configured.update(root / p for p in selection.get("included_sources", []))
             missing = sorted(p.relative_to(root).as_posix() for p in tracked
                              if p.suffix.lower() in SOURCE_SUFFIXES and first_party(p.relative_to(root))
                              and checked_resolve(p) not in configured)
@@ -1270,7 +1338,30 @@ def ci_checks(args, root: Path) -> int:
                 {"file": e["file"].relative_to(root).as_posix(), "directory": str(e["directory"]),
                  "arguments": clean_arguments(e["arguments"])} for e in selections[label]]
         gcc = selections["gcc"]
+        # Admission and identity precede budget deferral. In particular, a
+        # warning-policy refusal or unsafe Clang replay cannot become success.
+        commands = {
+            "gcc": [{"file": str(e["file"]), "directory": str(e["directory"]),
+                     "arguments": compile_command(e, Path("selected.o"),
+                                                  warning_profile="msvc-approx", fatal_profile=True)}
+                    for e in gcc],
+            "clang": [{"file": str(e["file"]), "directory": str(e["directory"]),
+                       "arguments": replay_arguments(e)} for e in selections["clang"]],
+        }
+        fingerprint_data = {"commands": commands, "tidy_policy": {
+            name: hashlib.sha256(checked_resolve(root / name).read_bytes()).hexdigest()
+            for name in (".clang-tidy", "scripts/tidy.sh")}}
+        report["command_fingerprint"] = hashlib.sha256(
+            json.dumps(fingerprint_data, sort_keys=True).encode()).hexdigest()
         report["cache_namespace"] = ci_cache_key(root, gcc, tracked)
+        report["selected_count"] = sum(len(selected) for selected in selections.values())
+        report["replay_variant_budget"] = CI_REPLAY_VARIANT_BUDGET
+        if report["selected_count"] > CI_REPLAY_VARIANT_BUDGET:
+            report["status"] = "deferred"
+            report["reason"] = (
+                f"Selection of {report['selected_count']} command variants exceeds the fast-lane "
+                f"budget of {CI_REPLAY_VARIANT_BUDGET}; deferred to the full required builds.")
+            return 0
         os.environ["CCACHE_NAMESPACE"] = report["cache_namespace"]
         if not shutil.which("ccache"):
             raise SelectionError("ccache not found")
@@ -1305,7 +1396,12 @@ def ci_checks(args, root: Path) -> int:
             os.environ.pop("CCACHE_NAMESPACE", None)
         else:
             os.environ["CCACHE_NAMESPACE"] = namespace_before
-        publish_ci_summary(args.summary_file, report)
+        try:
+            publish_ci_summary(args.summary_file, report)
+            publish_ci_evidence(args.evidence_file, report)
+        except (ValueError, OSError, TypeError) as error:
+            print(f"fast checks: evidence/summary publication failed: {error}", file=sys.stderr)
+            return 1
 
 
 def main(argv=None) -> int:
@@ -1316,6 +1412,8 @@ def main(argv=None) -> int:
     parser.add_argument("--clang-build-dir", type=Path)
     parser.add_argument("--full-selection", action="store_true")
     parser.add_argument("--summary-file", type=Path)
+    parser.add_argument("--evidence-file", type=Path,
+                        help="atomically publish the CI selection and replay result as JSON")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--base-ref", default=os.environ.get("LUMINUMBRA_BASE_REF") or "origin/devel",
                         help="override LUMINUMBRA_BASE_REF (unset or empty defaults to origin/devel)")
@@ -1331,18 +1429,18 @@ def main(argv=None) -> int:
     baselines.add_argument("--write-warning-baseline", type=Path)
     parser.add_argument("--conversion-clean-prefix", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
-    if args.command in {"route", "ci"} and (
-            args.warning_baseline or args.write_warning_baseline or args.conversion_clean_prefix):
-        parser.error("CI routing and checks do not accept warning calibration")
-    if args.command in {"compile", "tidy"} and args.build_dir is None:
-        parser.error("--build-dir is required for compile/tidy")
     start = time.monotonic()
     try:
         root = checked_resolve(args.root)
+        if args.command in {"route", "ci"} and (
+                args.warning_baseline or args.write_warning_baseline or args.conversion_clean_prefix):
+            parser.error("CI routing and checks do not accept warning calibration")
         if args.command == "route":
             return ci_route(args, root)
         if args.command == "ci":
             return ci_checks(args, root)
+        if args.build_dir is None:
+            parser.error("--build-dir is required for compile/tidy")
         if args.jobs < 1:
             raise SelectionError("--jobs must be positive")
         if ((args.warning_baseline or args.write_warning_baseline or args.conversion_clean_prefix)

@@ -240,17 +240,20 @@ protected:
     void Bind(
         Shader& shader, const char* name, int unit, GLuint texture, GLenum target = GL_TEXTURE_2D) {
         shader.setInt(name, unit);
-        glActiveTexture(GL_TEXTURE0 + unit);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
         glBindTexture(target, texture);
     }
     void Attach(GLuint texture, int slot = 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + slot, GL_TEXTURE_2D, texture, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,
+                               GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(slot),
+                               GL_TEXTURE_2D,
+                               texture,
+                               0);
     }
     glm::vec4 Pixel(int slot = 0) {
         glm::vec4 pixel{};
-        glReadBuffer(GL_COLOR_ATTACHMENT0 + slot);
+        glReadBuffer(GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(slot));
         glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, glm::value_ptr(pixel));
         return pixel;
     }
@@ -355,8 +358,8 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
     glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data());
     for (int cascade = 0; cascade < ShadowMap::CASCADE_COUNT; ++cascade) {
         SCOPED_TRACE(cascade);
-        EXPECT_EQ(observer->cascade_submissions[cascade], 0u);
-        EXPECT_EQ(observer->cascade_draws[cascade], 0u);
+        EXPECT_EQ(observer->cascade_submissions[static_cast<std::size_t>(cascade)], 0u);
+        EXPECT_EQ(observer->cascade_draws[static_cast<std::size_t>(cascade)], 0u);
         const auto begin = depths.begin() + cascade * resolution * resolution;
         EXPECT_TRUE(std::all_of(
             begin, begin + resolution * resolution, [](float value) { return value == 1.0f; }));
@@ -381,10 +384,10 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
     EXPECT_EQ(observer->draws, requests.size() * ShadowMap::CASCADE_COUNT);
     for (int cascade = 0; cascade < ShadowMap::CASCADE_COUNT; ++cascade) {
         SCOPED_TRACE(cascade);
-        EXPECT_EQ(observer->cascade_submissions[cascade], 1u);
-        EXPECT_EQ(observer->cascade_draws[cascade], requests.size());
-        EXPECT_EQ(injected_stats[cascade].draws, requests.size());
-        EXPECT_GT(injected_stats[cascade].indices, 0u);
+        EXPECT_EQ(observer->cascade_submissions[static_cast<std::size_t>(cascade)], 1u);
+        EXPECT_EQ(observer->cascade_draws[static_cast<std::size_t>(cascade)], requests.size());
+        EXPECT_EQ(injected_stats[static_cast<std::size_t>(cascade)].draws, requests.size());
+        EXPECT_GT(injected_stats[static_cast<std::size_t>(cascade)].indices, 0u);
     }
     ASSERT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
 }
@@ -407,8 +410,11 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
                                              GL_COLOR_ATTACHMENT3,
                                              GL_COLOR_ATTACHMENT4};
     for (int i = 0; i < 5; ++i) {
-        outputs[i] = Texture(GL_TEXTURE_2D, formats[i], channels[i], nullptr);
-        Attach(outputs[i], i);
+        outputs[static_cast<std::size_t>(i)] = Texture(GL_TEXTURE_2D,
+                                                       formats[static_cast<std::size_t>(i)],
+                                                       channels[static_cast<std::size_t>(i)],
+                                                       nullptr);
+        Attach(outputs[static_cast<std::size_t>(i)], i);
     }
     glDrawBuffers(5, draw_buffers.data());
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
@@ -487,14 +493,14 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
         EXPECT_TRUE(driver.DrawIndexed(static_cast<std::int32_t>(indices.size())));
         std::array<glm::vec4, 5> pixels{};
         for (int i = 0; i < 5; ++i)
-            pixels[i] = Pixel(i);
+            pixels[static_cast<std::size_t>(i)] = Pixel(i);
         return pixels;
     };
     for (const float ao : {0.0f, 1.0f, 0.3333f}) {
         for (int id = 0; id < 256; ++id) {
-            lut[id * 4] = 0.25f;
-            lut[id * 4 + 1] = 0.7f;
-            lut[id * 4 + 2] = ao;
+            lut[static_cast<std::size_t>(id * 4)] = 0.25f;
+            lut[static_cast<std::size_t>(id * 4 + 1)] = 0.7f;
+            lut[static_cast<std::size_t>(id * 4 + 2)] = ao;
         }
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, material_lut);
@@ -504,7 +510,7 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
             const auto legacy = render(ordinary, false, id);
             const auto inert = render(ladder, false, id);
             for (int i = 0; i < 5; ++i) {
-                EXPECT_EQ(legacy[i], inert[i]);
+                EXPECT_EQ(legacy[static_cast<std::size_t>(i)], inert[static_cast<std::size_t>(i)]);
             }
             const auto far = render(ladder, true, id);
             if (id == 7u) { // The live-water path is discarded in both variants.

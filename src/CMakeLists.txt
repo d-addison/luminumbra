@@ -24,6 +24,8 @@ target_include_directories(luminumbra_client PUBLIC
     # The 'src' directory, which is the root for includes like "luminumbra_common/..."
     ${CMAKE_CURRENT_SOURCE_DIR}
 
+)
+target_include_directories(luminumbra_client SYSTEM PUBLIC
     # vendor root, for single-header vendor libs included as "<lib>/<header>.h"
     # (e.g. renderdoc/renderdoc_app.h -- the  in-app capture API).
     ${CMAKE_SOURCE_DIR}/vendor

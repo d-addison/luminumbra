@@ -506,7 +506,8 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     };
     auto fnv64 = [](const std::string& s, std::uint64_t seed) {
         std::uint64_t h = seed;
-        for (unsigned char c : s) {
+        for (const char character : s) {
+            const auto c = static_cast<unsigned char>(character);
             h ^= c;
             h *= 1099511628211ull;
         }

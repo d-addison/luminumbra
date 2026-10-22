@@ -815,8 +815,14 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn('--output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"', route)
         self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
         self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
-        for step in steps(fast)[3:-1]:
+        for step in steps(fast)[3:6]:
             self.assertEqual(value(step, "if", 8), "steps.route.outputs.native != 'false'")
+        evidence = steps(fast)[6]
+        self.assertEqual(value(evidence, "if", 8), "always() && steps.route.outputs.native != 'false'")
+        self.assertIn("uses: actions/upload-artifact@", evidence)
+        self.assertIn("path: build/fast-checks-evidence.json", evidence)
+        self.assertIn("if-no-files-found: error", evidence)
+        self.assertIn("--evidence-file build/fast-checks-evidence.json", steps(fast)[5])
         for compiler in ("gcc", "clang"):
             self.assertIn(f"cmake -S . -B build/fast-{compiler}", fast)
             self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)
@@ -861,12 +867,15 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
             "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
+            # Require all three offline-dependency partitions in local-check evidence.
             "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
             "gns-compile-probe": "8ba48b3b08d1b8c8b3c566827d1c07b850f3d21b3ee2c4765952169a7c13532b",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
+            # Pin Python 3.14.8 across consumers and require partitioned local-check evidence.
             "windows-msvc": "763218a207e024d39c82df14c933c89ac1d090342d7f4a794baa046a7a8d10f5",
+            # Pin Python 3.14.8 and pass the selected runtime to UCRT64 configuration.
             "windows-ucrt64": "00890b97a7e49d22c50d046972b2f272fe0a63ca8ff90fb132f99fb410797eb1",
-            "linux-result": "506db39392d1e4e81219389b13a4a626675bec93182c598d4e6588f356512f77",
+            "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
@@ -1579,6 +1588,18 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn("python3 -I -B tools/ci/test_ctest_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
 
     def test_acceptance_execution_uses_verified_union_and_retains_networking_evidence(self):
+        # Hosted shards discover these unchanged labels from the engine CTest
+        # inventory. Recovery belongs to the same disjoint partition roster.
+        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.findall(
+            r'add_test\(\s*NAME (AcceptanceMatrixContract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
+        self.assertEqual(len(registrations), 225)
+        self.assertEqual({int(re.search(r'--contract-partition ([0-9]+)', command)[1])
+                          for _, command in registrations}, set(range(225)))
+        self.assertNotIn("NAME AcceptanceRecoveryContract", cmake)
+        for name, command in registrations:
+            self.assertIn('ci/test_check_acceptance_matrix.py', command)
+            self.assertRegex(cmake, rf'set_tests_properties\({name}\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)')
         ci = jobs(self.workflows["ci.yml"])
         producer, aggregate = ci["linux"], ci["linux-result"]
         self.assertNotIn("check_acceptance_matrix.py", producer)
@@ -1597,7 +1618,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(" ".join(command.replace("\\\n", "").split()),
                          "--junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml "
                          "--discovery build/release/ctest-discovery.json --ci-context "
-                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json")
+                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json "
+                         '--preparation-receipt-file "$RUNNER_TEMP/acceptance-preparation-custody.json"')
         upload = named["Upload merged JUnit"]
         self.assertEqual(value(upload, "if", 8),
                          "always() && needs.linux.result == 'success' && "

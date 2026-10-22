@@ -1104,7 +1104,7 @@ bool process_material_texture_with_cutoff(const std::string& input_path,
             stbi_image_free(data);
             return false;
         }
-        for (size_t p = 0; p < static_cast<size_t>(width) * height; ++p)
+        for (size_t p = 0; p < static_cast<size_t>(width) * static_cast<size_t>(height); ++p)
             data[p * 4 + 3] = mask[p];
         stbi_image_free(mask);
     }
@@ -1139,7 +1139,8 @@ bool process_material_texture_with_cutoff(const std::string& input_path,
     } else {
         base.width = static_cast<uint32_t>(width);
         base.height = static_cast<uint32_t>(height);
-        base.pixels.assign(data, data + static_cast<size_t>(width) * height * channels);
+        base.pixels.assign(
+            data, data + static_cast<size_t>(width) * static_cast<size_t>(height) * channels);
     }
     stbi_image_free(data);
 
@@ -1148,7 +1149,7 @@ bool process_material_texture_with_cutoff(const std::string& input_path,
             float n[3];
             float length_squared = 0.0f;
             for (int c = 0; c < 3; ++c) {
-                n[c] = mip.pixels[p + c] / 127.5f - 1.0f;
+                n[c] = mip.pixels[p + static_cast<size_t>(c)] / 127.5f - 1.0f;
                 length_squared += n[c] * n[c];
             }
             const float inverse_length =
@@ -1156,7 +1157,7 @@ bool process_material_texture_with_cutoff(const std::string& input_path,
             for (int c = 0; c < 3; ++c) {
                 const float component =
                     inverse_length > 0.0f ? n[c] * inverse_length : (c == 2 ? 1.0f : 0.0f);
-                mip.pixels[p + c] = static_cast<uint8_t>(
+                mip.pixels[p + static_cast<size_t>(c)] = static_cast<uint8_t>(
                     std::clamp(std::lround((component + 1.0f) * 127.5f), 0l, 255l));
             }
         }
@@ -1189,7 +1190,7 @@ bool process_material_texture_with_cutoff(const std::string& input_path,
                 if (inline_coverage) {
                     // Measure the quantized bytes that the shader will sample.
                     const auto alpha = std::clamp(std::lround(mip.pixels[p] * scale), 0l, 255l);
-                    covered += alpha >= alpha_cutoff * 255.0f;
+                    covered += static_cast<float>(alpha) >= alpha_cutoff * 255.0f;
                 } else {
                     // Retain the existing external-mask path's exact arithmetic.
                     covered += mip.pixels[p] * scale >= 127.5f;
@@ -1502,9 +1503,9 @@ bool process_gltf_checked(const std::string& input_path, const std::string& outp
 
     outFile.write(reinterpret_cast<const char*>(&header), sizeof(LMeshHeader));
     outFile.write(reinterpret_cast<const char*>(optimized_vertices.data()),
-                  unique_vertex_count * sizeof(Vertex));
+                  static_cast<std::streamsize>(unique_vertex_count * sizeof(Vertex)));
     outFile.write(reinterpret_cast<const char*>(optimized_indices.data()),
-                  optimized_indices.size() * sizeof(uint32_t));
+                  static_cast<std::streamsize>(optimized_indices.size() * sizeof(uint32_t)));
     outFile.close();
 
     std::cout << "Successfully processed '" << input_path << "' -> '" << output_path << "'"

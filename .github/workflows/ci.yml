@@ -1150,7 +1150,8 @@ jobs:
           python3 tools/ci/check_acceptance_matrix.py \
             --junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml \
             --discovery build/release/ctest-discovery.json --ci-context \
-            --execution-receipt build/release/test-artifacts/acceptance-execution.json
+            --execution-receipt build/release/test-artifacts/acceptance-execution.json \
+            --preparation-receipt-file "$RUNNER_TEMP/acceptance-preparation-custody.json"
       - name: Upload merged JUnit
         if: always() && needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1397,7 +1398,15 @@ jobs:
           if [ "$CI_FULL_SELECTION" != false ]; then full=(--full-selection); fi
           python3 -I -B tools/ci/changed_tus.py ci --base-ref "${CI_BASE_SHA:-HEAD}" \
             --build-dir build/fast-gcc --clang-build-dir build/fast-clang \
-            --jobs 2 --summary-file "$GITHUB_STEP_SUMMARY" "${full[@]}"
+            --jobs 2 --summary-file "$GITHUB_STEP_SUMMARY" \
+            --evidence-file build/fast-checks-evidence.json "${full[@]}"
+      - name: Upload fast selection and replay evidence
+        if: always() && steps.route.outputs.native != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fast-checks-evidence
+          path: build/fast-checks-evidence.json
+          if-no-files-found: error
       - name: Report runner-local compiler cache statistics
         if: always() && steps.route.outputs.native != 'false'
         run: |

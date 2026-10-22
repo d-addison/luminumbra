@@ -13,6 +13,9 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_station_discovery.py",
+    "tools/gates/test_common_library_isa.py",
+    "test/tools/test_runtime_config_contract.py",
     "test/tools/check_audio_shutdown_contract.py",
     "tools/ci/test_audio_propagation_metrics.py",
     "test/rendering/test_frame_attribution_wiring.py",
@@ -23,6 +26,7 @@ PYTHON_TESTS = (
     "tools/ci/test_replay_source_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
+    "tools/ci/test_check_acceptance_matrix.py",
     "tools/ci/test_changed_tus.py",
     "tools/ci/test_offline_deps.py",
     "tools/ci/test_jolt_startup.py",
@@ -39,13 +43,17 @@ PYTHON_TESTS = (
     "tools/ci/test_tidy_cache.py",
     "tools/perf/test_capture_sim_budget.py",
     "tools/perf/test_check_residency.py",
+    "tools/perf/test_check_gl_debug_log.py",
     "tools/perf/test_fixture_hash.py",
     "tools/perf/test_foliage_evidence.py",
     "tools/perf/test_perf.py",
+    "tools/perf/test_plan_qualification.py",
     "tools/perf/test_render_budget.py",
     "tools/perf/test_render_contract.py",
     "tools/perf/test_render_runner_evidence.py",
+    "tools/perf/test_run_qualification.py",
     "tools/perf/test_sim_budget_gate.py",
+    "tools/perf/test_summarize_process_receipts.py",
     "tools/perf/test_terrain_aov_paths.py",
     "tools/perf/test_terrain_aovs.py",
     "tools/release/test_sbom.py",
@@ -58,6 +66,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/ci/check_acceptance_matrix.py",
     "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
     "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",

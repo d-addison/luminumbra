@@ -35,7 +35,8 @@ constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void HashBytes(std::uint64_t& hash, std::string_view bytes) {
-    for (const unsigned char byte : bytes) {
+    for (const char character : bytes) {
+        const auto byte = static_cast<unsigned char>(character);
         hash ^= byte;
         hash *= kFnvPrime;
     }

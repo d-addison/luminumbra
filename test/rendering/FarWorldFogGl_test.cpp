@@ -115,7 +115,7 @@ protected:
             const GLenum target = sampler.type == GL_SAMPLER_3D         ? GL_TEXTURE_3D
                                   : sampler.type == GL_SAMPLER_2D_ARRAY ? GL_TEXTURE_2D_ARRAY
                                                                         : GL_TEXTURE_2D;
-            glActiveTexture(GL_TEXTURE0 + unit);
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
             glBindTexture(target, Texture(target, GL_RGBA32F, GL_RGBA, defaults.data()));
             shader->setInt(sampler.name, unit);
             units.emplace(sampler.name, unit++);
@@ -128,7 +128,7 @@ protected:
     void Bind(Shader& shader, const char* name, GLuint texture, GLenum target = GL_TEXTURE_2D) {
         const auto found = units.find(name);
         ASSERT_NE(found, units.end()) << name;
-        glActiveTexture(GL_TEXTURE0 + found->second);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(found->second));
         glBindTexture(target, texture);
         shader.setInt(name, found->second);
     }
@@ -502,8 +502,9 @@ TEST_F(FarWorldFogGl, ProductionConsumersUseDepthForFarCentersAndAllNeighbors) {
                 for (int x = 0; x < extent; ++x) {
                     const int index = y * extent + x;
                     const float axial = mixed ? (index == center ? 1999.75f : 2000.125f) : 16000;
-                    depths[index] = DepthAt(axial, kFarPlaneMeters);
-                    reference[index] = PositionAt(x, y, axial, fov, jitter);
+                    depths[static_cast<std::size_t>(index)] = DepthAt(axial, kFarPlaneMeters);
+                    reference[static_cast<std::size_t>(index)] =
+                        PositionAt(x, y, axial, fov, jitter);
                 }
             }
             if (mixed) {

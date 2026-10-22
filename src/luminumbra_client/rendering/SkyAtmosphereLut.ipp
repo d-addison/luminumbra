@@ -346,7 +346,8 @@ void SkyAtmosphereLut::build_transmittance_cpu() {
 
             const float t_top = ray_sphere_nearest(origin, dir, kAtmosphereTopM);
             if (t_top <= 0.0f) {
-                m_transmittance_cpu[static_cast<std::size_t>(y) * kTransmittanceWidth + x] = glm::vec3(1.0f);
+                m_transmittance_cpu[static_cast<std::size_t>(y) * kTransmittanceWidth +
+                                    static_cast<std::size_t>(x)] = glm::vec3(1.0f);
                 continue;
             }
             const float dt = t_top / static_cast<float>(kSamples);
@@ -357,8 +358,8 @@ void SkyAtmosphereLut::build_transmittance_cpu() {
                 const glm::vec2 d = density_ratio(std::max(0.0f, alt));
                 optical_depth += (beta_r * d.x + beta_m_ext * d.y) * dt;
             }
-            m_transmittance_cpu[static_cast<std::size_t>(y) * kTransmittanceWidth + x] =
-                glm::exp(-optical_depth);
+            m_transmittance_cpu[static_cast<std::size_t>(y) * kTransmittanceWidth +
+                                static_cast<std::size_t>(x)] = glm::exp(-optical_depth);
         }
     }
 }
@@ -369,7 +370,8 @@ glm::vec3 SkyAtmosphereLut::sample_transmittance(float altitude_m, float cos_zen
     const float u = glm::clamp((cos_zenith + 1.0f) * 0.5f, 0.0f, 1.0f);
     const int x = std::min(kTransmittanceWidth - 1, static_cast<int>(u * kTransmittanceWidth));
     const int y = std::min(kTransmittanceHeight - 1, static_cast<int>(v * kTransmittanceHeight));
-    return m_transmittance_cpu[static_cast<std::size_t>(y) * kTransmittanceWidth + x];
+    return m_transmittance_cpu[static_cast<std::size_t>(y) * kTransmittanceWidth +
+                               static_cast<std::size_t>(x)];
 }
 
 glm::vec3 SkyAtmosphereLut::sun_transmittance(float sun_cos_zenith) const {
@@ -449,7 +451,8 @@ void SkyAtmosphereLut::build_multiscatter_cpu() {
             fms *= inv * 4.0f * glm::pi<float>() * uniform_phase;
             // Analytic infinite series sum: L2 / (1 - fms).
             const glm::vec3 denom = glm::max(glm::vec3(1.0f) - fms, glm::vec3(1e-3f));
-            m_multiscatter_cpu[static_cast<std::size_t>(y) * kMultiScatterWidth + x] = L2nd / denom;
+            m_multiscatter_cpu[static_cast<std::size_t>(y) * kMultiScatterWidth +
+                               static_cast<std::size_t>(x)] = L2nd / denom;
         }
     }
 }
@@ -535,9 +538,11 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
                 const float ms_v = glm::clamp(std::max(0.0f, alt) / (kAtmosphereTopM - kPlanetRadiusM), 0.0f, 1.0f);
                 const int msx = std::min(kMultiScatterWidth - 1, static_cast<int>(ms_u * kMultiScatterWidth));
                 const int msy = std::min(kMultiScatterHeight - 1, static_cast<int>(ms_v * kMultiScatterHeight));
-                const glm::vec3 ms = m_multiscatter_cpu.empty()
-                    ? glm::vec3(0.0f)
-: m_multiscatter_cpu[static_cast<std::size_t>(msy) * kMultiScatterWidth + msx];
+                const glm::vec3 ms =
+                    m_multiscatter_cpu.empty()
+                        ? glm::vec3(0.0f)
+                        : m_multiscatter_cpu[static_cast<std::size_t>(msy) * kMultiScatterWidth +
+                                             static_cast<std::size_t>(msx)];
                 const glm::vec3 multi = (sigma_s_r + sigma_s_m) * ms;
 
                 const glm::vec3 step_tr = glm::exp(-sigma_e * dt);
@@ -547,7 +552,8 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
                 throughput *= step_tr;
             }
 
-            m_skyview_cpu[static_cast<std::size_t>(y) * kSkyViewWidth + x] = L;
+            m_skyview_cpu[static_cast<std::size_t>(y) * kSkyViewWidth +
+                          static_cast<std::size_t>(x)] = L;
 
             // Hemisphere ambient: average upper-hemisphere radiance weighted by
             // cosine of the view zenith (irradiance integral).
@@ -732,7 +738,8 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
         if (cos_view <= 0.0f) continue;
         const float sin_view = std::sin(view_zenith);
         for (int x = 0; x < kSkyViewWidth; ++x) {
-            const glm::vec3 L = m_skyview_cpu[static_cast<std::size_t>(y) * kSkyViewWidth + x];
+            const glm::vec3 L = m_skyview_cpu[static_cast<std::size_t>(y) * kSkyViewWidth +
+                                              static_cast<std::size_t>(x)];
             ambient_accum += L * cos_view * sin_view;
             ambient_weight += cos_view * sin_view;
         }

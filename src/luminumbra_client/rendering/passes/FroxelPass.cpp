@@ -107,7 +107,7 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
             glUniformMatrix4fv(glGetUniformLocation(m_inject_program, name.c_str()),
                                1,
                                GL_FALSE,
-                               &(*ctx.light_space_matrices)[i][0][0]);
+                               &(*ctx.light_space_matrices)[static_cast<std::size_t>(i)][0][0]);
         }
     }
     glUniform4fv(

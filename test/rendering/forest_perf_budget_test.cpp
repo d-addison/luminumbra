@@ -177,13 +177,14 @@ MeasureForestLoad(int n,
             // GBufferPass.cpp:545-553: all 3 tree parts at LOD3 fold into ONE camera-
             // facing octa-impostor billboard per tree (one quad, ~2 tris), collected
             // and drawn as a single shared instanced draw for the whole far field.
-            out.instances_by_lod[lod] += 1;
+            out.instances_by_lod[static_cast<std::size_t>(lod)] += 1;
             out.total_instances += 1;
             out.foliage_tris += kImpostorTrisPerTree;
             ++impostor_instances;
             continue;
         }
-        out.instances_by_lod[lod] += static_cast<std::uint64_t>(kPartsPerTree);
+        out.instances_by_lod[static_cast<std::size_t>(lod)] +=
+            static_cast<std::uint64_t>(kPartsPerTree);
         out.total_instances += static_cast<std::uint64_t>(kPartsPerTree);
         out.foliage_tris += actual_triangles != nullptr
                                 ? (*actual_triangles)[lod]
@@ -222,7 +223,8 @@ MeasureForestLoad(int n,
 void EmitArtifact(const ForestBudgetResult& r, bool tri_over, bool draw_over) {
     nlohmann::json by_lod = nlohmann::json::array();
     for (int lod = 0; lod < kTreeLodCount; ++lod) {
-        by_lod.push_back({{"lod", lod}, {"instances", r.instances_by_lod[lod]}});
+        by_lod.push_back(
+            {{"lod", lod}, {"instances", r.instances_by_lod[static_cast<std::size_t>(lod)]}});
     }
 
 #ifdef NDEBUG
@@ -317,12 +319,12 @@ TEST(ForestPerfBudget, AuthoredPackFitsSamePinnedForestAndBudgets) {
         const int lod = path.find(".lod1.") != std::string::npos   ? 1
                         : path.find(".lod2.") != std::string::npos ? 2
                                                                    : 0;
-        triangles[lod] += file.at("triangles").get<std::uint64_t>();
-        ++parts[lod];
+        triangles[static_cast<std::size_t>(lod)] += file.at("triangles").get<std::uint64_t>();
+        ++parts[static_cast<std::size_t>(lod)];
     }
     for (int lod = 0; lod < 3; ++lod) {
-        ASSERT_EQ(parts[lod], kPartsPerTree);
-        ASSERT_GT(triangles[lod], 0u);
+        ASSERT_EQ(parts[static_cast<std::size_t>(lod)], kPartsPerTree);
+        ASSERT_GT(triangles[static_cast<std::size_t>(lod)], 0u);
     }
     const auto result = MeasureForestLoad(kPinnedTreeCount,
                                           kPinnedSpacingM,

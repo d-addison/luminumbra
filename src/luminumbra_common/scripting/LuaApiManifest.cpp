@@ -14,7 +14,8 @@ constexpr const char* kDeterministicOrder = "module_then_name";
 
 void AppendJsonString(std::ostringstream& out, const std::string& value) {
     out << '"';
-    for (const unsigned char c : value) {
+    for (const char character : value) {
+        const auto c = static_cast<unsigned char>(character);
         switch (c) {
             case '"':
                 out << "\\\"";
