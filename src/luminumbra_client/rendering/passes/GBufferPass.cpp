@@ -3,6 +3,7 @@
 #include "../GBufferTargets.h"
 #include "StaticDrawPass.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 #include <luminumbra/rendering/StaticScene.h>
 #include <stdexcept>
 
@@ -507,7 +508,8 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     };
     auto fnv64 = [](const std::string& s, std::uint64_t seed) {
         std::uint64_t h = seed;
-        for (unsigned char c : s) {
+        for (const char character : s) {
+            const auto c = static_cast<unsigned char>(character);
             h ^= c;
             h *= 1099511628211ull;
         }
@@ -877,8 +879,12 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glEnableVertexAttribArray(7);
             glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)nullptr);
             glVertexAttribDivisor(7, 1);
-            glDrawElementsInstanced(
-                GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr, instance_count);
+            Luminumbra::Rendering::AttributedGl::Submit(glDrawElementsInstanced,
+                                                        GL_TRIANGLES,
+                                                        mesh->indexCount,
+                                                        GL_UNSIGNED_INT,
+                                                        nullptr,
+                                                        instance_count);
             glBindVertexArray(0);
         }
     }
@@ -919,7 +925,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                             impostorInstances.data() + offset);
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
-            glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, count);
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawArraysInstanced, GL_TRIANGLE_STRIP, 0, 4, count);
             glBindVertexArray(0);
         }
         if (cull_was_enabled)
@@ -1069,7 +1076,8 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_jointPaletteSSBO);
 
         glBindVertexArray(mesh->vao);
-        glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawElements, GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
         glBindVertexArray(0);
         stats.skinned_draws++;
         stats.skinned_indices += mesh->indexCount;

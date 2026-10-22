@@ -1,5 +1,6 @@
 #include "SkyboxPass.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "PassGlHelpers.h"
@@ -321,7 +322,7 @@ void SkyboxPass::execute(const RenderContext& ctx,
         m_skybox_shader->setFloat("u_stormSkyFloor", storm_floor);
     }
     glBindVertexArray(m_skybox_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 36);
     (*ctx.skybox_draw_counter)++;
     glBindVertexArray(0);
     if (sky_lut_ready) {
@@ -467,7 +468,7 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     m_weather_shader->setFloat("u_windStrength", wind_strength);
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE0);
     glEnable(GL_DEPTH_TEST);

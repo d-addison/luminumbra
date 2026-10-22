@@ -1,6 +1,7 @@
 #include "GlassOitPass.h"
 #include "../FarWorldReplay.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "PassGlHelpers.h"
 #include "core/Log.h"
@@ -120,7 +121,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         m_accum_shader->setMat4("u_model", pane.model);
         m_accum_shader->setVec3("u_tint", pane.tint);
         m_accum_shader->setFloat("u_thickness", pane.thickness);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 6);
     }
     glBindVertexArray(0);
 
@@ -154,7 +155,7 @@ void GlassOitPass::execute_resolve(const RenderContext& ctx, const GlassOitPassI
     glBindTexture(GL_TEXTURE_2D, m_reveal_tex);
     m_resolve_shader->setInt("u_reveal", 1);
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);

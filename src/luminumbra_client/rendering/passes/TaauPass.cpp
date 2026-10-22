@@ -1,6 +1,7 @@
 #include "TaauPass.h"
 #include "../FarWorldReplay.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h"
 #include "../RenderResourceRegistry.h"
@@ -150,7 +151,7 @@ void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen)
     m_shader->setInt("u_history_valid", plan.history_valid ? 1 : 0);
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
     // Copy the resolved output into lighting for final blit. Only normal frames

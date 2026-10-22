@@ -21,7 +21,8 @@ AudioPropagationSystem::AudioPropagationSystem(Luminumbra::Systems::PhysicsSyste
 
 AudioPropagationSystem::~AudioPropagationSystem() {
     {
-        // Serialize shutdown with the worker's predicate-to-wait transition.
+        // Publishing shutdown under the task mutex keeps a worker that has just evaluated its wait
+        // predicate from missing the notification and blocking destruction in join().
         std::lock_guard<std::mutex> lock(m_task_mutex);
         m_shutdown = true;
     }
@@ -326,13 +327,14 @@ AudioPropagationSystem::AnalyzeEnvironment(const glm::vec3& position, float anal
         }
     }
 
-    analysis.is_enclosed = (enclosed_rays > sample_directions.size() * 0.5f);
+    analysis.is_enclosed =
+        (static_cast<float>(enclosed_rays) > static_cast<float>(sample_directions.size()) * 0.5f);
 
     if (analysis.is_enclosed) {
-        float avg_wall_distance = total_distance / sample_directions.size();
+        float avg_wall_distance = total_distance / static_cast<float>(sample_directions.size());
         analysis.room_volume = avg_wall_distance * avg_wall_distance * avg_wall_distance * 2.0f;
         analysis.surface_area = avg_wall_distance * avg_wall_distance * 6.0f;
-        analysis.avg_absorption = total_absorption / std::max(1, enclosed_rays);
+        analysis.avg_absorption = total_absorption / static_cast<float>(std::max(1, enclosed_rays));
         analysis.rt60_estimate =
             CalculateRT60(analysis.room_volume, analysis.surface_area, analysis.avg_absorption);
     } else {
@@ -395,6 +397,7 @@ bool AudioPropagationSystem::ShouldUseCachedResult(const glm::vec3& source,
 }
 
 void AudioPropagationSystem::UpdatePerformanceMetrics(float calculation_time_ms, bool cache_hit) {
+    std::lock_guard<std::mutex> lock(m_metrics_mutex);
     if (cache_hit) {
         m_metrics.cache_hits++;
     } else {
@@ -428,10 +431,14 @@ void AudioPropagationSystem::WorkerThreadFunction() {
             if (!m_pending_tasks.empty()) {
                 task = std::move(m_pending_tasks.back());
                 m_pending_tasks.pop_back();
-                m_metrics.active_calculations++;
             } else {
                 continue;
             }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.active_calculations++;
         }
 
         LUMIN_PROFILE_ZONE_N("Audio worker job");
@@ -444,7 +451,10 @@ void AudioPropagationSystem::WorkerThreadFunction() {
             task.callback(result);
         }
 
-        m_metrics.active_calculations--;
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.active_calculations--;
+        }
     }
 }
 

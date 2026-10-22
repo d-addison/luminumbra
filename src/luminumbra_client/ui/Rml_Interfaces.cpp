@@ -1,5 +1,7 @@
 #include "Rml_Interfaces.h"
 #include "core/Profiler.h"
+#include "app/FrameAttribution.h"
+#include "rendering/AttributedGl.h"
 #include <GLFW/glfw3.h> // For glfwGetTime
 #include <SOIL2/SOIL2.h>
 #include <cstdio> // For FILE operations
@@ -102,6 +104,7 @@ const char* const fragment_shader_gl = R"(
 } // namespace
 
 RmlRenderer::RmlRenderer() {
+    const Attribution::PhaseScope shader_phase(Attribution::Phase::ShaderLoad);
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vertex_shader_gl, nullptr);
     {
@@ -116,7 +119,7 @@ RmlRenderer::RmlRenderer() {
         glCompileShader(fs);
     }
 
-    m_program = glCreateProgram();
+    m_program = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     glAttachShader(m_program, vs);
     glAttachShader(m_program, fs);
     glBindAttribLocation(m_program, 0, "inPosition");
@@ -188,7 +191,7 @@ void RmlRenderer::RenderGeometry(Rml::CompiledGeometryHandle handle,
                                  Rml::Vector2f translation,
                                  Rml::TextureHandle texture) {
     CompiledGeometry* geometry = (CompiledGeometry*)handle;
-    glUseProgram(m_program);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_program);
 
     Rml::Matrix4f proj =
         Rml::Matrix4f::ProjectOrtho(0.0f, (float)m_width, (float)m_height, 0.0f, -1.0f, 1.0f);
@@ -201,7 +204,8 @@ void RmlRenderer::RenderGeometry(Rml::CompiledGeometryHandle handle,
     // the fill colour survives the texture multiply (otherwise every background renders black).
     glBindTexture(GL_TEXTURE_2D, texture ? (GLuint)texture : m_whiteTexture);
     glBindVertexArray(geometry->vao);
-    glDrawElements(GL_TRIANGLES, geometry->num_indices, GL_UNSIGNED_INT, nullptr);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawElements, GL_TRIANGLES, geometry->num_indices, GL_UNSIGNED_INT, nullptr);
     glBindVertexArray(0);
 }
 
@@ -227,6 +231,8 @@ void RmlRenderer::SetScissorRegion(Rml::Rectanglei region) {
 
 Rml::TextureHandle RmlRenderer::LoadTexture(Rml::Vector2i& texture_dimensions,
                                             const Rml::String& source) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::TextureLoad);
     // The path needs to be relative to the executable or an absolute path.
     // The RmlFileInterface prepends the root path, so we use `source` directly.
     std::string full_path = "assets/" + source; // Example, adjust if needed
@@ -259,6 +265,8 @@ Rml::TextureHandle RmlRenderer::LoadTexture(Rml::Vector2i& texture_dimensions,
 
 Rml::TextureHandle RmlRenderer::GenerateTexture(Rml::Span<const Rml::byte> source_data,
                                                 Rml::Vector2i source_dimensions) {
+    const Luminumbra::Client::Attribution::PhaseScope texture_phase(
+        Luminumbra::Client::Attribution::Phase::TextureLoad);
     GLuint tex_id = 0;
     glGenTextures(1, &tex_id);
     if (tex_id == 0)

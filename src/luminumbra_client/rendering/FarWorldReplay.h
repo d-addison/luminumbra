@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 #include <utility>
@@ -152,8 +153,8 @@ struct TaauResolvePlan {
 };
 inline TaauResolvePlan
 PlanTaauResolve(const TaauHistoryState& input, std::uint32_t scratch, bool replay) noexcept {
-    return {input.textures[1 - input.write_index],
-            replay ? scratch : input.textures[input.write_index],
+    return {input.textures[static_cast<std::size_t>(1 - input.write_index)],
+            replay ? scratch : input.textures[static_cast<std::size_t>(input.write_index)],
             input.valid,
             !replay};
 }

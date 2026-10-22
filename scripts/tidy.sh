@@ -10,6 +10,7 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/tidy.sh                       # analyze every first-party TU
+#   scripts/tidy.sh --files0-from FILE   # strict NUL-delimited dependency-expanded TU list
 #   scripts/tidy.sh --changed-from REF    # analyze TUs changed since REF
 #   scripts/tidy.sh --build-dir DIR       # compile db location (default build/tidy)
 #   scripts/tidy.sh --jobs N              # parallel clang-tidy processes
@@ -19,13 +20,22 @@ set -euo pipefail
 
 build_dir="build/tidy"
 changed_from=""
+files0_from=""
 jobs="$(nproc)"
 cache_dir=""
 cache_mode="readwrite"
 shard="1/1"
 
 while [[ $# -gt 0 ]]; do
+    if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "$1 requires a nonempty value" >&2
+        exit 2
+    fi
     case "$1" in
+        --files0-from)
+            files0_from="$2"
+            shift 2
+            ;;
         --build-dir)
             build_dir="$2"
             shift 2
@@ -60,6 +70,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$files0_from" && -n "$changed_from" ]]; then
+    echo "--files0-from and --changed-from are mutually exclusive" >&2
+    exit 2
+fi
+if [[ ! "$jobs" =~ ^[0-9]+$ || "$jobs" =~ ^0+$ ]]; then
+    echo "--jobs requires a positive integer" >&2
+    exit 2
+fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
@@ -151,6 +170,7 @@ import sys
 for entry in json.load(open(sys.argv[1])):
     sys.stdout.write(entry["file"] + "\0")
 ' "$compile_db")
+wait "$!"
 
 # First-party translation units live under src/, test/ and tools/. The RmlUi GL3
 # backend is vendored upstream code carried in-tree and is excluded from the
@@ -170,7 +190,42 @@ is_first_party_tu() {
 }
 
 tidy_files=()
-if [[ -n "$changed_from" ]]; then
+if [[ -n "$files0_from" ]]; then
+    # This checks the supplied selection, never discovers or silently drops TUs.
+    # Python resolves relative database files against their command directories.
+    mapfile -d '' -t tidy_files < <(python3 - "$repo_root" "$compile_db" "$files0_from" <<'PYFILES'
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+try:
+    data = Path(sys.argv[3]).read_bytes()
+    if data and (not data.endswith(b"\0") or b"\0\0" in data):
+        raise ValueError("expected nonempty NUL-terminated file names")
+    database = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+    known = {(Path(e.get("directory", root)) / e["file"]).resolve() for e in database}
+    selected = set()
+    for raw in data.split(b"\0")[:-1]:
+        path = (root / os.fsdecode(raw)).resolve()
+        if not path.is_relative_to(root) or not path.is_file() or path not in known:
+            raise ValueError("selected TU missing, outside checkout or absent from database: " + os.fsdecode(raw))
+        selected.add(path)
+    for path in sorted(selected):
+        sys.stdout.buffer.write(os.fsencode(path) + b"\0")
+except (OSError, ValueError, TypeError, KeyError) as error:
+    sys.exit("Invalid --files0-from selection: " + str(error))
+PYFILES
+    )
+    wait "$!"
+    for tidy_file in "${tidy_files[@]}"; do
+        if ! is_first_party_tu "${tidy_file#"$repo_root/"}"; then
+            echo "Unsupported first-party TU in --files0-from: $tidy_file" >&2
+            exit 1
+        fi
+    done
+elif [[ -n "$changed_from" ]]; then
     if ! git -C "$repo_root" rev-parse --verify --quiet "$changed_from^{commit}" >/dev/null; then
         echo "Tidy comparison commit does not exist: $changed_from" >&2
         exit 1
@@ -199,7 +254,7 @@ fi
 
 # Preserve the full-scope discovery guard; an empty partition of a valid TU list
 # is handled successfully below.
-if [[ "${#tidy_files[@]}" -eq 0 && -z "$changed_from" ]]; then
+if [[ "${#tidy_files[@]}" -eq 0 && -z "$changed_from" && -z "$files0_from" ]]; then
     echo "No first-party translation units found for clang-tidy." >&2
     exit 1
 fi

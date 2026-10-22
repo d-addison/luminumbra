@@ -518,15 +518,51 @@ cap; “uncapped” refers to the recording duration and number of rows.
 
 The frame interval runs from loop entry through buffer swap. Its exclusive
 buckets are sim, stream, render submission, present, foliage rebuilds,
-scatter input preparation, plant rebake, event polling, menu rendering and UI
-rendering. `other_ms` is the remainder; these buckets plus the remainder sum to
-`frame_ms`. Rebuilds from preview and QA callers also enter the foliage bucket;
-any nested rebuild time is subtracted from its render or menu parent. Menu
-rendering includes the menu's UI; `ui_ms` covers the separate
-in-game RmlUi and final ImGui render calls. SLOWFRAME preserves its existing
+scatter input preparation, plant rebake, event polling, residual menu work and
+residual UI work, together with the phases below. Rebuilds from preview and QA
+callers also enter the foliage bucket; any nested rebuild time is subtracted
+from its render, menu or poll parent. SLOWFRAME preserves its existing
 field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
 `other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
 remains rebuild time only.
+
+Issue #402 appends these CPU wall-time columns after `count_generation`, in order:
+
+| Column | Work measured |
+|---|---|
+| `ui_update_ms` | RmlUi layout/update |
+| `ui_render_ms` | RmlUi rendering, excluding nested phases |
+| `ui_filters_ms` | UI filter submission, including blur |
+| `menu_scene_ms` | Scenic menu and preview scene rendering or cached-image presentation |
+| `preview_adoption_ms` | Adopting a completed preview world |
+| `document_load_ms` | Synchronous UI document loading |
+| `texture_load_ms` | UI texture loading and upload |
+| `shader_load_ms` | Shader source loading, compilation and linking |
+| `shader_first_use_ms` | First program binding and first draw/dispatch submission, including raw compute programs |
+| `world_create_callback_ms` | Synchronous world-creation callback work |
+| `world_load_callback_ms` | Synchronous world-loading callback work |
+
+These phases are exclusive: an enclosing phase excludes its nested phases and
+direct foliage rebuild time. `render_ms`, `menu_ms`, `poll_ms` and `ui_ms` now
+exclude the phases completed inside each measured parent. `foliage_ms` likewise
+excludes shader load/first-use phases completed inside a rebuild. In particular,
+`menu_ms` no longer includes attributed scenic/preview or RmlUi work, `ui_ms`
+excludes the separate in-game RmlUi phases (and still includes final ImGui work),
+and `poll_ms` excludes attributed synchronous world callbacks. `other_ms` also
+excludes all appended phases. The corrected identity is:
+
+```text
+frame_ms = sim_ms + stream_ms + render_ms + present_ms + foliage_ms
+         + scatter_ms + rebake_ms + poll_ms + menu_ms + ui_ms
+         + ui_update_ms + ui_render_ms + ui_filters_ms + menu_scene_ms
+         + preview_adoption_ms + document_load_ms + texture_load_ms
+         + shader_load_ms + shader_first_use_ms
+         + world_create_callback_ms + world_load_callback_ms + other_ms
+```
+
+CSV rounding can introduce a small difference. The remainder is not clamped:
+a negative value exposes overlapping inputs. These are CPU submission costs;
+first-use collection adds no GPU waits or readbacks.
 
 Foliage stage times are CPU wall time, including GL submission calls, without
 GPU waits or new readbacks. `signature_ms` includes polling existing evidence

@@ -1,5 +1,6 @@
 #include "FoliagePass.h"
 #include "../FarWorldReplay.h"
+#include "rendering/AttributedGl.h"
 #include "rendering/BenchmarkGpuQueries.h"
 
 #include "GBufferPass.h"
@@ -60,7 +61,8 @@ class RebuildAttributionScope {
 public:
     explicit RebuildAttributionScope(const FoliagePass& pass)
         : m_pass(pass)
-        , m_enabled(Attribution::foliage_frame_active()) {
+        , m_enabled(Attribution::foliage_frame_active())
+        , m_phases_before(Attribution::phase_total_ms()) {
         if (m_enabled)
             m_start = std::chrono::steady_clock::now();
     }
@@ -73,7 +75,8 @@ public:
         Attribution::record_foliage_rebuild(
             m_pass.rebuild_attribution(),
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_start)
-                .count(),
+                    .count() -
+                (Attribution::phase_total_ms() - m_phases_before),
             m_pass.instance_capacity(),
             count,
             m_pass.frame_instance_count_generation());
@@ -84,6 +87,7 @@ public:
 private:
     const FoliagePass& m_pass;
     bool m_enabled;
+    double m_phases_before;
     std::chrono::steady_clock::time_point m_start{};
 };
 
@@ -370,7 +374,9 @@ bool FoliagePass::contributes_to_scatter(const ChunkScatter& chunk,
 namespace {
 // Minimal compute-program compile/link helper. Returns 0
 // on any failure so the caller can fall back to the CPU scatter path.
-GLuint compile_compute_program(const std::string& source) {
+AttributedGl::Program compile_compute_program(const std::string& source) {
+    const Luminumbra::Client::Attribution::PhaseScope shader_phase(
+        Luminumbra::Client::Attribution::Phase::ShaderLoad);
     const char* src = source.c_str();
     GLuint s = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(s, 1, &src, nullptr);
@@ -385,9 +391,9 @@ GLuint compile_compute_program(const std::string& source) {
         glGetShaderInfoLog(s, sizeof(log), nullptr, log);
         LUMINUMBRA_CORE_WARN("FoliagePass: grass_scatter.comp compile failed: {}", log);
         glDeleteShader(s);
-        return 0;
+        return {};
     }
-    GLuint p = glCreateProgram();
+    auto p = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     glAttachShader(p, s);
     {
         LUMIN_PROFILE_ZONE_N("Shader link");
@@ -399,14 +405,15 @@ GLuint compile_compute_program(const std::string& source) {
         char log[2048];
         glGetProgramInfoLog(p, sizeof(log), nullptr, log);
         LUMINUMBRA_CORE_WARN("FoliagePass: grass_scatter program link failed: {}", log);
-        glDeleteProgram(p);
-        return 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, p);
+        return {};
     }
     return p;
 }
 } // namespace
 
 void FoliagePass::init_compute(const std::filesystem::path& root_path) {
+    const Attribution::PhaseScope shader_phase(Attribution::Phase::ShaderLoad);
     // Load + compile the scatter compute shader. On any failure the pass keeps
     // m_gpu_scatter=false and the CPU rebuild loop is used (graceful fallback).
     std::ifstream in(root_path / "res/shaders/grass_scatter.comp");
@@ -423,10 +430,11 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     std::ifstream prefix_in(root_path / "res/shaders/grass_compact_prefix.comp");
     std::stringstream prefix_source;
     prefix_source << prefix_in.rdbuf();
-    m_prefix_prog = prefix_in ? compile_compute_program(prefix_source.str()) : 0;
+    m_prefix_prog =
+        prefix_in ? compile_compute_program(prefix_source.str()) : AttributedGl::Program{};
     if (!m_prefix_prog) {
-        glDeleteProgram(m_compute_prog);
-        m_compute_prog = 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, m_compute_prog);
+        m_compute_prog = {};
         return;
     }
     // Locations belong to these linked programs. Refresh after every successful
@@ -500,12 +508,12 @@ void FoliagePass::destroy_compute() {
     m_scatter_uniforms = {};
     m_prefix_uniforms = {};
     if (m_compute_prog) {
-        glDeleteProgram(m_compute_prog);
-        m_compute_prog = 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, m_compute_prog);
+        m_compute_prog = {};
     }
     if (m_prefix_prog)
-        glDeleteProgram(m_prefix_prog);
-    m_prefix_prog = 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, m_prefix_prog);
+    m_prefix_prog = {};
     GLuint bufs[] = {m_chunk_ssbo,
                      m_surf_ssbo,
                      m_blade_ssbo,
@@ -1328,7 +1336,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     upload_timer.stop();
     Attribution::StageTimer dispatch_timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
     // --- Dispatch. ---
-    glUseProgram(m_compute_prog);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);
     glUniform1i(m_scatter_uniforms.chunk_count, chunk_count);
     glUniform1i(m_scatter_uniforms.archetype_count, static_cast<int>(m_archetypes.size()));
     glUniform1f(m_scatter_uniforms.total_weight, total_weight);
@@ -1427,23 +1435,25 @@ void FoliagePass::dispatch_scatter() {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, m_group_counts_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, m_group_offsets_ssbo);
     constexpr GLuint groups_x = (kMaxCandidatesPerChunk + 63) / 64;
-    glUseProgram(m_compute_prog);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);
     glUniform1i(m_scatter_uniforms.emit, GL_FALSE);
-    glDispatchCompute(groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDispatchCompute, groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-    glUseProgram(m_prefix_prog);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_prefix_prog);
     glUniform1ui(m_prefix_uniforms.group_count,
                  groups_x * static_cast<GLuint>(m_uploaded_chunk_count));
     glUniform1ui(m_prefix_uniforms.max_instances, kMaxInstances);
-    glDispatchCompute(1, 1, 1);
+    Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-    glUseProgram(m_compute_prog);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);
     glUniform1i(m_scatter_uniforms.emit, GL_TRUE);
     glUniform2f(m_scatter_uniforms.wind_xz, m_wind_xz.x, m_wind_xz.y);
-    glDispatchCompute(groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDispatchCompute, groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
                     GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
-    glUseProgram(0);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
 }
 
 void FoliagePass::submit_foliage_readback() {
@@ -1633,8 +1643,10 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         glBindVertexBuffer(0, m_blade_ssbo, 0, sizeof(InstanceRecord));
         if (!vertex_due || !capture_vertices(projection * view)) {
             glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_count_ssbo);
-            glDrawArraysIndirect(GL_TRIANGLES,
-                                 reinterpret_cast<const void*>(kGrassDrawCommandOffsetBytes));
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawArraysIndirect,
+                GL_TRIANGLES,
+                reinterpret_cast<const void*>(kGrassDrawCommandOffsetBytes));
             glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
             m_last_draw_calls = 1;
         }
@@ -1642,7 +1654,11 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
         //  12 verts/instance = two crossed quads (6 verts
         // each) so a blade reads as upright cover from any angle, not a flat decal.
-        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_draw_instance_limit));
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
+                                                    GL_TRIANGLES,
+                                                    0,
+                                                    12,
+                                                    static_cast<GLsizei>(m_draw_instance_limit));
         m_last_draw_calls = 1;
     }
     glBindVertexArray(0);
@@ -1810,17 +1826,24 @@ bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {
     // These three ranges partition the ORIGINAL draw. Rasterization remains ON;
     // there is no replacement shader, duplicate draw, or synthetic geometry.
     if (first) {
-        glDrawArraysInstancedBaseInstance(GL_TRIANGLES, 0, 12, first, 0);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawArraysInstancedBaseInstance, GL_TRIANGLES, 0, 12, first, 0);
         ++m_last_draw_calls;
     }
     glBeginTransformFeedback(GL_TRIANGLES);
-    glDrawArraysInstancedBaseInstance(GL_TRIANGLES, 0, 12, sample_count, first);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawArraysInstancedBaseInstance, GL_TRIANGLES, 0, 12, sample_count, first);
     glEndTransformFeedback();
     ++m_last_draw_calls;
     const auto after = first + sample_count;
     if (after < m_instances.size()) {
-        glDrawArraysInstancedBaseInstance(
-            GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_instances.size() - after), after);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawArraysInstancedBaseInstance,
+            GL_TRIANGLES,
+            0,
+            12,
+            static_cast<GLsizei>(m_instances.size() - after),
+            after);
         ++m_last_draw_calls;
     }
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, static_cast<GLuint>(previous_feedback));

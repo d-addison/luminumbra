@@ -3,6 +3,7 @@
 #include "luminumbra_client/rendering/RenderingDefaults.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/GameSession.h"
 
 #include <gtest/gtest.h>
@@ -22,7 +23,25 @@
 namespace luminumbra::core {
 namespace {
 
+using Luminumbra::Persistence::WorldSaveService;
 using Luminumbra::TestSupport::ScopedTempFile;
+
+class OverlayWriteReset {
+public:
+    ~OverlayWriteReset() {
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    }
+};
+
+void ExpectNoOverlayStaging(const std::filesystem::path& destination) {
+    auto prefix = destination.filename();
+    prefix += ".tmp.";
+    for (const auto& entry : std::filesystem::directory_iterator(destination.parent_path()))
+        EXPECT_NE(entry.path().filename().native().find(prefix.native()), 0u);
+    auto legacy = destination;
+    legacy += ".tmp";
+    EXPECT_FALSE(std::filesystem::exists(legacy));
+}
 
 std::string ReadText(const std::filesystem::path& path) {
     const std::ifstream file(path, std::ios::binary);
@@ -353,6 +372,7 @@ TEST(GraphicsPresets, MalformedUnreadableAndFutureSettingsRemainUntouchedAndBloc
         EXPECT_FALSE(config.SaveUserOverlay(file.Path().string()));
         EXPECT_EQ(ReadText(file.Path()), document);
         EXPECT_FALSE(std::filesystem::exists(file.Path().string() + ".tmp"));
+        ExpectNoOverlayStaging(file.Path());
     }
     // A directory at the overlay path is portably unreadable as a settings file,
     // even under elevated test accounts where permission-bit tests are unreliable.
@@ -429,6 +449,7 @@ TEST(GraphicsPresets, SystemsOverridesPreserveRecoveryAndRefuseSavingOriginal) {
             EXPECT_FALSE(config.SaveUserOverlay(player_file.Path().string()));
             EXPECT_EQ(ReadText(player_file.Path()), document);
             EXPECT_FALSE(std::filesystem::exists(player_file.Path().string() + ".tmp"));
+            ExpectNoOverlayStaging(player_file.Path());
         }
     }
 }
@@ -678,28 +699,45 @@ TEST(GraphicsPresets, RoundTripAllOverrideTypesAndDetectionWithoutSessionValues)
 
 TEST(GraphicsPresets, SaveFailuresPreserveExistingFileAndCleanTemporaryOutput) {
     const ScopedTempFile file("graphics_", ".json");
+    const OverlayWriteReset reset;
     auto config = SystemConfig::Defaults();
     ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
     const auto original = ReadText(file.Path());
-    // Force temp-open failure without relying on OS permissions.
+    // This unowned legacy name must neither block unique staging nor be removed.
     const auto temporary = std::filesystem::path(file.Path().string() + ".tmp");
     ASSERT_TRUE(std::filesystem::create_directory(temporary));
-    ASSERT_TRUE(SelectGraphicsPreset(config.user().graphics, GraphicsPreset::Low));
-    EXPECT_FALSE(config.SaveUserOverlay(file.Path().string()));
+    ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
     EXPECT_EQ(ReadText(file.Path()), original);
+    EXPECT_TRUE(std::filesystem::is_directory(temporary));
+    ASSERT_TRUE(SelectGraphicsPreset(config.user().graphics, GraphicsPreset::Low));
+    // Interrupt the actual shared writer after its owned staging file is flushed.
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(config.SaveUserOverlay(file.Path().string()));
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_EQ(ReadText(file.Path()), original);
+    EXPECT_TRUE(std::filesystem::is_directory(temporary));
     ASSERT_TRUE(std::filesystem::remove(temporary));
+    ExpectNoOverlayStaging(file.Path());
     config.user().graphics.overrides["render_scale"] = std::numeric_limits<double>::quiet_NaN();
     EXPECT_FALSE(config.SaveUserOverlay(file.Path().string()));
     EXPECT_EQ(ReadText(file.Path()), original);
+    ExpectNoOverlayStaging(file.Path());
     ResetGraphicsOverrides(config.user().graphics);
     // Force rename failure, and check cleanup with all stream handles closed.
     const auto directory = file.Path().parent_path() / "directory";
     ASSERT_TRUE(std::filesystem::create_directory(directory));
     EXPECT_FALSE(config.SaveUserOverlay(directory.string()));
     EXPECT_FALSE(std::filesystem::exists(directory.string() + ".tmp"));
+    ExpectNoOverlayStaging(directory);
     EXPECT_TRUE(std::filesystem::is_directory(directory));
     // A regular file cannot serve as the settings parent directory.
     EXPECT_FALSE(config.SaveUserOverlay((file.Path() / "settings.json").string()));
+    EXPECT_EQ(ReadText(file.Path()), original);
+    ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
+    const auto reloaded = SystemConfig::LoadLayered({}, file.Path());
+    EXPECT_EQ(reloaded.user().graphics.base_preset, GraphicsPreset::Low);
+    EXPECT_NE(ReadText(file.Path()), original);
+    ExpectNoOverlayStaging(file.Path());
 }
 
 TEST(GraphicsPresets, EveryPresetLeavesSimulationIdentityAndOtherOwnersUnchanged) {

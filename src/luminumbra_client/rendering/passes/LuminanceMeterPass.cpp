@@ -1,5 +1,7 @@
 #include "LuminanceMeterPass.h"
 #include "core/Profiler.h"
+#include "app/FrameAttribution.h"
+#include "rendering/AttributedGl.h"
 
 #include "PassGlHelpers.h"
 #include "core/Log.h"
@@ -34,12 +36,14 @@ GLuint create_compute_shader(const char* source) {
 
 } // namespace
 
-GLuint create_compute_program(const char* compute_source) {
+AttributedGl::Program create_compute_program(const char* compute_source) {
+    const Luminumbra::Client::Attribution::PhaseScope shader_phase(
+        Luminumbra::Client::Attribution::Phase::ShaderLoad);
     GLuint compute_shader = create_compute_shader(compute_source);
     if (compute_shader == 0)
-        return 0;
+        return {};
 
-    GLuint program = glCreateProgram();
+    auto program = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     glAttachShader(program, compute_shader);
     {
         LUMIN_PROFILE_ZONE_N("Shader link");
@@ -52,8 +56,8 @@ GLuint create_compute_program(const char* compute_source) {
         char infoLog[512];
         glGetProgramInfoLog(program, 512, nullptr, infoLog);
         LUMINUMBRA_CORE_ERROR("Compute program linking failed: {}", infoLog);
-        glDeleteProgram(program);
-        program = 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, program);
+        program = {};
     }
 
     glDeleteShader(compute_shader);
@@ -66,6 +70,7 @@ LuminanceMeterPass::~LuminanceMeterPass() = default;
 bool LuminanceMeterPass::execute(const RenderContext& ctx, const std::filesystem::path& root_path) {
     LUMIN_PROFILE_ZONE_N("GL LuminanceMeterPass.execute");
     if (m_reduce_program == 0) {
+        const Client::Attribution::PhaseScope shader_phase(Client::Attribution::Phase::ShaderLoad);
         // Lazy init: compile the reduce kernel + the 1-float SSBO on first use.
         std::ifstream file(root_path / "res/shaders/luminance_reduce.comp");
         if (!file) {
@@ -86,16 +91,16 @@ bool LuminanceMeterPass::execute(const RenderContext& ctx, const std::filesystem
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         PassGl::label_gl_object(GL_BUFFER, m_reduce_ssbo, "luminance_reduce.ssbo");
     }
-    glUseProgram(m_reduce_program);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_reduce_program);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.lit_scene_color.id);
     glUniform1i(glGetUniformLocation(m_reduce_program, "u_scene"), 0);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_reduce_ssbo);
-    glDispatchCompute(1, 1, 1);
+    Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1, 1, 1);
     // The ring's GPU->GPU copy must observe the SSBO write.
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
-    glUseProgram(0);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
     if (m_readback.ensure(sizeof(float), 3) && m_readback.begin()) {
         m_readback.copy_region(m_reduce_ssbo, 0, 0, sizeof(float));
         m_readback.submit();
@@ -105,8 +110,8 @@ bool LuminanceMeterPass::execute(const RenderContext& ctx, const std::filesystem
 
 void LuminanceMeterPass::destroy() {
     if (m_reduce_program) {
-        glDeleteProgram(m_reduce_program);
-        m_reduce_program = 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, m_reduce_program);
+        m_reduce_program = {};
     }
     if (m_reduce_ssbo) {
         glDeleteBuffers(1, &m_reduce_ssbo);

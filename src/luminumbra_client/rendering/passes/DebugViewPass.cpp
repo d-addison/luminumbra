@@ -1,5 +1,6 @@
 #include "DebugViewPass.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../Camera.h"            // near/far planes for Depth-mode linearization
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -77,7 +78,7 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     m_shader->setInt("gDepth", 3);
 
     glBindVertexArray(m_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 }
 

@@ -5,7 +5,6 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
-import shutil
 import sys
 import unittest
 
@@ -121,7 +120,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--bash")
     options, remaining = parser.parse_known_args()
-    fixture.BASH = options.bash or shutil.which("bash")
-    if not fixture.BASH:
-        raise SystemExit("Bash is required for GCC cohort regression tests")
+    fixture.BASH = fixture.bash_executable(options.bash)
     unittest.main(argv=[sys.argv[0], *remaining])

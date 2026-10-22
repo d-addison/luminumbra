@@ -1,5 +1,6 @@
 #include "PlantProcgenPass.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
@@ -147,7 +148,11 @@ void PlantProcgenPass::execute(const RenderContext& ctx, const Camera& camera) {
     m_shader->setFloat("u_markerEmissive", 0.55f);
 
     glBindVertexArray(m_vao);
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_index_count), GL_UNSIGNED_INT, nullptr);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                GL_TRIANGLES,
+                                                static_cast<GLsizei>(m_index_count),
+                                                GL_UNSIGNED_INT,
+                                                nullptr);
     glBindVertexArray(0);
 }
 

@@ -1,6 +1,7 @@
 #include "FroxelPass.h"
 #include "../FarWorldReplay.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../FroxelGrid.h"
 #include "../ShaderReflection.h"
@@ -17,7 +18,7 @@
 namespace Luminumbra::Rendering {
 
 // Shared with the pipeline's luminance-meter compute stage.
-GLuint create_compute_program(const char* compute_source);
+AttributedGl::Program create_compute_program(const char* compute_source);
 
 namespace {
 
@@ -49,11 +50,11 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
         if (ctx.frozen_replay)
             return false;
         // Lazy init: both kernels + both 3D volumes, together.
-        auto load_comp = [&](const char* rel) -> GLuint {
+        auto load_comp = [&](const char* rel) -> AttributedGl::Program {
             std::ifstream file(std::filesystem::path(root_path) / rel);
             if (!file) {
                 LUMINUMBRA_CORE_ERROR("froxel: missing {}", rel);
-                return 0;
+                return {};
             }
             std::stringstream source;
             source << file.rdbuf();
@@ -92,7 +93,7 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
     }
 
     PreserveReplayObject(ReplayObjectKind::Program, m_inject_program);
-    glUseProgram(m_inject_program);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_inject_program);
     glBindImageTexture(0, m_scatter_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.shadow_depth_array.id);
@@ -108,7 +109,7 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
             glUniformMatrix4fv(glGetUniformLocation(m_inject_program, name.c_str()),
                                1,
                                GL_FALSE,
-                               &(*ctx.light_space_matrices)[i][0][0]);
+                               &(*ctx.light_space_matrices)[static_cast<std::size_t>(i)][0][0]);
         }
     }
     glUniform4fv(
@@ -133,9 +134,10 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
     glUniform1f(glGetUniformLocation(m_inject_program, "u_baseHeight"), 40.0f);
     glUniform1f(glGetUniformLocation(m_inject_program, "u_densityFalloff"), 0.05f);
 
-    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, Froxel::kGridZ);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDispatchCompute, Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, Froxel::kGridZ);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
-    glUseProgram(0);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
     glActiveTexture(GL_TEXTURE0);
     return true;
 }
@@ -148,23 +150,24 @@ void FroxelPass::execute_integrate(const RenderContext& ctx) {
         return;
     }
     PreserveReplayObject(ReplayObjectKind::Program, m_integrate_program);
-    glUseProgram(m_integrate_program);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_integrate_program);
     glBindImageTexture(0, m_scatter_tex, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA16F);
     glBindImageTexture(1, m_integrated_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, 1);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDispatchCompute, Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, 1);
     // The aerial composite samples the integrated volume as a texture.
     glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
-    glUseProgram(0);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
 }
 
 void FroxelPass::destroy() {
     if (m_inject_program) {
-        glDeleteProgram(m_inject_program);
-        m_inject_program = 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, m_inject_program);
+        m_inject_program = {};
     }
     if (m_integrate_program) {
-        glDeleteProgram(m_integrate_program);
-        m_integrate_program = 0;
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, m_integrate_program);
+        m_integrate_program = {};
     }
     if (m_scatter_tex) {
         glDeleteTextures(1, &m_scatter_tex);

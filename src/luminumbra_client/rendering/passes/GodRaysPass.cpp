@@ -1,5 +1,6 @@
 #include "GodRaysPass.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h"
 #include "PassGlHelpers.h"
@@ -56,7 +57,7 @@ void GodRaysPass::execute(const RenderContext& ctx) {
         m_shader->setFloat("u_sunVisible", sun_visible);
         m_shader->setFloat("u_strength", 0.85f);
         glBindVertexArray(ctx.screen_quad_vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, 0);

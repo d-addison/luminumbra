@@ -80,41 +80,57 @@ def check():
     assert source.count("m_task_cv.wait(") == 1, "Audit every task waiter"
     worker = body(source, "void AudioPropagationSystem::WorkerThreadFunction()")
     assert code(worker) == code("""
-        LUMIN_PROFILE_THREAD("Audio propagation worker");
-        while (!m_shutdown) {
-            AsyncTask task;
-            {
-                LUMIN_PROFILE_LOCK(
-                    std::unique_lock<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
-                LUMIN_PROFILE_WAIT("Audio condition wait", m_task_cv.wait(lock, [this] {
-                    return !m_pending_tasks.empty() || m_shutdown;
-                }));
-                if (m_shutdown)
-                    break;
-                if (!m_pending_tasks.empty()) {
-                    task = std::move(m_pending_tasks.back());
-                    m_pending_tasks.pop_back();
-                    m_metrics.active_calculations++;
-                } else {
-                    continue;
-                }
+    LUMIN_PROFILE_THREAD("Audio propagation worker");
+    while (!m_shutdown) {
+        AsyncTask task;
+
+        // Wait for task
+        {
+            LUMIN_PROFILE_LOCK(
+                std::unique_lock<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
+            LUMIN_PROFILE_WAIT("Audio condition wait", m_task_cv.wait(lock, [this] {
+                return !m_pending_tasks.empty() || m_shutdown;
+            }));
+
+            if (m_shutdown)
+                break;
+
+            if (!m_pending_tasks.empty()) {
+                task = std::move(m_pending_tasks.back());
+                m_pending_tasks.pop_back();
+            } else {
+                continue;
             }
-            LUMIN_PROFILE_ZONE_N("Audio worker job");
-            AudioPropagationResult result =
-                CalculatePropagation(task.source, task.listener, task.max_distance);
-            if (task.callback) {
-                task.callback(result);
-            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.active_calculations++;
+        }
+
+        LUMIN_PROFILE_ZONE_N("Audio worker job");
+        // Process task
+        AudioPropagationResult result =
+            CalculatePropagation(task.source, task.listener, task.max_distance);
+
+        // Execute callback
+        if (task.callback) {
+            task.callback(result);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
             m_metrics.active_calculations--;
         }
-    """), "Keep worker predicate, queued-task, callback and profiling semantics"
+    }
+    """), "Keep worker predicate, queued-task, callback and metrics semantics"
     enqueue = body(source, "void AudioPropagationSystem::CalculatePropagationAsync(")
     assert code(enqueue) == code("""
-        {
-            LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
-            m_pending_tasks.push_back({source, listener, max_distance, std::move(callback)});
-        }
-        m_task_cv.notify_one();
+    {
+        LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
+        m_pending_tasks.push_back({source, listener, max_distance, std::move(callback)});
+    }
+    m_task_cv.notify_one();
     """), "Keep enqueue and notification semantics"
     cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
     for registration in (

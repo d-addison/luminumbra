@@ -1,5 +1,6 @@
 #include "SsaoPass.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h"
@@ -239,7 +240,7 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         m_ssao.ssaoShader->setVec2("u_screenSize", screen_size);
     }
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     if (halfres)
         glViewport(0,
@@ -277,7 +278,7 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
         m_ssao.upsampleShader->setVec2(
             "u_halfTexel", glm::vec2(1.0f / (float)m_ssao.halfW, 1.0f / (float)m_ssao.halfH));
         glBindVertexArray(ctx.screen_quad_vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return;
@@ -289,7 +290,7 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
     m_ssao.blurShader->setInt("u_ssaoInput", 0);
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

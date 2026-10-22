@@ -103,7 +103,8 @@ CommandResult DeveloperCommandRegistry::Submit(const std::string& line) const {
     std::vector<std::string> tokens;
     std::string token;
     bool quoted = false, started = false, escape = false;
-    for (const unsigned char c : line) {
+    for (const char character : line) {
+        const auto c = static_cast<unsigned char>(character);
         if (c == '\n' || c == '\r' || c == 0)
             return {false, "Submit one command line"};
         if (escape) {

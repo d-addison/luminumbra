@@ -1,5 +1,6 @@
 #include "WaterPass.h"
 #include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h"
@@ -154,7 +155,7 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
     m_caustics_shader->setVec2("u_resolution", glm::vec2(kCausticsResolution, kCausticsResolution));
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
     glEnable(GL_DEPTH_TEST);
@@ -244,7 +245,8 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     for (const auto& item : input.draw_items) {
         m_water_shader->setMat4("u_model", item.model);
         glBindVertexArray(item.vao_id);
-        glDrawElements(GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawElements, GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, nullptr);
         stats.water_draws++;
         stats.water_indices += item.element_count;
     }

@@ -44,7 +44,8 @@ constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void AppendHash(std::uint64_t& hash, const std::string& value) {
-    for (const unsigned char byte : value) {
+    for (const char character : value) {
+        const auto byte = static_cast<unsigned char>(character);
         hash ^= byte;
         hash *= kFnvPrime;
     }
