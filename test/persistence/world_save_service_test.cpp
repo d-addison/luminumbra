@@ -499,25 +499,36 @@ TEST(WorldSaveService, SymlinkParentSaveReclaimsAndReplacesInTheResolvedDirector
     const auto unrelated = wrong_save / "r.0.0.lmr.tmp.retained";
     ASSERT_TRUE(WorldSaveService::write_file_durably(unrelated, "unrelated"));
     WorldStreamingState state;
-    PopulateFixtureWorld(state);
+    // The interruption stops at the first region; keep only the region whose
+    // abandoned staging is checked below, independent of other fixture regions.
+    AddFixtureChunk(state, IVec3(0, 0, 0), ChunkState::Ready, 1u);
     const WorldSaveService service;
     ASSERT_TRUE(service.save_world(state, save_root));
     const auto original_hash = service.world_hash(state);
     const auto abandoned = actual_save / "r.0.0.lmr.tmp.abandoned";
+    const auto abandoned_manifest = actual_save / "world-manifest.json.tmp.abandoned";
     ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial"));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned_manifest, "{partial"));
+    AddFixtureChunk(state, IVec3(0, 0, 0), ChunkState::Ready, 9u);
+    const auto changed_hash = service.world_hash(state);
+    ASSERT_NE(changed_hash, original_hash);
     WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
     const bool interrupted = service.save_world(state, save_root);
     WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
     EXPECT_FALSE(interrupted);
     EXPECT_FALSE(std::filesystem::exists(abandoned));
+    // Manifest reclamation follows region replacement and is reached on retry.
+    EXPECT_TRUE(std::filesystem::exists(abandoned_manifest));
     EXPECT_TRUE(std::filesystem::exists(unrelated));
     WorldStreamingState loaded;
     std::vector<std::string> errors;
     ASSERT_TRUE(service.load_world(loaded, save_root, errors));
     EXPECT_EQ(service.world_hash(loaded), original_hash);
     ASSERT_TRUE(service.save_world(state, save_root));
+    EXPECT_FALSE(std::filesystem::exists(abandoned_manifest));
     ASSERT_TRUE(service.load_world(loaded, actual_save, errors));
-    EXPECT_EQ(service.world_hash(loaded), original_hash);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(service.world_hash(loaded), changed_hash);
     EXPECT_FALSE(std::filesystem::exists(wrong_save / "chunks"));
     EXPECT_TRUE(std::filesystem::exists(unrelated));
 }
