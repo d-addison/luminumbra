@@ -1,7 +1,7 @@
 #include "core/RuntimeScenarioConfig.h"
 #include "core/Log.h"
-#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra/core/Types.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"

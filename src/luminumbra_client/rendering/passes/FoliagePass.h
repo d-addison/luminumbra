@@ -1,8 +1,8 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
-#include "../FoliageCountObservation.h"
 #include "../AttributedGl.h"
+#include "../FoliageCountObservation.h"
 #include "../FoliageEvidence.h"
 #include "../FoliageGroundMesh.h"
 #include "../RenderContext.h"

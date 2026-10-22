@@ -1,6 +1,6 @@
 #include "LuminanceMeterPass.h"
-#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "app/FrameAttribution.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/AttributedGl.h"
 
 #include "PassGlHelpers.h"
