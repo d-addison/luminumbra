@@ -29,7 +29,7 @@ class RegistrationTests(unittest.TestCase):
         blocks = re.findall(
             r'add_test\(\s*NAME AcceptanceMatrixContract\d*\s+COMMAND.*?\)\s*'
             r'set_tests_properties\(AcceptanceMatrixContract\d*\s+PROPERTIES.*?\)', source, re.S)
-        self.assertEqual(len(blocks), 176)
+        self.assertEqual(len(blocks), 225)
         with tempfile.TemporaryDirectory(prefix="acceptance registration ") as temporary:
             fixture = Path(temporary)
             cmake = ('cmake_minimum_required(VERSION 3.20)\nproject(AcceptanceRegistration LANGUAGES NONE)\n'
@@ -44,7 +44,7 @@ class RegistrationTests(unittest.TestCase):
             discovery = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
                                        check=True, capture_output=True, text=True)
             tests = json.loads(discovery.stdout)["tests"]
-            expected = {"AcceptanceMatrixContract" + (str(i + 1) if i else ""): i for i in range(176)}
+            expected = {"AcceptanceMatrixContract" + (str(i + 1) if i else ""): i for i in range(225)}
             self.assertEqual({test["name"] for test in tests}, set(expected))
             self.assertEqual(len(tests), len(expected))
             for test in tests:

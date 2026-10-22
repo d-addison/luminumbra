@@ -6,8 +6,9 @@ import sys
 
 
 _CHILD_TIMEOUT = 12
-_CONTRACT_PARTITIONS = 176
-_EXPECTED_CASES = 431
+_LOCAL_PARTITIONS = 64
+_CONTRACT_PARTITIONS = 225
+_EXPECTED_CASES = 466
 _PHASE_LIMIT = 768
 _phase_records = 0
 
@@ -93,8 +94,30 @@ class _PhaseCase(unittest.TestCase):
         # Keep the original result, setup/teardown, assertions and exit behavior.
         identity = (type(self).__name__[:128] + "." + self._testMethodName[:128])[:128]
         _phase("case-start", case=identity)
+        # One reservation unit is a child launch or an outer CLI/transaction
+        # operation on slow storage (up to one second). Count actual helper
+        # calls, including failed calls and nested loops, rather than test names.
+        work = {"count": 0, "depth": 0}
+        self._storage_work = work
+        def counted(function):
+            def invoke(*args, **kwargs):
+                if work["depth"] == 0:
+                    work["count"] += 1
+                work["depth"] += 1
+                try:
+                    return function(*args, **kwargs)
+                finally:
+                    work["depth"] -= 1
+            return invoke
+        def check_reservation():
+            self.assertLessEqual(work["count"], _STORAGE_ALLOWANCES.get(type(self).__name__ + "." + self._testMethodName, 1), identity)
+        self.addCleanup(check_reservation)
         try:
-            return super().run(result)
+            with contextlib.ExitStack() as stack:
+                for owner, name in ((MODULE, "main"), (MODULE, "_replace_outputs"),
+                                    (MODULE, "_recover_outputs"), (MODULE._PreparationCustody, "create")):
+                    stack.enter_context(mock.patch.object(owner, name, counted(getattr(owner, name))))
+                return super().run(result)
         finally:
             _phase("case-finish", case=identity)
 
@@ -379,10 +402,16 @@ class AcceptanceFixture(_PhaseCase):
                 self.caller_custody = line.removeprefix("preparation custody receipt: ")
 
     def base_args(self) -> list[str]:
+        if "caller_directory" not in self.__dict__:
+            directory = tempfile.TemporaryDirectory(prefix="acceptance-caller-")
+            self.addCleanup(directory.cleanup)
+            self.caller_directory = Path(directory.name).resolve()
+        self.receipt_number = self.__dict__.get("receipt_number", 0) + 1
         args = ["--root", str(self.root), "--matrix", str(self.matrix_path)]
         receipt = self.__dict__.get("caller_custody")
         if receipt is not None and MODULE._refresh_lock_path(self.root).with_suffix(".preparation").exists():
             args.extend(("--preparation-custody", receipt))
+        args.extend(("--preparation-receipt-file", str(self.caller_directory / (str(self.receipt_number) + ".json"))))
         return args
 
     def prepare_refresh(self, *, generated_evidence: bool = True) -> dict[str, Any]:
@@ -1439,11 +1468,11 @@ if sys.argv[5] == "publish":
     pathlib.Path.replace = published
 else:
     module["refresh_inventory"] = paused
-raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3], "--refresh-inventory"]))
+raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3], "--refresh-inventory", "--preparation-receipt-file", sys.argv[6]]))
 """
         child = subprocess.Popen([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
                                   str(self.root), str(self.matrix_path), str(ready),
-                                  "publish" if during_publication else "prepare"],
+                                  "publish" if during_publication else "prepare", self.base_args()[-1]],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True)
         def cleanup() -> None:
@@ -1906,10 +1935,10 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                         else:
                             changed.write_bytes(original)
 
-    def test_optional_outputs_cannot_overwrite_inputs_or_each_other(self) -> None:
+    def _check_optional_outputs_cannot_overwrite_inputs_or_each_other(self, refresh) -> None:
         self.prepare_refresh()
         discovery, report = self.execution_inputs()
-        for refresh in (False, True):
+        for selected_refresh in (refresh,):
             for target in (self.root / MODULE.CONTRACT_DOCUMENTS[0], self.root / "docs/d.md",
                            self.root / "test/x_test.cpp", self.root / "tools/script.py",
                            self.root / "CMakeLists.txt", discovery, report,
@@ -1931,7 +1960,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                     "--write-doc", str(target), "--execution-receipt", str(target)]
             if refresh:
                 args.append("--refresh-inventory")
-            code, _, err = self.run_main(*args)
+            code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
             self.assertEqual(code, 2, err)
             self.assertIn("output paths must be distinct", err)
             self.assertFalse(target.exists())
@@ -2203,9 +2232,9 @@ script.write_text('changed input', encoding='utf-8')
         args.write_doc.unlink()
         MODULE._check_output_paths(args, self.root, self.matrix_path, [script])
 
-    def test_cli_alias_retargeting_refuses_before_and_after_every_publication(self) -> None:
+    def _check_cli_alias_retargeting_refuses_before_and_after_every_publication(self, boundary) -> None:
         for name in ("inventory", "matrix", "generated", "check", "write", "discovery", "receipt", "junit"):
-            for boundary in ("loaded", "staging", 1, 2, 3, 4, 5):
+            for selected_boundary in (boundary,):
                 for denied in (False, True):
                     with self.subTest(alias=name, boundary=boundary, denied=denied):
                         paths, before = self.prepare_rollback()
@@ -2512,15 +2541,16 @@ script.write_text('changed input', encoding='utf-8')
         args = ["--root", str(self.root / "test/.."),
                 "--matrix", str(self.root / ".." / self.matrix_path.name),
                 "--write-doc", str(self.root / "docs/../docs/acceptance-matrix.md"),
-                "--refresh-inventory", "--check-doc", str(doc)]
-        code, _, err = self.run_main(*args)
+                "--refresh-inventory", "--check-doc", str(doc),
+                "--preparation-receipt-file", self.base_args()[-1]]
+        code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
         self.assertEqual(code, 0, err)
         matrix = MODULE.load_matrix(self.matrix_path)
         self.assertEqual(row_of(matrix, "iss.126")["source"], MODULE.CONTRACT_DOCUMENTS[1] + "#moved")
         self.assertEqual(self.errors(matrix), [])
         self.assertEqual(doc.read_text(encoding="utf-8"), MODULE.render_doc(matrix))
         before = doc.read_bytes(), doc.stat().st_mtime_ns
-        self.assertEqual(self.run_main(*args)[0], 0)
+        self.assertEqual(self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])[0], 0)
         self.assertEqual((doc.read_bytes(), doc.stat().st_mtime_ns), before)
 
     def test_generated_document_evidence_allows_both_writers_and_separate_exports(self) -> None:
@@ -2775,7 +2805,8 @@ script.write_text('changed input', encoding='utf-8')
                             stack.callback(restore_alias)
                         identity = alias.lstat()
                         with mock.patch.object(Path, "replace", publish):
-                            code, _, err = self.run_main("--root", str(self.root), "--refresh-inventory")
+                            code, _, err = self.run_main("--root", str(self.root), "--refresh-inventory",
+                                                       "--preparation-receipt-file", self.base_args()[-1])
                         self.assertEqual(code, 2 if fail else 0, err)
                         self.assertEqual(published, expected)
                         self.assertTrue(os.path.samestat(identity, alias.lstat()))
@@ -3152,7 +3183,7 @@ script.write_text('changed input', encoding='utf-8')
                     args.append("--refresh-inventory")
                 with mock.patch.object(Path, "replace", fail_after_receipt), \
                         mock.patch.object(Path, "unlink", denied_unlink):
-                    code, _, err = self.run_main(*args)
+                    code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
                 self.assertEqual(code, 2, err)
                 for path in (*paths, document):
                     self.assertEqual(path.read_bytes(), (originals if path in originals else before)[path])
@@ -3439,11 +3470,11 @@ script.write_text('changed input', encoding='utf-8')
                 if decision_kind == "removed-or-reworded-or-ambiguous":
                     document.write_text(original, encoding="utf-8")
 
-    def test_refresh_invalid_sources_use_validation_messages_before_any_relocation(self) -> None:
+    def _check_refresh_invalid_sources_use_validation_messages_before_any_relocation(self, row_id) -> None:
         matrix = self.prepare_refresh()
         (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
             "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
-        for row_id in ("iss.126", "planned.doc"):
+        for selected_row in (row_id,):
             for invalid in ([], {}, 17, None, False, "", " "):
                 for aggregate in (False, True):
                     with self.subTest(row=row_id, source=invalid, aggregate=aggregate):
@@ -3637,10 +3668,9 @@ script.write_text('changed input', encoding='utf-8')
                 self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in paths.values()], after)
                 self.assertEqual(set(inventory.parent.iterdir()), {inventory})
 
-    def test_refresh_stages_all_outputs_before_replacement_and_retries_partial_data(self) -> None:
+    def _check_refresh_stages_all_outputs_before_replacement_and_retries_partial_data(self, failure) -> None:
         create = open
-        for failure, fail_at in ((failure, stage) for failure in ("create", "partial")
-                                 for stage in range(1, 9)):
+        for fail_at in range(1, 9):
             with self.subTest(failure=failure, stage=fail_at):
                 self.prepare_refresh()
                 self.write_inventory()
@@ -3674,7 +3704,7 @@ script.write_text('changed input', encoding='utf-8')
                     return handle
                 with mock.patch.object(MODULE, "open", side_effect=partial_file, create=True), \
                         mock.patch.object(Path, "replace") as replace:
-                    code, _, err = self.run_main(*args)
+                    code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
                 self.assertEqual(code, 2, err)
                 self.assertIn("partial staged output" if failure == "partial"
                               else "staged output creation denied", err)
@@ -3683,7 +3713,7 @@ script.write_text('changed input', encoding='utf-8')
                 self.assertFalse(extra_doc.exists())
                 self.assertFalse(receipt.exists())
                 self.assertEqual(set(self.tmp.rglob("*")), before_paths)
-                code, _, err = self.run_main(*args)
+                code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
                 self.assertEqual(code, 0, err)
                 self.assertEqual(extra_doc.read_bytes(), paths[2].read_bytes())
                 self.assertEqual(json.loads(receipt.read_bytes())["matrix_sha256"], MODULE._sha256(self.matrix_path))
@@ -3744,7 +3774,7 @@ script.write_text('changed input', encoding='utf-8')
                 "--junit", str(report), "--discovery", str(discovery), "--execution-receipt", str(receipt)]
         for content in (b"{", b"[]", b'{"kind":"ctestInfo","tests":[]}', b"\xff"):
             discovery.write_bytes(content)
-            code, _, err = self.run_main(*args)
+            code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
             self.assertEqual(code, 2, err)
             self.assertFalse(receipt.exists())
             self.assertFalse(extra_doc.exists())
@@ -3756,13 +3786,13 @@ script.write_text('changed input', encoding='utf-8')
                 raise PermissionError("matrix locked")
             return replace(file, target)
         with mock.patch.object(Path, "replace", locked):
-            code, _, err = self.run_main(*args)
+            code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
         self.assertEqual(code, 2, err)
         self.assertEqual(paths[0].read_bytes(), before[0])
         self.assertFalse(receipt.exists())
         self.assertFalse(extra_doc.exists())
         self.assertEqual([path.read_bytes() for path in paths], before)
-        code, _, err = self.run_main(*args)
+        code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["matrix_sha256"],
                          MODULE._sha256(self.matrix_path))
@@ -3777,7 +3807,7 @@ script.write_text('changed input', encoding='utf-8')
                 raise PermissionError("inventory locked")
             return replace(file, target)
         with mock.patch.object(Path, "replace", inventory_locked):
-            code, _, err = self.run_main(*args)
+            code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
         self.assertEqual(code, 2, err)
         self.assertIn("inventory locked", err)
         self.assertEqual([path.read_bytes() for path in all_paths], old)
@@ -3887,7 +3917,7 @@ script.write_text('changed input', encoding='utf-8')
                                 "--discovery", str(discovery), "--execution-receipt", str(receipt)]
                         if refresh:
                             args.append("--refresh-inventory")
-                        code, _, err = self.run_main(*args)
+                        code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
                     finally:
                         os.umask(previous)
                     self.assertEqual(code, 0, err)
@@ -3898,7 +3928,7 @@ script.write_text('changed input', encoding='utf-8')
                         output.write_bytes(b"stale output\n")
                         output.chmod(0o640)
                     modes = [stat.S_IMODE(output.stat().st_mode) for output in (doc, receipt)]
-                    code, _, err = self.run_main(*args)
+                    code, _, err = self.run_main(*args, "--preparation-receipt-file", self.base_args()[-1])
                     self.assertEqual(code, 0, err)
                     self.assertEqual([stat.S_IMODE(output.stat().st_mode) for output in (doc, receipt)], modes)
                     self.assertEqual(doc.read_bytes(), MODULE.render_doc(MODULE.load_matrix(self.matrix_path)).encode("utf-8"))
@@ -5599,8 +5629,8 @@ raise SystemExit(module["main"](sys.argv[5:]))
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 0, err)
         # Six payloads, eighteen artifact records, four pending records, two
-        # journals, initial enrollment, cleanup reset and automatic retirement.
-        self.assertEqual(len(synced), 33)
+        # journals, initial enrollment, independent receipt, cleanup reset and retirement.
+        self.assertEqual(len(synced), 34)
 
     def test_readonly_first_writer_journal_is_recovered_or_refused_before_retry_inputs(self) -> None:
         lock = MODULE._refresh_lock_path(self.root)
@@ -5706,7 +5736,7 @@ raise SystemExit(module["main"](sys.argv[5:]))
             code, _, err = self.run_main(*self.base_args(), *options)
             self.assertEqual(code, 0, err)
 
-    def test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read(self) -> None:
+    def _check_recovery_rejects_damaged_or_unknown_journal_before_any_input_read(self, batch) -> None:
         paths, _ = self.prepare_rollback()
         self.interrupted_refresh(1)
         journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
@@ -5744,6 +5774,8 @@ raise SystemExit(module["main"](sys.argv[5:]))
             change(value)
             mutations.append(json.dumps(value).encode("utf-8"))
         for index, data in enumerate(mutations):
+            if index % 3 != batch:
+                continue
             with self.subTest(index=index):
                 journal.write_bytes(data)
                 with mock.patch.object(MODULE, "load_matrix") as load:
@@ -5962,12 +5994,14 @@ raise SystemExit(module["main"](sys.argv[3:]))
                 journal_syncs = 0
                 journal_descriptor = None
                 unknown_reported = False
+                invocation = self.base_args()
+                authority_file = Path(invocation[-1])
                 def faulted_fdopen(descriptor: int, mode: str) -> Any:
                     nonlocal journal_descriptor
                     handle = fdopen(descriptor, mode)
-                    if mode == "wb":
+                    if mode == "wb" and candidate.exists():
                         journal_descriptor = descriptor
-                    if mode == "wb" and failure in ("write", "flush"):
+                    if mode == "wb" and candidate.exists() and failure in ("write", "flush"):
                         if failure == "write":
                             handle.write = lambda data: 0
                         else:
@@ -5987,7 +6021,10 @@ raise SystemExit(module["main"](sys.argv[3:]))
                     with fdopen(os.dup(descriptor), "rb") as handle:
                         actual = metadata(handle)
                     is_journal = candidate.exists() and descriptor == journal_descriptor
-                    is_marker = MODULE._same_transaction_identity(journal.with_suffix(".preparation"), actual)
+                    enrollment_paths = [journal.with_suffix(".preparation"), authority_file,
+                                        *journal.parent.glob(".acceptance-enrollment-*")]
+                    is_marker = any(path.exists() and MODULE._same_transaction_identity(path, actual)
+                                    for path in enrollment_paths)
                     if is_journal:
                         journal_syncs += 1
                     if ((failure == "payload-sync" and not is_marker and not is_journal) or (is_journal and (
@@ -6009,7 +6046,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
                         mock.patch.object(os, "replace", faulted_replace), \
                         mock.patch.object(os, "fsync", faulted_sync), \
                         mock.patch.object(MODULE, "_transaction_metadata", unknown_candidate):
-                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    code, _, err = self.run_main(*invocation, "--refresh-inventory")
                 self.assertEqual(code, 2, err)
                 if failure in ("sync", "commit-sync"):
                     self.assertEqual(journal_syncs, 1 if failure == "sync" else 2)
@@ -6037,12 +6074,12 @@ raise SystemExit(module["main"](sys.argv[3:]))
         self.assertIn("timer unavailable", err)
         load.assert_not_called()
 
-    def test_refresh_defaults_and_optional_outputs_reject_all_input_aliases(self) -> None:
+    def _check_refresh_defaults_and_optional_outputs_reject_all_input_aliases(self, destination_name) -> None:
         self.prepare_refresh()
         doc = self.root / "docs/acceptance-matrix.md"
         inventory = self.root / "tools/ci/acceptance_requirements.json"
         discovery, report = self.execution_inputs()
-        for destination in (doc, inventory, self.matrix_path):
+        for destination in ({"doc": doc, "inventory": inventory, "matrix": self.matrix_path}[destination_name],):
             for source in (self.root / MODULE.CONTRACT_DOCUMENTS[0], self.root / "docs/d.md",
                            self.root / "test/x_test.cpp", self.root / "tools/script.py",
                            self.root / "CMakeLists.txt", discovery, report):
@@ -6072,6 +6109,8 @@ raise SystemExit(module["main"](sys.argv[3:]))
                             publish.assert_not_called()
                             self.assertEqual(source.read_bytes(), protected)
                         self.assertEqual(destination.read_bytes(), original)
+        if destination_name != "doc":
+            return
         # Optional destinations and output/output aliases use the same identity rule.
         for option in ("--write-doc", "--execution-receipt"):
             for source in (inventory, self.matrix_path, self.root / MODULE.CONTRACT_DOCUMENTS[0], doc):
@@ -6306,7 +6345,7 @@ class ProductionAcceptanceMatrixTests(_PhaseCase):
         # Read all production inputs in place. Redirect coordination metadata
         # and publication to scratch so Git metadata may be read-only and an
         # explicit write may normalize CRLF without changing the checkout.
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as caller:
             scratch = Path(temporary).resolve()
             destination = scratch / doc.name
             destination.write_bytes(expected.replace("\n", "\r\n").encode("utf-8"))
@@ -6320,7 +6359,8 @@ class ProductionAcceptanceMatrixTests(_PhaseCase):
                             mock.patch.object(MODULE, "_refresh_lock_path",
                                               return_value=scratch / "acceptance-refresh.lock"), \
                             mock.patch.object(MODULE, "_replace_outputs", side_effect=publish_document) as publisher:
-                        code = MODULE.main(["--root", str(root), *options, "--check-doc", str(doc)])
+                        code = MODULE.main(["--root", str(root), *options, "--check-doc", str(doc),
+                                            "--preparation-receipt-file", str(Path(caller) / "receipt.json")])
                     self.assertEqual(code, 0, err.getvalue())
                     self.assertIn(f"static references ok: {len(matrix['rows'])} rows", out.getvalue())
                     publisher.assert_called_once()
@@ -6337,7 +6377,8 @@ class ProductionAcceptanceMatrixTests(_PhaseCase):
         matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
         recipe = (root / "docs/v0.3-acceptance.md").read_text(encoding="utf-8")
         command = ("python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> "
-                   "--junit <native.junit.xml> --execution-receipt <acceptance-execution.json>")
+                   "--junit <native.junit.xml> --execution-receipt <acceptance-execution.json> "
+                   "--preparation-receipt-file <caller-metadata.json>")
         for row_id in ("iss.385", "iss.429"):
             with self.subTest(row=row_id):
                 row = row_of(matrix, row_id)
@@ -6645,6 +6686,230 @@ class PublicTreeScanTests(_PhaseCase):
 
 
 class AcceptanceCustodyTests(AcceptanceFixture):
+    def test_metadata_directory_aliases_share_canonical_transaction_paths(self) -> None:
+        for denied in (False, True):
+            with self.subTest(denied=denied), self.retargetable_path(self.root / ".git", denied=denied) as (target, _, _):
+                lock = MODULE._refresh_lock_path(self.root)
+                self.assertEqual(lock.parent, target.resolve())
+                journal = (self.root / ".git" / lock.name).with_suffix(".transaction")
+                receipt = MODULE._PreparationCustody.create(journal)
+                output = self.tmp / "output"
+                MODULE._replace_outputs([(output, "published")], journal=journal, custody=receipt)
+                MODULE._recover_outputs(journal, receipt)
+                MODULE._PreparationCustody(journal, receipt).retire()
+                self.assertEqual(output.read_bytes(), b"published")
+                self.assertFalse(journal.with_suffix(".pending").exists())
+                self.assertFalse(journal.with_suffix(".preparation").exists())
+                previous = Path.cwd()
+                try:
+                    os.chdir(self.tmp)
+                    self.assertEqual(MODULE._refresh_lock_path(Path("repo")), lock)
+                finally:
+                    os.chdir(previous)
+
+    def test_cli_requires_independent_new_authority_outside_recovery_tree(self) -> None:
+        self.prepare_refresh()
+        plain = ["--root", str(self.root), "--matrix", str(self.matrix_path)]
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        for options in ((), ("--preparation-receipt-file", str(self.root / "receipt")),
+                        ("--preparation-receipt-file", str(journal.with_suffix(".receipt")))):
+            with self.subTest(options=options):
+                before = self.image()
+                code, _, err = self.run_main(*plain, *options, "--enroll-preparation")
+                self.assertEqual(code, 2, err)
+                self.assertIn("receipt", err)
+                self.assertEqual(self.image(), before)
+        args = self.base_args()
+        authority = Path(args[-1])
+        authority.write_bytes(b"caller evidence")
+        before = self.image()
+        self.assertEqual(self.run_main(*args, "--enroll-preparation")[0], 2)
+        self.assertEqual(authority.read_bytes(), b"caller evidence")
+        self.assertEqual(self.image(), before)
+        # A caller file may also be an output alias; it is protected before staging.
+        args = self.base_args()
+        code, _, err = self.run_main(*args, "--write-doc", args[-1])
+        self.assertEqual(code, 2, err)
+        self.assertIn("overlaps an input", err)
+        self.assertFalse(Path(args[-1]).exists())
+        code, _, err = self.run_main(*self.base_args(), "--write-doc", str(journal.with_suffix(".preparation")))
+        self.assertEqual(code, 2, err)
+        self.assertIn("overlaps an input", err)
+        self.assertFalse(journal.with_suffix(".preparation").exists())
+
+    def test_enrollment_publication_rechecks_staging_and_preserves_foreign_marker(self) -> None:
+        for change in ("content", "replacement", "link", "marker"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                journal, authority = base / "refresh.transaction", base / "caller.json"
+                marker = journal.with_suffix(".preparation")
+                native_open, native_sync = os.open, os.fsync
+                receipt_descriptor = None
+                retained = {}
+                def opened(path, flags, *args, **kwargs):
+                    nonlocal receipt_descriptor
+                    descriptor = native_open(path, flags, *args, **kwargs)
+                    if Path(path) == authority:
+                        receipt_descriptor = descriptor
+                    return descriptor
+                def synced(descriptor):
+                    native_sync(descriptor)
+                    if descriptor == receipt_descriptor:
+                        staged, = base.glob(".acceptance-enrollment-*")
+                        if change == "content":
+                            staged.write_bytes(b"foreign content")
+                        elif change == "replacement":
+                            staged.rename(base / "displaced")
+                            staged.write_bytes(b"foreign replacement")
+                        elif change == "link":
+                            os.link(staged, base / "alias")
+                        else:
+                            marker.write_bytes(b"foreign marker")
+                        retained.update({path: (path.read_bytes(), path.stat()) for path in base.iterdir()
+                                         if path != authority and (change != "marker" or path == marker)})
+                with mock.patch.object(os, "open", opened), mock.patch.object(os, "fsync", synced), \
+                        self.assertRaises(MODULE.MatrixError):
+                    MODULE._PreparationCustody.create(journal, receipt_file=authority)
+                for path, (data, identity) in retained.items():
+                    self.assertEqual(path.read_bytes(), data)
+                    self.assertTrue(os.path.samestat(path.stat(), identity))
+                self.assertEqual(marker.exists(), change == "marker")
+
+    def test_receipt_persistence_failures_never_publish_a_marker(self) -> None:
+        for failure in ("open", "fdopen", "write", "flush", "sync", "close", "rename"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                journal, authority = base / "refresh.transaction", base / "caller.json"
+                native_open, native_fdopen, native_sync = os.open, os.fdopen, os.fsync
+                descriptors = []
+                def opened(path, flags, *args, **kwargs):
+                    if Path(path) == authority and failure == "open":
+                        raise PermissionError("receipt denied")
+                    descriptor = native_open(path, flags, *args, **kwargs)
+                    if Path(path) == authority:
+                        descriptors.append(descriptor)
+                    return descriptor
+                def handled(descriptor, mode):
+                    if descriptor in descriptors and mode == "wb" and failure == "fdopen":
+                        raise OSError("receipt handle denied")
+                    handle = native_fdopen(descriptor, mode)
+                    if descriptor in descriptors and mode == "wb":
+                        if failure == "write":
+                            write = handle.write
+                            handle.write = lambda data: write(data[:3])
+                        elif failure == "flush":
+                            handle.flush = mock.Mock(side_effect=OSError("receipt flush denied"))
+                        elif failure == "close":
+                            close = handle.close
+                            def closed():
+                                close()
+                                raise OSError("receipt close denied")
+                            handle.close = closed
+                    return handle
+                def synced(descriptor):
+                    if descriptor in descriptors and failure == "sync":
+                        raise OSError("receipt sync denied")
+                    native_sync(descriptor)
+                with mock.patch.object(os, "open", opened), mock.patch.object(os, "fdopen", handled), \
+                        mock.patch.object(os, "fsync", synced), \
+                        mock.patch.object(os, "rename", side_effect=OSError("publication denied") if failure == "rename" else os.rename), \
+                        self.assertRaises(OSError):
+                    MODULE._PreparationCustody.create(journal, receipt_file=authority)
+                self.assertFalse(journal.with_suffix(".preparation").exists())
+                self.assertEqual(list(base.glob(".acceptance-enrollment-*")), [])
+                # Partial caller data never causes automatic enrollment/adoption.
+                MODULE._recover_outputs(journal)
+                for descriptor in descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            journal, authority = base / "refresh.transaction", base / "caller.json"
+            encode = MODULE._custody_json
+            def exact_bound(value):
+                if isinstance(value, dict) and set(value) == {"version", "journal", "device", "inode", "nonce", "key"}:
+                    return b"x" * MODULE._JOURNAL_BYTES
+                return encode(value)
+            with mock.patch.object(MODULE, "_custody_json", exact_bound), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "exceeds its bound"):
+                MODULE._PreparationCustody.create(journal, receipt_file=authority)
+            self.assertEqual(list(base.iterdir()), [])
+
+    def _check_enrollment_crash_before_receipt_delivery_is_recoverable(self, mode, boundary) -> None:
+        self.prepare_rollback() if mode == "write" else self.prepare_refresh()
+        args = self.base_args()
+        authority = Path(args[-1])
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        if mode == "legacy":
+            output = self.tmp / "legacy-output"
+            backup, candidate = (self.tmp / (".acceptance-" + str(i) * 32) for i in (1, 2))
+            backup.write_bytes(b"old")
+            candidate.write_bytes(b"new")
+            old, new = MODULE._transaction_record(backup), MODULE._transaction_record(candidate)
+            MODULE._write_transaction(journal, [{"path": str(output), "old": old["sha256"],
+                                                "backup": old, "new": new}], committed=False)
+            candidate.replace(output)
+        program = r'''
+import importlib.util, os, pathlib, sys
+spec = importlib.util.spec_from_file_location("acceptance_child", sys.argv[1])
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+mode, boundary = sys.argv[2:4]
+create = checker._PreparationCustody.create
+rename = os.rename
+def interrupted(*args, **kwargs):
+    receipt = create(*args, **kwargs)
+    os._exit(73)
+def publication(source, target):
+    if boundary == "before":
+        os._exit(73)
+    rename(source, target)
+    os._exit(73)
+if boundary == "delivery":
+    checker._PreparationCustody.create = interrupted
+else:
+    os.rename = publication
+options = ["--enroll-preparation"] if mode == "enroll" else (["--refresh-inventory"] if mode == "write" else [])
+raise SystemExit(checker.main(sys.argv[4:] + options))
+'''
+        child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH), mode, boundary, *args],
+                               capture_output=True, text=True, timeout=_CHILD_TIMEOUT)
+        self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+        self.assertNotIn("preparation custody receipt:", child.stderr)
+        self.assertEqual(child.stdout, "")
+        receipt = authority.read_text(encoding="utf-8")
+        self.assertEqual(json.loads(receipt)["journal"], str(journal))
+        marker = journal.with_suffix(".preparation")
+        if boundary == "before":
+            self.assertFalse(marker.exists())
+            # No fixed marker blocks a new enrollment. Retry with fresh caller
+            # authority; the inert candidate is never used to authenticate it.
+            retry = self.base_args()
+            options = ["--enroll-preparation"] if mode == "enroll" else (["--refresh-inventory"] if mode == "write" else [])
+            code, delivered, err = self.run_main(*retry, *options)
+            self.assertEqual(code, 0, err)
+            if mode == "enroll":
+                code, _, err = self.run_main(*self.base_args(), "--preparation-custody", delivered, "--retire-preparation")
+                self.assertEqual(code, 0, err)
+            self.assertFalse(marker.exists())
+            return
+        self.assertTrue(marker.exists())
+        image = self.image()
+        with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+            MODULE._recover_outputs(journal)
+        self.assertEqual(self.image(), image)
+        forged = json.loads(receipt)
+        forged["key"] = "0" * 64
+        with self.assertRaises(MODULE.MatrixError):
+            MODULE._recover_outputs(journal, json.dumps(forged))
+        self.assertEqual(self.image(), image)
+        code, _, err = self.run_main(*self.base_args(), "--preparation-custody", receipt, "--retire-preparation")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(marker.exists())
+        self.assertFalse(journal.exists())
+
     def custody(self) -> tuple[Path, str]:
         journal = self.tmp / "refresh.transaction"
         return journal, MODULE._PreparationCustody.create(journal)
@@ -7063,13 +7328,8 @@ g["_replace_outputs"]([(journal.parent / "output", "candidate\r\n")], journal=jo
 # all four public-tree partitions.
 _MATRIX_CLASSES = (AcceptanceMatrixTests, ProductionAcceptanceMatrixTests,
                    AcceptanceMatrixPublishabilityTests, PublicTreeScanTests)
-# Whole-case moves distribute the launch-free filesystem sweeps.
-_CONTRACT_CASE_PARTITIONS = {
-    "AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files": 1,
-    "AcceptanceSelectionTests.test_rollback_payload_buffer_boundaries_are_discoverable": 6,
-    "AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication": 7,
-}
-
+# Populated after all parameterized cases are registered.
+_CONTRACT_CASE_PARTITIONS = {}
 
 def contract_suite(number: int) -> unittest.TestSuite:
     if type(number) is not int or not 0 <= number < _CONTRACT_PARTITIONS:
@@ -7082,7 +7342,7 @@ def contract_suite(number: int) -> unittest.TestSuite:
     suite = unittest.TestSuite(case for index, case in enumerate(cases)
                               if _CONTRACT_CASE_PARTITIONS.get(
                                   type(case).__name__ + "." + case._testMethodName,
-                                  index % 24) == number)
+                                  index % _LOCAL_PARTITIONS) == number)
     _phase("selection-finish", selector=number)
     return suite
 
@@ -7093,8 +7353,8 @@ class AcceptanceSelectionTests(_PhaseCase):
         return {path: (path.read_bytes(), info.st_dev, info.st_ino, info.st_nlink, info.st_mode)
                 for path in base.iterdir() if path.is_file() for info in (path.stat(),)}
 
-    def test_restart_refuses_linked_transaction_members_before_any_mutation(self) -> None:
-        for committed in (False, True):
+    def _check_restart_refuses_linked_transaction_members_before_any_mutation(self, committed) -> None:
+        for selected_commit in (committed,):
             for persistent in (False, True):
                 for kind in ("backup", "candidate", "restoration", "journal", "preparation", "pending"):
                     with self.subTest(committed=committed, persistent=persistent, kind=kind), \
@@ -7368,14 +7628,9 @@ class AcceptanceSelectionTests(_PhaseCase):
         sync_patch = mock.patch.object(os, "fsync", autospec=_NATIVE_FSYNC)
         sync_patch.start()
         self.addCleanup(sync_patch.stop)
-        # Extend the registered preparation owner without changing selection IDs
-        # or its existing assertions. These controls use the actual openers.
-        if self._testMethodName == "test_preparation_bound_is_checked_before_creating_an_artifact":
-            self.assert_native_creation_retries()
-            self.assert_native_creation_refusals()
 
-    def assert_native_creation_retries(self) -> None:
-        for journaled in (False, True):
+    def _check_native_creation_retries(self, journaled) -> None:
+        for selected_journal in (journaled,):
             for failure in ("missing-parent", "backup-denied", "payload-denied"):
                 with self.subTest(staging=failure, journaled=journaled), tempfile.TemporaryDirectory() as directory:
                     base = Path(directory).resolve()
@@ -7421,6 +7676,8 @@ class AcceptanceSelectionTests(_PhaseCase):
                         self.assertFalse(journal.exists())
                         self.assertFalse(MODULE._preparation_pending(journal))
 
+        if journaled:
+            return
         for failure in ("missing-parent", "denied"):
             with self.subTest(recovery=failure), AcceptanceMatrixTests.recovery_transaction(self) as fixture:
                 base, paths, backups, old_journal = fixture
@@ -7501,14 +7758,14 @@ class AcceptanceSelectionTests(_PhaseCase):
         finally:
             fixture.doCleanups()
 
-    def assert_native_creation_refusals(self) -> None:
+    def _check_native_creation_refusals(self, recovery, batch) -> None:
         failures = ("before-opener", "created-enoent", "created-denied", "created-exists", "created-interrupt",
                     "created-runtime", "handle-after-create", "interrupted-absent", "unknown-error",
                     "stat-before", "stat-after", "stat-after-runtime", "collision", "collision-replaced",
                     "collision-content", "collision-link", "collision-unknown", "collision-after-unknown",
                     "collision-removed", "marker-replaced", "marker-content", "marker-link", "marker-stat")
-        for recovery in (False, True):
-            for failure in failures:
+        for selected_recovery in (recovery,):
+            for failure in failures[batch::3]:
                 with self.subTest(recovery=recovery, creation=failure), \
                         AcceptanceMatrixTests.recovery_transaction(self) as fixture:
                     base, paths, backups, journal = fixture
@@ -7759,7 +8016,7 @@ class AcceptanceSelectionTests(_PhaseCase):
         output = io.StringIO()
         with mock.patch.dict(globals(), _phase_records=0), contextlib.redirect_stderr(output):
             suite = contract_suite(7)
-        self.assertEqual(suite.countTestCases(), 11)
+        self.assertEqual(suite.countTestCases(), 3)
         self.assertEqual(output.getvalue(), "acceptance-phase=selection-start selector=7\n"
                          "acceptance-phase=selection-finish selector=7\n")
 
@@ -8633,7 +8890,7 @@ watchdog.join()
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         names = {"AcceptanceMatrixContract" + (str(number + 1) if number else "")
                  for number in range(_CONTRACT_PARTITIONS)}
-        for row_id in ("perf.requirement-matrix", "iss.126"):
+        for row_id in ("perf.requirement-matrix", "iss.126", "ci.acceptance-preparation-custody"):
             evidence = {item["ref"] for item in row_of(matrix, row_id)["evidence"] if item["kind"] == "ctest"}
             self.assertEqual(evidence, names)
         self.assertEqual(sorted(partitions), list(range(_CONTRACT_PARTITIONS)))
@@ -8701,14 +8958,20 @@ watchdog.join()
             allowances = sum(_CHILD_ALLOWANCES.get(type(case).__name__ + "." + case._testMethodName, 0)
                            for case in cases)
             self.assertLessEqual(allowances * _CHILD_TIMEOUT, 24, number)
+            # One second per child launch or complete outer storage operation;
+            # pure cases still reserve one second. Count the full nested grid.
+            storage = sum(max(1, _STORAGE_ALLOWANCES.get(type(case).__name__ + "." + case._testMethodName, 1))
+                          for case in cases)
+            self.assertLessEqual(storage + allowances, 24, number)
             self.assertTrue(cases, number)
             if allowances:
                 self.assertEqual(len(cases), 1, number)
-                self.assertGreaterEqual(number, 24)
+                self.assertGreaterEqual(number, _LOCAL_PARTITIONS)
             else:
-                self.assertLess(number, 24)
+                self.assertLess(number, _LOCAL_PARTITIONS)
             selected.update((type(case).__name__ + "." + case._testMethodName, number) for case in cases)
         self.assertTrue(set(_CHILD_ALLOWANCES) <= selected.keys())
+        self.assertTrue(set(_STORAGE_ALLOWANCES) <= selected.keys())
         self.assertEqual(len(set(selected[name] for name in _CHILD_ALLOWANCES)), len(_CHILD_ALLOWANCES))
 
     def test_contract_partition_refuses_invalid_selection(self) -> None:
@@ -8726,6 +8989,176 @@ def _child_case(check, values):
 
 
 _CHILD_ALLOWANCES = {}
+# Fixed per-case bounds on outer CLI/transaction operations. The run wrapper
+# checks actual work including nested fault grids and setup/cleanup helpers.
+# Every other case reserves one unit for ordinary fixture and import work.
+_STORAGE_ALLOWANCES = {
+    'AcceptanceCustodyTests.test_cleanup_and_reset_failures_remain_restartable': 8,
+    'AcceptanceCustodyTests.test_cli_rejects_incomplete_or_combined_enrollment_requests': 4,
+    'AcceptanceCustodyTests.test_cli_requires_independent_new_authority_outside_recovery_tree': 6,
+    'AcceptanceCustodyTests.test_enrollment_cli_recovery_reuse_and_retirement': 6,
+    'AcceptanceCustodyTests.test_enrollment_crash_before_receipt_delivery_is_recoverable': 2,
+    'AcceptanceCustodyTests.test_enrollment_crash_before_receipt_delivery_is_recoverable_case_1': 3,
+    'AcceptanceCustodyTests.test_enrollment_crash_before_receipt_delivery_is_recoverable_case_2': 3,
+    'AcceptanceCustodyTests.test_enrollment_crash_before_receipt_delivery_is_recoverable_case_4': 3,
+    'AcceptanceCustodyTests.test_enrollment_crash_before_receipt_delivery_is_recoverable_case_5': 3,
+    'AcceptanceCustodyTests.test_enrollment_crash_before_receipt_delivery_is_recoverable_case_7': 3,
+    'AcceptanceCustodyTests.test_enrollment_crash_before_receipt_delivery_is_recoverable_case_8': 3,
+    'AcceptanceCustodyTests.test_enrollment_publication_rechecks_staging_and_preserves_foreign_marker': 4,
+    'AcceptanceCustodyTests.test_enrollment_short_write_flush_and_sync_failures_preserve_unknown_state': 6,
+    'AcceptanceCustodyTests.test_foreign_pending_and_replaced_enrolled_artifacts_refuse_before_cleanup': 6,
+    'AcceptanceCustodyTests.test_foreign_stale_and_forged_receipts_preserve_all_bytes_and_identities': 7,
+    'AcceptanceCustodyTests.test_interrupted_enrollment_never_adopts_a_marker_or_returns_a_receipt': 3,
+    'AcceptanceCustodyTests.test_invalid_journal_refuses_before_owned_pending_cleanup_or_marker_reset': 2,
+    'AcceptanceCustodyTests.test_malformed_authenticated_events_and_byte_bounds_refuse_untouched': 18,
+    'AcceptanceCustodyTests.test_metadata_directory_aliases_share_canonical_transaction_paths': 6,
+    'AcceptanceCustodyTests.test_receipt_persistence_failures_never_publish_a_marker': 15,
+    'AcceptanceCustodyTests.test_record_metadata_file_and_output_bounds_are_enforced': 5,
+    'AcceptanceCustodyTests.test_reset_removes_only_enrolled_partial_content_and_preserves_unrelated_files': 2,
+    'AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files': 2,
+    'AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files_case_1': 2,
+    'AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files_case_2': 2,
+    'AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files_case_3': 2,
+    'AcceptanceCustodyTests.test_restart_reacquires_enrolled_partial_output_and_pending_files_case_4': 2,
+    'AcceptanceCustodyTests.test_torn_event_reset_retains_the_committed_enrollment': 3,
+    'AcceptanceCustodyTests.test_uncommitted_artifact_enrollment_is_unknown_and_untouched': 2,
+    'AcceptanceCustodyTests.test_unknown_authenticated_metadata_and_tampering_refuse_without_reset': 4,
+    'AcceptanceCustodyTests.test_unreadable_marker_and_artifact_refuse_without_reset': 3,
+    'AcceptanceCustodyTests.test_v1_v2_journals_recover_with_custody_and_compact_before_restoration': 8,
+    'AcceptanceMatrixTests.test_alias_change_before_snapshot_never_reads_the_new_target': 4,
+    'AcceptanceMatrixTests.test_changed_or_unreadable_commit_input_restores_old_outputs': 3,
+    'AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication': 16,
+    'AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication_case_1': 16,
+    'AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication_case_2': 16,
+    'AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication_case_3': 16,
+    'AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication_case_4': 16,
+    'AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication_case_5': 16,
+    'AcceptanceMatrixTests.test_cli_alias_retargeting_refuses_before_and_after_every_publication_case_6': 16,
+    'AcceptanceMatrixTests.test_cli_parser_setup_is_shared_without_sharing_invocation_inputs': 5,
+    'AcceptanceMatrixTests.test_crlf_doc_is_accepted': 2,
+    'AcceptanceMatrixTests.test_default_destinations_cannot_read_the_mandatory_lock_range': 6,
+    'AcceptanceMatrixTests.test_default_input_destinations_are_resolved_for_readers': 12,
+    'AcceptanceMatrixTests.test_default_output_destinations_use_resolved_paths_for_publish_and_rollback': 6,
+    'AcceptanceMatrixTests.test_direct_publication_refuses_external_destination_changes_before_replace': 2,
+    'AcceptanceMatrixTests.test_edited_doc_is_stale': 2,
+    'AcceptanceMatrixTests.test_execution_cli_writes_scoped_receipt_and_requires_discovery': 2,
+    'AcceptanceMatrixTests.test_first_reader_holds_lock_before_first_writer_can_publish': 3,
+    'AcceptanceMatrixTests.test_generated_document_as_source_or_other_evidence_remains_protected': 12,
+    'AcceptanceMatrixTests.test_generated_document_evidence_aliases_remain_real_inputs': 6,
+    'AcceptanceMatrixTests.test_generated_document_evidence_allows_both_writers_and_separate_exports': 4,
+    'AcceptanceMatrixTests.test_generated_document_evidence_stays_in_refresh_snapshot': 3,
+    'AcceptanceMatrixTests.test_generated_document_resolution_and_validation_precede_publication': 4,
+    'AcceptanceMatrixTests.test_in_place_candidate_edits_are_preserved_during_refusal_cleanup': 8,
+    'AcceptanceMatrixTests.test_interrupt_reconciliation_preserves_external_output_and_source_occupants': 12,
+    'AcceptanceMatrixTests.test_interrupted_native_restore_and_removal_are_reconciled_before_cleanup': 4,
+    'AcceptanceMatrixTests.test_journal_native_publication_interrupt_covers_prepare_commit_and_rollback_marker': 10,
+    'AcceptanceMatrixTests.test_merged_rows_with_stale_summary_are_rejected': 4,
+    'AcceptanceMatrixTests.test_missing_lock_creation_failures_use_fallback_only_for_readonly_metadata': 4,
+    'AcceptanceMatrixTests.test_native_publication_then_interrupt_restores_every_staged_destination': 15,
+    'AcceptanceMatrixTests.test_native_recovery_interrupt_keeps_independent_original_copies_until_verification': 6,
+    'AcceptanceMatrixTests.test_new_document_modes_follow_umask_and_receipts_stay_private': 12,
+    'AcceptanceMatrixTests.test_nonrefresh_writers_reject_cli_and_referenced_input_alias_retargeting': 18,
+    'AcceptanceMatrixTests.test_nonstandard_output_cannot_alias_generated_document': 4,
+    'AcceptanceMatrixTests.test_optional_outputs_cannot_overwrite_inputs_or_each_other': 18,
+    'AcceptanceMatrixTests.test_optional_outputs_cannot_overwrite_inputs_or_each_other_case_1': 18,
+    'AcceptanceMatrixTests.test_output_staging_collision_never_changes_or_removes_existing_files': 2,
+    'AcceptanceMatrixTests.test_overlapping_refresh_is_refused_without_stealing_live_lock': 2,
+    'AcceptanceMatrixTests.test_parent_and_checkout_alias_retargeting_rolls_back_actual_destinations': 4,
+    'AcceptanceMatrixTests.test_read_lock_failures_do_not_read_inputs': 5,
+    'AcceptanceMatrixTests.test_reader_creation_closes_descriptor_when_handle_construction_fails': 2,
+    'AcceptanceMatrixTests.test_readers_refuse_mixed_publication_then_accept_completed_refresh': 6,
+    'AcceptanceMatrixTests.test_readers_share_the_lock_and_writers_wait': 2,
+    'AcceptanceMatrixTests.test_readonly_checkout_detects_first_writer_and_discards_speculative_results': 9,
+    'AcceptanceMatrixTests.test_readonly_modes_do_not_expand_publication_inputs': 7,
+    'AcceptanceMatrixTests.test_receipt_rollback_guards_existing_and_created_outputs_for_every_writer': 14,
+    'AcceptanceMatrixTests.test_recovery_candidate_failures_keep_original_copies_and_publication_unchanged': 13,
+    'AcceptanceMatrixTests.test_refresh_aliased_inputs_and_standard_document_share_one_identity': 2,
+    'AcceptanceMatrixTests.test_refresh_ambiguous_and_duplicate_accounting_is_never_guessed': 2,
+    'AcceptanceMatrixTests.test_refresh_and_validation_refuse_unhashable_status_and_evidence_kind': 10,
+    'AcceptanceMatrixTests.test_refresh_audited_historical_exclusion_follows_only_unique_exact_relocation': 7,
+    'AcceptanceMatrixTests.test_refresh_bytes_do_not_depend_on_entry_row_or_object_key_order': 2,
+    'AcceptanceMatrixTests.test_refresh_consistent_crlf_doc_and_failed_doc_replacement': 2,
+    'AcceptanceMatrixTests.test_refresh_cross_document_move_and_aggregate_source_decision': 3,
+    'AcceptanceMatrixTests.test_refresh_decisions_persist_without_any_writes_alongside_a_move': 8,
+    'AcceptanceMatrixTests.test_refresh_duplicate_new_occurrences_get_distinct_editable_fragments': 3,
+    'AcceptanceMatrixTests.test_refresh_empty_inventory_or_documents_remains_incomplete': 2,
+    'AcceptanceMatrixTests.test_refresh_invalid_sources_use_validation_messages_before_any_relocation': 14,
+    'AcceptanceMatrixTests.test_refresh_invalid_sources_use_validation_messages_before_any_relocation_case_1': 14,
+    'AcceptanceMatrixTests.test_refresh_inventory_only_move_canonicalizes_matrix_object_order': 2,
+    'AcceptanceMatrixTests.test_refresh_is_idempotent_and_consistent_tree_is_byte_and_mtime_noop': 3,
+    'AcceptanceMatrixTests.test_refresh_lock_location_and_failures_are_private_and_clear': 11,
+    'AcceptanceMatrixTests.test_refresh_malformed_metadata_is_rejected_without_writes': 6,
+    'AcceptanceMatrixTests.test_refresh_missing_unreadable_or_partial_contract_never_writes': 4,
+    'AcceptanceMatrixTests.test_refresh_moves_statement_and_clears_only_derived_inventory_error': 2,
+    'AcceptanceMatrixTests.test_refresh_new_reworded_removed_and_punctuation_changes_need_decisions': 4,
+    'AcceptanceMatrixTests.test_refresh_prepares_optional_doc_and_receipt_before_writes_and_retries': 11,
+    'AcceptanceMatrixTests.test_refresh_preserves_file_permissions_and_cleans_readonly_replacement_failure': 2,
+    'AcceptanceMatrixTests.test_refresh_preserves_unknown_entry_metadata_and_rejects_invalid_row_lists': 7,
+    'AcceptanceMatrixTests.test_refresh_refuses_colliding_output_paths_without_writes': 3,
+    'AcceptanceMatrixTests.test_refresh_reviewed_normative_override_retains_current_behaviour_context': 2,
+    'AcceptanceMatrixTests.test_refresh_rolls_back_every_failed_replacement_including_windows_locks': 9,
+    'AcceptanceMatrixTests.test_refresh_source_changes_before_or_during_publication_are_rolled_back': 18,
+    'AcceptanceMatrixTests.test_refresh_stages_all_outputs_before_replacement_and_retries_partial_data': 16,
+    'AcceptanceMatrixTests.test_refresh_stages_all_outputs_before_replacement_and_retries_partial_data_case_1': 16,
+    'AcceptanceMatrixTests.test_refresh_unreadable_output_prevents_every_replacement': 5,
+    'AcceptanceMatrixTests.test_restoration_journal_rejects_invalid_records_and_unreadable_or_partial_candidates': 11,
+    'AcceptanceMatrixTests.test_restore_candidate_substitution_is_never_adopted_after_native_success': 2,
+    'AcceptanceMatrixTests.test_restore_interrupt_before_native_operation_retains_copies_for_recovery': 2,
+    'AcceptanceMatrixTests.test_restored_set_is_reverified_before_discarding_any_recovery_copy': 2,
+    'AcceptanceMatrixTests.test_rollback_faults_retain_all_copies_and_continue_other_restores': 19,
+    'AcceptanceMatrixTests.test_same_byte_input_hardlink_rebindings_are_refused': 8,
+    'AcceptanceMatrixTests.test_snapshot_inputs_and_outputs_use_the_bounded_regular_file_reader': 8,
+    'AcceptanceMatrixTests.test_snapshot_unknown_or_unreadable_name_identity_refuses_without_publication': 2,
+    'AcceptanceMatrixTests.test_speculative_diagnostics_are_bounded_and_overflow_refuses_success': 2,
+    'AcceptanceMatrixTests.test_validation_creates_missing_lock_and_uses_existing_lock_read_only': 3,
+    'AcceptanceMatrixTests.test_write_doc_then_check_doc_passes': 2,
+    'AcceptanceRecoveryTests.test_default_document_symlinks_and_output_hardlinks_are_refused': 5,
+    'AcceptanceRecoveryTests.test_journal_write_flush_and_publication_failures_preserve_outputs': 8,
+    'AcceptanceRecoveryTests.test_pending_recovery_exclusive_lock_still_obeys_deadline': 2,
+    'AcceptanceRecoveryTests.test_readonly_first_writer_journal_is_recovered_or_refused_before_retry_inputs': 4,
+    'AcceptanceRecoveryTests.test_recovery_faults_preserve_files_and_retry_without_consuming_inputs': 18,
+    'AcceptanceRecoveryTests.test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read': 11,
+    'AcceptanceRecoveryTests.test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read_case_1': 11,
+    'AcceptanceRecoveryTests.test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read_case_2': 11,
+    'AcceptanceRecoveryTests.test_refresh_defaults_and_optional_outputs_reject_all_input_aliases': 21,
+    'AcceptanceRecoveryTests.test_refresh_defaults_and_optional_outputs_reject_all_input_aliases_case_1': 14,
+    'AcceptanceRecoveryTests.test_refresh_defaults_and_optional_outputs_reject_all_input_aliases_case_2': 14,
+    'AcceptanceRecoveryTests.test_static_validation_reads_source_archive_without_git_or_any_writes': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_1': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_10': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_11': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_12': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_13': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_2': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_3': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_4': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_5': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_6': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_7': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_8': 2,
+    'AcceptanceRecoveryTests.test_termination_at_every_publication_boundary_recovers_before_reading_case_9': 2,
+    'AcceptanceRecoveryTests.test_transaction_bounds_and_special_files_fail_before_publication': 4,
+    'AcceptanceSelectionTests.test_direct_preparation_is_detected_in_every_output_parent': 2,
+    'AcceptanceSelectionTests.test_first_marker_failures_are_closed_and_preserve_all_outputs': 12,
+    'AcceptanceSelectionTests.test_foreign_preparation_aliases_preserve_the_actual_foreign_file': 2,
+    'AcceptanceSelectionTests.test_foreign_preparation_and_pending_occupants_are_never_opened_or_modified': 16,
+    'AcceptanceSelectionTests.test_live_rollback_and_cleanup_refuse_entire_linked_set': 16,
+    'AcceptanceSelectionTests.test_native_creation_refusals': 18,
+    'AcceptanceSelectionTests.test_native_creation_refusals_case_1': 16,
+    'AcceptanceSelectionTests.test_native_creation_refusals_case_2': 14,
+    'AcceptanceSelectionTests.test_native_creation_refusals_case_3': 18,
+    'AcceptanceSelectionTests.test_native_creation_refusals_case_4': 16,
+    'AcceptanceSelectionTests.test_native_creation_refusals_case_5': 14,
+    'AcceptanceSelectionTests.test_native_creation_retries': 17,
+    'AcceptanceSelectionTests.test_native_creation_retries_case_1': 9,
+    'AcceptanceSelectionTests.test_preparation_and_pending_replacements_preserve_foreign_identity_and_bytes': 4,
+    'AcceptanceSelectionTests.test_preparation_in_place_edits_and_added_aliases_are_preserved': 2,
+    'AcceptanceSelectionTests.test_restart_refuses_linked_transaction_members_before_any_mutation': 24,
+    'AcceptanceSelectionTests.test_restart_refuses_linked_transaction_members_before_any_mutation_case_1': 24,
+    'AcceptanceSelectionTests.test_staged_chmod_refuses_link_added_after_payload_close': 2,
+    'ProductionAcceptanceMatrixTests.test_production_inputs_allow_refresh_and_standard_document_write': 2,
+}
 
 
 def _register_child_cases(owner, name, check, values, children):
@@ -8738,6 +9171,11 @@ def _register_child_cases(owner, name, check, values, children):
         setattr(owner, selected, case)
         _CHILD_ALLOWANCES[owner.__name__ + "." + selected] = children
 
+
+_register_child_cases(AcceptanceCustodyTests, 'test_enrollment_crash_before_receipt_delivery_is_recoverable',
+                      AcceptanceCustodyTests._check_enrollment_crash_before_receipt_delivery_is_recoverable,
+                      tuple((mode, boundary) for mode in ("enroll", "write", "legacy")
+                            for boundary in ("before", "after", "delivery")), 1)
 
 _register_child_cases(AcceptanceRecoveryTests, 'test_retargeted_inventory_alias_recovers_the_actual_publication_destinations',
                       AcceptanceRecoveryTests._check_retargeted_inventory_alias_recovers_the_actual_publication_destinations,
@@ -8826,6 +9264,40 @@ _register_child_cases(AcceptanceSelectionTests, 'test_full_output_set_native_pub
                       (('direct', 'publication'), ('original', 'publication'), ('rollback', 'rename'),
                        ('recovery', 'rename'), ('pending', 'rename'), ('marker', 'bind')), 2)
 
+def _register_storage_cases(owner, name, values):
+    check = getattr(owner, "_check_" + name.removeprefix("test_"))
+    for index, arguments in enumerate(values):
+        selected = name + ("_case_" + str(index) if index else "")
+        case = _child_case(check, arguments)
+        case.__name__ = selected
+        case._contract_origin = name
+        case._contract_check = check.__name__
+        setattr(owner, selected, case)
+
+
+_register_storage_cases(AcceptanceMatrixTests,
+    "test_cli_alias_retargeting_refuses_before_and_after_every_publication",
+    tuple((boundary,) for boundary in ("loaded", "staging", 1, 2, 3, 4, 5)))
+_register_storage_cases(AcceptanceMatrixTests,
+    "test_optional_outputs_cannot_overwrite_inputs_or_each_other", ((False,), (True,)))
+_register_storage_cases(AcceptanceMatrixTests,
+    "test_refresh_invalid_sources_use_validation_messages_before_any_relocation", (("iss.126",), ("planned.doc",)))
+_register_storage_cases(AcceptanceRecoveryTests,
+    "test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read", ((0,), (1,), (2,)))
+_register_storage_cases(AcceptanceRecoveryTests,
+    "test_refresh_defaults_and_optional_outputs_reject_all_input_aliases", (("doc",), ("inventory",), ("matrix",)))
+_register_storage_cases(AcceptanceSelectionTests,
+    "test_restart_refuses_linked_transaction_members_before_any_mutation", ((False,), (True,)))
+
+
+_register_storage_cases(AcceptanceMatrixTests,
+    "test_refresh_stages_all_outputs_before_replacement_and_retries_partial_data", (("create",), ("partial",)))
+_register_storage_cases(AcceptanceSelectionTests,
+    "test_native_creation_retries", ((False,), (True,)))
+_register_storage_cases(AcceptanceSelectionTests,
+    "test_native_creation_refusals", tuple((recovery, batch) for recovery in (False, True) for batch in range(3)))
+
+
 _CHILD_ALLOWANCES.update({
     'AcceptanceMatrixTests.test_crashed_holder_releases_lock_without_removing_persistent_file': 2,
     'AcceptanceMatrixTests.test_external_edits_invalidate_path_discovery_and_evidence_answers': 1,
@@ -8841,13 +9313,19 @@ _CHILD_ALLOWANCES.update({
     'AcceptanceSelectionTests.test_restart_partial_writes_are_discoverable': 2,
 })
 
-# Paused holders reserve two allowances: their shared startup/completion
-# deadline and a separate kill/drain cleanup allowance. Ordinary run() children
-# each reserve one allowance, including the deliberate timeout control.
-# Child allowances total at most 24 seconds per entry, leaving six seconds
-# inside CTest's unchanged 30-second deadline for parent work and cleanup.
-# Launch-free cases retain the original 24-way distribution.
-_CONTRACT_CASE_PARTITIONS.update({name: 24 + index for index, name in enumerate(sorted(_CHILD_ALLOWANCES))})
+# A paused holder reserves startup/completion plus kill/drain deadlines.
+# Launches are independently bounded by deadlines and by slow-storage units.
+_CONTRACT_CASE_PARTITIONS.update({name: _LOCAL_PARTITIONS + index
+                                  for index, name in enumerate(sorted(_CHILD_ALLOWANCES))})
+_local_load = [0] * _LOCAL_PARTITIONS
+_local_cases = [owner.__name__ + "." + name
+                for owner in (*_MATRIX_CLASSES, AcceptanceSelectionTests, AcceptanceRecoveryTests, AcceptanceCustodyTests)
+                for name in unittest.TestLoader().getTestCaseNames(owner)
+                if owner.__name__ + "." + name not in _CHILD_ALLOWANCES]
+for _case in sorted(_local_cases, key=lambda name: (-_STORAGE_ALLOWANCES.get(name, 1), name)):
+    _partition = min(range(_LOCAL_PARTITIONS), key=lambda number: (_local_load[number], number))
+    _CONTRACT_CASE_PARTITIONS[_case] = _partition
+    _local_load[_partition] += _STORAGE_ALLOWANCES.get(_case, 1)
 
 _phase("module-ready")
 

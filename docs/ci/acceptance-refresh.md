@@ -13,32 +13,40 @@ cooperating invocations; non-cooperating concurrent writers remain outside the
 threat model. Verification before a named mutation is not identity-conditioned
 unlink or replacement, on either Windows or POSIX.
 
-Enrollment exclusively creates a preparation marker, obtains its native file
-identity, and writes and syncs an authenticated enrollment record. A separate
-caller receipt binds that identity, the canonical journal path, a fresh nonce
-and the authentication key. The key is absent from recovery files. The receipt
-is independent authority: a matching filename or self-described record alone
-never authorizes reacquisition. Ordinary CLI writes emit the receipt to stderr
-and flush it before staging payloads. Retain the run log outside the recovery
-files. Successful automatic writes reset and retire their enrollment.
+CLI enrollment first exclusively creates a bounded candidate beside the canonical
+journal, obtains its native identity, and writes and syncs its authenticated
+enrollment record. It then exclusively writes, syncs and closes a separate caller
+receipt before atomically renaming the closed candidate to the preparation marker.
+The receipt binds that identity, canonical journal path, nonce and authentication
+key. The key is absent from recovery files. A matching filename or self-described
+record alone never authorizes reacquisition.
+
+Every new CLI enrollment requires `--preparation-receipt-file` naming a new file
+in an existing caller-owned directory outside both the checkout and Git metadata.
+An existing file is never overwritten. Retain this file in the caller's run
+metadata. Ordinary writes also print the receipt to stderr before payload staging;
+explicit enrollment prints it to stdout. Neither diagnostic is commit authority.
+Successful automatic writes reset and retire their marker; the caller receipt
+file remains available until the caller removes it.
 
 For reuse across several invocations, enroll explicitly and retain the returned
-JSON in the caller's run metadata. For example, in one shell session:
+JSON. For example, choose a new receipt pathname in an existing directory:
 
 ```bash
-custody="$(python3 -I -B tools/ci/check_acceptance_matrix.py --enroll-preparation)" || exit
+custody="$(python3 -I -B tools/ci/check_acceptance_matrix.py --enroll-preparation --preparation-receipt-file "$callerMetadata/enrollment.json")" || exit
 python3 -I -B tools/ci/check_acceptance_matrix.py --preparation-custody "$custody" --refresh-inventory
 python3 -I -B tools/ci/check_acceptance_matrix.py --preparation-custody "$custody" --check-doc docs/acceptance-matrix.md
 python3 -I -B tools/ci/check_acceptance_matrix.py --preparation-custody "$custody" --retire-preparation
 ```
 
-After an interrupted automatic write, pass the JSON from its `preparation
-custody receipt:` diagnostic with `--preparation-custody`. The same operation
-recovers before reading inputs; retirement can then remove the persistent
-marker. Readers without the receipt refuse an existing preparation marker.
-Receipt delivery is enrollment commit authority. A failed or lost delivery,
-including termination before the receipt is emitted, leaves UNKNOWN enrollment;
-there is no automatic adoption or filename-based reset of that state.
+After interrupted delivery, read the durable caller file and pass its JSON with
+`--preparation-custody`; `--retire-preparation` recovers and removes its marker.
+Readers without the independent receipt still refuse the marker. A crash before
+marker publication leaves no fixed preparation marker and cannot block another
+enrollment. Retry the original command with a new caller receipt pathname.
+An uncommitted `.acceptance-enrollment-*` candidate may remain in Git metadata;
+it is inert, is never adopted or scanned for authority, and does not prevent the
+bounded retry. Unreadable or partial receipt persistence never publishes a marker.
 
 Before creating each staging file, the marker records its intention. After
 exclusive creation, it records and syncs the native identity through the open
@@ -90,11 +98,16 @@ readable without a caller-supplied receipt.
 
 ## Contract partitions
 
-Twenty-four launch-free selections and 152 selections with child processes
-include all matrix, recovery and custody cases. Each child-process selection
-reserves at most 24 seconds of child deadlines, leaving six seconds of its
-30-second timeout for imports and filesystem work.
-Four further selections retain the public-tree sweeps. Each CTest registration
+Sixty-four selections without child processes and 161 selections with child
+processes include all matrix, recovery and custody cases. Each selection reserves
+at most 24 slow-storage work units: one second for each child launch or outer
+CLI/transaction operation, and at least one second per case. Actual outer calls,
+including nested fault grids and setup helpers, are checked against fixed case
+allowances. Child deadlines independently reserve at most 24 seconds per
+selection. Six seconds remain inside the unchanged 30-second timeout for imports
+and cleanup. Publication-boundary and native-creation sweeps are separate cases;
+partition placement balances the complete reservation rather than case counts.
+Four further selections retain the public-tree sweeps. Every CTest registration
 keeps its `hygiene;tools` labels and 30-second timeout. Direct Python invocation
 and unittest discovery still run the complete suite. Registration and workflow
 policy checks pin exact coverage; hosted sharding consumes the registered names
@@ -105,6 +118,6 @@ requires hosted execution.
 
 The inventory refresh now includes receipt-backed restart recovery, bounded
 reset and reuse, and explicit retirement for issue #540. Unknown occupants and
-uncommitted enrollment remain protected. Recovery cases share the expanded
+uncommitted artifact enrollment remain protected. Recovery cases share the expanded
 contract partitions, with unchanged deadlines and labels. Source checks cover
 the implementation; repaired-head hosted Windows execution remains pending.

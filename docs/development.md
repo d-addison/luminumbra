@@ -558,10 +558,12 @@ python3 -I -B tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-ma
 python3 -I -B tools/ci/validate_public_tree.py --root .
 ```
 
-After moving contract text or merging documentation changes, run:
+After moving contract text or merging documentation changes, set `callerMetadata`
+to an existing directory outside the checkout and Git metadata, then run with a
+new receipt filename:
 
 ```sh
-python3 -I -B tools/ci/check_acceptance_matrix.py --refresh-inventory
+python3 -I -B tools/ci/check_acceptance_matrix.py --refresh-inventory --preparation-receipt-file "$callerMetadata/enrollment.json"
 ```
 
 Refresh reserves unchanged occurrences, then updates a locator only when one
@@ -602,7 +604,8 @@ publication, refusing changes made while it was running. All output bytes and
 rollback copies are staged before replacing any file. A failed replacement,
 including a locked file on Windows, restores the previous outputs. Close the
 locking program and retry after resolving concurrent source edits. After manual
-accounting or evidence edits, use `--write-doc docs/acceptance-matrix.md` and rerun
+accounting or evidence edits, use `--write-doc docs/acceptance-matrix.md` with a new
+`--preparation-receipt-file` outside the checkout and Git metadata, and rerun
 `--check-doc`.
 The inventory-completeness error for `iss.126` clears exactly when the inventory
 and mappings are complete; refresh does not change that row's status to hide it.

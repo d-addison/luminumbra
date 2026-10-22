@@ -1205,6 +1205,202 @@
         {
           "kind": "ctest",
           "ref": "AcceptanceMatrixContract176"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract177"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract178"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract179"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract180"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract181"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract182"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract183"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract184"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract185"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract186"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract187"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract188"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract189"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract190"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract191"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract192"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract193"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract194"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract195"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract196"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract197"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract198"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract199"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract200"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract201"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract202"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract203"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract204"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract205"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract206"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract207"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract208"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract209"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract210"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract211"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract212"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract213"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract214"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract215"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract216"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract217"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract218"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract219"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract220"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract221"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract222"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract223"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract224"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract225"
         }
       ],
       "requirements": [
@@ -2284,6 +2480,202 @@
         {
           "kind": "ctest",
           "ref": "AcceptanceMatrixContract176"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract177"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract178"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract179"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract180"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract181"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract182"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract183"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract184"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract185"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract186"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract187"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract188"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract189"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract190"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract191"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract192"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract193"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract194"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract195"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract196"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract197"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract198"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract199"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract200"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract201"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract202"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract203"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract204"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract205"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract206"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract207"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract208"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract209"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract210"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract211"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract212"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract213"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract214"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract215"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract216"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract217"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract218"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract219"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract220"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract221"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract222"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract223"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract224"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract225"
         }
       ],
       "requirements": [
@@ -5229,7 +5621,7 @@
     {
       "id": "ci.acceptance-preparation-custody",
       "source": "docs/ci/acceptance-refresh.md#preparation-custody",
-      "statement": "Journaled CLI writes emit an independent custody receipt before payload staging. Persistent authenticated preparation records support restart reacquisition, bounded reset and reuse, journal custody transfer and retirement. UNKNOWN, foreign, stale, unreadable and uncommitted enrollment states refuse untouched. Five outputs, fifteen payload artifacts, 16 MiB files, 64 KiB metadata, v1/v2 journals and complete-transaction sole-link checks are retained. Extra links refuse recovery, rollback and cleanup before mutation; identity, content and link count are rechecked before removal, replacement or permission changes. Twenty-four launch-free contract selections and 152 selections with child processes include recovery and custody cases alongside four public-tree partitions, with unchanged labels and 30-second deadlines. Hosted Windows qualification remains pending.",
+      "statement": "Journaled CLI writes persist an independent caller receipt outside the checkout and Git metadata before publishing a preparation marker. Interrupted receipt delivery is recoverable from that file. Metadata directory aliases resolve before transaction paths are derived. Persistent authenticated preparation records support restart reacquisition, bounded reset and reuse, journal custody transfer and retirement. UNKNOWN, foreign, stale, unreadable and uncommitted enrollment states refuse untouched. Five outputs, fifteen payload artifacts, 16 MiB files, 64 KiB metadata, v1/v2 journals and complete-transaction sole-link checks are retained. Extra links refuse recovery, rollback and cleanup before mutation; identity, content and link count are rechecked before removal, replacement or permission changes. Sixty-four contract selections without child processes and 161 selections with child processes include recovery and custody cases alongside four public-tree partitions, with checked per-case storage reservations, unchanged labels and 30-second deadlines. Hosted Windows qualification remains pending.",
       "status": "covered",
       "evidence": [
         {
@@ -5943,6 +6335,202 @@
         {
           "kind": "ctest",
           "ref": "AcceptanceMatrixContract176"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract177"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract178"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract179"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract180"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract181"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract182"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract183"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract184"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract185"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract186"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract187"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract188"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract189"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract190"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract191"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract192"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract193"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract194"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract195"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract196"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract197"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract198"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract199"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract200"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract201"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract202"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract203"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract204"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract205"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract206"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract207"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract208"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract209"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract210"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract211"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract212"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract213"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract214"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract215"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract216"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract217"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract218"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract219"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract220"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract221"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract222"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract223"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract224"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract225"
         }
       ]
     },
@@ -6131,7 +6719,7 @@
         {
           "kind": "native",
           "ref": "tools/ci/check_acceptance_matrix.py",
-          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json>",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json> --preparation-receipt-file <caller-metadata.json>",
           "receipt_schema": "luminumbra.acceptance_execution.v1"
         },
         {
@@ -6173,7 +6761,7 @@
         {
           "kind": "native",
           "ref": "tools/ci/check_acceptance_matrix.py",
-          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json>",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json> --preparation-receipt-file <caller-metadata.json>",
           "receipt_schema": "luminumbra.acceptance_execution.v1"
         },
         {

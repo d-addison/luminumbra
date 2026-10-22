@@ -920,14 +920,19 @@ def refresh_inventory(
 
 def _refresh_lock_path(root: Path, *, required: bool = True) -> Path | None:
     """Keep the persistent lock outside the public tree, including worktrees."""
+    root = root.resolve()
     metadata = root / ".git"
-    if metadata.is_file():
+    located = metadata.is_file()
+    if located:
         locator = metadata.read_text(encoding="utf-8").strip()
         if not locator.startswith("gitdir: ") or not locator[8:].strip():
             raise MatrixError("cannot locate refresh lock: invalid Git directory locator")
-        metadata = (root / locator[8:]).resolve()
-        if metadata.is_relative_to(root):
-            raise MatrixError("refresh lock requires Git metadata outside the public tree")
+        metadata = root / locator[8:]
+    # Canonicalize directory-form metadata too (symlinks, junctions and
+    # relative roots), before deriving any cooperating transaction pathname.
+    metadata = metadata.resolve()
+    if located and metadata.is_relative_to(root):
+        raise MatrixError("refresh lock requires Git metadata outside the public tree")
     if not metadata.is_dir():
         if not required:
             return None
@@ -1383,6 +1388,7 @@ class _PreparationCustody(_OutputPreparation):
     All named mutations still require the cooperating-writer threat model.
     """
     def __init__(self, journal: Path, receipt: str) -> None:
+        journal = journal.resolve()
         super().__init__(journal.with_suffix(".preparation"))
         if len(receipt) > _JOURNAL_BYTES:
             raise MatrixError("invalid preparation custody receipt")
@@ -1391,7 +1397,7 @@ class _PreparationCustody(_OutputPreparation):
             if (not isinstance(value, dict) or set(value) != {
                     "version", "journal", "device", "inode", "nonce", "key"}
                     or type(value["version"]) is not int or value["version"] != 1
-                    or value["journal"] != str(journal.resolve())
+                    or value["journal"] != str(journal)
                     or any(type(value[k]) is not int for k in ("device", "inode"))
                     or value["device"] < 0 or value["inode"] <= 0
                     or any(not isinstance(value[k], str) or not re.fullmatch(r"[0-9a-f]{64}", value[k])
@@ -1399,7 +1405,7 @@ class _PreparationCustody(_OutputPreparation):
                 raise ValueError("invalid receipt fields")
         except (ValueError, TypeError, RecursionError) as exc:
             raise MatrixError("invalid preparation custody receipt") from exc
-        self.journal = journal.resolve()
+        self.journal = journal
         self.key = bytes.fromhex(value.pop("key"))
         self.enrollment = {"enrollment": value}
         self.events: list[dict[str, Any]] = []
@@ -1436,7 +1442,8 @@ class _PreparationCustody(_OutputPreparation):
             raise MatrixError(f"uncertain recovery preparation; bytes retained: {exc}") from exc
 
     @classmethod
-    def create(cls, journal: Path, journal_record: dict[str, Any] | None = None) -> str:
+    def create(cls, journal: Path, journal_record: dict[str, Any] | None = None,
+               *, receipt_file: Path | None = None) -> str:
         journal = journal.resolve()
         path = journal.with_suffix(".preparation")
         if journal_record is not None:
@@ -1446,30 +1453,62 @@ class _PreparationCustody(_OutputPreparation):
         if (any(os.path.lexists(p) for p in (path, journal.with_suffix(".pending")))
                 or journal_record is None and os.path.lexists(journal)):
             raise MatrixError("uncertain recovery preparation; enrollment requires empty recovery state")
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        # CLI enrollment stages beside the journal for atomic publication.
+        # A crash before receipt persistence cannot publish a recovery marker.
+        # Legacy direct helpers retain their explicit UNKNOWN failure contract.
+        staged = (path.parent / (".acceptance-enrollment-" + secrets.token_hex(16))
+                  if receipt_file is not None else path)
+        identity = None
+        data = b""
         try:
-            handle = os.fdopen(descriptor, "w+b")
+            descriptor = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                handle = os.fdopen(descriptor, "w+b")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with handle:
+                identity = _transaction_metadata(handle)
+                if not identity.st_ino or identity.st_nlink != 1 or not _same_transaction_identity(staged, identity):
+                    raise MatrixError("preparation enrollment identity unavailable; bytes retained")
+                receipt = {"version": 1, "journal": str(journal), "device": identity.st_dev,
+                           "inode": identity.st_ino, "nonce": secrets.token_hex(32), "key": secrets.token_hex(32)}
+                event = {"enrollment": {k: v for k, v in receipt.items() if k != "key"}}
+                mac = hmac.digest(bytes.fromhex(receipt["key"]), _custody_json(event), "sha256")
+                data = _custody_json({"event": event, "mac": mac.hex()}) + b"\n"
+                if len(data) > _JOURNAL_BYTES or len(_custody_json(receipt)) + (receipt_file is not None) > _JOURNAL_BYTES:
+                    raise MatrixError("recovery preparation exceeds its bound")
+                if handle.write(data) != len(data):
+                    raise OSError("incomplete preparation enrollment write")
+                handle.flush()
+                os.fsync(handle.fileno())
+            if receipt_file is not None:
+                # Exclusive creation never replaces caller authority. Persist and
+                # close it BEFORE making the marker visible, including on Windows.
+                encoded = _custody_json(receipt) + b"\n"
+                receipt_descriptor = os.open(receipt_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    authority = os.fdopen(receipt_descriptor, "wb")
+                except BaseException:
+                    os.close(receipt_descriptor)
+                    raise
+                with authority:
+                    if authority.write(encoded) != len(encoded):
+                        raise OSError("incomplete preparation receipt write")
+                    authority.flush()
+                    os.fsync(authority.fileno())
+                # The same-filesystem rename publishes only a closed, synced marker.
+                _verify_transaction_file(_written_transaction_prefix(
+                    staged, data, identity, _JOURNAL_BYTES), _JOURNAL_BYTES)
+                if os.path.lexists(path):
+                    raise MatrixError("preparation marker appeared before enrollment publication")
+                os.rename(staged, path)
+            return _custody_json(receipt).decode("utf-8")
         except BaseException:
-            os.close(descriptor)
+            if receipt_file is not None and identity is not None and os.path.lexists(staged):
+                _remove_transaction_file(_written_transaction_prefix(
+                    staged, data, identity, _JOURNAL_BYTES), _JOURNAL_BYTES)
             raise
-        with handle:
-            identity = _transaction_metadata(handle)
-            if not identity.st_ino or identity.st_nlink != 1 or not _same_transaction_identity(path, identity):
-                raise MatrixError("preparation enrollment identity unavailable; bytes retained")
-            receipt = {"version": 1, "journal": str(journal), "device": identity.st_dev,
-                       "inode": identity.st_ino, "nonce": secrets.token_hex(32), "key": secrets.token_hex(32)}
-            event = {"enrollment": {k: v for k, v in receipt.items() if k != "key"}}
-            mac = hmac.digest(bytes.fromhex(receipt["key"]), _custody_json(event), "sha256")
-            data = _custody_json({"event": event, "mac": mac.hex()}) + b"\n"
-            if len(data) > _JOURNAL_BYTES or len(_custody_json(receipt)) > _JOURNAL_BYTES:
-                raise MatrixError("recovery preparation exceeds its bound")
-            if handle.write(data) != len(data):
-                raise OSError("incomplete preparation enrollment write")
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Only returning this independent receipt commits enrollment to the
-        # caller. Failed/lost receipt delivery cannot authorize later adoption.
-        return _custody_json(receipt).decode("utf-8")
 
     def append(self, event: dict[str, Any]) -> None:
         if len(self.events) >= _PREPARATION_EVENTS or self.data != self.complete:
@@ -1634,6 +1673,7 @@ def _write_transaction(
     restorations: list[dict[str, Any] | None] | None = None,
     preparation: _OutputPreparation | None = None,
 ) -> None:
+    journal = journal.parent.resolve() / journal.name
     if not 1 <= len(entries) <= _TRANSACTION_OUTPUTS:
         raise MatrixError("recovery transaction exceeds its bound")
     transaction: dict[str, Any] = {"version": 1, "committed": committed, "outputs": entries}
@@ -1797,7 +1837,9 @@ def _stage_recovery_copy(
         raise
 
 
-def _recover_outputs(journal: Path | None, custody: str | None = None, *, enroll_recovery: bool = False) -> None:
+def _recover_outputs(journal: Path | None, custody: str | None = None, *, enroll_recovery: bool = False,
+                     receipt_file: Path | None = None) -> None:
+    journal = journal.parent.resolve() / journal.name if journal is not None else None
     owner = _PreparationCustody(journal, custody) if journal is not None and custody is not None else None
     if owner is not None:
         # Validate before any journal recovery mutation. Pending bytes and torn
@@ -1806,13 +1848,13 @@ def _recover_outputs(journal: Path | None, custody: str | None = None, *, enroll
     elif _preparation_pending(journal):
         raise MatrixError(f"uncertain recovery preparation; outputs and recovery copies retained; inspect "
                           f"{journal.with_suffix('.preparation')} and {journal.with_suffix('.pending')}")
-    _recover_journal(journal, owner, enroll_recovery=enroll_recovery)
+    _recover_journal(journal, owner, enroll_recovery=enroll_recovery, receipt_file=receipt_file)
     if owner is not None:
         owner.reset()
 
 
 def _recover_journal(journal: Path | None, owner: _PreparationCustody | None = None,
-                     *, enroll_recovery: bool = False) -> None:
+                     *, enroll_recovery: bool = False, receipt_file: Path | None = None) -> None:
     if journal is None or not journal.exists():
         return
     if _same_path(journal, journal.with_suffix(".lock")):
@@ -1901,7 +1943,7 @@ def _recover_journal(journal: Path | None, owner: _PreparationCustody | None = N
         # Legacy v1/v2 journals can need new restoration payloads too. Enroll
         # only after their complete validation, and deliver restart authority
         # before staging, exactly as for a new CLI publication.
-        receipt = _PreparationCustody.create(journal, journal_record)
+        receipt = _create_cli_custody(journal, receipt_file, journal_record)
         print("preparation custody receipt: " + receipt, file=sys.stderr, flush=True)
         owner = _PreparationCustody(journal, receipt)
     if owner is not None:
@@ -1978,6 +2020,7 @@ def _replace_outputs(
     custody: str | None = None,
 ) -> None:
     """Stage closed files and rollback copies before publishing on either OS."""
+    journal = journal.parent.resolve() / journal.name if journal is not None else None
     staged: list[tuple[Path, Path]] = []
     backups: dict[Path, Path | None] = {}
     temporary_paths: list[Path] = []
@@ -2866,7 +2909,10 @@ def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path,
                  *cmake_files, *gtest_files, *inputs, *args.junit,
                  *([args.discovery] if args.discovery is not None else [])]
     lock = _refresh_lock_path(root)
-    protected.extend([lock, lock.with_suffix(".transaction"), lock.with_suffix(".pending")])
+    protected.extend([lock, lock.with_suffix(".transaction"), lock.with_suffix(".pending"),
+                      lock.with_suffix(".preparation")])
+    if getattr(args, "preparation_receipt_file", None) is not None:
+        protected.append(args.preparation_receipt_file)
     for path in targets:
         # Refresh may replace its own matrix/inventory, but neither may alias
         # another output or any contract/evidence input. Document aliases get
@@ -2896,9 +2942,18 @@ def _argument_parser() -> argparse.ArgumentParser:
                         help="enroll an empty preparation marker and print its independent custody receipt")
     parser.add_argument("--preparation-custody",
                         help="JSON receipt returned by --enroll-preparation; retain outside recovery files")
+    parser.add_argument("--preparation-receipt-file", type=Path,
+                        help="new caller-owned file outside the checkout and Git metadata; required for new enrollment")
     parser.add_argument("--retire-preparation", action="store_true",
                         help="recover and retire the marker bound by --preparation-custody")
     return parser
+
+
+def _create_cli_custody(journal: Path, receipt_file: Path | None,
+                        journal_record: dict[str, Any] | None = None) -> str:
+    if receipt_file is None:
+        raise MatrixError("new enrollment requires --preparation-receipt-file outside the checkout and Git metadata")
+    return _PreparationCustody.create(journal, journal_record, receipt_file=receipt_file)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2919,6 +2974,13 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --junit and --discovery are required together for execution evidence", file=sys.stderr)
         return 2
     try:
+        if args.preparation_receipt_file is not None:
+            args.preparation_receipt_file = args.preparation_receipt_file.resolve()
+            lock = _refresh_lock_path(root, required=False)
+            metadata = lock.parent if lock is not None else None
+            if (args.preparation_receipt_file.is_relative_to(root)
+                    or metadata is not None and args.preparation_receipt_file.is_relative_to(metadata)):
+                raise MatrixError("preparation receipt file must be outside the checkout and Git metadata")
         # At most one speculative read on a read-only checkout. A writer always
         # creates the persistent lock before publishing any journal or output;
         # its appearance invalidates even an unsuccessful speculative result.
@@ -2930,9 +2992,10 @@ def main(argv: list[str] | None = None) -> int:
                 journal = lock.with_suffix(".transaction") if lock is not None else None
                 if writing:
                     if args.enroll_preparation:
-                        print(_PreparationCustody.create(journal))
+                        print(_create_cli_custody(journal, args.preparation_receipt_file), flush=True)
                         return 0
-                    _recover_outputs(journal, args.preparation_custody, enroll_recovery=True)
+                    _recover_outputs(journal, args.preparation_custody, enroll_recovery=True,
+                                     receipt_file=args.preparation_receipt_file)
                     if args.retire_preparation:
                         _PreparationCustody(journal, args.preparation_custody).retire()
                         return 0
@@ -2960,7 +3023,7 @@ def main(argv: list[str] | None = None) -> int:
         # Recovery needs exclusive ownership. Recheck under that lock before
         # reading inputs; another writer may have completed recovery meanwhile.
         with _refresh_lock(root):
-            _recover_outputs(journal, enroll_recovery=True)
+            _recover_outputs(journal, enroll_recovery=True, receipt_file=args.preparation_receipt_file)
             return _run_locked(args, root)
     except (MatrixError, OSError, UnicodeError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -3084,7 +3147,7 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
     output_journal = _refresh_lock_path(root).with_suffix(".transaction") if outputs else None
     try:
         if outputs and args.preparation_custody is None:
-            automatic_custody = _PreparationCustody.create(output_journal)
+            automatic_custody = _create_cli_custody(output_journal, args.preparation_receipt_file)
             # Deliver independent authority before any payload creation. A
             # caller retains this diagnostic with its run logs for restart.
             print("preparation custody receipt: " + automatic_custody, file=sys.stderr, flush=True)
