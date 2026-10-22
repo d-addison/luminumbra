@@ -1054,7 +1054,7 @@ class _RefreshSnapshot:
         try:
             # The same closed-file reader bounds allocation, rejects devices
             # without blocking, and checks bytes/identity through its handle.
-            return hashlib.sha256(_read_transaction_file(path, _TRANSACTION_BYTES)[0]).digest()
+            return hashlib.sha256(_read_transaction_file(path, _TRANSACTION_BYTES, sole_link=False)[0]).digest()
         except FileNotFoundError:
             return None
 
@@ -1158,16 +1158,20 @@ def _same_transaction_identity(path: Path, expected: os.stat_result) -> bool:
         return os.path.samestat(actual, expected) and os.path.samestat(before, path.lstat())
 
 
-def _read_transaction_file(path: Path, limit: int) -> tuple[bytes, os.stat_result]:
+def _read_transaction_file(path: Path, limit: int, *, sole_link: bool = True) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     with os.fdopen(os.open(path, flags), "rb") as handle:
         before = _transaction_metadata(handle)
         if not stat.S_ISREG(before.st_mode) or not before.st_ino or before.st_size > limit:
             raise MatrixError(f"invalid recovery file or size: {path}")
+        if sole_link and before.st_nlink != 1:
+            raise MatrixError(f"recovery file requires a sole link; transaction retained: {path}")
         # Allocate from the verified size, with one byte to detect growth;
         # even an empty file never requests the full 16 MiB file bound.
         data = handle.read(before.st_size + 1)
         after = _transaction_metadata(handle)
+        if sole_link and (after.st_nlink != 1 or path.lstat().st_nlink != 1):
+            raise MatrixError(f"recovery file requires a sole link; transaction retained: {path}")
         same_identity = _same_transaction_identity(path, before)
     if (len(data) > limit or len(data) != before.st_size
             or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
@@ -1496,6 +1500,9 @@ class _PreparationCustody(_OutputPreparation):
             suffix = data[common:]
             if handle.write(suffix) != len(suffix):
                 raise OSError("incomplete preparation custody write")
+            if (_transaction_metadata(handle).st_nlink != 1
+                    or not _same_transaction_identity(self.path, actual)):
+                raise MatrixError("preparation custody requires a sole link; bytes retained")
             handle.truncate(len(data))
             handle.flush()
             os.fsync(handle.fileno())
@@ -1590,6 +1597,7 @@ class _PreparationCustody(_OutputPreparation):
         return records
 
     def reset(self, preserve: frozenset[Path] = frozenset()) -> None:
+        _verify_transaction_file(self.record(), _JOURNAL_BYTES)
         records = self.retained()
         for record in records:
             if Path(record["path"]) in preserve:
@@ -1638,6 +1646,7 @@ def _write_transaction(
     data = json.dumps(transaction, sort_keys=True).encode("utf-8")
     if len(data) > _JOURNAL_BYTES:
         raise MatrixError("recovery transaction exceeds its bound")
+    previous = _transaction_record(journal, _JOURNAL_BYTES) if os.path.lexists(journal) else None
     candidate = journal.with_suffix(".pending")
     if isinstance(preparation, _PreparationCustody):
         preparation.intend(candidate, journal, data)
@@ -1665,6 +1674,8 @@ def _write_transaction(
                 raise MatrixError("invalid recovery journal candidate")
             if preparation is not None:
                 preparation.enroll(candidate, metadata)
+            _verify_transaction_file(_written_transaction_prefix(candidate, b"", metadata, _JOURNAL_BYTES),
+                                     _JOURNAL_BYTES)
             handle.truncate(0)
             if handle.write(data) != len(data):
                 raise OSError("incomplete recovery journal write")
@@ -1682,6 +1693,11 @@ def _write_transaction(
         _verify_transaction_file(record, _JOURNAL_BYTES)
         if preparation is not None:
             preparation.handoff(record)
+        _verify_transaction_file(record, _JOURNAL_BYTES)
+        if previous is not None:
+            _verify_transaction_file(previous, _JOURNAL_BYTES)
+        elif os.path.lexists(journal):
+            raise MatrixError("recovery journal appeared; transaction retained")
         os.replace(candidate, journal)
     finally:
         if preparation is not None and preparation.pending is not None:
@@ -1751,7 +1767,9 @@ def _stage_recovery_copy(
     try:
         with open(candidate, "xb", opener=creation) as handle:
             metadata = _transaction_metadata(handle)
+            _written_transaction_prefix(candidate, b"", metadata)
             preparation.enroll(candidate, metadata)
+            _written_transaction_prefix(candidate, b"", metadata)
             record = {"path": str(candidate), "device": metadata.st_dev, "inode": metadata.st_ino,
                       "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             if handle.write(data) != len(data):
@@ -1769,6 +1787,7 @@ def _stage_recovery_copy(
             preparation.cancel(candidate)
         if metadata is not None:
             try:
+                _verify_transaction_file(backup)
                 _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata))
             except BaseException:
                 preparation.uncertain = True
@@ -1855,6 +1874,9 @@ def _recover_journal(journal: Path | None, owner: _PreparationCustody | None = N
     restore: list[int] = []
     # Validate the entire bounded transaction before restoring any destination.
     _verify_transaction_file(journal_record, _JOURNAL_BYTES)
+    if owner is not None:
+        _verify_transaction_file(owner.record(), _JOURNAL_BYTES)
+        owner.retained()
     for index, entry in enumerate(entries):
         for record in (entry["new"], entry["backup"], restorations[index]):
             if record is not None and Path(record["path"]).exists():
@@ -1933,6 +1955,13 @@ def _recover_journal(journal: Path | None, owner: _PreparationCustody | None = N
             if current != entry["old"]:
                 raise MatrixError("recovery output changed; recovery copies retained")
     _verify_transaction_file(journal_record, _JOURNAL_BYTES)
+    if owner is not None:
+        _verify_transaction_file(owner.record(), _JOURNAL_BYTES)
+        owner.retained()
+    for index, entry in enumerate(entries):
+        for record in (entry["new"], entry["backup"], restorations[index]):
+            if record is not None and os.path.lexists(record["path"]):
+                _verify_transaction_file(record)
     for index, entry in enumerate(entries):
         for record in (entry["new"], entry["backup"], restorations[index]):
             if record is not None and Path(record["path"]).exists():
@@ -1987,7 +2016,9 @@ def _replace_outputs(
                 temporary_paths.append(temporary)
                 metadata = _transaction_metadata(handle)
                 temporary_identities[temporary] = metadata
+                _written_transaction_prefix(temporary, b"", metadata)
                 preparation.enroll(temporary, metadata)
+                _written_transaction_prefix(temporary, b"", metadata)
                 temporary_records[temporary] = {
                     "path": str(temporary), "device": metadata.st_dev, "inode": metadata.st_ino,
                     "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
@@ -2005,13 +2036,15 @@ def _replace_outputs(
                 preparation.uncertain = True
             raise
         if mode is not None:
-            temporary.chmod(mode)
+            _verify_transaction_file(temporary_records[temporary]).chmod(mode)
         preparation.bind(temporary_records[temporary])
         return temporary
 
     def verify_temporary(path: Path) -> None:
         expected = temporary_identities.get(path)
         actual = path.lstat()
+        if actual.st_nlink != 1:
+            raise MatrixError(f"temporary output requires a sole link; transaction retained: {path}")
         if (expected is None or not expected.st_ino or not stat.S_ISREG(actual.st_mode)
                 or not _same_transaction_identity(path, expected)):
             raise MatrixError(f"temporary output identity changed: {path}")
@@ -2054,6 +2087,24 @@ def _replace_outputs(
             return True
         return path in restorations and current == restorations[path]
 
+    def verify_retained_links() -> None:
+        # At most fifteen payloads plus the fixed metadata names. Validate the
+        # whole retained set before rollback or cleanup can mutate any member.
+        for temporary in temporary_paths:
+            if os.path.lexists(temporary):
+                verify_temporary(temporary)
+        for _, destination in staged:
+            if os.path.lexists(destination):
+                metadata = destination.lstat()
+                if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+                    raise MatrixError(f"output requires a sole link; transaction retained: {destination}")
+        if preparation.identity is not None:
+            _written_transaction_prefix(preparation.path, preparation.data, preparation.identity, _JOURNAL_BYTES)
+        if journal is not None:
+            for metadata_path in (journal, journal.with_suffix(".pending")):
+                if os.path.lexists(metadata_path) and metadata_path.lstat().st_nlink != 1:
+                    raise MatrixError(f"recovery metadata requires a sole link; transaction retained: {metadata_path}")
+
     try:
         if len(outputs) > _TRANSACTION_OUTPUTS:
             raise MatrixError("too many transaction outputs")
@@ -2086,6 +2137,10 @@ def _replace_outputs(
                 mode = stat.S_IMODE(original_metadata.st_mode)
             except FileNotFoundError:
                 original, mode = None, None
+            except MatrixError:
+                if verify is not None:
+                    verify(published)
+                raise
             originals[path] = (dict(path=str(path), device=original_metadata.st_dev,
                                     inode=original_metadata.st_ino, size=len(original),
                                     sha256=hashlib.sha256(original).hexdigest())
@@ -2099,6 +2154,7 @@ def _replace_outputs(
             digests[path] = hashlib.sha256(data).digest()
         if verify is not None:
             verify(published)
+        verify_retained_links()
         for temporary, path in staged:
             candidates[path] = bound_temporary(temporary, digests[path])
         transaction = [{"path": str(path),
@@ -2117,6 +2173,7 @@ def _replace_outputs(
             identities[path] = (target, identity)
             if verify is not None:
                 verify(published)
+            verify_retained_links()
             try:
                 current = _transaction_record(path)
             except FileNotFoundError:
@@ -2132,12 +2189,14 @@ def _replace_outputs(
                 verify(published)
         if verify is not None:
             verify(published)
+        verify_retained_links()
         if journal is not None and transaction:
             _write_transaction(journal, transaction, committed=True, publications=journal_publications,
                                preparation=preparation if isinstance(preparation, _PreparationCustody) else None)
     except BaseException as failure:
         keep_backups = True
         conflicts = []
+        verify_retained_links()
         # A commit rename can also finish before reporting interruption. Put a
         # verified journal back in rollback state before changing destinations;
         # if that fails, leave the complete publication and its copies intact.
@@ -2201,6 +2260,7 @@ def _replace_outputs(
         keep_backups = False
         raise
     finally:
+        verify_retained_links()
         journal_record = None
         if journal_publications and not keep_backups and journal is not None and journal.exists():
             journal_record = _transaction_record(journal, _JOURNAL_BYTES)

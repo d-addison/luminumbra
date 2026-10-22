@@ -7,7 +7,7 @@ import sys
 
 _CHILD_TIMEOUT = 12
 _CONTRACT_PARTITIONS = 176
-_EXPECTED_CASES = 420
+_EXPECTED_CASES = 429
 _PHASE_LIMIT = 768
 _phase_records = 0
 
@@ -2688,10 +2688,10 @@ script.write_text('changed input', encoding='utf-8')
                     elif failure == "changed":
                         doc.write_bytes(b"External document edit.\n")
                     return result
-                def read_after_validation(path: Path, limit: int) -> Any:
+                def read_after_validation(path: Path, limit: int, **kwargs: Any) -> Any:
                     if checked and path == doc and failure == "unreadable":
                         raise PermissionError("document unreadable")
-                    return read(path, limit)
+                    return read(path, limit, **kwargs)
                 with mock.patch.object(MODULE, "validate", validate_then_change), \
                         mock.patch.object(MODULE, "_read_transaction_file", read_after_validation), \
                         mock.patch.object(Path, "replace") as publish:
@@ -2870,10 +2870,10 @@ script.write_text('changed input', encoding='utf-8')
                     elif failure == "partial":
                         source.write_bytes(b"# Part")
                     return result
-                def unreadable(file: Path, limit: int) -> Any:
+                def unreadable(file: Path, limit: int, **kwargs: Any) -> Any:
                     if replaced and file == source and failure == "unreadable":
                         raise PermissionError("commit input unreadable")
-                    return read(file, limit)
+                    return read(file, limit, **kwargs)
                 try:
                     with mock.patch.object(Path, "replace", replace_then_change), \
                             mock.patch.object(MODULE, "_read_transaction_file", unreadable):
@@ -3026,8 +3026,8 @@ script.write_text('changed input', encoding='utf-8')
                         if failure == "changed-before-replace":
                             matrix.write_bytes(b"editor save while preparing restore\n")
                     return read(file)
-                def faulted_bounded_read(file: Path, limit: int) -> Any:
-                    data, file_metadata = bounded_read(file, limit)
+                def faulted_bounded_read(file: Path, limit: int, **kwargs: Any) -> Any:
+                    data, file_metadata = bounded_read(file, limit, **kwargs)
                     if active and (file == matrix or file in copies):
                         data = faulted_read(file)
                     return data, file_metadata
@@ -3715,10 +3715,10 @@ script.write_text('changed input', encoding='utf-8')
         read = MODULE._read_transaction_file
         for blocked in paths:
             with self.subTest(path=blocked):
-                def denied(file: Path, limit: int) -> Any:
+                def denied(file: Path, limit: int, **kwargs: Any) -> Any:
                     if file == blocked:
                         raise PermissionError("output read denied")
-                    return read(file, limit)
+                    return read(file, limit, **kwargs)
                 with mock.patch.object(MODULE, "_read_transaction_file", denied), \
                         mock.patch.object(Path, "replace") as replace:
                     code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
@@ -6271,6 +6271,9 @@ raise SystemExit(module["main"](sys.argv[3:]))
         self.assertEqual(linked.st_nlink, 2)
         self.assertTrue(os.path.samestat(identity, linked))
         self.assertTrue(MODULE._same_transaction_identity(alias, identity))
+        with self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+            MODULE._read_transaction_file(alias, 4)
+        alias.unlink()
         short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
         short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
         short_path.restype = wintypes.DWORD
@@ -7014,6 +7017,278 @@ def contract_suite(number: int) -> unittest.TestSuite:
 
 
 class AcceptanceSelectionTests(_PhaseCase):
+    @staticmethod
+    def link_image(base: Path) -> dict[Path, tuple[Any, ...]]:
+        return {path: (path.read_bytes(), info.st_dev, info.st_ino, info.st_nlink, info.st_mode)
+                for path in base.iterdir() if path.is_file() for info in (path.stat(),)}
+
+    def test_restart_refuses_linked_transaction_members_before_any_mutation(self) -> None:
+        for committed in (False, True):
+            for persistent in (False, True):
+                for kind in ("backup", "candidate", "restoration", "journal", "preparation", "pending"):
+                    with self.subTest(committed=committed, persistent=persistent, kind=kind), \
+                            AcceptanceMatrixTests.recovery_transaction(self) as (base, paths, backups, journal):
+                        entries = json.loads(journal.read_bytes())["outputs"]
+                        restorations = None
+                        artifact = backups[-1]
+                        if kind == "candidate":
+                            artifact = Path(entries[-1]["new"]["path"])
+                            paths[-1].rename(artifact)
+                            paths[-1].write_bytes(backups[-1].read_bytes())
+                        elif kind == "restoration":
+                            artifact = base / (".acceptance-" + "f" * 32)
+                            artifact.write_bytes(backups[-1].read_bytes())
+                            restorations = [None, MODULE._transaction_record(artifact)]
+                        elif kind == "journal":
+                            artifact = journal
+                        MODULE._write_transaction(journal, entries, committed=committed, restorations=restorations)
+                        receipt = None
+                        if persistent:
+                            receipt = MODULE._PreparationCustody.create(journal, MODULE._transaction_record(journal))
+                        if kind in ("preparation", "pending"):
+                            artifact = journal.with_suffix("." + kind)
+                            if kind == "pending" and persistent:
+                                owner = MODULE._PreparationCustody(journal, receipt)
+                                owner.intend(artifact, journal, b"partial")
+                                artifact.touch()
+                                with artifact.open("r+b") as handle:
+                                    owner.enroll(artifact, MODULE._transaction_metadata(handle))
+                                    handle.write(b"part")
+                            elif not artifact.exists():
+                                artifact.write_bytes(b"unknown partial record")
+                        artifact.chmod(stat.S_IRUSR)
+                        os.link(artifact, base / "alias")
+                        before = self.link_image(base)
+                        with self.assertRaisesRegex(MODULE.MatrixError, "sole link|uncertain recovery preparation"):
+                            MODULE._recover_outputs(journal, receipt)
+                        self.assertEqual(self.link_image(base), before)
+                        # Restore writability solely for Windows temporary-directory teardown.
+                        artifact.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        for persistent in (False, True):
+            for kind in ("preparation", "pending"):
+                with self.subTest(journal=False, persistent=persistent, kind=kind), \
+                        tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory).resolve()
+                    journal = base / "refresh.transaction"
+                    receipt = MODULE._PreparationCustody.create(journal) if persistent else None
+                    artifact = journal.with_suffix("." + kind)
+                    if persistent and kind == "pending":
+                        owner = MODULE._PreparationCustody(journal, receipt)
+                        owner.intend(artifact, journal, b"whole record")
+                        artifact.touch()
+                        with artifact.open("r+b") as handle:
+                            owner.enroll(artifact, MODULE._transaction_metadata(handle))
+                            handle.write(b"partial")
+                    elif not artifact.exists():
+                        artifact.write_bytes(b"unknown partial record")
+                    artifact.chmod(stat.S_IRUSR)
+                    os.link(artifact, base / "alias")
+                    before = self.link_image(base)
+                    with self.assertRaisesRegex(MODULE.MatrixError, "sole link|uncertain recovery preparation"):
+                        MODULE._recover_outputs(journal, receipt)
+                    self.assertEqual(self.link_image(base), before)
+                    artifact.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_removal_rechecks_links_before_readonly_fallback_and_unlink(self) -> None:
+        for phase in ("before-unlink", "before-chmod", "after-chmod"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                artifact, alias = base / "artifact", base / "alias"
+                artifact.write_bytes(b"retained bytes")
+                artifact.chmod(stat.S_IRUSR)
+                initial_mode = artifact.stat().st_mode
+                record = MODULE._transaction_record(artifact)
+                chmod, verify = Path.chmod, MODULE._verify_transaction_file
+                calls, changed_modes = [], []
+                def checked(value: Any, limit: Any = None) -> Path:
+                    if phase == "before-unlink" and not calls:
+                        os.link(artifact, alias)
+                        calls.append("linked")
+                    return verify(value, limit)
+                def removed(path: Path, *args: Any, **kwargs: Any) -> None:
+                    calls.append("unlink")
+                    if phase == "before-chmod":
+                        os.link(artifact, alias)
+                    raise PermissionError("read-only file")
+                def changed(path: Path, mode: int, *args: Any, **kwargs: Any) -> None:
+                    calls.append("chmod")
+                    chmod(path, mode, *args, **kwargs)
+                    changed_modes.append(path.stat().st_mode)
+                    os.link(artifact, alias)
+                with mock.patch.object(MODULE, "_verify_transaction_file", checked), \
+                        mock.patch.object(Path, "unlink", removed), mock.patch.object(Path, "chmod", changed), \
+                        self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+                    MODULE._remove_transaction_file(record)
+                self.assertEqual(artifact.read_bytes(), b"retained bytes")
+                self.assertEqual(alias.read_bytes(), b"retained bytes")
+                self.assertEqual(calls, ["linked"] if phase == "before-unlink" else
+                                 ["unlink"] if phase == "before-chmod" else ["unlink", "chmod"])
+                expected_mode = changed_modes[0] if phase == "after-chmod" else initial_mode
+                self.assertEqual(artifact.stat().st_mode, expected_mode)
+                self.assertEqual(alias.stat().st_mode, expected_mode)
+                chmod(artifact, stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_live_rollback_and_cleanup_refuse_entire_linked_set(self) -> None:
+        for journaled in (False, True):
+            for fail in (False, True):
+                for kind in ("backup", "candidate", "preparation", "output"):
+                    with self.subTest(journaled=journaled, fail=fail, kind=kind), \
+                            tempfile.TemporaryDirectory() as directory:
+                        base = Path(directory).resolve()
+                        output = base / "output"
+                        output.write_bytes(b"old")
+                        journal = base / "refresh.transaction" if journaled else None
+                        snapshot = []
+                        def changed(published: Any) -> None:
+                            if snapshot or kind == "output" and not published:
+                                return
+                            if kind == "output":
+                                artifact = output
+                            elif kind == "preparation":
+                                artifact = journal.with_suffix(".preparation") if journal else base / ".refresh-preparation"
+                            else:
+                                artifact = next(p for p in base.glob(".acceptance-*")
+                                                if p.read_bytes() == (b"old" if kind == "backup" else b"new"))
+                            os.link(artifact, base / "alias")
+                            snapshot.append(self.link_image(base))
+                            if fail:
+                                raise RuntimeError("publication refused")
+                        with self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+                            MODULE._replace_outputs([(output, "new")], journal=journal, verify=changed)
+                        self.assertEqual(len(snapshot), 1)
+                        self.assertEqual(self.link_image(base), snapshot[0])
+
+    def test_custody_reset_revalidates_marker_before_removing_enrolled_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            journal = base / "refresh.transaction"
+            receipt = MODULE._PreparationCustody.create(journal)
+            owner = MODULE._PreparationCustody(journal, receipt)
+            artifact = base / (".acceptance-" + "a" * 32)
+            owner.intend(artifact, base / "output", b"payload")
+            artifact.touch()
+            with artifact.open("r+b") as handle:
+                owner.enroll(artifact, MODULE._transaction_metadata(handle))
+                handle.write(b"part")
+            os.link(owner.path, base / "alias")
+            before = self.link_image(base)
+            with self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+                owner.reset()
+            self.assertEqual(self.link_image(base), before)
+
+    def test_staged_chmod_refuses_link_added_after_payload_close(self) -> None:
+        for journaled in (False, True):
+            with self.subTest(journaled=journaled), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                output = base / "output"
+                output.write_bytes(b"old")
+                output.chmod(stat.S_IRUSR)
+                journal = base / "refresh.transaction" if journaled else None
+                sync = os.fsync
+                snapshot = []
+                def linked(descriptor: int) -> None:
+                    sync(descriptor)
+                    artifacts = list(base.glob(".acceptance-*"))
+                    if artifacts and not snapshot:
+                        os.link(artifacts[0], base / "alias")
+                        snapshot.append(self.link_image(base))
+                with mock.patch.object(os, "fsync", linked), self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+                    MODULE._replace_outputs([(output, "new")], journal=journal)
+                self.assertEqual(self.link_image(base), snapshot[0])
+                output.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_recovery_read_refuses_unknown_link_counts_and_late_aliases(self) -> None:
+        for links in (0, 2):
+            for late in (False, True):
+                with self.subTest(links=links, late=late), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "artifact"
+                    path.write_bytes(b"payload")
+                    metadata = MODULE._transaction_metadata
+                    reads = []
+                    def changed(handle: Any) -> Any:
+                        actual = metadata(handle)
+                        reads.append(actual)
+                        if not late or len(reads) == 2:
+                            fields = list(actual)
+                            fields[3] = links
+                            return os.stat_result(fields, {"st_mtime_ns": actual.st_mtime_ns,
+                                                           "st_ctime_ns": actual.st_ctime_ns})
+                        return actual
+                    with mock.patch.object(MODULE, "_transaction_metadata", changed), \
+                            self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+                        MODULE._read_transaction_file(path, 7)
+                    self.assertEqual(path.read_bytes(), b"payload")
+
+    def test_recovery_cleanup_preflights_links_added_during_restore(self) -> None:
+        with AcceptanceMatrixTests.recovery_transaction(self) as (base, paths, backups, journal):
+            replace = os.replace
+            snapshot = []
+            def changed(source: Any, target: Any) -> None:
+                replace(source, target)
+                if Path(target) == paths[0]:
+                    os.link(backups[-1], base / "alias")
+                    snapshot.append(self.link_image(base))
+            with mock.patch.object(os, "replace", changed), self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+                MODULE._recover_outputs(journal)
+            self.assertEqual(self.link_image(base), snapshot[0])
+
+    def test_journal_replacement_rechecks_both_names_after_handoff(self) -> None:
+        for existing in (False, True):
+            for edit in ("journal-link", "journal-replaced", "pending-link", "pending-replaced"):
+                with self.subTest(existing=existing, edit=edit), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory).resolve()
+                    journal = base / "refresh.transaction"
+                    if existing:
+                        journal.write_bytes(b"previous journal")
+                    preparation = MODULE._OutputPreparation(journal.with_suffix(".preparation"))
+                    handoff = preparation.handoff
+                    snapshot = []
+                    def changed(record: Any) -> None:
+                        handoff(record)
+                        artifact = journal if edit.startswith("journal") else journal.with_suffix(".pending")
+                        if artifact.exists():
+                            if edit.endswith("link"):
+                                os.link(artifact, base / "alias")
+                            else:
+                                artifact.rename(base / "displaced")
+                                artifact.write_bytes(b"foreign journal")
+                        else:
+                            artifact.write_bytes(b"appeared journal")
+                        snapshot.append(self.link_image(base))
+                    with mock.patch.object(preparation, "handoff", changed), self.assertRaisesRegex(
+                            MODULE.MatrixError, "sole link|identity or content changed|journal appeared"):
+                        MODULE._write_transaction(journal, [{}], committed=False, preparation=preparation)
+                    self.assertEqual(self.link_image(base), snapshot[0])
+
+    def test_custody_truncate_rechecks_links_through_owning_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            journal = base / "refresh.transaction"
+            receipt = MODULE._PreparationCustody.create(journal)
+            owner = MODULE._PreparationCustody(journal, receipt)
+            fdopen = os.fdopen
+            snapshot, truncations = [], []
+            def opened(*args: Any, **kwargs: Any) -> Any:
+                handle = fdopen(*args, **kwargs)
+                if args[1] != "r+b":
+                    return handle
+                write, truncate = handle.write, handle.truncate
+                def written(data: bytes) -> int:
+                    count = write(data)
+                    handle.flush()
+                    os.link(owner.path, base / "alias")
+                    snapshot.append(self.link_image(base))
+                    return count
+                def truncated(size: int) -> Any:
+                    truncations.append(size)
+                    return truncate(size)
+                handle.write, handle.truncate = written, truncated
+                return handle
+            with mock.patch.object(os, "fdopen", opened), self.assertRaisesRegex(MODULE.MatrixError, "sole link"):
+                owner.append({"cancelled": "unused"})
+            self.assertEqual(self.link_image(base), snapshot[0])
+            self.assertEqual(truncations, [])
+
     def setUp(self) -> None:
         super().setUp()
         # Logical fault sweeps need ordering and injected failures, just as in
@@ -8160,10 +8435,10 @@ watchdog.join()
                     if failure == "sync" and descriptor in owned:
                         raise OSError("marker sync denied")
                     sync(descriptor)
-                def unreadable(path: Path, limit: int) -> Any:
+                def unreadable(path: Path, limit: int, **kwargs: Any) -> Any:
                     if failure == "unreadable" and path == marker:
                         raise PermissionError("marker unreadable")
-                    return read(path, limit)
+                    return read(path, limit, **kwargs)
                 with mock.patch.object(os, "open", opened), mock.patch.object(os, "fdopen", handle), \
                         mock.patch.object(os, "fsync", flushed), mock.patch.object(MODULE, "_transaction_metadata", unknown), \
                         mock.patch.object(MODULE, "_read_transaction_file", unreadable), \

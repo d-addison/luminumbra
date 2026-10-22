@@ -5229,7 +5229,7 @@
     {
       "id": "ci.acceptance-preparation-custody",
       "source": "docs/ci/acceptance-refresh.md#preparation-custody",
-      "statement": "Journaled CLI writes emit an independent custody receipt before payload staging. Persistent authenticated preparation records support restart reacquisition, bounded reset and reuse, journal custody transfer and retirement. UNKNOWN, foreign, stale, unreadable and uncommitted enrollment states refuse untouched. Five outputs, fifteen payload artifacts, 16 MiB files, 64 KiB metadata, sole-link checks and v1/v2 journals are retained. Twenty-four disjoint contract partitions include recovery and custody cases alongside four public-tree partitions, with unchanged labels and 30-second deadlines. Hosted Windows qualification remains pending.",
+      "statement": "Journaled CLI writes emit an independent custody receipt before payload staging. Persistent authenticated preparation records support restart reacquisition, bounded reset and reuse, journal custody transfer and retirement. UNKNOWN, foreign, stale, unreadable and uncommitted enrollment states refuse untouched. Five outputs, fifteen payload artifacts, 16 MiB files, 64 KiB metadata, v1/v2 journals and complete-transaction sole-link checks are retained. Extra links refuse recovery, rollback and cleanup before mutation; identity, content and link count are rechecked before removal, replacement or permission changes. Twenty-four launch-free contract selections and 152 selections with child processes include recovery and custody cases alongside four public-tree partitions, with unchanged labels and 30-second deadlines. Hosted Windows qualification remains pending.",
       "status": "covered",
       "evidence": [
         {

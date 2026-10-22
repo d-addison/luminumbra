@@ -57,6 +57,12 @@ authentication failures, unreadable files and exceeded bounds refuse untouched.
 A torn final marker suffix can be discarded only after this validation. No
 directory scan, age check or PID inference supplies ownership.
 
+Every recovery copy, backup, staged candidate and metadata record must have
+exactly one link before any recovery mutation. Cleanup and rollback validate
+the complete retained set first, then recheck identity, content and sole-link
+status immediately before removal, replacement or permission changes. An
+extra link refuses the transaction with its files and alias permissions intact.
+
 Only a closed pending file renamed to the journal commits transaction metadata.
 Unpublished pending bytes are reset using enrolled identity. Published v1/v2
 journals retain their existing formats, validation, rollback and cleanup rules.
@@ -84,7 +90,10 @@ readable without a caller-supplied receipt.
 
 ## Contract partitions
 
-Twenty-four disjoint selections include all matrix, recovery and custody cases.
+Twenty-four launch-free selections and 152 selections with child processes
+include all matrix, recovery and custody cases. Each child-process selection
+reserves at most 24 seconds of child deadlines, leaving six seconds of its
+30-second timeout for imports and filesystem work.
 Four further selections retain the public-tree sweeps. Each CTest registration
 keeps its `hygiene;tools` labels and 30-second timeout. Direct Python invocation
 and unittest discovery still run the complete suite. Registration and workflow
