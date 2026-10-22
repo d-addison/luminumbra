@@ -88,6 +88,8 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
   endif()
 
   target_compile_definitions(${TARGET_NAME} PRIVATE
+    # Compile-database consumers distinguish target policy from source ownership.
+    LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1
     $<$<CONFIG:Debug>:LUMINUMBRA_DEBUG>
   )
 

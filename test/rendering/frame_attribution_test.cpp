@@ -120,7 +120,10 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
         "instance_capacity,generated_count,count_generation,"
         "terrain_work_ms,terrain_overshoot_ms,terrain_attempts,terrain_adopted,terrain_work_bytes,"
         "terrain_byte_overshoot,terrain_pending,water_work_ms,water_overshoot_ms,water_attempts,"
-        "water_adopted,water_work_bytes,water_byte_overshoot,water_pending\n");
+        "water_adopted,water_work_bytes,water_byte_overshoot,water_pending,"
+        "ui_update_ms,ui_render_ms,ui_filters_ms,menu_scene_ms,preview_adoption_ms,"
+        "document_load_ms,texture_load_ms,shader_load_ms,shader_first_use_ms,"
+        "world_create_callback_ms,world_load_callback_ms\n");
     std::ostringstream unknown;
     write_csv_row(unknown, 401, 60, buckets, foliage, 262144, false, 262144, 7);
     EXPECT_EQ(unknown.str(),
@@ -128,7 +131,9 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
               "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
               "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
               "2048,4096,8192,1,cpu,column_capacity,262144,,,"
-              "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0\n");
+              "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,"
+              "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,"
+              "0.000000,0.000000,0.000000,0.000000\n");
     EXPECT_EQ(fields(header.str()).size(), fields(unknown.str()).size());
     std::ostringstream known;
     write_csv_row(known, 402, 60, buckets, foliage, 262144, true, 123, 7);
@@ -163,7 +168,9 @@ TEST(FrameAttribution, UploadCountersAccumulateAcrossRenderAndMenuAndResetEveryF
         EXPECT_EQ(uploads.terrain_pending, 4u);
         EXPECT_EQ(uploads.water_pending, 2u);
         std::ostringstream row;
-        write_csv_row(row, 1, 20, {}, {}, 0, false, 0, 0, uploads);
+        PhaseTotals phases;
+        phases.add(Phase::UiUpdate, 3, 0, 0);
+        write_csv_row(row, 1, 20, {}, {}, 0, false, 0, 0, phases, uploads);
         const auto columns = fields(row.str());
         EXPECT_EQ(columns.at(37), "7.000000");
         EXPECT_EQ(columns.at(38), "2.000000");
@@ -171,7 +178,9 @@ TEST(FrameAttribution, UploadCountersAccumulateAcrossRenderAndMenuAndResetEveryF
         EXPECT_EQ(columns.at(42), "400");
         EXPECT_EQ(columns.at(43), "4");
         EXPECT_EQ(columns.at(44), "1.500000");
-        EXPECT_EQ(columns.at(50), "2\n");
+        EXPECT_EQ(columns.at(50), "2");
+        EXPECT_EQ(columns.at(51), "3.000000");
+        EXPECT_EQ(columns.size(), 51u + kPhaseCount);
     }
     record_render_uploads({1, 1, 10, 0, 1, 0}, false, 10);
     FoliageFrameScope next(true);
@@ -352,6 +361,87 @@ TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
         EXPECT_EQ(enabled.snapshot().uploads.terrain.attempts, 1u);
     }
     EXPECT_FALSE(foliage_frame_active());
+}
+
+TEST(FrameAttribution, ConstCollectorsOwnMutableTotalsAndResetTheNextFrame) {
+    {
+        const FoliageFrameScope foliage(true);
+        const PhaseFrameScope phases(true);
+        {
+            const PhaseScope scene(Phase::MenuScene);
+            record_foliage_rebuild({}, 0, 262144, std::nullopt, 0);
+            EXPECT_TRUE(scene.is_current());
+        }
+        EXPECT_EQ(phases.snapshot().completed_scopes(Phase::MenuScene), 1u);
+        EXPECT_EQ(foliage.snapshot().rebuild.rebuild_calls, 1u);
+        EXPECT_EQ(foliage.snapshot().capacity, 262144u);
+        EXPECT_FALSE(foliage.snapshot().count_known);
+        EXPECT_EQ(foliage.snapshot().generated_count, 0u);
+        EXPECT_EQ(foliage.snapshot().count_generation, 0u);
+    }
+    EXPECT_FALSE(foliage_frame_active());
+    EXPECT_DOUBLE_EQ(phase_total_ms(), 0);
+    const FoliageFrameScope next_foliage(true);
+    const PhaseFrameScope next_phases(true);
+    EXPECT_EQ(next_foliage.snapshot().rebuild.rebuild_calls, 0u);
+    EXPECT_EQ(next_phases.snapshot().completed_scopes(Phase::MenuScene), 0u);
+}
+
+TEST(FrameAttribution, PhaseCollectorsAreIsolatedAcrossThreads) {
+    const PhaseFrameScope frame(true);
+    const PhaseScope parent(Phase::MenuScene);
+    bool worker_saw_parent = false;
+    bool worker_scope_active = false;
+    bool worker_frame_active = false;
+    bool worker_disabled_active = false;
+    bool worker_restored = false;
+    bool worker_finally_saw_parent = false;
+    double worker_initial_total = -1;
+    double worker_final_total = -1;
+    PhaseTotals worker_totals;
+    // The parent stays idle until join: shared-state mutations fail without
+    // concurrent reads/writes or assumptions about scheduler/clock precision.
+    std::thread worker([&] {
+        worker_saw_parent = parent.is_current();
+        worker_initial_total = phase_total_ms();
+        {
+            const PhaseFrameScope worker_frame(true);
+            worker_frame_active = worker_frame.is_current();
+            {
+                const PhaseScope ui(Phase::UiUpdate);
+                worker_scope_active = ui.is_current();
+                {
+                    const PhaseFrameScope disabled(false);
+                    const PhaseScope ignored(Phase::UiFilters);
+                    worker_disabled_active = disabled.is_current() || ignored.is_current();
+                }
+                worker_restored = worker_frame.is_current() && ui.is_current();
+            }
+            worker_totals = worker_frame.snapshot();
+        }
+        worker_finally_saw_parent = parent.is_current();
+        worker_final_total = phase_total_ms();
+    });
+    worker.join();
+    EXPECT_FALSE(worker_saw_parent);
+    EXPECT_DOUBLE_EQ(worker_initial_total, 0);
+    EXPECT_TRUE(worker_frame_active);
+    EXPECT_TRUE(worker_scope_active);
+    EXPECT_FALSE(worker_disabled_active);
+    EXPECT_TRUE(worker_restored);
+    EXPECT_FALSE(worker_finally_saw_parent);
+    EXPECT_DOUBLE_EQ(worker_final_total, 0);
+    EXPECT_EQ(worker_totals.completed_scopes(Phase::UiUpdate), 1u);
+    EXPECT_EQ(worker_totals.completed_scopes(Phase::UiFilters), 0u);
+    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::UiUpdate), 0u);
+    EXPECT_TRUE(frame.is_current());
+    EXPECT_TRUE(parent.is_current());
+    {
+        const PhaseScope ui(Phase::UiUpdate);
+        EXPECT_TRUE(ui.is_current());
+    }
+    EXPECT_TRUE(parent.is_current());
+    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::UiUpdate), 1u);
 }
 
 // A bounded sink that accepts a prefix, then reports a write error on every
@@ -538,7 +628,7 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     std::string line;
     ASSERT_TRUE(std::getline(input, line));
     const auto header = fields(line);
-    ASSERT_EQ(header.size(), 51u);
+    ASSERT_EQ(header.size(), 51u + kPhaseCount);
     EXPECT_EQ(header.at(34), "instance_capacity");
     EXPECT_EQ(header.at(35), "generated_count");
     EXPECT_EQ(header.at(36), "count_generation");
@@ -555,7 +645,7 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
         EXPECT_EQ(columns.at(36), rows % 3 == 0 ? "" : std::to_string(rows));
         // Upload fields follow the nullable counts; all fourteen must retain
         // their exact zero values and time precision on every buffered row.
-        for (std::size_t column = 37; column < header.size(); ++column) {
+        for (std::size_t column = 37; column < 51; ++column) {
             SCOPED_TRACE(header.at(column));
             const bool time = column == 37 || column == 38 || column == 44 || column == 45;
             EXPECT_EQ(columns.at(column), time ? "0.000000" : "0");
@@ -565,5 +655,10 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     ASSERT_EQ(rows, 502u); // Header and every frame, including beyond 400.
     EXPECT_TRUE(input.eof());
     EXPECT_EQ(last.substr(0, 13), "501,1.000000,");
+    EXPECT_EQ(fields(last).at(34), "262144");
+    EXPECT_EQ(fields(last).at(35), "");
+    EXPECT_EQ(fields(last).at(36), "");
+    for (std::size_t index = 51; index < 51 + kPhaseCount; ++index)
+        EXPECT_EQ(fields(last).at(index), "0.000000");
 }
 } // namespace

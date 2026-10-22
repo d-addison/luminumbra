@@ -3,19 +3,27 @@
 whole analysis input is identical to an earlier passing run."""
 
 import importlib.util
+import concurrent.futures
 import contextlib
+import ctypes
 import io
 import json
+import ntpath
 import os
+import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "tidy_cache.py"
@@ -77,7 +85,7 @@ print("main.o: " + " \\\\\\n ".join(p.replace(" ", "\\\\ ") for p in order))
 """
 
 FAKE_TIDY = """
-import os, sys
+import json, os, sys
 args = sys.argv[1:]
 if args == ["--version"]:
     print("faketidy " + os.environ.get("FAKE_TIDY_VERSION", "1"))
@@ -85,6 +93,12 @@ if args == ["--version"]:
 target = args[-1]
 with open(os.environ["FAKE_TIDY_LOG"], "a", encoding="utf-8") as log:
     log.write(target + "\\n")
+database = os.path.join(args[args.index("-p") + 1], "compile_commands.json")
+with open(database, encoding="utf-8") as handle:
+    entries = json.load(handle)
+first = next((entry for entry in entries if os.path.normcase(os.path.abspath(
+    os.path.join(entry["directory"], entry["file"]))) == os.path.normcase(os.path.abspath(target))), None)
+flag_failure = first is not None and "-DTIDY_FAIL" in first["arguments"]
 swap = os.environ.get("FAKE_TIDY_DB_FROM")
 if swap:
     import shutil
@@ -93,11 +107,765 @@ mutate = os.environ.get("FAKE_TIDY_MUTATE")
 if mutate:
     with open(mutate, "a", encoding="utf-8") as handle:
         handle.write("// changed while the analysis was running\\n")
-if "TIDY_FAIL" in open(target, encoding="utf-8").read():
+if flag_failure or "TIDY_FAIL" in open(target, encoding="utf-8").read():
     print("fake diagnostic in " + target)
     sys.exit(1)
 sys.exit(0)
 """
+
+
+def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, driver_exits=False,
+                        interrupt=False, ready_event=None):
+    """Exercise a real driver and grandchild, and reap the fixture on failure."""
+    with tempfile.TemporaryDirectory(prefix="process-tree-") as temporary:
+        directory = Path(temporary)
+        ready = directory / "grandchild.pid"
+        script = directory / "driver.py"
+        script.write_text(
+            "import subprocess, sys, time\n"
+            'code = ("import os, pathlib, sys, time; "\n'
+            '        "ready = pathlib.Path(sys.argv[1]); pending = ready.with_suffix(\\".ready\\"); "\n'
+            '        "pending.write_text(str(os.getpid())); pending.replace(ready); time.sleep(60)")\n'
+            "subprocess.Popen([sys.executable, '-I', '-B', '-c', code, sys.argv[1]])\n"
+            "print('driver output', flush=True)\n"
+            + ("sys.exit(0)\n" if driver_exits else "time.sleep(60)\n"), encoding="utf-8")
+        grandchild = None
+        handle = None
+        process = None
+        subreaper = None
+        terminated = False
+        started = threading.Event()
+        if sys.platform == "linux":
+            # Adopt the orphan so the regression verifies reaping as well as
+            # termination, even in containers whose init does not reap zombies.
+            libc = ctypes.CDLL(None, use_errno=True)
+            subreaper = ctypes.c_int()
+            case.assertEqual(libc.prctl(37, ctypes.byref(subreaper), 0, 0, 0), 0)
+            case.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        if os.name == "nt":
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+            kernel.OpenProcess.restype = ctypes.c_void_p
+            kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+            kernel.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+            kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+        popen = subprocess.Popen
+
+        def start(command, **kwargs):
+            nonlocal process
+            process = popen(command, **kwargs)
+            communicate = process.communicate
+
+            def wait_until_ready(input=None, timeout=None):
+                nonlocal grandchild, handle
+                if timeout is not None:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() or not ready.read_text():
+                        case.assertLess(time.monotonic(), deadline, "grandchild did not start")
+                        time.sleep(0.01)
+                    grandchild = int(ready.read_text())
+                    if os.name == "nt":
+                        handle = kernel.OpenProcess(0x100001, False, grandchild)
+                        case.assertTrue(handle)
+                    started.set()
+                    if ready_event is not None:
+                        ready_event.set()
+                        return communicate(input, timeout=timeout)
+                    # Start the actual timeout only after the descendant exists.
+                    return communicate(input, timeout=0.05)
+                return communicate(input)
+
+            process.communicate = wait_until_ready
+            return process
+
+        def gone():
+            nonlocal terminated
+            if terminated:
+                return True
+            if os.name == "nt":
+                terminated = kernel.WaitForSingleObject(handle, 0) == 0
+                return terminated
+            try:
+                waited, _ = os.waitpid(grandchild, os.WNOHANG)
+                if waited:
+                    terminated = True
+                    return True
+            except ChildProcessError:
+                pass
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                terminated = True
+                return True
+            return False
+
+        try:
+            def driver_only(command, **kwargs):
+                return start(command, **kwargs) if command[0] == sys.executable else popen(command, **kwargs)
+
+            future_result = concurrent.futures.Future.result
+            futures_wait = concurrent.futures.wait
+
+            def interrupt_result(future, *args, **kwargs):
+                deadline = time.monotonic() + 5
+                while not started.is_set():
+                    # Let non-process preparation finish before interrupting
+                    # the analysis pool in the public command regression.
+                    if future.done():
+                        return future_result(future, *args, **kwargs)
+                    case.assertLess(time.monotonic(), deadline, "worker did not start")
+                    started.wait(0.001)
+                raise KeyboardInterrupt()
+
+            def interrupt_wait(futures, *args, **kwargs):
+                deadline = time.monotonic() + 5
+                while not started.is_set():
+                    if all(future.done() for future in futures):
+                        return futures_wait(futures, *args, **kwargs)
+                    case.assertLess(time.monotonic(), deadline, "worker did not start")
+                    started.wait(0.001)
+                raise KeyboardInterrupt()
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(subprocess, "Popen", side_effect=driver_only))
+                if interrupt:
+                    stack.enter_context(patch.object(concurrent.futures.Future, "result", interrupt_result))
+                    stack.enter_context(patch.object(concurrent.futures, "wait", interrupt_wait))
+                with case.assertRaises(error_type):
+                    launch([sys.executable, "-I", "-B", str(script), str(ready)], directory)
+            case.assertIsNotNone(grandchild)
+            case.assertIsNotNone(process.returncode)
+            deadline = time.monotonic() + 2
+            while not gone():
+                case.assertLess(time.monotonic(), deadline, "grandchild survived the timeout")
+                time.sleep(0.01)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+            if grandchild is not None and not gone():
+                if os.name == "nt":
+                    kernel.TerminateProcess(handle, 1)
+                    kernel.WaitForSingleObject(handle, 5000)
+                else:
+                    os.kill(grandchild, signal.SIGKILL)
+                    if subreaper is not None:
+                        os.waitpid(grandchild, 0)
+            if handle is not None:
+                kernel.CloseHandle(handle)
+            if subreaper is not None:
+                case.assertEqual(libc.prctl(36, subreaper.value, 0, 0, 0), 0)
+
+
+def assert_parallel_failure(case, module, failure, *, collect_errors=(), active_error=None,
+                            parallel=None, slow=None, ready=None, observer=None):
+    """Hold publication and joining apart to inspect the worker failure boundary."""
+    submitted, published, joining = (threading.Event() for _ in range(3))
+    if observer is not None:
+        published = observer.publication_event(published)
+    active = threading.Barrier(3, timeout=5)
+    futures, visited, contexts, boundary, slow_cancelled, shutdowns, tool_errors, publication_joined = (
+        [] for _ in range(8))
+    shared = []
+    executor = module.concurrent.futures.ThreadPoolExecutor
+    futures_wait = module.concurrent.futures.wait
+
+    class ObservedExecutor(executor):
+        def submit(self, function, item):
+            def observe():
+                try:
+                    return function(item)
+                except BaseException as error:
+                    if observer is not None and item == 1 and error is failure:
+                        observer.failure_caught(error, shared[0])
+                    raise
+                finally:
+                    contexts.append(hasattr(module._PROCESS_CONTEXT, "cancelled"))
+
+            future = super().submit(observe)
+            futures.append(future)
+            if item == 1:
+                def failure_published(completed):
+                    boundary.append(shared[0].is_set())
+                    published.set()
+                    if slow is not None:
+                        # Rescue the real fixture on a broken implementation,
+                        # only after recording the required boundary state.
+                        shared[0].set()
+                    publication_joined.append(joining.wait(5))
+
+                future.add_done_callback(failure_published)
+            if observer is not None and item == 3:
+                observer.queued_future(future)
+            if item == 7:
+                submitted.set()
+            return future
+
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            shutdowns.append((wait, cancel_futures))
+            # Keep the failing worker in its callback until the coordinator
+            # has cancelled the queue, so actual Future cancellation is tested.
+            super().shutdown(wait=False, cancel_futures=cancel_futures)
+            joining.set()
+            super().shutdown(wait=wait)
+
+    def work(item):
+        visited.append(item)
+        cancelled = module._PROCESS_CONTEXT.cancelled
+        if item == 0:
+            shared.append(cancelled)
+            if observer is not None:
+                observer.work0_started()
+        if item < 3:
+            active.wait()
+        if item == 0:
+            if slow is not None:
+                try:
+                    return slow()
+                except BaseException as error:
+                    tool_errors.append(type(error))
+                    # Cancellation may reap the tool before the failing future
+                    # publishes its callback; keep this worker off the queue.
+                    case.assertTrue(published.wait(5), "failure was not published")
+                    if boundary and boundary[0]:
+                        case.assertTrue(joining.wait(5), "coordinator did not join")
+                    raise
+            case.assertTrue(published.wait(5), "failure was not published")
+            slow_cancelled.append(cancelled.is_set())
+            if boundary[0]:
+                case.assertTrue(joining.wait(5), "coordinator did not join")
+            raise concurrent.futures.CancelledError()
+        if item == 1:
+            case.assertTrue(submitted.wait(5), "queue was not submitted")
+            if ready is not None:
+                case.assertTrue(ready.wait(5), "owned process did not start")
+            raise failure
+        if item == 2:
+            case.assertTrue(published.wait(5), "failure was not published")
+            if boundary[0]:
+                case.assertTrue(joining.wait(5), "coordinator did not join")
+            if active_error is not None:
+                raise active_error
+            return None
+        case.fail("queued function ran after failure")
+
+    def observe_completion(*args, **kwargs):
+        case.assertTrue(published.wait(5), "failure was not published")
+        return futures_wait(*args, **kwargs)
+
+    caught = None
+    with patch.object(module.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor), \
+            patch.object(module.concurrent.futures, "wait", side_effect=observe_completion):
+        try:
+            if parallel is None:
+                module.parallel_map(work, range(8), 3, collect_errors=collect_errors)
+            else:
+                parallel(work, range(8), 3)
+        except BaseException as error:
+            caught = error
+    case.assertEqual(boundary, [True], "cancellation was late at exception publication")
+    case.assertEqual(sorted(visited), [0, 1, 2])
+    case.assertEqual(shutdowns, [(True, True)])
+    case.assertEqual(publication_joined, [True], "coordinator did not join")
+    case.assertTrue(all(future.done() for future in futures))
+    case.assertTrue(all(future.cancelled() for future in futures[3:]))
+    case.assertTrue(contexts)
+    case.assertFalse(any(contexts), "worker retained process cancellation context")
+    if slow is None:
+        case.assertEqual(slow_cancelled, [True])
+    else:
+        case.assertEqual(tool_errors, [concurrent.futures.CancelledError])
+    case.assertIsNotNone(caught, "parallel failure was lost")
+    return caught
+
+
+class ParallelMapTests(unittest.TestCase):
+    def test_later_failure_cancels_slow_first_and_queue_before_publication(self):
+        failure = RuntimeError("later failure")
+        self.assertIs(assert_parallel_failure(self, MODULE, failure), failure)
+
+    def test_collected_active_errors_remain_in_input_order(self):
+        error = assert_parallel_failure(self, MODULE, PermissionError("later refusal"),
+                                        collect_errors=(OSError, ValueError),
+                                        active_error=ValueError("active refusal"))
+        self.assertIs(type(error), ValueError)
+        self.assertEqual(str(error), "later refusal\nactive refusal")
+
+    def test_unexpected_active_cleanup_error_is_not_replaced_by_collected_error(self):
+        failure = RuntimeError("cleanup failed")
+        self.assertIs(assert_parallel_failure(self, MODULE, ValueError("later refusal"),
+                                              collect_errors=(ValueError,), active_error=failure), failure)
+
+    def test_unexpected_cancellation_is_propagated(self):
+        failure = concurrent.futures.CancelledError("unexpected cancellation")
+        self.assertIs(assert_parallel_failure(self, MODULE, failure), failure)
+
+    def test_workers_refuse_queue_before_coordinator_observes_failure(self):
+        submitted, drained = threading.Event(), threading.Event()
+        lock = threading.Lock()
+        visited, finished = [], []
+        failure = RuntimeError("worker failed")
+        executor = MODULE.concurrent.futures.ThreadPoolExecutor
+        futures_wait = MODULE.concurrent.futures.wait
+
+        class ObservedExecutor(executor):
+            def submit(self, function, item):
+                future = super().submit(function, item)
+
+                def done(result):
+                    with lock:
+                        finished.append(item)
+                        if len(finished) == 5:
+                            drained.set()
+
+                future.add_done_callback(done)
+                if item == 4:
+                    submitted.set()
+                return future
+
+        def work(item):
+            visited.append(item)
+            if item == 0:
+                self.assertTrue(submitted.wait(5))
+                raise failure
+            return item
+
+        def observe_completion(*args, **kwargs):
+            # Workers must refuse queued calls even while the coordinator is
+            # held away from completion observation and queue cancellation.
+            self.assertTrue(drained.wait(5))
+            return futures_wait(*args, **kwargs)
+
+        with patch.object(MODULE.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor), \
+                patch.object(MODULE.concurrent.futures, "wait", side_effect=observe_completion), \
+                self.assertRaises(RuntimeError) as raised:
+            MODULE.parallel_map(work, range(5), 1)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(visited, [0])
+        self.assertEqual(finished, list(range(5)))
+
+    def test_submission_failure_cancels_and_joins_already_started_work(self):
+        started, cleaned = threading.Event(), threading.Event()
+        failure = PermissionError("cannot read remaining inputs")
+        contexts = []
+        executor = MODULE.concurrent.futures.ThreadPoolExecutor
+
+        class ObservedExecutor(executor):
+            def submit(self, function, item):
+                def observe():
+                    try:
+                        return function(item)
+                    finally:
+                        contexts.append(hasattr(MODULE._PROCESS_CONTEXT, "cancelled"))
+                return super().submit(observe)
+
+        def items():
+            yield 0
+            self.assertTrue(started.wait(5))
+            raise failure
+
+        def work(item):
+            cancelled = MODULE._PROCESS_CONTEXT.cancelled
+            started.set()
+            try:
+                self.assertTrue(cancelled.wait(5))
+            finally:
+                cleaned.set()
+
+        with patch.object(MODULE.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor), \
+                self.assertRaises(PermissionError) as raised:
+            MODULE.parallel_map(work, items(), 1)
+        self.assertIs(raised.exception, failure)
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(contexts, [False])
+
+    def test_successes_keep_input_order_despite_reverse_completion(self):
+        submitted = threading.Event()
+        completed = [threading.Event() for _ in range(3)]
+        executor = MODULE.concurrent.futures.ThreadPoolExecutor
+        order = []
+
+        class ObservedExecutor(executor):
+            def submit(self, function, item):
+                future = super().submit(function, item)
+
+                def done(result):
+                    order.append(item)
+                    completed[item].set()
+
+                future.add_done_callback(done)
+                if item == 2:
+                    submitted.set()
+                return future
+
+        def work(item):
+            self.assertTrue(submitted.wait(5))
+            if item < 2:
+                self.assertTrue(completed[item + 1].wait(5))
+            return [None, "middle", 42][item]
+
+        with patch.object(MODULE.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor):
+            self.assertEqual(MODULE.parallel_map(work, range(3), 3), [None, "middle", 42])
+        self.assertEqual(order, [2, 1, 0])
+        self.assertFalse(hasattr(MODULE._PROCESS_CONTEXT, "cancelled"))
+
+
+class ProcessRunnerContractTests(unittest.TestCase):
+    def setUp(self):
+        self.process = MagicMock(pid=123, returncode=0)
+        self.process.poll.return_value = None
+        self.process.__enter__.return_value = self.process
+        self.popen = patch.object(MODULE.subprocess, "Popen", return_value=self.process).start()
+        # Fake Popen handles must use a fake job backend on native Windows too.
+        patch.object(MODULE, "_WindowsJob").start()
+        self.addCleanup(patch.stopall)
+
+    def test_success_output_exit_codes_and_capture_validation(self):
+        for output in ((b"out", b"err"), ("out", "err"), (None, None)):
+            with self.subTest(output=output):
+                self.process.communicate.return_value = output
+                result = MODULE.run_process(["tool"], timeout=7)
+                self.assertEqual((result.stdout, result.stderr), output)
+                self.assertEqual(result.returncode, 0)
+        self.process.returncode = 2
+        self.assertEqual(MODULE.run_process(["tool"], timeout=7).returncode, 2)
+        with self.assertRaises(subprocess.CalledProcessError):
+            MODULE.run_process(["tool"], timeout=7, check=True)
+        self.popen.reset_mock()
+        for name in ("stdout", "stderr"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                MODULE.run_process(["tool"], timeout=7, capture_output=True, **{name: subprocess.PIPE})
+        self.popen.assert_not_called()
+        self.popen.side_effect = OSError("cannot launch")
+        with self.assertRaisesRegex(OSError, "cannot launch"):
+            MODULE.run_process(["tool"], timeout=7)
+
+    def test_posix_timeout_and_interruption_kill_group_before_draining(self):
+        for error in (subprocess.TimeoutExpired("tool", 7, b"partial"), KeyboardInterrupt()):
+            with self.subTest(error=type(error)), patch.object(MODULE.os, "name", "posix"), \
+                    patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                    patch.object(MODULE.os, "killpg", create=True) as killpg:
+                self.process.communicate.side_effect = [error, (b"partial", b"diagnostic")]
+                with self.assertRaises(type(error)):
+                    MODULE.run_process(["tool"], timeout=7, capture_output=True)
+                self.assertTrue(self.popen.call_args.kwargs["start_new_session"])
+                killpg.assert_called_once_with(123, signal.SIGKILL)
+                self.assertEqual(self.process.communicate.call_args_list[-1].kwargs, {})
+
+    def test_posix_missing_group_is_reaped_and_cleanup_errors_propagate(self):
+        for failure in (ProcessLookupError(), PermissionError("cannot terminate")):
+            with self.subTest(failure=type(failure)), patch.object(MODULE.os, "name", "posix"), \
+                    patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                    patch.object(MODULE.os, "killpg", create=True, side_effect=failure):
+                self.process.communicate.side_effect = [subprocess.TimeoutExpired("tool", 7), (b"", b"")]
+                expected = subprocess.TimeoutExpired if isinstance(failure, ProcessLookupError) else PermissionError
+                with self.assertRaises(expected):
+                    MODULE.run_process(["tool"], timeout=7)
+                if expected is PermissionError:
+                    self.process.kill.assert_called_once()
+                    self.process.wait.assert_called_once()
+
+    def test_windows_job_flags_output_and_failure_inputs(self):
+        for stage in (None, "create", "launch", "start", "terminate"):
+            with self.subTest(stage=stage), patch.object(MODULE.os, "name", "nt"), \
+                    patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                    patch.object(MODULE, "_WindowsJob") as factory:
+                self.process.reset_mock()
+                self.process.communicate.side_effect = [subprocess.TimeoutExpired("tool", 7),
+                                                       (b"partial", b"diagnostic")]
+                job = factory.return_value
+                failure = OSError("job failure")
+                if stage == "create":
+                    factory.side_effect = failure
+                elif stage == "launch":
+                    self.popen.side_effect = failure
+                elif stage is not None:
+                    getattr(job, stage).side_effect = failure
+                    if stage == "start":
+                        self.process.communicate.side_effect = [(b"", b"")]
+                expected = OSError if stage else subprocess.TimeoutExpired
+                with self.assertRaises(expected) as raised:
+                    MODULE.run_process(["tool"], timeout=7, capture_output=True)
+                if stage == "create":
+                    job.close.assert_not_called()
+                    continue
+                self.assertEqual(self.popen.call_args.kwargs["creationflags"], 516)
+                job.close.assert_called_once()
+                if stage == "launch":
+                    job.start.assert_not_called()
+                    self.popen.side_effect = None
+                    continue
+                job.start.assert_called_once_with(self.process)
+                job.terminate.assert_called_once()
+                self.process.kill.assert_called_once()
+                if stage == "terminate":
+                    self.process.wait.assert_called_once()
+                elif stage is None:
+                    self.assertEqual(raised.exception.stdout, b"partial")
+                    self.assertEqual(raised.exception.stderr, b"diagnostic")
+
+    def test_windows_success_releases_job_after_collecting_output(self):
+        with patch.object(MODULE.os, "name", "nt"), \
+                patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                patch.object(MODULE, "_WindowsJob") as factory:
+            self.process.communicate.return_value = (b"out", b"err")
+            result = MODULE.run_process(["tool"], timeout=7)
+            self.assertEqual((result.stdout, result.stderr), (b"out", b"err"))
+            factory.return_value.start.assert_called_once_with(self.process)
+            factory.return_value.close.assert_called_once()
+            factory.return_value.terminate.assert_not_called()
+
+    def test_windows_assignment_failure_after_driver_exit_is_reported_and_reaped(self):
+        failure = OSError("assignment failed after exit")
+        self.process.poll.return_value = 0
+        self.process.communicate.return_value = (b"", b"")
+        with patch.object(MODULE.os, "name", "nt"), \
+                patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                patch.object(MODULE, "_WindowsJob") as factory:
+            factory.return_value.start.side_effect = failure
+            with self.assertRaises(OSError) as raised:
+                MODULE.run_process(["tool"], timeout=7)
+            self.assertIs(raised.exception, failure)
+            self.process.kill.assert_not_called()
+            self.process.communicate.assert_called_once_with()
+            self.process.__exit__.assert_called_once()
+            factory.return_value.terminate.assert_called_once()
+            factory.return_value.close.assert_called_once()
+
+    def test_parallel_cancellation_terminates_both_backends_and_refuses_new_launches(self):
+        for platform in ("posix", "nt"):
+            with self.subTest(platform=platform), patch.object(MODULE.os, "name", platform), \
+                    patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                    patch.object(MODULE.os, "killpg", create=True) as killpg, \
+                    patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                    patch.object(MODULE, "_WindowsJob") as factory:
+                self.process.reset_mock()
+                cancelled = threading.Event()
+
+                def communicate(timeout=None):
+                    if timeout is None:
+                        return b"partial", b"diagnostic"
+                    self.assertLessEqual(timeout, 0.1)
+                    cancelled.set()
+                    raise subprocess.TimeoutExpired("tool", timeout)
+
+                self.process.communicate.side_effect = communicate
+                with patch.object(MODULE._PROCESS_CONTEXT, "cancelled", cancelled, create=True):
+                    with self.assertRaises(concurrent.futures.CancelledError):
+                        MODULE.run_process(["tool"], timeout=7)
+                    self.process.communicate.assert_called_with()
+                    self.popen.reset_mock()
+                    with self.assertRaises(concurrent.futures.CancelledError):
+                        MODULE.run_process(["queued tool"], timeout=7)
+                    self.popen.assert_not_called()
+                if platform == "nt":
+                    factory.return_value.terminate.assert_called_once()
+                    factory.return_value.close.assert_called_once()
+                else:
+                    killpg.assert_called_once_with(123, 9)
+
+    def test_parallel_deadline_preserves_partial_output_and_empty_work(self):
+        cancelled = threading.Event()
+        self.process.communicate.side_effect = [subprocess.TimeoutExpired("tool", 0, b"partial"),
+                                               (b"partial", b"diagnostic")]
+        with patch.object(MODULE.os, "name", "posix"), \
+                patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                patch.object(MODULE.os, "killpg", create=True), \
+                patch.object(MODULE._PROCESS_CONTEXT, "cancelled", cancelled, create=True):
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                MODULE.run_process(["tool"], timeout=0)
+            self.assertEqual(raised.exception.timeout, 0)
+            self.assertEqual(raised.exception.stdout, b"partial")
+        self.assertEqual(MODULE.parallel_map(lambda item: self.fail("unexpected work"), [], 2), [])
+
+
+class WindowsJobTests(unittest.TestCase):
+    def make_job(self):
+        self.kernel = MagicMock()
+        self.kernel.CreateJobObjectW.return_value = 11
+        self.kernel.CreateToolhelp32Snapshot.return_value = 22
+        self.kernel.OpenThread.return_value = 33
+        self.kernel.ResumeThread.return_value = 1
+        self.kernel.QueryInformationJobObject.return_value = 1
+
+        def entry(snapshot, pointer):
+            pointer._obj.th32OwnerProcessID = 123
+            pointer._obj.th32ThreadID = 456
+            return True
+
+        self.kernel.Thread32First.side_effect = entry
+        patch.object(ctypes, "WinDLL", return_value=self.kernel, create=True).start()
+        patch.object(ctypes, "WinError", side_effect=lambda code: OSError("Windows API failure"),
+                     create=True).start()
+        patch.object(ctypes, "get_last_error", return_value=5, create=True).start()
+        self.addCleanup(patch.stopall)
+        return MODULE._WindowsJob()
+
+    def test_assign_before_resume_and_wait_for_every_descendant(self):
+        job = self.make_job()
+        job.start(SimpleNamespace(pid=123, _handle=44))
+        self.kernel.AssignProcessToJobObject.assert_called_once_with(11, 44)
+        self.kernel.OpenThread.assert_called_once_with(2, False, 456)
+        self.kernel.ResumeThread.assert_called_once_with(33)
+        calls = [call[0] for call in self.kernel.mock_calls]
+        self.assertLess(calls.index("AssignProcessToJobObject"), calls.index("ResumeThread"))
+        active = iter((2, 1, 0))
+
+        def query(handle, kind, pointer, size, returned):
+            pointer._obj.ActiveProcesses = next(active)
+            return True
+
+        self.kernel.QueryInformationJobObject.side_effect = query
+        with patch.object(MODULE.time, "sleep") as sleep:
+            job.terminate()
+        self.assertEqual(self.kernel.QueryInformationJobObject.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        job.close()
+        self.assertEqual([call.args[0] for call in self.kernel.CloseHandle.call_args_list], [33, 22, 11])
+
+    def test_kernel_failure_inputs_release_acquired_handles(self):
+        for stage in ("CreateJobObjectW", "AssignProcessToJobObject", "CreateToolhelp32Snapshot",
+                      "Thread32First", "Thread32Next", "OpenThread", "ResumeThread",
+                      "TerminateJobObject", "QueryInformationJobObject"):
+            with self.subTest(stage=stage):
+                job = self.make_job()
+                function = getattr(self.kernel, stage)
+                function.side_effect = None
+                function.return_value = (ctypes.c_void_p(-1).value if stage == "CreateToolhelp32Snapshot"
+                                         else 0xFFFFFFFF if stage == "ResumeThread" else 0)
+                if stage == "Thread32Next":
+                    self.kernel.Thread32First.side_effect = None
+                    self.kernel.Thread32First.return_value = True
+                try:
+                    with self.assertRaises(OSError):
+                        if stage == "CreateJobObjectW":
+                            MODULE._WindowsJob()
+                        elif stage in {"TerminateJobObject", "QueryInformationJobObject"}:
+                            job.terminate()
+                        else:
+                            job.start(SimpleNamespace(pid=123, _handle=44))
+                finally:
+                    job.close()
+                handles = [call.args[0] for call in self.kernel.CloseHandle.call_args_list]
+                self.assertEqual(handles[-1], 11)
+                if stage in {"Thread32First", "Thread32Next", "OpenThread", "ResumeThread"}:
+                    self.assertIn(22, handles)
+                if stage == "ResumeThread":
+                    self.assertIn(33, handles)
+
+    def test_thread_enumeration_ignores_other_processes(self):
+        job = self.make_job()
+        entry = self.kernel.Thread32First.side_effect
+
+        def unrelated(snapshot, pointer):
+            pointer._obj.th32OwnerProcessID = 789
+            return True
+
+        self.kernel.Thread32First.side_effect = unrelated
+        self.kernel.Thread32Next.side_effect = entry
+        job.start(SimpleNamespace(pid=123, _handle=44))
+        self.kernel.Thread32Next.assert_called_once()
+        self.kernel.OpenThread.assert_called_once_with(2, False, 456)
+        job.close()
+
+    def test_partial_thread_information_refuses_resume_and_releases_snapshot(self):
+        job = self.make_job()
+
+        def partial(snapshot, pointer):
+            pointer._obj.dwSize = 8
+            return True
+
+        self.kernel.Thread32First.side_effect = partial
+        with self.assertRaisesRegex(OSError, "incomplete tool thread information"):
+            job.start(SimpleNamespace(pid=123, _handle=44))
+        self.kernel.ResumeThread.assert_not_called()
+        self.kernel.CloseHandle.assert_called_once_with(22)
+        job.close()
+
+
+class ProcessTreeTests(unittest.TestCase):
+    def test_later_failure_cancels_and_reaps_owned_driver_and_descendant(self):
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                ready = threading.Event()
+                failure = RuntimeError("later failure")
+
+                def launch(command, directory):
+                    error = assert_parallel_failure(
+                        self, MODULE, failure, ready=ready,
+                        slow=lambda: MODULE.run_process(command, cwd=directory, capture_output=True,
+                                                        timeout=MODULE.DEPS_TIMEOUT_SECONDS))
+                    self.assertIs(error, failure)
+                    raise error
+
+                assert_tree_timeout(self, launch, RuntimeError, driver_exits=driver_exits,
+                                    ready_event=ready)
+
+    def test_cache_command_interrupt_cleans_up_preparation_and_analysis(self):
+        for phase in ("prepare", "analyze"):
+            with self.subTest(phase=phase):
+                key_calls, launches, failures = [], [], []
+
+                def launch(command, directory):
+                    original_run = MODULE.run_process
+
+                    def run_tool(*args, **kwargs):
+                        launches.append(args[0])
+                        try:
+                            return original_run(command, cwd=directory, capture_output=True, timeout=1)
+                        except BaseException as error:
+                            failures.append(type(error))
+                            raise
+
+                    def key_for(tu, *args):
+                        key_calls.append(tu)
+                        if phase == "prepare":
+                            run_tool(command)
+                        return "key"
+
+                    args = SimpleNamespace(files=[str(directory / f"{i}.cpp") for i in range(8)],
+                                           tool_file=[], clang_tidy="tidy", build_dir=str(directory),
+                                           mode="readwrite", cache_dir=str(directory / "cache"),
+                                           jobs=1, config="{}")
+                    with patch.object(MODULE, "combined_tool_hash", return_value="hash"), \
+                            patch.object(MODULE, "load_entries", return_value={}), \
+                            patch.object(MODULE.KeyBuilder, "key_for", side_effect=key_for), \
+                            patch.object(MODULE, "run_process", side_effect=run_tool), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        MODULE.run_command(args)
+
+                assert_tree_timeout(self, launch, KeyboardInterrupt, interrupt=True)
+                self.assertEqual(len(launches), 1)
+                self.assertEqual(len(key_calls), 1 if phase == "prepare" else 8)
+                self.assertEqual(failures, [concurrent.futures.CancelledError])
+
+    def test_parallel_interrupt_cancels_queue_and_reaps_descendants(self):
+        visited = []
+
+        def launch(command, directory):
+            def work(index):
+                visited.append(index)
+                if index == 0:
+                    return MODULE.run_process(command, cwd=directory, capture_output=True, timeout=1)
+            MODULE.parallel_map(work, range(8), 1)
+
+        assert_tree_timeout(self, launch, KeyboardInterrupt, interrupt=True)
+        self.assertEqual(visited, [0])
+
+    def test_timeout_terminates_and_reaps_grandchild(self):
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                assert_tree_timeout(self, lambda command, directory: MODULE.run_process(
+                    command, cwd=directory, capture_output=True, timeout=1), driver_exits=driver_exits)
+
+    def test_dependency_timeout_terminates_grandchild_before_cache_miss(self):
+        def launch(command, directory):
+            builder = MODULE.KeyBuilder("hash", "tidy", SimpleNamespace(describe=lambda *args: "tool"))
+            entry = {"directory": str(directory), "arguments": command}
+            with patch.object(MODULE, "dependency_command", return_value=command):
+                builder.key_for(str(directory / "unit.cpp"), [entry], "{}")
+
+        assert_tree_timeout(self, launch, MODULE.CacheMiss)
 
 
 class TidyCacheTests(unittest.TestCase):
@@ -149,7 +917,7 @@ class TidyCacheTests(unittest.TestCase):
             "--clang-tidy", str(self.tidy), "--config", config,
             "--tool-file", str(tool_file or self.tool_file), "--", *map(str, files),
         ]
-        original_run = subprocess.run
+        original_run = MODULE.run_process
 
         def run_fixture(argv, **kwargs):
             # Preserve tool-file hashing, argv, output and exit status; only the
@@ -159,7 +927,7 @@ class TidyCacheTests(unittest.TestCase):
 
         out, err = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, self.env, clear=True), patch.object(
-            MODULE.subprocess, "run", side_effect=run_fixture
+            MODULE, "run_process", side_effect=run_fixture
         ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             status = MODULE.main(command)
         return subprocess.CompletedProcess(command, status, out.getvalue(), err.getvalue())
@@ -172,6 +940,80 @@ class TidyCacheTests(unittest.TestCase):
     def assertRan(self, result, expected_total_runs):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.tidy_runs(), expected_total_runs, result.stdout + result.stderr)
+
+    def test_analysis_failures_cancel_queued_units_without_writing_records(self):
+        sources = [self.main, *(self.src / f"unit{index}.cpp" for index in range(3))]
+        for source in sources:
+            source.write_text("int value; // TIDY_FAIL\n", encoding="utf-8")
+        self.entries = [self.entry([], source) for source in sources]
+        self.write_db()
+        original_run = MODULE.run_process
+        for failure in (None, PermissionError("cannot launch"),
+                        subprocess.TimeoutExpired("tidy", MODULE.TIDY_TIMEOUT_SECONDS)):
+            with self.subTest(failure=failure):
+                launches = []
+                cancellation_at_flush = []
+
+                class ObservedOutput(io.StringIO):
+                    def flush(self):
+                        cancelled = getattr(MODULE._PROCESS_CONTEXT, "cancelled", None)
+                        if cancelled is not None:
+                            cancellation_at_flush.append(cancelled.is_set())
+                        super().flush()
+
+                def run_tool(command, **kwargs):
+                    if "-quiet" in command:
+                        launches.append(command[-1])
+                        if failure is not None:
+                            raise failure
+                    return original_run(command, **kwargs)
+
+                # A single worker makes every following analysis queued when
+                # the first one fails, independently of scheduler timing.
+                parallel = MODULE.parallel_map
+
+                def serial(function, items, jobs, **kwargs):
+                    return parallel(function, items, 1, **kwargs)
+
+                with patch.object(MODULE, "run_process", side_effect=run_tool), \
+                        patch.object(MODULE, "parallel_map", side_effect=serial), \
+                        patch.object(io, "StringIO", ObservedOutput):
+                    result = self.run_cache(sources)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(launches, [str(self.main)])
+                self.assertEqual(cancellation_at_flush, [True])
+                self.assertIn("analyzed 1, recorded 0, failed 1", result.stdout)
+                self.assertIn("clang-tidy failed on " + str(self.main), result.stderr)
+                self.assertEqual(list(self.cache.rglob("*.json")), [])
+
+    def test_analysis_flush_failure_preserves_cancellation_and_exception_without_records(self):
+        other = self.src / "other.cpp"
+        for source in (self.main, other):
+            source.write_text("int value; // TIDY_FAIL\n", encoding="utf-8")
+        self.entries = [self.entry([], source) for source in (self.main, other)]
+        self.write_db()
+        failure = OSError("diagnostic flush failed")
+        cancellation_at_flush = []
+        parallel = MODULE.parallel_map
+
+        class FailingOutput(io.StringIO):
+            def flush(self):
+                cancelled = getattr(MODULE._PROCESS_CONTEXT, "cancelled", None)
+                if cancelled is not None:
+                    cancellation_at_flush.append(cancelled.is_set())
+                    raise failure
+                super().flush()
+
+        def serial(function, items, jobs, **kwargs):
+            return parallel(function, items, 1, **kwargs)
+
+        with patch.object(MODULE, "parallel_map", side_effect=serial), \
+                patch.object(io, "StringIO", FailingOutput), self.assertRaises(OSError) as raised:
+            self.run_cache([self.main, other])
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(cancellation_at_flush, [True])
+        self.assertEqual(self.tidy_runs(), 1)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
 
     def test_second_identical_run_is_a_hit(self):
         self.assertRan(self.run_cache(), 1)
@@ -236,6 +1078,38 @@ class TidyCacheTests(unittest.TestCase):
         self.entries = [self.entry(["-DONE"]), self.entry(["-DTHREE"])]
         self.write_db()
         self.assertRan(self.run_cache(), 2)
+
+    def test_reordered_duplicate_commands_cannot_hide_failing_first_flags(self):
+        self.entries = [self.entry(["-DONE"]), self.entry(["-DTIDY_FAIL"])]
+        self.write_db()
+        self.assertRan(self.run_cache(), 1)
+        result = self.run_cache()
+        self.assertRan(result, 1)
+        self.assertIn("1 hit(s)", result.stdout)
+        self.entries.reverse()
+        self.write_db()
+        for runs in (2, 3):
+            result = self.run_cache()
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("0 hit(s)", result.stdout)
+            self.assertIn("fake diagnostic", result.stdout)
+            self.assertEqual(self.tidy_runs(), runs)
+            self.assertEqual(len(list(self.cache.rglob("*.json"))), 1)
+        self.entries.reverse()
+        self.write_db()
+        result = self.run_cache()
+        self.assertRan(result, 3)
+        self.assertIn("1 hit(s)", result.stdout)
+
+    def test_duplicate_order_changing_during_analysis_is_not_recorded(self):
+        self.entries = [self.entry(["-DONE"]), self.entry(["-DTWO"])]
+        self.write_db()
+        replacement = self.root / "replacement_db.json"
+        replacement.write_text(json.dumps(list(reversed(self.entries))), encoding="utf-8")
+        self.env["FAKE_TIDY_DB_FROM"] = str(replacement)
+        self.env["FAKE_TIDY_DB"] = str(self.build / "compile_commands.json")
+        self.assertRan(self.run_cache(), 1)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
 
     def test_corrupt_or_foreign_records_are_misses(self):
         self.assertRan(self.run_cache(), 1)
@@ -372,12 +1246,335 @@ class TidyCacheTests(unittest.TestCase):
         os.utime(record, (cutoff + 10, cutoff + 10))
         os.utime(stale / ("f" * 64 + ".json"), (cutoff - 100, cutoff - 100))
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "prune", "--cache-dir", str(self.cache), "--before", str(cutoff)],
+            [sys.executable, "-I", "-B", str(SCRIPT), "prune", "--cache-dir", str(self.cache), "--before", str(cutoff)],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(record.exists())
         self.assertFalse((stale / ("f" * 64 + ".json")).exists())
+
+
+class CompileCommandParserTests(unittest.TestCase):
+    def test_windows_compiler_paths_choose_windows_quoting(self):
+        for compiler in ("g++.exe", "clang++.exe", r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\Program Files\LLVM\bin\clang++.exe", r"C:\tools\g++"):
+            arguments = [compiler, "-c", r"C:\source dir\unit.cpp", '-DVALUE=a"b',
+                         r'-DPATH=C:\some\path\\', ""]
+            with self.subTest(compiler=compiler):
+                self.assertEqual(MODULE.entry_arguments({"directory": r"C:\build",
+                                                        "command": subprocess.list2cmdline(arguments)}),
+                                 arguments)
+
+    def test_windows_embedded_quotes_and_backslash_runs(self):
+        cases = [
+            (r'"a b" c', ["a b", "c"]),
+            (r'a\\\b d"e f"g h', [r'a\\\b', "de fg", "h"]),
+            (r'a\\\"b c d', [r'a\"b', "c", "d"]),
+            (r'a\\\\"b c" d e', [r'a\\b c', "d", "e"]),
+            ('"" "unterminated space', ["", "unterminated space"]),
+            ('"a"""b', ['a"b']),
+        ]
+        for tail, expected in cases:
+            with self.subTest(tail=tail):
+                self.assertEqual(MODULE.entry_arguments({"command_platform": "windows",
+                                                        "command": "g++.exe " + tail}),
+                                 ["g++.exe", *expected])
+
+    def test_posix_commands_keep_shell_quoting_and_escapes(self):
+        for compiler in ("/usr/bin/g++", "g++.exe", "clang++.exe", "/ucrt64/bin/g++.exe"):
+            with self.subTest(compiler=compiler):
+                self.assertEqual(MODULE.entry_arguments({"directory": "/build",
+                    "command": compiler + r''' '-DVALUE=a"b' -Iwith\ space -c 'unit file.cpp' '''}),
+                    [compiler, '-DVALUE=a"b', "-Iwith space", "-c", "unit file.cpp"])
+
+    def test_quoting_context_overrides_host_and_compiler_suffix(self):
+        with patch.object(MODULE.os, "name", "nt"):
+            self.assertEqual(MODULE.entry_arguments({"command": "g++.exe -c 'unit file.cpp'"}),
+                             ["g++.exe", "-c", "unit file.cpp"])
+            self.assertEqual(MODULE.entry_arguments({"directory": "/msys/build",
+                "command": "g++.exe -c 'unit file.cpp'"}), ["g++.exe", "-c", "unit file.cpp"])
+        for directory in (r"C:\build", r"\\server\share\build"):
+            self.assertEqual(MODULE.entry_arguments({"directory": directory,
+                "command": 'g++.exe -c "unit file.cpp"'}), ["g++.exe", "-c", "unit file.cpp"])
+        arguments = [r"C:\bin\g++.exe", "-c", "unit file.cpp"]
+        self.assertEqual(MODULE.entry_arguments({"directory": "/msys/build",
+            "command": shlex.join(arguments)}), arguments)
+        self.assertEqual(MODULE.entry_arguments({"directory": r"C:\build", "command_platform": "posix",
+            "command": "g++.exe -c 'unit file.cpp'"}), ["g++.exe", "-c", "unit file.cpp"])
+        self.assertEqual(MODULE.entry_arguments({"directory": "/build", "command_platform": "windows",
+            "command": subprocess.list2cmdline(arguments)}), arguments)
+
+    def test_native_driver_paths_without_directory_choose_windows_quoting(self):
+        for prefix in ([], [r"C:\tools\ccache.exe"], ["sccache.exe"]):
+            arguments = [*prefix, r"C:\bin\g++.exe", "-c", "unit file.cpp"]
+            self.assertEqual(MODULE.entry_arguments({"command": subprocess.list2cmdline(arguments)}),
+                             arguments)
+
+    def test_native_working_directory_preserves_posix_producer_quoting(self):
+        for directory in (r"C:\build with spaces", r"\\server\share\build"):
+            for compiler in ("/usr/bin/g++", "g++.exe", "g++-14", "clang++-18",
+                             r"C:\msys64\ucrt64\bin\g++.exe"):
+                arguments = [compiler, "-I", r"C:\headers with spaces", "-c",
+                             r"C:\changed_tus\unit file.cpp", '-DVALUE=a"b', "-DNAME=O'Brien"]
+                with self.subTest(directory=directory, compiler=compiler):
+                    self.assertEqual(MODULE.entry_arguments({"directory": directory,
+                        "command": shlex.join(arguments)}), arguments)
+
+    def test_native_quotes_can_contain_literal_apostrophes(self):
+        arguments = [r"C:\O'Brien\g++.exe", "-c", r"C:\unit file.cpp",
+                     "-DNAME=one 'two' three"]
+        for directory in (r"C:\build", r"\\server\share\build"):
+            with self.subTest(directory=directory):
+                self.assertEqual(MODULE.entry_arguments({"directory": directory,
+                    "command": subprocess.list2cmdline(arguments)}), arguments)
+
+    def test_arguments_array_is_never_reparsed(self):
+        arguments = [r"C:\bin\g++.exe", '"quoted value"', r"back\slash", ""]
+        self.assertEqual(MODULE.entry_arguments({"arguments": arguments, "command": "ignored"}),
+                         arguments)
+
+
+class ToolIdentityTests(unittest.TestCase):
+    def test_dependency_hashing_rejects_reparse_paths_and_hashes_safety_code(self):
+        with patch.object(MODULE._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(MODULE._PATH_SAFETY, "is_reparse_point", return_value=True):
+            with self.assertRaisesRegex(MODULE.CacheMiss, "reparse point"):
+                MODULE.KeyBuilder._hash_dependency(str(self.tool))
+            with self.assertRaisesRegex(OSError, "reparse point"):
+                MODULE.sha256_file(str(self.tool))
+        safety_content = "before"
+
+        def content(path):
+            return safety_content if path == MODULE._PATH_SPEC.origin else "unchanged"
+
+        with patch.object(MODULE, "sha256_file", side_effect=content):
+            before = MODULE.combined_tool_hash([])
+            safety_content = "after"
+            self.assertNotEqual(MODULE.combined_tool_hash([]), before)
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="tool-identity-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.tool = self.root / "compiler"
+        self.tick = 10_000_000_000
+        self.write_tool(b"old tool")
+        self.tools = MODULE.ToolIdentity()
+
+    def write_tool(self, content):
+        self.tool.write_bytes(content)
+        os.utime(self.tool, ns=(self.tick, self.tick))
+
+    def test_same_tick_rewrite_is_detected_on_delayed_reuse(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000) as clock:
+            before = self.tools.describe(str(self.tool), str(self.root))
+            self.write_tool(b"new tool")
+            clock.return_value = self.tick + 2_000_000_001
+            after = self.tools.describe(str(self.tool), str(self.root))
+            self.assertNotEqual(before, after)
+            self.assertIn(MODULE.sha256_bytes(b"new tool"), after)
+            self.assertEqual(version.call_count, 2)
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), after)
+            self.assertEqual(version.call_count, 2)
+
+    def test_identity_is_revalidated_until_tick_closes(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
+                patch.object(MODULE, "sha256_file", wraps=MODULE.sha256_file) as content, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000) as clock:
+            before = self.tools.describe(str(self.tool), str(self.root))
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(content.call_count, 2)
+            self.assertEqual(version.call_count, 1)
+            clock.return_value = self.tick + 2_000_000_000
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(content.call_count, 3)
+            self.assertEqual(version.call_count, 1)
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(content.call_count, 3)
+            self.assertEqual(version.call_count, 1)
+
+    def test_identical_content_with_new_fingerprint_reuses_version(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\r\n", b"")
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
+                patch.object(MODULE, "sha256_file", wraps=MODULE.sha256_file) as content:
+            before = self.tools.describe(str(self.tool), str(self.root))
+            # Windows file times have 100ns resolution: a 1ns change rounds
+            # back to the old fingerprint and correctly takes the cache hit.
+            os.utime(self.tool, ns=(self.tick + 1_000_000_000, self.tick + 1_000_000_000))
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(content.call_count, 2)
+            self.assertEqual(version.call_count, 1)
+
+    def test_windows_tool_spellings_share_identity_in_command_directory(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        info = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
+                               st_size=8, st_mtime_ns=self.tick)
+        with patch.object(MODULE.os, "path", ntpath), \
+                patch.object(MODULE.os, "sep", "\\"), \
+                patch.object(ntpath, "isfile", return_value=True), \
+                patch.object(ntpath, "realpath", side_effect=ntpath.normpath), \
+                patch.object(MODULE.os, "stat", return_value=info), \
+                patch.object(MODULE, "sha256_file", return_value="content") as content, \
+                patch.object(MODULE, "run_process", return_value=result) as version, \
+                patch.object(MODULE.shutil, "which") as which, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+            before = self.tools.describe("../bin/CLANG++.EXE", r"C:\toolchain\build")
+            for executable in (r"..\bin\clang++.exe", "C:/toolchain/bin/clang++.exe"):
+                self.assertEqual(self.tools.describe(executable, r"C:\toolchain\build"), before)
+            which.assert_not_called()
+            self.assertEqual(content.call_count, 1)
+            self.assertEqual(version.call_count, 1)
+            self.assertEqual(version.call_args.args[0], [r"c:\toolchain\bin\clang++.exe", "--version"])
+
+    def concurrent_descriptions(self, failure=None):
+        started, release, joined = threading.Event(), threading.Event(), threading.Event()
+        result_lock = threading.Lock()
+        waiters, outcomes = [], []
+        original_hash = MODULE.sha256_file
+
+        class ObservedFuture(concurrent.futures.Future):
+            def result(self, timeout=None):
+                with result_lock:
+                    waiters.append(self)
+                    if len(waiters) == 3:
+                        joined.set()
+                return super().result(timeout)
+
+        def hash_tool(path):
+            started.set()
+            if not release.wait(5):
+                raise OSError("identity check did not finish")
+            if failure is not None:
+                raise failure
+            return original_hash(path)
+
+        def describe():
+            try:
+                outcome = self.tools.describe(str(self.tool), str(self.root))
+            except MODULE.CacheMiss as error:
+                outcome = error
+            with result_lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=describe) for _ in range(4)]
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE.concurrent.futures, "Future", ObservedFuture), \
+                patch.object(MODULE, "sha256_file", side_effect=hash_tool) as content, \
+                patch.object(MODULE, "run_process", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
+            threads[0].start()
+            try:
+                self.assertTrue(started.wait(5))
+                for thread in threads[1:]:
+                    thread.start()
+                self.assertTrue(joined.wait(5))
+            finally:
+                release.set()
+                for thread in threads:
+                    if thread.ident is not None:
+                        thread.join(5)
+                        self.assertFalse(thread.is_alive())
+            self.assertEqual(content.call_count, 1)
+            self.assertEqual(version.call_count, 0 if failure is not None else 1)
+        self.assertEqual(len(outcomes), 4)
+        self.assertEqual(self.tools._pending, {})
+        return outcomes
+
+    def test_concurrent_identity_checks_share_hash_and_version(self):
+        outcomes = self.concurrent_descriptions()
+        self.assertTrue(all(isinstance(outcome, str) for outcome in outcomes))
+        self.assertEqual(len(set(outcomes)), 1)
+
+    def test_failed_concurrent_identity_check_refuses_all_waiters_and_retries(self):
+        outcomes = self.concurrent_descriptions(PermissionError("unreadable executable"))
+        self.assertTrue(all(isinstance(outcome, MODULE.CacheMiss) for outcome in outcomes))
+        self.assertTrue(all("unreadable executable" in str(outcome) for outcome in outcomes))
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE, "run_process", return_value=result) as version:
+            self.assertIn(MODULE.sha256_bytes(b"old tool"),
+                          self.tools.describe(str(self.tool), str(self.root)))
+            self.assertEqual(version.call_count, 1)
+
+    def test_revalidation_failures_cannot_reuse_stale_identity(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        for failure in (PermissionError("unreadable"), OSError("partial read")):
+            with self.subTest(failure=failure), \
+                    patch.object(MODULE, "run_process", return_value=result) as version, \
+                    patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
+                self.tools = MODULE.ToolIdentity()
+                before = self.tools.describe(str(self.tool), str(self.root))
+                with patch.object(MODULE, "sha256_file", side_effect=failure), \
+                        self.assertRaises(MODULE.CacheMiss):
+                    self.tools.describe(str(self.tool), str(self.root))
+                self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+                self.assertEqual(version.call_count, 1)
+
+    def test_version_failures_are_not_cached_and_can_retry(self):
+        success = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        failures = (subprocess.TimeoutExpired("tool", 60), OSError("cannot launch"),
+                    subprocess.CompletedProcess([], 1, b"partial version", b"error"),
+                    subprocess.CompletedProcess([], 0, b"", b""))
+        for failure in failures:
+            with self.subTest(failure=failure), \
+                    patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
+                self.tools = MODULE.ToolIdentity()
+                self.write_tool(b"old tool")
+                with patch.object(MODULE, "run_process", return_value=success):
+                    before = self.tools.describe(str(self.tool), str(self.root))
+                self.write_tool(b"new tool")
+                with patch.object(MODULE, "run_process", side_effect=[failure, success]) as version:
+                    with self.assertRaises(MODULE.CacheMiss):
+                        self.tools.describe(str(self.tool), str(self.root))
+                    after = self.tools.describe(str(self.tool), str(self.root))
+                    self.assertNotEqual(after, before)
+                    self.assertIn(MODULE.sha256_bytes(b"new tool"), after)
+                    self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), after)
+                    self.assertEqual(version.call_count, 2)
+
+    def test_identity_observed_after_tick_closes_uses_fingerprint(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+            before = self.tools.describe(str(self.tool), str(self.root))
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(version.call_count, 1)
+
+    def test_device_and_inode_changes_invalidate_trusted_identity(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        for field in ("st_dev", "st_ino"):
+            with self.subTest(field=field):
+                tools = MODULE.ToolIdentity()
+                self.write_tool(b"old tool")
+                info = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
+                                       st_size=8, st_mtime_ns=self.tick)
+                with patch.object(MODULE.os, "stat", return_value=info), \
+                        patch.object(MODULE, "run_process", return_value=result) as version, \
+                        patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+                    before = tools.describe(str(self.tool), str(self.root))
+                    self.write_tool(b"new tool")
+                    setattr(info, field, 2)
+                    after = tools.describe(str(self.tool), str(self.root))
+                    self.assertNotEqual(before, after)
+                    self.assertIn(MODULE.sha256_bytes(b"new tool"), after)
+                    self.assertEqual(version.call_count, 2)
+
+    def test_kind_change_after_path_check_cannot_reuse_trusted_identity(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        info = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
+                               st_size=8, st_mtime_ns=self.tick)
+        with patch.object(MODULE.os.path, "isfile", return_value=True), \
+                patch.object(MODULE.os, "stat", return_value=info), \
+                patch.object(MODULE, "run_process", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+            self.tools.describe(str(self.tool), str(self.root))
+            # Model a replacement between the path check and the stat call.
+            info.st_mode = stat.S_IFDIR
+            with self.assertRaisesRegex(MODULE.CacheMiss, "not a regular file"):
+                self.tools.describe(str(self.tool), str(self.root))
+            self.assertEqual(version.call_count, 1)
 
 
 class TidyCachePathTests(unittest.TestCase):

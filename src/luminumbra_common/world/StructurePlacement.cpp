@@ -394,7 +394,7 @@ std::vector<StructureVoxel> AssembleStructure(const StructureTemplatePool& pool,
 
     // Deterministic root piece.
     const int root_index = rng.next_int(static_cast<int>(pool.pieces.size()));
-    const StructurePiece& root = pool.pieces[root_index];
+    const StructurePiece& root = pool.pieces[static_cast<std::size_t>(root_index)];
     StampPiece(root, site.origin, voxels);
 
     // Jigsaw: for each socket on the root, deterministically pick a candidate
@@ -404,7 +404,7 @@ std::vector<StructureVoxel> AssembleStructure(const StructureTemplatePool& pool,
     for (const StructureSocket& root_socket : root.sockets) {
         // Choose a piece that has at least one socket to join.
         const int candidate_index = rng.next_int(static_cast<int>(pool.pieces.size()));
-        const StructurePiece& candidate = pool.pieces[candidate_index];
+        const StructurePiece& candidate = pool.pieces[static_cast<std::size_t>(candidate_index)];
         if (candidate.sockets.empty()) {
             continue;
         }

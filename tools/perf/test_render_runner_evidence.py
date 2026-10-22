@@ -563,5 +563,184 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
 
 
+class RenderRunnerRegistrationTests(unittest.TestCase):
+    def test_real_client_registrations_share_native_graphics_admission(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / 'test/CMakeLists.txt').read_text(encoding='utf-8')
+        # Evaluate only the actual registration lists/loop, never the native
+        # target definitions or engine project. Discovery records properties on
+        # sentinel tests instead of launching GoogleTest executables.
+        start = source.index('set(LUMINUMBRA_GTEST_TARGETS\n')
+        end = source.index('\nendforeach()', source.index('foreach(_lum_gtest_target'))
+        native = source[start:end + len('\nendforeach()')]
+        integrations = source[source.index('add_test(NAME RenderBenchmarkAssets'):]
+        manual = source[source.index('add_test(NAME ShieldRtTracerProfileGpu'):
+                        source.index('#  per-flag fixtures')]
+        cpu = source[source.index('add_test(NAME ShieldRtSpike'):
+                     source.index('# Simulation telemetry captures')]
+        gpu_cases = {
+            'ShieldRtTracerProfileGpu': 'shieldrt_tracer_profile_gpu',
+            'ShieldRtFarFieldParityGpu': 'shieldrt_far_field_parity_gpu',
+            'ShieldRtFarFieldGbufferGpu': 'shieldrt_far_field_gbuffer_gpu',
+            'ShieldRtFarFieldMaxMipGpu': 'shieldrt_far_field_maxmip_gpu',
+        }
+        cases = {
+            'RenderTraversalIntegrated': 'test_traversal_twice',
+            'RenderBenchmarkImplicitCreationFailure': 'test_implicit_creation_failure',
+            'RenderBenchmarkOverrideCollection': 'test_gl_debug_override_collection',
+            'RenderTraversalEmbeddedPresetRefusal': 'test_embedded_preset_refusal',
+        }
+        with tempfile.TemporaryDirectory(prefix='render registration ') as temporary:
+            fixture = Path(temporary)
+            for optional in ('OFF', 'ON'):
+                with self.subTest(optional_graphics=optional):
+                    project = fixture / optional
+                    project.mkdir()
+                    build = project / 'build with spaces'
+                    # Five inert imported targets; metadata inspection never executes them.
+                    targets = (*gpu_cases.values(), 'shieldrt_spike_bench')
+                    executables = {}
+                    imported = []
+                    for target in targets:
+                        executable = project / (target + ' sentinel.exe')
+                        executable.write_text('metadata only\n', encoding='utf-8')
+                        executable.chmod(0o700)
+                        executables[target] = executable.as_posix()
+                        imported.append(
+                            f'add_executable({target} IMPORTED)\n'
+                            f'set_target_properties({target} PROPERTIES '
+                            f'IMPORTED_LOCATION [=[{executable.as_posix()}]=])')
+                    imported_targets = '\n'.join(imported)
+                    cmake = f"""cmake_minimum_required(VERSION 3.20)
+project(RenderRegistration LANGUAGES NONE)
+enable_testing()
+set(CMAKE_SOURCE_DIR [=[{root.as_posix()}]=])
+set(Python3_EXECUTABLE [=[{Path(sys.executable).as_posix()}]=])
+add_executable(luminumbra_client_app IMPORTED)
+set_target_properties(luminumbra_client_app PROPERTIES
+    IMPORTED_LOCATION [=[{Path(sys.executable).as_posix()}]=])
+function(gtest_discover_tests target)
+    cmake_parse_arguments(discovery "NO_PRETTY_VALUES" "DISCOVERY_TIMEOUT;TEST_LIST" "PROPERTIES" ${{ARGN}})
+    if(NOT discovery_DISCOVERY_TIMEOUT EQUAL 120 OR discovery_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "Unexpected discovery arguments")
+    endif()
+    add_test(NAME native.${{target}} COMMAND "${{CMAKE_COMMAND}}" -E false)
+    if(discovery_TEST_LIST)
+        set(${{discovery_TEST_LIST}} native.${{target}} PARENT_SCOPE)
+    endif()
+    if(discovery_PROPERTIES)
+        set_tests_properties(native.${{target}} PROPERTIES ${{discovery_PROPERTIES}})
+    endif()
+endfunction()
+set(LUMINUMBRA_ENABLE_DILIGENT {optional})
+set(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE {optional})
+{native}
+file(WRITE "${{CMAKE_BINARY_DIR}}/gl-targets.txt" "${{LUMINUMBRA_GL_GTEST_TARGETS}}")
+{imported_targets}
+{manual}
+{cpu}
+{integrations}
+"""
+                    (project / 'CMakeLists.txt').write_text(cmake, encoding='utf-8')
+                    subprocess.run(['cmake', '-S', str(project), '-B', str(build),
+                                    '-G', 'Ninja'], check=True, capture_output=True, text=True)
+                    result = subprocess.run(
+                        ['ctest', '--test-dir', str(build), '--show-only=json-v1'],
+                        check=True, capture_output=True, text=True)
+                    tests = {test['name']: test for test in json.loads(result.stdout)['tests']}
+                    properties = {
+                        name: {item['name']: item['value'] for item in test['properties']}
+                        for name, test in tests.items()
+                    }
+                    self.assertEqual({name for name in tests if not name.startswith('native.')},
+                                     set(cases) | set(gpu_cases) | {
+                                          'RenderBenchmarkAssets', 'ShieldRtSpike'})
+                    gl_targets = (build / 'gl-targets.txt').read_text(encoding='utf-8').split(';')
+                    self.assertGreaterEqual(len(gl_targets), 17)
+                    self.assertIn('render_smoke_test', gl_targets)
+                    optional_targets = {
+                        'rhi_device_bringup_test', 'rhi_pilot_flip_test',
+                        'pilot_shader_reflection_test',
+                    }
+                    required_gl_targets = {
+                        'render_smoke_test', 'render_capture_test',
+                        'async_readback_ring_test', 'dual_backend_flip_test',
+                        'registry_ownership_test', 'environment_brdf_test',
+                        'pass_context_test', 'reversed_z_depth_test',
+                        'shader_reflection_test', 'waterfall_visual_test',
+                        'particle_determinism_test', 'far_lod_worker_test',
+                        'ui_smoke_test', 'ui_page_load_test', 'worldgen_preview_test',
+                        'runtime_world_visual_validation_test',
+                    }
+                    # Membership includes optional targets even when discovery omits them.
+                    expected_gl = required_gl_targets | optional_targets
+                    self.assertCountEqual(gl_targets, expected_gl)
+                    expected_registered_gl = {'OFF': required_gl_targets, 'ON': expected_gl}[optional]
+                    self.assertEqual({name[7:] for name in tests
+                                      if name.startswith('native.') and name[7:] in expected_gl},
+                                     expected_registered_gl)
+                    self.assertEqual({name[7:] for name, props in properties.items()
+                                      if name.startswith('native.') and
+                                      props.get('RESOURCE_LOCK') == ['luminumbra_gl_context']},
+                                     expected_registered_gl)
+                    active_gl = set(gl_targets)
+                    if optional == 'OFF':
+                        active_gl -= optional_targets
+                    for target in sorted(active_gl):
+                        name = 'native.' + target
+                        self.assertIn(name, tests)
+                        self.assertEqual(properties[name].get('RESOURCE_LOCK'),
+                                         ['luminumbra_gl_context'], name)
+                    self.assertNotIn('RESOURCE_LOCK', properties['native.common_tests'])
+                    for target in ('rhi_device_bringup_test', 'rhi_pilot_flip_test',
+                                   'pilot_shader_reflection_test'):
+                        self.assertEqual('native.' + target in tests, optional == 'ON')
+                    for name, method in cases.items():
+                        with self.subTest(test=name):
+                            command = tests[name]['command']
+                            self.assertEqual(Path(command[0]).resolve(), Path(sys.executable).resolve())
+                            self.assertEqual(Path(command[1]), root / 'tools/perf/test_render_runner.py')
+                            self.assertEqual(command[2], '--client')
+                            self.assertEqual(Path(command[3]).resolve(), Path(sys.executable).resolve())
+                            self.assertEqual(command[4:], [
+                                '--source', root.as_posix(),
+                                '--assets', (build / 'test-artifacts/render-synthetic-content').as_posix(),
+                                '--artifacts', (build / 'test-artifacts/render-runner').as_posix(),
+                                'RenderRunnerTests.' + method])
+                            self.assertEqual(properties[name]['TIMEOUT'], 600)
+                            self.assertEqual(properties[name]['FIXTURES_REQUIRED'],
+                                             ['render_benchmark_assets'])
+                            self.assertEqual(properties[name].get('RESOURCE_LOCK'),
+                                             properties['native.render_smoke_test']['RESOURCE_LOCK'])
+                            for forbidden in ('DISABLED', 'SKIP_RETURN_CODE', 'SKIP_REGULAR_EXPRESSION',
+                                              'LABELS', 'RUN_SERIAL'):
+                                self.assertNotIn(forbidden, properties[name])
+                    for name, target in gpu_cases.items():
+                        with self.subTest(manual_gpu=name):
+                            self.assertEqual(tests[name]['command'], [executables[target]])
+                            self.assertEqual(properties[name]['TIMEOUT'], 600)
+                            self.assertEqual(properties[name]['LABELS'], ['gpu', 'manual', 'perf'])
+                            self.assertEqual(properties[name].get('RESOURCE_LOCK'),
+                                             properties['native.render_smoke_test']['RESOURCE_LOCK'])
+                            for forbidden in ('DISABLED', 'SKIP_RETURN_CODE', 'SKIP_REGULAR_EXPRESSION',
+                                              'FIXTURES_REQUIRED', 'RUN_SERIAL'):
+                                self.assertNotIn(forbidden, properties[name])
+                    self.assertEqual(tests['ShieldRtSpike']['command'],
+                                     [executables['shieldrt_spike_bench']])
+                    self.assertEqual(properties['ShieldRtSpike']['TIMEOUT'], 600)
+                    self.assertEqual(properties['ShieldRtSpike']['LABELS'], ['manual', 'perf', 'spike'])
+                    self.assertNotIn('RESOURCE_LOCK', properties['ShieldRtSpike'])
+                    assets = tests['RenderBenchmarkAssets']['command']
+                    self.assertEqual(Path(assets[0]).resolve(), Path(sys.executable).resolve())
+                    self.assertEqual(Path(assets[1]), root / 'tools/perf/synthetic_render_content.py')
+                    self.assertEqual(assets[2:], [
+                        '--root', (build / 'test-artifacts/render-synthetic-content').as_posix()])
+                    self.assertEqual(properties['RenderBenchmarkAssets']['FIXTURES_SETUP'],
+                                     ['render_benchmark_assets'])
+                    self.assertEqual(properties['RenderBenchmarkAssets']['TIMEOUT'], 30)
+                    cache = (build / 'CMakeCache.txt').read_text(encoding='utf-8')
+                    self.assertNotRegex(cache, r'(?m)^CMAKE_(?:C|CXX)_COMPILER:')
+
+
 if __name__ == '__main__':
     unittest.main(argv=[__file__, *remaining])

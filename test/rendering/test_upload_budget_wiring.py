@@ -232,9 +232,9 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("m_storage_bytes = 0", destroy)
         draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
         self.assertIn("m_chunk_geometry_pool.mark_submitted(", draw)
-        self.assertLess(draw.index("glMultiDrawElementsIndirect("),
+        self.assertLess(compact(draw).index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
                         draw.index("m_chunk_geometry_pool.mark_submitted("))
-        self.assertEqual(self.pipeline.count("glMultiDrawElementsIndirect("), 1)
+        self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 1)
         probe = read(ROOT / "test/rendering/render_smoke_test.cpp")
         self.assertIn("glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);\n"
                       "        pool_.mark_submitted(allocation.block_index);", probe)
@@ -431,7 +431,7 @@ class UploadBudgetWiring(unittest.TestCase):
         helpers = read(RENDERING / "PixelIo.h")
         image = compact(body(pixels, "bool WritePixelBufferPpm("))
         self.assertIn("!CapturePixelBytes(width, height, 3, bytes) || pixels.size() != bytes", image)
-        self.assertIn("return CloseCaptureFile(output);", image)
+        self.assertIn("if (!CloseCaptureFile(output))", image)
         flush = compact(body(helpers, "bool FlushCaptureStream("))
         self.assertEqual(flush, "output.flush(); return static_cast<bool>(output);")
         close = compact(body(helpers, "bool CloseCaptureFile("))

@@ -317,13 +317,13 @@ protected:
                    const glm::vec3& look_at_target = {-248, 0, -248}) {
         shader.use();
         std::array<glm::vec4, 256 * 4> lut{};
-        for (int id = 0; id < 256; ++id)
+        for (std::size_t id = 0; id < 256; ++id)
             lut[id] = {0, 1, 1, 0};
         int unit = 0;
         for (const auto& sampler : shader.Reflected().samplers) {
-            glActiveTexture(GL_TEXTURE0 + unit);
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
             const bool material = sampler.name == "u_materialLUT";
-            const auto texture_target =
+            const GLenum texture_target =
                 sampler.type == GL_SAMPLER_2D_ARRAY ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
             Texture(texture_target,
                     GL_RGBA32F,

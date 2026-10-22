@@ -165,8 +165,9 @@ bool RunSceneSurvey(GLFWwindow* window,
     {
         std::string top_biomes;
         for (int i = 0; i < 256; ++i)
-            if (biome_hist[i] > 0)
-                top_biomes += " " + std::to_string(i) + ":" + std::to_string(biome_hist[i]);
+            if (biome_hist[static_cast<std::size_t>(i)] > 0)
+                top_biomes += " " + std::to_string(i) + ":" +
+                              std::to_string(biome_hist[static_cast<std::size_t>(i)]);
         LUMINUMBRA_CORE_INFO("SceneSurvey world scan: elev [{:.0f}..{:.0f}], water_cells={}, "
                              "biomes_enabled={}, biome_hist={}",
                              elev_min,
@@ -184,19 +185,22 @@ bool RunSceneSurvey(GLFWwindow* window,
         });
         const int n = std::min<int>(2, static_cast<int>(sites.size()));
         for (int i = 0; i < n; ++i) {
-            const glm::vec3 look = (sites[i].crest + sites[i].foot) * 0.5f;
-            targets.push_back(frame_target("waterfall_" + std::to_string(i),
-                                           look,
-                                           16.0f + sites[i].drop_height * 1.1f,
-                                           sites[i].drop_height * 0.45f + 4.0f,
-                                           kDayTod));
+            const glm::vec3 look = (sites[static_cast<std::size_t>(i)].crest +
+                                    sites[static_cast<std::size_t>(i)].foot) *
+                                   0.5f;
+            targets.push_back(
+                frame_target("waterfall_" + std::to_string(i),
+                             look,
+                             16.0f + sites[static_cast<std::size_t>(i)].drop_height * 1.1f,
+                             sites[static_cast<std::size_t>(i)].drop_height * 0.45f + 4.0f,
+                             kDayTod));
             LUMINUMBRA_CORE_INFO(
                 "SceneSurvey waterfall {}: drop {:.1f}m at ({:.0f},{:.0f}) lake_outlet={}",
                 i,
-                sites[i].drop_height,
-                sites[i].crest.x,
-                sites[i].crest.z,
-                sites[i].lake_outlet);
+                sites[static_cast<std::size_t>(i)].drop_height,
+                sites[static_cast<std::size_t>(i)].crest.x,
+                sites[static_cast<std::size_t>(i)].crest.z,
+                sites[static_cast<std::size_t>(i)].lake_outlet);
         }
         if (n == 0)
             LUMINUMBRA_CORE_INFO("SceneSurvey: NO waterfall sites detected in this world");
