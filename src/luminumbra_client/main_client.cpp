@@ -5816,6 +5816,26 @@ int main(int argc, char* argv[]) {
                     {"estimated_vram_bytes", resources.estimated_vram_bytes},
                     {"static_model_texture_bytes", resources.static_model_texture_bytes},
                     {"tree_impostor_texture_bytes", resources.tree_impostor_texture_bytes}};
+                const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
+                j["streaming"]["terrain_uploads_pending"] = uploads.terrain_uploads_deferred;
+                j["streaming"]["water_uploads_pending"] = uploads.water_uploads_deferred;
+                j["streaming"]["render_uploads_settled"] = renderPipeline.render_uploads_settled();
+                const auto upload_observation = [](const auto& work, const auto& limits) {
+                    return nlohmann::json{{"attempts", work.attempts},
+                                          {"adopted", work.adopted},
+                                          {"bytes", work.bytes},
+                                          {"byte_overshoot", work.byte_overshoot},
+                                          {"elapsed_ms", work.elapsed_ms},
+                                          {"overshoot_ms", work.overshoot_ms},
+                                          {"byte_limit", limits.bytes},
+                                          {"count_limit", limits.count},
+                                          {"progress_floor", limits.progress},
+                                          {"time_limit_ms", limits.milliseconds}};
+                };
+                j["streaming"]["terrain_upload_budget"] = upload_observation(
+                    uploads.terrain_budget, Luminumbra::Rendering::kTerrainUploadLimits);
+                j["streaming"]["water_upload_budget"] = upload_observation(
+                    uploads.water_budget, Luminumbra::Rendering::kWaterUploadLimits);
                 if (g_camera && gameSession && gameSession->GetWorldSystem()) {
                     const auto* world = gameSession->GetWorldSystem();
                     const auto coords = world->world_to_chunk_coords(g_camera->Position);
@@ -5831,30 +5851,9 @@ int main(int argc, char* argv[]) {
                                          {"mesh_indices", chunk ? chunk->mesh_indices.size() : 0},
                                          {"lod", chunk ? chunk->current_lod.load() : -1}};
                     const auto& streaming = world->get_last_streaming_budget_stats();
-                    j["streaming"] = {{"generation_pending", streaming.deferred_generation},
-                                      {"meshing_pending", streaming.deferred_meshing},
-                                      {"terrain_visible_chunks", s.terrain_visible_chunks}};
-                    const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
-                    j["streaming"]["terrain_uploads_pending"] = uploads.terrain_uploads_deferred;
-                    j["streaming"]["water_uploads_pending"] = uploads.water_uploads_deferred;
-                    j["streaming"]["render_uploads_settled"] =
-                        renderPipeline.render_uploads_settled();
-                    const auto upload_observation = [](const auto& work, const auto& limits) {
-                        return nlohmann::json{{"attempts", work.attempts},
-                                              {"adopted", work.adopted},
-                                              {"bytes", work.bytes},
-                                              {"byte_overshoot", work.byte_overshoot},
-                                              {"elapsed_ms", work.elapsed_ms},
-                                              {"overshoot_ms", work.overshoot_ms},
-                                              {"byte_limit", limits.bytes},
-                                              {"count_limit", limits.count},
-                                              {"progress_floor", limits.progress},
-                                              {"time_limit_ms", limits.milliseconds}};
-                    };
-                    j["streaming"]["terrain_upload_budget"] = upload_observation(
-                        uploads.terrain_budget, Luminumbra::Rendering::kTerrainUploadLimits);
-                    j["streaming"]["water_upload_budget"] = upload_observation(
-                        uploads.water_budget, Luminumbra::Rendering::kWaterUploadLimits);
+                    j["streaming"].update({{"generation_pending", streaming.deferred_generation},
+                                           {"meshing_pending", streaming.deferred_meshing},
+                                           {"terrain_visible_chunks", s.terrain_visible_chunks}});
                     j["streaming"]["terrain_draws"] = s.terrain_draws;
                     j["camera"]["yaw"] = g_camera->Yaw;
                     j["camera"]["pitch"] = g_camera->Pitch;

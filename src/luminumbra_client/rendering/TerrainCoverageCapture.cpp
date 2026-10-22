@@ -169,6 +169,27 @@ nlohmann::json RenderPipeline::terrain_coverage_diagnostics(bool include_live_ch
                              {"complete", ownership.complete()},
                              {"cells", ownership.cells().size()},
                              {"limit", kFarWorldLiveCellLimit}};
+    const auto& uploads = get_last_mesh_upload_stats();
+    const auto upload_work = [](const UploadWorkStats& work) {
+        return Json{{"attempts", work.attempts},
+                    {"adopted", work.adopted},
+                    {"bytes", work.bytes},
+                    {"byte_overshoot", work.byte_overshoot},
+                    {"elapsed_ms", work.elapsed_ms},
+                    {"overshoot_ms", work.overshoot_ms}};
+    };
+    out["live"]["render_uploads_settled"] = render_uploads_settled();
+    out["live"]["terrain_upload_budget"] = upload_work(uploads.terrain_budget);
+    out["live"]["water_upload_budget"] = upload_work(uploads.water_budget);
+    out["live"]["streaming"] = {{"terrain_uploads_pending", uploads.terrain_uploads_deferred},
+                                {"water_uploads_pending", uploads.water_uploads_deferred}};
+    if (const auto* world = m_frame_prepared.world_system; m_frame_prepared.valid && world) {
+        const auto& s = world->get_last_streaming_budget_stats();
+        out["live"]["streaming"].update({{"requested_radius_chunks", s.requested_render_radius},
+                                         {"target_radius_chunks", s.target_render_radius},
+                                         {"generation_pending", s.deferred_generation},
+                                         {"meshing_pending", s.deferred_meshing}});
+    }
     if (!include_live_chunks || !m_frame_prepared.valid)
         return out;
     // Bound output and sort independently of unordered-map/culler iteration.
@@ -216,32 +237,11 @@ nlohmann::json RenderPipeline::terrain_coverage_diagnostics(bool include_live_ch
         }
         rows.push_back(std::move(row));
     }
-    out["live"] = {{"submit_observed", m_terrain_coverage_live_submit_observed},
-                   {"snapshot_count", snapshots.size()},
-                   {"truncated", snapshots.size() > limit},
-                   {"scope", "prepared_renderable_snapshots_not_all_requested_chunks"},
-                   {"chunks", std::move(rows)}};
-    const auto& uploads = get_last_mesh_upload_stats();
-    const auto upload_work = [](const UploadWorkStats& work) {
-        return Json{{"attempts", work.attempts},
-                    {"adopted", work.adopted},
-                    {"bytes", work.bytes},
-                    {"byte_overshoot", work.byte_overshoot},
-                    {"elapsed_ms", work.elapsed_ms},
-                    {"overshoot_ms", work.overshoot_ms}};
-    };
-    out["live"]["render_uploads_settled"] = render_uploads_settled();
-    out["live"]["terrain_upload_budget"] = upload_work(uploads.terrain_budget);
-    out["live"]["water_upload_budget"] = upload_work(uploads.water_budget);
-    if (const auto* world = m_frame_prepared.world_system) {
-        const auto& s = world->get_last_streaming_budget_stats();
-        out["live"]["streaming"] = {{"requested_radius_chunks", s.requested_render_radius},
-                                    {"target_radius_chunks", s.target_render_radius},
-                                    {"generation_pending", s.deferred_generation},
-                                    {"meshing_pending", s.deferred_meshing},
-                                    {"terrain_uploads_pending", uploads.terrain_uploads_deferred},
-                                    {"water_uploads_pending", uploads.water_uploads_deferred}};
-    }
+    out["live"].update({{"submit_observed", m_terrain_coverage_live_submit_observed},
+                        {"snapshot_count", snapshots.size()},
+                        {"truncated", snapshots.size() > limit},
+                        {"scope", "prepared_renderable_snapshots_not_all_requested_chunks"},
+                        {"chunks", std::move(rows)}});
     return out;
 }
 

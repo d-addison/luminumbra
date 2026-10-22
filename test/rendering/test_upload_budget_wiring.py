@@ -25,6 +25,15 @@ def body(text, signature):
     return text[start + 1:end - 1]
 
 
+def brace_depth(text, position):
+    # Ignore JSON keys, string contents and comments when checking conditional scope.
+    masked = re.sub(
+        r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+        lambda match: " " * len(match.group()), text, flags=re.S,
+    )
+    return masked[:position].count("{") - masked[:position].count("}")
+
+
 class UploadBudgetWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -291,6 +300,104 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertIn("settle_uploads(", source)
             self.assertIn("pending.terrain_uploads_deferred", source)
             self.assertIn("pending.water_uploads_deferred", source)
+
+    def test_default_coverage_emits_every_upload_field_before_chunk_detail_return(self):
+        diagnostics = body(read(RENDERING / "TerrainCoverageCapture.cpp"),
+                           "nlohmann::json RenderPipeline::terrain_coverage_diagnostics(")
+        guard = "if (!include_live_chunks || !m_frame_prepared.valid)"
+        prefix, detail = diagnostics.split(guard, 1)
+        condition = guard[len("if ("):-1].replace("!", "not ").replace("||", " or ")
+        for include_live_chunks in (False, True):
+            for valid in (False, True):
+                with self.subTest(include_live_chunks=include_live_chunks, valid=valid):
+                    actual = eval(condition.replace("m_frame_prepared.valid", "valid"),
+                                  {"__builtins__": {}},
+                                  dict(include_live_chunks=include_live_chunks, valid=valid))
+                    self.assertEqual(actual, not include_live_chunks or not valid)
+        self.assertIn("bool include_live_chunks = false", self.header)
+        self.assertIn("renderPipeline.terrain_coverage_diagnostics();", self.main)
+        self.assertIn("const auto upload_work =", prefix)
+        serializer = body(prefix, "const auto upload_work =")
+        fields = ("attempts", "adopted", "bytes", "byte_overshoot", "elapsed_ms", "overshoot_ms")
+        self.assertEqual(dict(re.findall(r'\{"(\w+)", work\.(\w+)\}', serializer)),
+                         {field: field for field in fields})
+        assignments = ['out["live"]["render_uploads_settled"] = render_uploads_settled();']
+        for lane in ("terrain", "water"):
+            assignments.append(f'out["live"]["{lane}_upload_budget"] = '
+                               f'upload_work(uploads.{lane}_budget);')
+        for assignment in assignments:
+            self.assertIn(assignment, prefix)
+            self.assertEqual(brace_depth(prefix, prefix.index(assignment)), 0)
+        streaming = 'out["live"]["streaming"] ='
+        self.assertEqual(brace_depth(prefix, prefix.index(streaming)), 0)
+        pending = body(prefix, streaming)
+        for lane in ("terrain", "water"):
+            self.assertIn(f'"{lane}_uploads_pending", uploads.{lane}_uploads_deferred', pending)
+        # Only the explicit disabled-diagnostics contract can return before these fields.
+        self.assertEqual(prefix.count("return out;"), 1)
+        self.assertIn("if (!m_terrain_coverage_enabled) return out;", compact(prefix))
+        self.assertTrue(compact(detail).startswith("return out;"))
+        self.assertNotIn("renderable_chunk_snapshots", prefix)
+        self.assertIn("renderable_chunk_snapshots", detail)
+
+    def test_upload_summaries_survive_details_and_unknown_world_metadata(self):
+        diagnostics = body(read(RENDERING / "TerrainCoverageCapture.cpp"),
+                           "nlohmann::json RenderPipeline::terrain_coverage_diagnostics(")
+        metadata_guard = ("if (const auto* world = m_frame_prepared.world_system; "
+                          "m_frame_prepared.valid && world)")
+        self.assertIn(metadata_guard, diagnostics)
+        metadata = body(diagnostics, metadata_guard)
+        self.assertIn('out["live"]["streaming"].update(', metadata)
+        for field in ("requested_radius_chunks", "target_radius_chunks",
+                      "generation_pending", "meshing_pending"):
+            self.assertIn('"' + field + '"', metadata)
+        self.assertNotIn("uploads.", metadata)
+        condition = metadata_guard.split(";", 1)[1].rstrip(")").strip()
+        condition = condition.replace("m_frame_prepared.valid", "valid").replace("&&", " and ")
+        for valid in (False, True):
+            for world in (False, True):
+                with self.subTest(valid=valid, world=world):
+                    self.assertEqual(eval(condition, {"__builtins__": {}},
+                                          dict(valid=valid, world=world)), valid and world)
+        self.assertIn('out["live"].update(', diagnostics)
+        self.assertNotRegex(diagnostics, r'out\["live"\]\s*=')
+        # Neither the optional metadata nor the chunk list may replace the pending counts.
+        self.assertEqual(diagnostics.count('out["live"]["streaming"] ='), 1)
+        self.assertLess(diagnostics.index('out["live"]["streaming"] ='),
+                        diagnostics.index(metadata_guard))
+
+    def test_both_benchmark_schemas_emit_uploads_without_camera_metadata(self):
+        report = body(self.main, "else if (wait_for_uploads(capture_upload_wait,")
+        camera_guard = "if (g_camera && gameSession && gameSession->GetWorldSystem())"
+        prefix = report.split(camera_guard, 1)[0]
+        self.assertIn('j["schema"] = "luminumbra.render_benchmark.v2";', prefix)
+        self.assertIn('j["schema"] = "luminumbra.render_benchmark.v3";',
+                      body(report, "if (benchmark_v3)"))
+        self.assertIn('j["upload_settling_frames"] = {{"warmup", upload_warmup_wait_frames}, '
+                      '{"capture", upload_capture_wait_frames}};', compact(prefix))
+        self.assertEqual(brace_depth(prefix, prefix.index('j["upload_settling_frames"] =')), 0)
+        for lane in ("terrain", "water"):
+            for field in ("uploads_pending", "upload_budget"):
+                assignment = f'j["streaming"]["{lane}_{field}"] ='
+                self.assertIn(assignment, prefix)
+                self.assertEqual(brace_depth(prefix, prefix.index(assignment)), 0)
+            self.assertIn(f'uploads.{lane}_uploads_deferred;', prefix)
+            self.assertIn(f'uploads.{lane}_budget, '
+                          f'Luminumbra::Rendering::k{lane.title()}UploadLimits', prefix)
+        settled = 'j["streaming"]["render_uploads_settled"] ='
+        self.assertIn(settled + ' renderPipeline.render_uploads_settled();', prefix)
+        self.assertEqual(brace_depth(prefix, prefix.index(settled)), 0)
+        serializer = body(prefix, "const auto upload_observation =")
+        fields = ("attempts", "adopted", "bytes", "byte_overshoot", "elapsed_ms", "overshoot_ms")
+        self.assertEqual(dict(re.findall(r'\{"(\w+)", work\.(\w+)\}', serializer)),
+                         {field: field for field in fields})
+        self.assertEqual(dict(re.findall(r'\{"(\w+)", limits\.(\w+)\}', serializer)),
+                         {"byte_limit": "bytes", "count_limit": "count",
+                          "progress_floor": "progress", "time_limit_ms": "milliseconds"})
+        aggregate = prefix[prefix.index("const auto& uploads ="):]
+        self.assertNotIn("return", aggregate.replace(serializer, ""))
+        self.assertNotRegex(report, r'j\["streaming"\]\s*=')
+        self.assertIn('j["streaming"].update(', body(report, camera_guard))
 
     def test_empty_water_replacements_are_adopted_through_the_budget(self):
         integrate = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
