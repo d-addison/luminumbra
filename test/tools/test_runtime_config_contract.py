@@ -333,7 +333,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for name in ("save_metadata", "save_metadata_and_active_regions", "save_plant_entities",
                      "save_active_regions", "upsert_container_records", "save_dirty_chunks",
                      "write_snapshot", "write_file_durably", "remove_file_and_staging",
-                     "create_file_durably", "rename_file_durably"):
+                     "create_file_durably", "rename_file_durably",
+                     "persist_water_column_migration", "copy_chunk_authority"):
             start = service.index("WorldSaveService::" + name + "(")
             body = service.index("{", start)
             self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)

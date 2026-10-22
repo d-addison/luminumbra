@@ -45,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stop_token>
 #include <string>
@@ -146,9 +147,9 @@ protected:
                  root / "worlds/atlas/presets-rev6",
                  fs::copy_options::recursive);
         save = root / "worlds/saves/fixture";
-        Write(
-            save / "world_info.json",
-            R"({"container_version":2,"name":"Fixture","seed":"1337","worldType":"default","creationTime":1,"spawnPoint":{"x":8,"y":18,"z":8}})");
+        Write(save / "world_info.json",
+              R"({"container_version":2,"name":"Fixture","seed":"1337","worldType":"default",)"
+              R"("creationTime":1,"spawnPoint":{"x":8,"y":18,"z":8}})");
         jobs.startup(1);
         WorldStreamingState state;
         auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
@@ -1659,7 +1660,7 @@ public:
     SiblingWriteFailure(const SiblingWriteFailure&) = delete;
     SiblingWriteFailure& operator=(const SiblingWriteFailure&) = delete;
 
-    void Arm(const fs::path& destination, bool energy) {
+    void Arm([[maybe_unused]] GameSession& session, const fs::path& destination, bool energy) {
 #if defined(_WIN32)
         const auto path = energy ? destination / "aether_state.efs"
                                  : WorldSaveService::plant_entities_path(destination);
@@ -1672,22 +1673,35 @@ public:
                                nullptr);
         ASSERT_NE(handle, INVALID_HANDLE_VALUE);
 #else
-        // One resident region and its manifest each flush all ancestor entries
-        // and then their own directory before the selected sibling writer.
-        int flushes = 2;
-        for (auto ancestor = WorldSaveService::region_directory(destination);
-             !ancestor.empty() && ancestor != ancestor.root_path();
-             ancestor = ancestor.parent_path())
-            flushes += 2;
-        if (energy) {
-            const auto plants = WorldSaveService::plant_entities_path(destination);
-            // The plant writer flushes every ancestor entry and its replacement.
-            for (auto ancestor = plants.parent_path();
-                 !ancestor.empty() && ancestor != ancestor.root_path();
-                 ancestor = ancestor.parent_path())
-                ++flushes;
-            ++flushes;
+        // Follow the payload sequence in SaveWorldStateToImpl: exported durable
+        // authority, live regions + manifest, then plants before energy. Each
+        // replacement flushes its ancestors and its final parent exactly once.
+        int flushes = 0;
+        const auto source = session.GetWorldSystem()->authority_directory();
+        if (session.ActiveRegionsEnabled() && source != destination &&
+            !fs::equivalent(source, destination)) {
+            for (const auto& entry :
+                 fs::directory_iterator(WorldSaveService::region_directory(source))) {
+                if (entry.path().extension() != ".lmr")
+                    continue;
+                WorldSaveService::AuthorityReader reader;
+                ASSERT_TRUE(reader.open(entry.path()));
+                if (reader.next_id().has_value())
+                    flushes += ReplacementFlushes(WorldSaveService::region_directory(destination) /
+                                                  entry.path().filename());
+            }
         }
+        std::set<fs::path> regions;
+        for (const auto& resident : session.GetWorldSystem()->snapshot_streamed_chunks()) {
+            int rx = 0, rz = 0;
+            WorldSaveService::region_coords_for_chunk(resident->get_coords(), rx, rz);
+            regions.insert(WorldSaveService::region_file_path(destination, rx, rz));
+        }
+        for (const auto& region : regions)
+            flushes += ReplacementFlushes(region);
+        flushes += ReplacementFlushes(WorldSaveService::world_manifest_path(destination));
+        if (energy)
+            flushes += ReplacementFlushes(WorldSaveService::plant_entities_path(destination));
         WorldSaveService::set_directory_flush_failure_for_testing(flushes);
 #endif
     }
@@ -1704,6 +1718,18 @@ public:
     }
 
 private:
+#if !defined(_WIN32)
+    static int ReplacementFlushes(const fs::path& payload) {
+        // One post-rename parent flush, plus one per non-root ancestor.
+        // Path depth bounds this count; the fixture owns every component.
+        int flushes = 1;
+        for (auto ancestor = payload.parent_path();
+             !ancestor.empty() && ancestor != ancestor.root_path();
+             ancestor = ancestor.parent_path())
+            ++flushes;
+        return flushes;
+    }
+#endif
 #if defined(_WIN32)
     HANDLE handle = INVALID_HANDLE_VALUE;
 #endif
@@ -1877,7 +1903,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     // Declare after the runner so even a fatal assertion releases the obstruction
     // before its destructor attempts a shutdown save.
     SiblingWriteFailure failure;
-    ASSERT_NO_FATAL_FAILURE(failure.Arm(destination, energy_failure));
+    ASSERT_NO_FATAL_FAILURE(failure.Arm(*session, destination, energy_failure));
     world::WorldStateSaveReport report;
     if (save_path == 0)
         EXPECT_FALSE(session->SaveWorldState(&report));
@@ -1944,6 +1970,53 @@ INSTANTIATE_TEST_SUITE_P(RegionModesWritersAndSavePaths,
                          CompleteSaveFailure,
                          testing::Combine(testing::Values(0, 1), testing::Range(0, 14)));
 
+void ExpectExportRetainsPendingChunks(const fs::path& destination,
+                                      const WorldStreamingState& expected,
+                                      const std::vector<ChunkID>& pending_ids) {
+    WorldStreamingState exported;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.load_world(exported, destination, errors));
+    EXPECT_TRUE(errors.empty());
+    // A fixed tick can admit the simulation water horizon independently of
+    // rendering. A complete export must retain every captured resident.
+    ASSERT_EQ(exported.size(), expected.size());
+    for (const auto id : pending_ids) {
+        const auto resident = expected.find_chunk(id);
+        ASSERT_NE(resident, nullptr);
+        EXPECT_TRUE(resident->is_voxel_data_dirty());
+    }
+    for (const auto& resident : expected.snapshot_chunks()) {
+        SCOPED_TRACE(resident->get_id());
+        const auto saved = exported.find_chunk(resident->get_id());
+        ASSERT_NE(saved, nullptr);
+        EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
+        EXPECT_EQ(saved->sdf_data, resident->sdf_data);
+        EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
+    }
+}
+
+void ExpectCanonicalPersistsPendingChunks(const fs::path& canonical,
+                                          const WorldStreamingState& expected,
+                                          const std::vector<ChunkID>& pending_ids) {
+    std::vector<std::string> errors;
+    WorldStreamingState persisted;
+    ASSERT_TRUE(WorldSaveService{}.load_world(persisted, canonical, errors));
+    EXPECT_TRUE(errors.empty());
+    // Incremental canonical saves may omit regenerable clean residents,
+    // but must acknowledge and persist every edit left pending by export.
+    for (const auto id : pending_ids) {
+        SCOPED_TRACE(id);
+        const auto resident = expected.find_chunk(id);
+        const auto saved = persisted.find_chunk(id);
+        ASSERT_NE(resident, nullptr);
+        ASSERT_NE(saved, nullptr);
+        EXPECT_FALSE(resident->is_voxel_data_dirty());
+        EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
+        EXPECT_EQ(saved->sdf_data, resident->sdf_data);
+        EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
+    }
+}
+
 TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits) {
     for (const bool regions : {false, true}) {
         SCOPED_TRACE(regions);
@@ -1980,45 +2053,12 @@ TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits
         EXPECT_EQ(Read(canonical / "unrelated/retained.txt"), "canonical member");
         EXPECT_FALSE(fs::exists(destination / "unrelated"));
         EXPECT_TRUE(WorldSaveService::validate_save(destination));
-        WorldStreamingState exported;
-        std::vector<std::string> errors;
-        ASSERT_TRUE(WorldSaveService{}.load_world(exported, destination, errors));
-        EXPECT_TRUE(errors.empty());
-        // A fixed tick can admit the simulation water horizon independently of
-        // rendering. A complete export must retain every captured resident.
-        ASSERT_EQ(exported.size(), expected.size());
-        for (const auto id : pending_ids) {
-            const auto resident = expected.find_chunk(id);
-            ASSERT_NE(resident, nullptr);
-            EXPECT_TRUE(resident->is_voxel_data_dirty());
-        }
-        for (const auto& resident : expected.snapshot_chunks()) {
-            SCOPED_TRACE(resident->get_id());
-            const auto saved = exported.find_chunk(resident->get_id());
-            ASSERT_NE(saved, nullptr);
-            EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
-            EXPECT_EQ(saved->sdf_data, resident->sdf_data);
-            EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
-        }
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectExportRetainsPendingChunks(destination, expected, pending_ids));
         ASSERT_TRUE(session->SaveWorldState());
         EXPECT_FALSE(chunk->is_voxel_data_dirty());
-        WorldStreamingState persisted;
-        errors.clear();
-        ASSERT_TRUE(WorldSaveService{}.load_world(persisted, canonical, errors));
-        EXPECT_TRUE(errors.empty());
-        // Incremental canonical saves may omit regenerable clean residents,
-        // but must acknowledge and persist every edit left pending by export.
-        for (const auto id : pending_ids) {
-            SCOPED_TRACE(id);
-            const auto resident = expected.find_chunk(id);
-            const auto saved = persisted.find_chunk(id);
-            ASSERT_NE(resident, nullptr);
-            ASSERT_NE(saved, nullptr);
-            EXPECT_FALSE(resident->is_voxel_data_dirty());
-            EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
-            EXPECT_EQ(saved->sdf_data, resident->sdf_data);
-            EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
-        }
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectCanonicalPersistsPendingChunks(canonical, expected, pending_ids));
         runner.Shutdown();
     }
 }

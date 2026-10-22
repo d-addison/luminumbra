@@ -2163,6 +2163,7 @@ bool WorldSaveService::persist_water_column_migration(
     const std::filesystem::path& save_dir,
     const std::shared_ptr<Chunk>& destination,
     const std::vector<std::shared_ptr<Chunk>>& sources) {
+    const SaveGuard guard;
     if (save_dir.empty() || !destination || destination->get_coords().y != 0 ||
         !destination->has_water_authority() || !destination->has_complete_water_state() ||
         sources.empty() || sources.size() >= std::numeric_limits<u16>::max())

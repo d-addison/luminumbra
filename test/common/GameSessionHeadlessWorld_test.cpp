@@ -4824,11 +4824,15 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     loaded.SetActiveRegionsEnabled(true);
     loaded.SetRegionSchedulerConfig({1, 1, 1});
     const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(0.25 * dt), 0u);
     for (std::uint64_t t = 1; t < start; ++t)
         ASSERT_EQ(session.TickSimulation(dt), 1u);
     ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
     // Half a tick of slack keeps the clock from rounding the frame down. A fault
     // on the first tick of the frame stops the second tick from running.
+    auto completed_clock = session.GetSimulationClock();
+    for (std::uint64_t tick = start; tick <= k; ++tick)
+        completed_clock.advance(dt);
     ASSERT_EQ(session.TickSimulation(2.5 * dt), k - start + 1);
     const auto fault = session.GetRegionSchedulerFault();
     ASSERT_TRUE(fault.has_value());
@@ -4838,6 +4842,12 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
         EXPECT_FALSE(snapshot.message.empty());
     }
     EXPECT_EQ(session.GetSimulationTickCount(), k);
+    EXPECT_EQ(session.GetSimulationClock().tick_count(), k);
+    EXPECT_EQ(session.GetSimulationClock().accumulator(), completed_clock.accumulator());
+    EXPECT_EQ(session.GetSimulationClock().dropped_time_seconds(),
+              completed_clock.dropped_time_seconds());
+    EXPECT_EQ(session.GetSimulationClock().dropped_frame_count(),
+              completed_clock.dropped_frame_count());
     EXPECT_LT(session.GetActiveRegionLedger().tick(), k);
     EXPECT_EQ(session.GetActiveRegionLedger().header_tick(), k);
     EXPECT_TRUE(session.IsSimulationTickBoundary());
@@ -4853,6 +4863,67 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
 }
+void RunAdmissionFaultCase(const HeadlessRoot& root,
+                           JobSystem& jobs,
+                           bool prepare_before_frame,
+                           std::uint64_t completed) {
+    SCOPED_TRACE(completed);
+    SCOPED_TRACE(prepare_before_frame);
+    GameSession session, loaded;
+    for (auto* current : {&session, &loaded}) {
+        current->SetRootPath(root.root_string());
+        current->SetJobSystem(&jobs);
+        current->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(session.CreateWorld("Admission failure", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({});
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(0.25 * dt), 0u);
+    if (completed != 0) {
+        ASSERT_EQ(session.TickSimulation(8.0 * dt), completed);
+    }
+    const auto before_clock = session.GetSimulationClock();
+    const auto before_hash = SessionWorldHash(session);
+    const auto before_ledger = session.GetActiveRegionLedger().canonical_bytes();
+    const auto region_file = P::WorldSaveService::region_file_path(
+        session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z);
+    fs::create_directories(region_file.parent_path());
+    {
+        std::ofstream output(region_file, std::ios::binary);
+        output << "not a region file";
+        ASSERT_TRUE(output.good());
+    }
+    session.SetReplicatedSimulationAnchors(
+        {Luminumbra::Vec3(kFaultRegion.x * 512 + 8, 8, kFaultRegion.z * 512 + 8)});
+    int events_run = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto&) { ++events_run; });
+    session.GetSimulationEventBus().publish(completed + 1, "must not run", "");
+    if (prepare_before_frame)
+        session.PrepareSimulationCollisions();
+    EXPECT_EQ(session.TickSimulation(2.5 * dt), 0u);
+    const auto& fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (fault.has_value()) {
+        EXPECT_EQ(fault->tick, completed);
+    }
+    EXPECT_EQ(session.GetSimulationTickCount(), completed);
+    EXPECT_EQ(session.GetSimulationClock().tick_count(), completed);
+    EXPECT_EQ(session.GetSimulationClock().accumulator(), before_clock.accumulator());
+    EXPECT_EQ(session.GetSimulationClock().dropped_time_seconds(),
+              before_clock.dropped_time_seconds());
+    EXPECT_EQ(session.GetSimulationClock().dropped_frame_count(),
+              before_clock.dropped_frame_count());
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), before_ledger);
+    EXPECT_EQ(events_run, 0);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    EXPECT_EQ(session.TickSimulation(dt), 0u);
+    ASSERT_TRUE(fs::remove(region_file));
+    EXPECT_EQ(SessionWorldHash(session), before_hash);
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetSimulationTickCount(), completed);
+    EXPECT_EQ(SessionWorldHash(loaded), before_hash);
+}
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
@@ -4867,52 +4938,11 @@ TEST(GameSessionHeadlessWorldTest, AdmissionFailureDoesNotCommitAnUnsimulatedTic
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    for (const std::uint64_t completed : {0u, 2u}) {
-        SCOPED_TRACE(completed);
-        GameSession session, loaded;
-        for (auto* current : {&session, &loaded}) {
-            current->SetRootPath(root.root_string());
-            current->SetJobSystem(&jobs);
-            current->SetActiveRegionsEnabled(true);
+    for (const bool prepare_before_frame : {false, true}) {
+        for (const std::uint64_t completed : {0u, 2u}) {
+            ASSERT_NO_FATAL_FAILURE(
+                RunAdmissionFaultCase(root, jobs, prepare_before_frame, completed));
         }
-        ASSERT_TRUE(session.CreateWorld("Admission failure", "1337", "default"));
-        session.SetReplicatedSimulationAnchors({});
-        const auto dt = session.GetSimulationClock().fixed_dt();
-        for (std::uint64_t tick = 0; tick < completed; ++tick)
-            ASSERT_EQ(session.TickSimulation(dt), 1u);
-        const auto before_hash = SessionWorldHash(session);
-        const auto before_ledger = session.GetActiveRegionLedger().canonical_bytes();
-        const auto region_file = P::WorldSaveService::region_file_path(
-            session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z);
-        fs::create_directories(region_file.parent_path());
-        {
-            std::ofstream output(region_file, std::ios::binary);
-            output << "not a region file";
-            ASSERT_TRUE(output.good());
-        }
-        session.SetReplicatedSimulationAnchors(
-            {Luminumbra::Vec3(kFaultRegion.x * 512 + 8, 8, kFaultRegion.z * 512 + 8)});
-        int events_run = 0;
-        session.GetSimulationEventBus().subscribe([&](const auto&) { ++events_run; });
-        session.GetSimulationEventBus().publish(completed + 1, "must not run", "");
-        EXPECT_EQ(session.TickSimulation(2.5 * dt), 0u);
-        const auto& fault = session.GetRegionSchedulerFault();
-        ASSERT_TRUE(fault.has_value());
-        if (fault.has_value()) {
-            EXPECT_EQ(fault->tick, completed);
-        }
-        EXPECT_EQ(session.GetSimulationTickCount(), completed);
-        EXPECT_EQ(session.GetSimulationClock().tick_count(), completed);
-        EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), before_ledger);
-        EXPECT_EQ(events_run, 0);
-        EXPECT_TRUE(session.IsSimulationTickBoundary());
-        EXPECT_EQ(session.TickSimulation(dt), 0u);
-        ASSERT_TRUE(fs::remove(region_file));
-        EXPECT_EQ(SessionWorldHash(session), before_hash);
-        ASSERT_TRUE(session.SaveWorldState());
-        ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
-        EXPECT_EQ(loaded.GetSimulationTickCount(), completed);
-        EXPECT_EQ(SessionWorldHash(loaded), before_hash);
     }
 }
 

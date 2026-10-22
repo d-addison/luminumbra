@@ -60,7 +60,8 @@
 #include "../fields/EnergyFieldState.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SavedWorldCatalog.h"
-#include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
+// Persistence::StableChecksum (ComputeScentSubHash).
+#include "../persistence/WorldPersistenceRoundtrip.h"
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
 #include "../simulation/SimWorkCounters.h"
@@ -469,6 +470,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         bool m_previous;
     };
     const BatchGuard guard(m_simulationBatchInProgress);
+    auto completed_clock = m_simulationClock;
     std::uint32_t ticks_executed;
     if (m_activeRegionsEnabled) {
         auto advanced_clock = m_simulationClock;
@@ -493,8 +495,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         luminumbra::simulation::SimBudgetTelemetry::TickScope budget(m_simBudgetTelemetry,
                                                                      current_tick);
         PrepareSimulationCollisions();
-        if (m_regionFault)
+        if (m_regionFault) {
+            // Latching retains the completed world tick. Restore its full clock
+            // checkpoint too: refused admission must not consume fractional time
+            // or clear catch-up telemetry from earlier completed frames.
+            m_simulationClock = completed_clock;
             return i; // Admission failed before any of this tick's systems ran.
+        }
         if (m_activeRegionsEnabled)
             m_worldClock.set_tick(current_tick);
 
@@ -1201,8 +1208,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             }
         }
         RunRegionScheduler(current_tick);
-        if (m_regionFault)
+        if (m_activeRegionsEnabled)
+            completed_clock.advance(completed_clock.fixed_dt());
+        if (m_regionFault) {
+            m_simulationClock = completed_clock;
             return i + 1; // the faulting tick's systems ran; the clock was rewound to it
+        }
     }
     return ticks_executed;
 }
@@ -1634,7 +1645,10 @@ void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     if (m_regionFault)
         return; // first fault wins
     m_regionFault = RegionSchedulerFault{tick, message};
-    m_simulationClock.reset(tick);
+    // Out-of-frame admission already has the completed tick. Keep its
+    // fractional accumulator and telemetry when no catch-up rewind is needed.
+    if (m_simulationClock.tick_count() != tick)
+        m_simulationClock.reset(tick);
     m_activeRegionLedger.acknowledge_world_clock(m_worldClock);
     m_regionWork.clear();
     LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}", tick, message);

@@ -1248,7 +1248,9 @@ TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirecto
     EXPECT_FALSE(std::filesystem::exists(missing));
     auto batch = WorldSaveService::SaveBatch::begin(nested);
     ASSERT_TRUE(batch.has_value());
-    EXPECT_FALSE(batch->save_metadata("{}"));
+    if (batch.has_value()) {
+        EXPECT_FALSE(batch.value().save_metadata("{}"));
+    }
     EXPECT_FALSE(std::filesystem::exists(missing));
     const auto blocked = root.path() / "file";
     {
@@ -1693,23 +1695,26 @@ TEST(WorldSaveService, DurablePayloadRefusesNondirectoryParentsAndPreservesEmpty
               1);
 }
 
+namespace {
+std::shared_ptr<Chunk> MakeColumnWater(const IVec3& coords) {
+    auto chunk = std::make_shared<Chunk>(coords);
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(4);
+    chunk->water_level_data.assign(16, 0.8f);
+    chunk->water_flow_data.assign(16, Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(16, -0.2f);
+    chunk->water_depth_mm.assign(16, 1000);
+    chunk->water_bed_mm.assign(16, -200);
+    chunk->water_edge_flux.assign(32, 7);
+    chunk->mark_water_data_dirty();
+    return chunk;
+}
+} // namespace
+
 TEST(WorldSaveService, WaterColumnMigrationRejectsInvalidInputsBeforeReplacingRecords) {
     const TempSaveDir root("water-column-refusal");
-    const auto make_water = [](const IVec3& coords) {
-        auto chunk = std::make_shared<Chunk>(coords);
-        chunk->has_water_sim.store(true);
-        chunk->current_water_resolution.store(4);
-        chunk->water_level_data.assign(16, 0.8f);
-        chunk->water_flow_data.assign(16, Vec2(0.0f));
-        chunk->water_sim_terrain_height.assign(16, -0.2f);
-        chunk->water_depth_mm.assign(16, 1000);
-        chunk->water_bed_mm.assign(16, -200);
-        chunk->water_edge_flux.assign(32, 7);
-        chunk->mark_water_data_dirty();
-        return chunk;
-    };
-    const auto destination = make_water({10, 0, 10});
-    const auto source = make_water({10, 7, 10});
+    const auto destination = MakeColumnWater({10, 0, 10});
+    const auto source = MakeColumnWater({10, 7, 10});
     ASSERT_TRUE(WorldSaveService::persist_chunk_authority(root.path(), source));
     const auto path = WorldSaveService::region_file_path(root.path(), 0, 0);
     const auto bytes = [&path] {
@@ -1732,16 +1737,16 @@ TEST(WorldSaveService, WaterColumnMigrationRejectsInvalidInputsBeforeReplacingRe
     refuse(root.path(), nullptr, {source});
     refuse(root.path(), source, {source});
     refuse(root.path(), std::make_shared<Chunk>(IVec3(10, 0, 10)), {source});
-    const auto incomplete_target = make_water({10, 0, 10});
+    const auto incomplete_target = MakeColumnWater({10, 0, 10});
     incomplete_target->water_edge_flux.pop_back();
     refuse(root.path(), incomplete_target, {source});
     refuse(root.path(), destination, {});
     refuse(root.path(), destination, {nullptr});
     refuse(root.path(), destination, {destination});
     refuse(root.path(), destination, {source, source});
-    refuse(root.path(), destination, {make_water({11, 7, 10})});
-    refuse(root.path(), destination, {make_water({10, 7, 11})});
-    const auto conflict = make_water({10, -3, 10});
+    refuse(root.path(), destination, {MakeColumnWater({11, 7, 10})});
+    refuse(root.path(), destination, {MakeColumnWater({10, 7, 11})});
+    const auto conflict = MakeColumnWater({10, -3, 10});
     ++conflict->water_edge_flux[0];
     refuse(root.path(), destination, {source, conflict});
     conflict->water_edge_flux.clear();
@@ -1766,4 +1771,52 @@ TEST(WorldSaveService, WaterColumnMigrationRejectsInvalidInputsBeforeReplacingRe
     EXPECT_EQ(canonical->water_depth_mm, destination->water_depth_mm);
     EXPECT_EQ(canonical->water_bed_mm, destination->water_bed_mm);
     EXPECT_EQ(canonical->water_edge_flux, destination->water_edge_flux);
+}
+
+TEST(WorldSaveService, WaterColumnMigrationWaitsForOwnershipAndRetainsSiblingRecords) {
+    const TempSaveDir root("water-column-ownership");
+    const auto destination = MakeColumnWater({10, 0, 10});
+    const auto source = MakeColumnWater({10, 7, 10});
+    auto sibling = std::make_shared<Chunk>(IVec3(11, 0, 10));
+    sibling->heightmap_data = {42.0f};
+    sibling->mark_voxel_data_dirty();
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(root.path(), source));
+    bool migrated = false;
+    std::atomic<bool> done{false};
+    std::jthread migration;
+    {
+        const WorldSaveService::SaveOwnership ownership;
+        // Recursive ownership is required when migration belongs to a larger save.
+        ASSERT_TRUE(
+            WorldSaveService::persist_water_column_migration(root.path(), destination, {source}));
+        migration = std::jthread([&] {
+            migrated = WorldSaveService::persist_water_column_migration(
+                root.path(), destination, {source});
+            done.store(true, std::memory_order_release);
+        });
+        // Bound a broken implementation's observation wait, including starvation.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (WorldSaveService::waiting_save_writers() == 0 &&
+               !done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        EXPECT_FALSE(done.load(std::memory_order_acquire));
+        EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+        // This writer runs before migration can read/merge/replace its image.
+        EXPECT_TRUE(WorldSaveService::persist_chunk_authority(root.path(), sibling));
+    }
+    migration.join();
+    EXPECT_TRUE(migrated);
+    EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, root.path(), errors, {}, 8192, false, true));
+    const auto retained = loaded.find_chunk(sibling->get_id());
+    const auto canonical = loaded.find_chunk(destination->get_id());
+    const auto retired = loaded.find_chunk(source->get_id());
+    ASSERT_NE(retained, nullptr);
+    ASSERT_NE(canonical, nullptr);
+    ASSERT_NE(retired, nullptr);
+    EXPECT_EQ(retained->heightmap_data, sibling->heightmap_data);
+    EXPECT_TRUE(canonical->same_water_state(*destination));
+    EXPECT_FALSE(retired->has_water_authority());
 }
