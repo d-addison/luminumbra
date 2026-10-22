@@ -1773,7 +1773,9 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
         !m_worldOpenError.empty() || !SavedPresetCompatible(save_dir))
         return false;
     auto batch = Persistence::WorldSaveService::SaveBatch::begin(save_dir);
-    return batch && SaveWorldMetadata(*batch);
+    if (!batch.has_value())
+        return false;
+    return SaveWorldMetadata(batch.value());
 }
 
 bool GameSession::SaveWorldMetadata(Persistence::WorldSaveService::SaveBatch& batch) const {
@@ -1895,7 +1897,10 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // then retain the shared recursive ownership from destination validation
     // through every payload, metadata publication and dirty acknowledgement.
     auto batch = Persistence::WorldSaveService::SaveBatch::begin(save_dir);
-    if (!batch || !ClockConfigurationCompatible(save_dir) || !SavedPresetCompatible(save_dir))
+    if (!batch.has_value())
+        return false;
+    auto& save_batch = batch.value();
+    if (!ClockConfigurationCompatible(save_dir) || !SavedPresetCompatible(save_dir))
         return false;
 
     std::vector<std::string> errors;
@@ -1910,30 +1915,30 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         // Legacy plant-only saves already count as containers: their next save
         // writes only dirty regions, preserving the regions-disabled byte contract.
         const bool has_snapshot =
-            m_activeRegionsEnabled ? batch->has_chunk_snapshot() : batch->has_world_save();
+            m_activeRegionsEnabled ? save_batch.has_chunk_snapshot() : save_batch.has_world_save();
         if (full_snapshot || !has_snapshot)
-            ok = batch->save_world(state, &errors, m_activeRegionsEnabled);
+            ok = save_batch.save_world(state, &errors, m_activeRegionsEnabled);
         else
-            ok = batch->save_dirty_chunks(state, &errors, m_activeRegionsEnabled).saved;
+            ok = save_batch.save_dirty_chunks(state, &errors, m_activeRegionsEnabled).saved;
     }
     // A region replacement can succeed before a later writer fails. Invalidate
     // derived authority after every chunk attempt, including partial failures,
     // so an older worker result cannot integrate against newly persisted chunks.
     if (write_chunks) {
         for (const ChunkID id : dirty_ids) {
-            if (const auto chunk = state.find_chunk(id))
+            if (const auto chunk = state.find_chunk(id); chunk != nullptr)
                 m_worldSystem->notify_far_lod_authority_durable(chunk->get_coords());
         }
     }
     if (ok)
-        ok = batch->save_plant_entities(plant_snapshot, &errors);
+        ok = save_batch.save_plant_entities(plant_snapshot, &errors);
     if (ok)
         ok = SaveEnergyFieldRecord(save_dir);
     // Regions-disabled incremental saves preserve legacy metadata and file layout.
     // Explicit complete saves publish metadata only after all required state.
     write_metadata = write_metadata && !m_transientWorld;
     if (ok && write_metadata)
-        ok = SaveWorldMetadata(*batch);
+        ok = SaveWorldMetadata(save_batch);
     for (const auto& error : errors)
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     if (!ok)
@@ -1948,7 +1953,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // there, so the next autosave cannot advance its metadata beside stale chunks.
     if (m_transientWorld || canonical_save) {
         for (const ChunkID id : dirty_ids) {
-            if (const auto chunk = state.find_chunk(id))
+            if (const auto chunk = state.find_chunk(id); chunk != nullptr)
                 chunk->clear_voxel_data_dirty();
         }
     }

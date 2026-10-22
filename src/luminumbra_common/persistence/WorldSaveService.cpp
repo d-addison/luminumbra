@@ -1316,17 +1316,6 @@ bool RewriteRegionFile(const std::filesystem::path& path,
         RemoveTemporaryFile(temp);
         return false;
     }
-#if !defined(_WIN32)
-    // Persist newly created ancestor entries too. On failure the complete live
-    // file may already be installed, but its in-memory owner must be retained.
-    for (auto parent = path.parent_path(); !parent.empty() && parent != parent.root_path();
-         parent = parent.parent_path()) {
-        const auto holder =
-            parent.has_parent_path() ? parent.parent_path() : std::filesystem::path(".");
-        if (!FlushDirectoryEntry(holder, errors))
-            return false;
-    }
-#endif
     return true;
 }
 
@@ -1460,6 +1449,14 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
 bool WorldSaveService::save_metadata_validated(const std::string& bytes,
                                                const std::filesystem::path& save_dir,
                                                std::vector<std::string>* errors) {
+    // Metadata-only writes require an existing root. Ancestor staging must not
+    // turn a missing legacy destination into a newly created save directory.
+    const auto directory = save_dir.empty() ? std::filesystem::path(".") : save_dir;
+    std::error_code directory_error;
+    if (!std::filesystem::is_directory(directory, directory_error) || directory_error) {
+        AddError(errors, "metadata destination is not an accessible directory");
+        return false;
+    }
     world::WorldClock clock;
     std::string clock_error;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
@@ -1491,8 +1488,7 @@ bool WorldSaveService::save_metadata_validated(const std::string& bytes,
         AddError(errors, "interrupted before metadata replacement");
         return false;
     }
-    if (!CreatePayloadDirectory(destination, errors) ||
-        !ReplaceRegionFileAtomically(temp, destination, errors)) {
+    if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
         RemoveTemporaryFile(temp);
         return false;
     }

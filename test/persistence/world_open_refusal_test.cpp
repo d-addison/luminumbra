@@ -1958,7 +1958,14 @@ TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits
         const auto before_chunks = Read(WorldSaveService::region_file_path(canonical, 0, 0));
         if (regions) {
             ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault().has_value());
         }
+        WorldStreamingState expected;
+        for (const auto& resident : session->GetWorldSystem()->snapshot_streamed_chunks())
+            ASSERT_TRUE(expected.insert_chunk(resident));
+        ASSERT_EQ(expected.find_chunk(chunk->get_id()), chunk);
+        const auto pending_ids = expected.dirty_chunk_ids();
+        ASSERT_FALSE(pending_ids.empty());
         const auto ledger = session->GetActiveRegionLedger().encode();
         Write(canonical / "unrelated/retained.txt", "canonical member");
         const auto destination = root / (regions ? "enabled-export" : "legacy-export") / "";
@@ -1977,13 +1984,41 @@ TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits
         std::vector<std::string> errors;
         ASSERT_TRUE(WorldSaveService{}.load_world(exported, destination, errors));
         EXPECT_TRUE(errors.empty());
-        ASSERT_EQ(exported.size(), 1u);
-        ASSERT_NE(exported.find_chunk(chunk->get_id()), nullptr);
-        EXPECT_EQ(exported.find_chunk(chunk->get_id())->heightmap_data, chunk->heightmap_data);
+        // A fixed tick can admit the simulation water horizon independently of
+        // rendering. A complete export must retain every captured resident.
+        ASSERT_EQ(exported.size(), expected.size());
+        for (const auto id : pending_ids) {
+            const auto resident = expected.find_chunk(id);
+            ASSERT_NE(resident, nullptr);
+            EXPECT_TRUE(resident->is_voxel_data_dirty());
+        }
+        for (const auto& resident : expected.snapshot_chunks()) {
+            SCOPED_TRACE(resident->get_id());
+            const auto saved = exported.find_chunk(resident->get_id());
+            ASSERT_NE(saved, nullptr);
+            EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
+            EXPECT_EQ(saved->sdf_data, resident->sdf_data);
+            EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
+        }
         ASSERT_TRUE(session->SaveWorldState());
         EXPECT_FALSE(chunk->is_voxel_data_dirty());
-        EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)),
-                  Read(WorldSaveService::region_file_path(destination, 0, 0)));
+        WorldStreamingState persisted;
+        errors.clear();
+        ASSERT_TRUE(WorldSaveService{}.load_world(persisted, canonical, errors));
+        EXPECT_TRUE(errors.empty());
+        // Incremental canonical saves may omit regenerable clean residents,
+        // but must acknowledge and persist every edit left pending by export.
+        for (const auto id : pending_ids) {
+            SCOPED_TRACE(id);
+            const auto resident = expected.find_chunk(id);
+            const auto saved = persisted.find_chunk(id);
+            ASSERT_NE(resident, nullptr);
+            ASSERT_NE(saved, nullptr);
+            EXPECT_FALSE(resident->is_voxel_data_dirty());
+            EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
+            EXPECT_EQ(saved->sdf_data, resident->sdf_data);
+            EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
+        }
         runner.Shutdown();
     }
 }

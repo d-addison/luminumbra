@@ -269,9 +269,12 @@ class RegionAuthorityWiring(unittest.TestCase):
                       "chunk->voxel_revision() == job_chunk.voxel_revision && "
                       "(job_chunk.voxel_revision != std::numeric_limits<u32>::max() || "
                       "chunk->authority_hash_revision() == job_chunk.authority_revision);", publish)
-        guard = "if (job_chunk.terrain_mesh_required && terrain_current)"
+        success_guard = "if (mesh_ready && !mesh_failed && current_result && terrain_current)"
+        self.assertIn(success_guard, publish)
+        success = function(source, success_guard)
+        guard = "if (job_chunk.terrain_mesh_required)"
         terrain = function(source, guard)
-        success = function(source, "if (mesh_ready && !mesh_failed && current_result)")
+        self.assertIn(terrain, success)
         self.assertNotIn("continue;", success)
         self.assertNotIn("return ", success)
         for write in ("chunk->mesh_vertices =", "chunk->mesh_indices =",
@@ -284,27 +287,32 @@ class RegionAuthorityWiring(unittest.TestCase):
         # Failure/refusal never restores a completed LOD or clears edit truth.
         self.assertEqual(publish.count("current_lod.store("), 1)
         self.assertLess(publish.index("resident->second != chunk"), publish.index(guard))
-        self.assertLess(publish.index("if (mesh_ready && !mesh_failed && current_result)"), publish.index(guard))
+        self.assertLess(publish.index(success_guard), publish.index(guard))
 
-    def test_water_publication_and_cleanup_are_independent_of_terrain_guard(self):
+    def test_water_publication_requires_current_terrain_but_cleanup_is_unconditional(self):
         source = SOURCE.read_text(encoding="utf-8")
         publish = function(source, "bool SHIELD_WorldSystem::publish_front_meshing_batch(")
-        guard = "if (job_chunk.terrain_mesh_required && terrain_current)"
-        terrain = function(source, guard)
+        success_guard = "if (mesh_ready && !mesh_failed && current_result && terrain_current)"
+        self.assertIn(success_guard, publish)
+        success = function(source, success_guard)
+        terrain = function(source, "if (job_chunk.terrain_mesh_required)")
+        self.assertIn(terrain, success)
         self.assertNotIn("water_mesh", terrain)
         self.assertNotIn("continue;", terrain)
         self.assertNotIn("return", terrain)
-        self.assertIn("chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);",
-                      publish)
-        self.assertIn("chunk->water_mesh_version++;", publish)
+        for write in ("chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);",
+                      "chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);",
+                      "chunk->water_mesh_version++;"):
+            self.assertIn(write, success)
+            self.assertEqual(publish.count(write), success.count(write))
         self.assertIn("if (chunk->authority_hash_revision() == job_chunk.authority_revision)",
-                      publish)
+                      success)
         for cleanup in ("pending_mesh_vertices.clear()", "pending_mesh_indices.clear()",
                         "pending_water_mesh_vertices.clear()", "pending_water_mesh_indices.clear()",
                         "pending_mesh_ready.store(false", "pending_mesh_failed.store(false",
                         "pending_lod.store(-1"):
             self.assertIn(cleanup, publish)
-            self.assertNotIn(cleanup, terrain)
+            self.assertNotIn(cleanup, success)
         # All completion entry points converge on the guarded publisher.
         self.assertIn("publish_front_meshing_batch(force)", function(
             source, "void SHIELD_WorldSystem::process_completed_meshing_jobs("))
@@ -325,7 +333,7 @@ class RegionAuthorityWiring(unittest.TestCase):
                      "SynchronousEditRebuildCannotBeSkippedByStaleCompletion",
                      "RefusedSynchronousEditReopensSettledCandidateScan",
                      "RefusedWorkerDispatchLeavesEditedMeshAndCollisionUntouched",
-                     "StaleTerrainDoesNotDiscardIndependentWaterMeshOutput",
+                     "StaleTerrainRejectsWaterMeshUntilEditedSnapshotCompletes",
                      "WaterRevisionChangeDoesNotRejectCurrentTerrainCompletion",
                      "MeshSnapshotOwnersSurviveQueuedWorkAndReleaseAfterWorldClear"):
             self.assertIn("TEST(StreamingHardening, " + case + ")", native)

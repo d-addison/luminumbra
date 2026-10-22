@@ -1131,7 +1131,7 @@ TEST(StreamingHardening, RefusedWorkerDispatchLeavesEditedMeshAndCollisionUntouc
     EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
 }
 
-TEST(StreamingHardening, StaleTerrainDoesNotDiscardIndependentWaterMeshOutput) {
+TEST(StreamingHardening, StaleTerrainRejectsWaterMeshUntilEditedSnapshotCompletes) {
     JobSystem jobs;
     jobs.startup(1);
     WaterSystem water(nullptr, nullptr);
@@ -1149,23 +1149,27 @@ TEST(StreamingHardening, StaleTerrainDoesNotDiscardIndependentWaterMeshOutput) {
     world.update(registry, Vec3(8), nullptr);
     ASSERT_EQ(chunk->pending_lod.load(), 0);
     const auto water_version = chunk->water_mesh_version.load();
-    // Change only voxel truth: water input remains independently renderable.
+    ASSERT_TRUE(chunk->water_mesh_vertices.empty());
+    ASSERT_TRUE(chunk->water_mesh_indices.empty());
+    // Water geometry shares the terrain snapshot for beds and culling.
     chunk->sdf_data.assign(chunk->sdf_data.size(), 1.0f);
     chunk->mark_voxel_data_dirty();
     chunk->current_lod.store(-1);
     paused.release();
     world.wait_for_streaming_jobs();
     EXPECT_EQ(chunk->current_lod.load(), -1);
-    EXPECT_GT(chunk->water_mesh_version.load(), water_version);
-    EXPECT_EQ(chunk->water_mesh_vertices.size(), 64u);
-    EXPECT_EQ(chunk->water_mesh_indices.size(), 96u);
-    // Shared authority revision conservatively requests a fresh water mesh.
+    EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
+    EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+    EXPECT_TRUE(chunk->water_mesh_indices.empty());
     EXPECT_FALSE(chunk->water_mesh_generated.load());
     const auto terrain_version = chunk->mesh_version.load();
     world.update(registry, Vec3(8), nullptr);
     world.wait_for_streaming_jobs();
     EXPECT_TRUE(chunk->mesh_vertices.empty());
     EXPECT_GT(chunk->mesh_version.load(), terrain_version);
+    EXPECT_GT(chunk->water_mesh_version.load(), water_version);
+    EXPECT_EQ(chunk->water_mesh_vertices.size(), 64u);
+    EXPECT_EQ(chunk->water_mesh_indices.size(), 96u);
     EXPECT_TRUE(chunk->water_mesh_generated.load());
 
     // Water-only work must not change LOD, terrain version, or collision state.

@@ -1241,6 +1241,28 @@ TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirecto
     const auto missing = root.path() / "missing";
     EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", missing));
     EXPECT_FALSE(std::filesystem::exists(missing));
+    const auto nested = missing / "nested";
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::save_metadata("{}", nested, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_FALSE(std::filesystem::exists(missing));
+    auto batch = WorldSaveService::SaveBatch::begin(nested);
+    ASSERT_TRUE(batch.has_value());
+    EXPECT_FALSE(batch->save_metadata("{}"));
+    EXPECT_FALSE(std::filesystem::exists(missing));
+    const auto blocked = root.path() / "file";
+    {
+        std::ofstream output(blocked, std::ios::binary);
+        output << "retained";
+        ASSERT_TRUE(output.good());
+    }
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService::save_metadata("{}", blocked, &errors));
+    EXPECT_FALSE(errors.empty());
+    std::ifstream retained(blocked, std::ios::binary);
+    std::ostringstream retained_bytes;
+    retained_bytes << retained.rdbuf();
+    EXPECT_EQ(retained_bytes.str(), "retained");
     for (const std::string bytes : {"{}", "{", "[]", "null", "opaque legacy input"}) {
         SCOPED_TRACE(bytes);
         const TempSaveDir destination("opaque_metadata");

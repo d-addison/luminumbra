@@ -6089,9 +6089,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
         const bool mesh_ready = chunk->pending_mesh_ready.load(std::memory_order_acquire);
         const bool mesh_failed = chunk->pending_mesh_failed.load(std::memory_order_acquire);
 
-        const auto live = m_streaming_state.chunks.find(chunk->get_id());
         const bool current_result =
-            live != m_streaming_state.chunks.end() && live->second == chunk &&
             chunk->mesh_version.load(std::memory_order_acquire) == job_chunk.mesh_version &&
             chunk->water_mesh_version.load(std::memory_order_acquire) ==
                 job_chunk.water_mesh_version;
@@ -6099,8 +6097,10 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->voxel_revision() == job_chunk.voxel_revision &&
             (job_chunk.voxel_revision != std::numeric_limits<u32>::max() ||
              chunk->authority_hash_revision() == job_chunk.authority_revision);
-        if (mesh_ready && !mesh_failed && current_result) {
-            if (job_chunk.terrain_mesh_required && terrain_current) {
+        // Water geometry also depends on the terrain snapshot (beds and culling).
+        // A voxel edit invalidates the entire result, including water-only jobs.
+        if (mesh_ready && !mesh_failed && current_result && terrain_current) {
+            if (job_chunk.terrain_mesh_required) {
                 //  ( step 1): the LOD0-promotion backfill
                 // publish that used to live here moved to
                 // process_completed_promotion_jobs — the meshing lane is

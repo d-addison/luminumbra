@@ -311,15 +311,19 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertLess(begin.index("SaveOwnershipownership;"), begin.index("load_world("))
         self.assertIn("SaveBatch(directory,present,!probe.empty(),std::move(ownership))", begin)
         ownership = sequence.index(guard)
+        checked_batch = "if(!batch.has_value())returnfalse;auto&save_batch=batch.value();"
+        self.assertIn(checked_batch, sequence)
+        self.assertLess(ownership, sequence.index(checked_batch))
         # Function scope keeps ownership across all phases and every early return.
         self.assertEqual(sequence[:ownership].count("{") - sequence[:ownership].count("}"), 1)
         for capture in ("quiesce_streaming_jobs_for_save();", "BuildPlantEntitySnapshot(m_registry)",
                         "state.dirty_chunk_ids()"):
             self.assertLess(sequence.index(capture), ownership)
         for operation in ("ClockConfigurationCompatible(save_dir)",
-                          "SavedPresetCompatible(save_dir)", "batch->save_world(",
-                          "batch->save_dirty_chunks(", "save_plant_entities(", "SaveEnergyFieldRecord(",
-                          "SaveWorldMetadata(*batch)", "m_activeRegionLedger.mark_saved(",
+                          "SavedPresetCompatible(save_dir)", "save_batch.save_world(",
+                          "save_batch.save_dirty_chunks(", "save_plant_entities(",
+                          "SaveEnergyFieldRecord(",
+                          "SaveWorldMetadata(save_batch)", "m_activeRegionLedger.mark_saved(",
                           "chunk->clear_voxel_data_dirty()"):
             self.assertLess(ownership, sequence.index(operation))
 
