@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -16,6 +17,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
+_SHARD_SPEC = importlib.util.spec_from_file_location("ctest_shards", ROOT / "tools/ci/ctest_shards.py")
+_SHARDS = importlib.util.module_from_spec(_SHARD_SPEC)
+_SHARD_SPEC.loader.exec_module(_SHARDS)
 REPO = "d-addison/luminumbra"
 SCHEMA = "luminumbra.ci_qualification_capture.v1"
 LANES = {
@@ -167,9 +171,16 @@ def successful_producers(lane, outcomes):
     require(all(value == "success" for value in outcomes.values()), "producer failed, skipped, cancelled or missing")
 
 
+def asan_shard_ids():
+    return _SHARDS.shard_ids("asan")
+
+
 def asan_producers(binding, records):
-    require(len(records) == 2 and [item["shard"] for item in records] == [1, 2],
-            "exactly two ordered ASan shard records required")
+    expected = list(asan_shard_ids())
+    require(isinstance(records, list) and len(records) == len(expected) and
+            all(isinstance(item, dict) and type(item.get("shard")) is int for item in records) and
+            [item["shard"] for item in records] == expected,
+            f"exactly {len(expected)} ordered ASan shard records required")
     for record in records:
         require(all(record[key] == binding[key] for key in binding if key != "run_attempt"),
                 "ASan shard identity differs")
@@ -179,7 +190,7 @@ def asan_producers(binding, records):
         successful_producers("asan", record["producers"])
         require(re.fullmatch(r"[0-9a-f]{64}", record["binary_sha256"])
                 and re.fullmatch(r"[0-9a-f]{64}", record["junit_sha256"]), "ASan shard digest missing")
-    require(records[0]["binary_sha256"] == records[1]["binary_sha256"],
+    require(all(record["binary_sha256"] == records[0]["binary_sha256"] for record in records),
             "ASan shard binary digests differ")
     receipts = [record for record in records if "ambient" in record]
     require(len(receipts) == 1, "exactly one ASan shard must produce the ambient receipt")
@@ -188,6 +199,7 @@ def asan_producers(binding, records):
 
 def write_asan_shard(args):
     require(args.lane == "asan", "ASan shard requires the ASan lane")
+    require(type(args.shard) is int and args.shard in asan_shard_ids(), "invalid ASan shard")
     binding = source_identity("asan", args.expected_sha)
     outcomes = json.loads(os.environ.get("QUALIFICATION_PRODUCERS", "{}"))
     successful_producers("asan", outcomes)
@@ -242,7 +254,7 @@ def write_manifest(args):
         if args.lane == "asan":
             require(outcomes == {"tests": "success"}, "ASan aggregate checks did not succeed")
             records = []
-            for shard in (1, 2):
+            for shard in asan_shard_ids():
                 source = args.asan_shards / f"shard-{shard}"
                 record = read_json(source / "qualification-shard.json")
                 require(record["junit_sha256"] == digest(source / "ctest.junit.xml"), "ASan shard JUnit digest differs")
@@ -316,6 +328,23 @@ def verify_producer(document):
     else:
         raise ValueError("producer job pagination did not terminate")
     matches = [job for job in jobs if job["name"] == document["job_name"]]
+    # Native qualification remains a single full producer with the original
+    # binary-bound manifest. New runs also have a required-name aggregate.
+    full = [job for job in jobs if job["name"] == document["job_name"] + " full qualification"]
+    if document["lane"] in ("linux-gcc", "windows-msvc", "windows-ucrt64"):
+        if full:
+            require(len(matches) == 1 and matches[0]["status"] == "completed" and
+                    matches[0]["conclusion"] == "success", "qualification aggregate not successful")
+            matches = full
+        else:
+            # Older full captures used the required name for the producer itself.
+            # Prove its native steps so a new aggregate alone cannot stand in.
+            required = ("Configure, build, and test",) if document["lane"] == "windows-msvc" else ("Configure", "Build", "Test")
+            require(len(matches) == 1, "full qualification producer missing")
+            for name in required:
+                native = [step for step in matches[0].get("steps", []) if step["name"] == name]
+                require(len(native) == 1 and native[0]["status"] == "completed" and
+                        native[0]["conclusion"] == "success", "full qualification native step missing or unsuccessful")
     require(len(matches) == 1 and matches[0]["status"] == "completed" and matches[0]["conclusion"] == "success", "producer job not independently successful")
     return {"job_id": matches[0]["id"], "completed_at": matches[0]["completed_at"]}
 
@@ -485,7 +514,7 @@ def main(argv=None):
             sub.add_argument("--baseline", type=Path)
             sub.add_argument("--asan-shards", type=Path)
         if name == "asan-shard":
-            sub.add_argument("--shard", type=int, choices=(1, 2), required=True)
+            sub.add_argument("--shard", type=int, choices=asan_shard_ids(), required=True)
     sub = commands.add_parser("validate-chain")
     sub.add_argument("--expected-sha", required=True)
     sub.add_argument("--artifact", nargs=4, action="append", required=True,

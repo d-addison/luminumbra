@@ -1159,7 +1159,9 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsRefusedOnLoad) {
         session.SetJobSystem(&jobs);
         session.SetRootPath(root.root_string());
         ASSERT_TRUE(session.CreateWorld("QuarantineWorld", "12345", "default"));
+        session.GetWorldSystem()->SetWaterSimWindowCursor(19);
         EXPECT_FALSE(session.LoadWorldStateFrom(save_dir));
+        EXPECT_EQ(session.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
         EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
         EXPECT_FALSE(session.GetWorldOpenError().empty());
         EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
@@ -1561,6 +1563,127 @@ TEST_P(SavedWorldPresetTest, UnmarkedLegacySaveUsesFrozenPresetAndEmbedsItOnResa
     EXPECT_TRUE(P::InspectSavedWorld(root.path(), "legacy").error.empty());
 }
 
+TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMetadataToZero) {
+    GameSession source, reader;
+    Configure(source);
+    Configure(reader);
+    ASSERT_TRUE(source.CreateWorld("Water cursor source", "1337", "default"));
+    ASSERT_TRUE(reader.CreateTransientWorld("Water cursor reader", "1337", "default"));
+    // A value beyond the 64-chunk update cap must survive exactly; clamping it
+    // would choose a different next water window when more chunks are awake.
+    constexpr std::size_t saved_cursor = 65;
+    source.GetWorldSystem()->SetWaterSimWindowCursor(saved_cursor);
+    ASSERT_TRUE(source.SaveWorld());
+    const auto source_save = source.GetWorldSaveDir();
+    ASSERT_TRUE(source.LoadWorld(source.GetMetadata().worldId)) << source.GetWorldOpenError();
+    EXPECT_EQ(source.GetWorldSystem()->GetWaterSimWindowCursor(), saved_cursor);
+
+    const auto snapshot = root.path() / "water-cursor-snapshot";
+    for (const bool with_chunks : {false, true}) {
+        SCOPED_TRACE(with_chunks);
+        fs::remove_all(snapshot);
+        ASSERT_TRUE(fs::create_directories(snapshot));
+        fs::copy_file(source_save / "world_info.json", snapshot / "world_info.json");
+        fs::copy_file(source_save / "preset.json", snapshot / "preset.json");
+        if (with_chunks) {
+            Luminumbra::WorldStreamingState state;
+            auto chunk = state.get_or_create_chunk(Luminumbra::IVec3(0, 0, 0));
+            chunk->set_state(Luminumbra::ChunkState::Idle);
+            ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
+        }
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        auto before = SavedPresetTestDiskBytes(snapshot);
+        ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), saved_cursor);
+        EXPECT_EQ(SavedPresetTestDiskBytes(snapshot), before);
+
+        auto metadata = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
+        ASSERT_EQ(metadata.erase("waterSimCursor"), 1u);
+        ASSERT_NO_FATAL_FAILURE(WriteSavedPresetTestJson(snapshot / "world_info.json", metadata));
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        before = SavedPresetTestDiskBytes(snapshot);
+        ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+        EXPECT_EQ(SavedPresetTestDiskBytes(snapshot), before);
+
+        ASSERT_TRUE(fs::remove(snapshot / "world_info.json"));
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+    }
+    reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+    ASSERT_TRUE(reader.LoadWorldStateFrom(root.path() / "missing-water-snapshot"));
+    EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+}
+
+TEST_P(SavedWorldPresetTest, InvalidWaterCursorRefusesCatalogAndSnapshotWithoutChangingCursor) {
+    GameSession source;
+    Configure(source);
+    ASSERT_TRUE(source.CreateWorld("Invalid water cursor", "1337", "default"));
+    const auto save = source.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const std::array<nlohmann::json, 8> invalid{
+        nullptr, -1, 1.5, 1e38, true, "65", nlohmann::json::array(), nlohmann::json::object()};
+    for (const auto& value : invalid) {
+        SCOPED_TRACE(value.dump());
+        auto malformed = metadata;
+        malformed["waterSimCursor"] = value;
+        ASSERT_NO_FATAL_FAILURE(WriteSavedPresetTestJson(save / "world_info.json", malformed));
+        const auto before = SavedPresetTestDiskBytes(save);
+        GameSession reader;
+        Configure(reader);
+        ASSERT_TRUE(reader.CreateTransientWorld("Cursor refusal", "1337", "default"));
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        EXPECT_FALSE(reader.LoadWorldStateFrom(save));
+        EXPECT_NE(reader.GetWorldOpenError().find("water simulation cursor"), std::string::npos);
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
+        EXPECT_FALSE(P::InspectSavedWorld(root.path(), source.GetMetadata().worldId).error.empty());
+        EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+    }
+}
+
+TEST_P(SavedWorldPresetTest, UnmarkedInvalidDestinationRefusesBeforePresetOrPayloadWrites) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, false));
+    const PendingSnapshotState pending(session);
+    const auto save = session.GetWorldSaveDir();
+    const std::array<std::pair<fs::path, std::string>, 5> artifacts{{
+        {P::WorldSaveService::world_state_path(save), "obsolete snapshot"},
+        {P::WorldSaveService::region_file_path(save, 0, 0), std::string("LMR1\xff\xff\0\0", 8)},
+        {P::WorldSaveService::region_file_path(save, 0, 0), "LMR1"},
+        {P::WorldSaveService::world_manifest_path(save), "{"},
+        {P::WorldSaveService::region_directory(save) / "unknown.bin", "unknown artifact"},
+    }};
+    for (const auto& [path, bytes] : artifacts) {
+        SCOPED_TRACE(path.generic_string());
+        fs::remove_all(save);
+        fs::create_directories(path.parent_path());
+        {
+            std::ofstream output(path, std::ios::binary);
+            output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            output.close();
+            ASSERT_FALSE(output.fail());
+        }
+        ASSERT_FALSE(fs::exists(save / "preset.json"));
+        ASSERT_FALSE(fs::exists(save / "world_info.json"));
+        ASSERT_FALSE(P::WorldSaveService::validate_save(save));
+        const SnapshotDestinationBytes before(save);
+        EXPECT_FALSE(session.SaveWorld());
+        before.ExpectUnchanged();
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_FALSE(session.SaveWorldState());
+        before.ExpectUnchanged();
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_FALSE(session.SaveWorldStateTo(save));
+        before.ExpectUnchanged();
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_FALSE(fs::exists(save / "preset.json"));
+        EXPECT_FALSE(fs::exists(save / "world_info.json"));
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
 
 TEST(GameSessionHeadlessWorldTest,
@@ -1617,12 +1740,8 @@ TEST(GameSessionHeadlessWorldTest,
     }
 }
 
-// Reads a record that production writes through a text-mode stream, so its bytes
-// carry the host's line endings: the energy record (GameSession writes
-// aether_state.efs with a default-mode ofstream) is LF on Linux and CRLF on
-// Windows. That platform difference predates this change; normalising here keeps
-// the assertions about record CONTENT independent of it. Tests that assert exact
-// bytes written by the test itself use binary streams instead.
+// Normalize historical text-mode energy records and current durable binary
+// records for content assertions. Exact-byte assertions use ReadClockTestFile.
 std::string ReadClockTestTextRecord(const fs::path& path) {
     std::string text = ReadClockTestFile(path);
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
@@ -1952,11 +2071,19 @@ TEST(GameSessionHeadlessWorldTest, FailedForwardLedgerWriteReloadsAndSavesImmedi
     ASSERT_TRUE(session.CreateWorld("Forward failure", "1337", "default"));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.SaveWorld());
+    const auto directory = session.GetWorldSaveDir();
+    const auto previous_ledger =
+        ReadClockTestFile(P::WorldSaveService::active_regions_path(directory));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
     const bool saved = session.SaveWorld();
     P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
     ASSERT_FALSE(saved);
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(directory / "world_info.json"))
+                  .at("simulationTick"),
+              2u);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(directory)),
+              previous_ledger);
     ASSERT_NO_FATAL_FAILURE(CheckPartialPairReloadAndSave(
         root, jobs, session.GetMetadata().worldId, session.GetWorldSaveDir()));
 }
@@ -1989,7 +2116,10 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
         },
         testing::ExitedWithCode(73),
         "");
-    const auto save = fs::directory_iterator(root.path() / "worlds/saves")->path();
+    const auto catalog = P::EnumerateSavedWorlds(root.path());
+    ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    const auto save = root.path() / "worlds/saves" / catalog.worlds.front().metadata.worldId;
     std::vector<fs::path> debris;
     for (const auto& entry : fs::recursive_directory_iterator(save)) {
         if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
@@ -1997,6 +2127,9 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
     }
     ASSERT_EQ(debris.size(), 1u);
     EXPECT_EQ(debris.front().parent_path(), save);
+    EXPECT_EQ(
+        nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")).at("simulationTick"),
+        2u);
     Luminumbra::world::ActiveRegionLedger staged;
     std::string error;
     ASSERT_TRUE(Luminumbra::world::ActiveRegionLedger::decode(
@@ -2385,8 +2518,10 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledCallbacksKeepLegacySavesLoa
         EXPECT_TRUE(session.IsSimulationTickBoundary());
         EXPECT_TRUE(session.SaveWorld());
         EXPECT_TRUE(session.SaveWorldState());
-        EXPECT_TRUE(session.SaveWorldStateTo(root.path() / "legacy-explicit"));
-        EXPECT_FALSE(fs::exists(root.path() / "legacy-explicit"));
+        EXPECT_TRUE(session.SaveWorldStateTo(
+            root.path() / "legacy-explicit", nullptr, /*full_snapshot=*/true));
+        EXPECT_EQ(ReadClockTestFile(root.path() / "legacy-explicit/world_info.json"), before);
+        EXPECT_TRUE(P::WorldSaveService::validate_save(root.path() / "legacy-explicit"));
         EXPECT_TRUE(session.LoadWorldState());
         EXPECT_TRUE(session.LoadWorldStateFrom(save));
         EXPECT_EQ(session.TickSimulation(dt), 1u);
@@ -3081,6 +3216,8 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
     }
     const auto save = root.path() / "golden-save";
     ASSERT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_FALSE(fs::exists(save / "preset.json"));
+    EXPECT_FALSE(fs::exists(save / "world_info.json"));
     ExpectSameWorldHash(session, expected);
     EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
     const auto fixture =
@@ -3144,6 +3281,8 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(expected_live, 32));
     const auto save = root.path() / "plant-golden-save";
     ASSERT_NO_FATAL_FAILURE(SavePlantRosterThenMultiRegionEdit(session, save));
+    EXPECT_FALSE(fs::exists(save / "preset.json"));
+    EXPECT_FALSE(fs::exists(save / "world_info.json"));
     EXPECT_FALSE(session.ActiveRegionsEnabled());
     EXPECT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 1, 0)));
     const auto fixture =

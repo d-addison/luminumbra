@@ -12,10 +12,21 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def is_msvc_compiler(compiler):
+    return Path(compiler or "").name.lower() in {"cl", "cl.exe"}
+
+
 class CommonLibraryIsaContract(unittest.TestCase):
     compiler = shutil.which("c++") or shutil.which("cl")
     cmake = shutil.which("cmake")
-    msvc = False
+    msvc = is_msvc_compiler(compiler)
+
+    def test_compiler_mode(self):
+        for compiler, expected in (("cl", True), ("cl.exe", True), ("CL.EXE", True),
+                                   ("/compiler/bin/cl.exe", True), ("c++", False),
+                                   ("clang++", False), (None, False)):
+            with self.subTest(compiler=compiler):
+                self.assertEqual(is_msvc_compiler(compiler), expected)
 
     def test_injected_cpu_profiles(self):
         self.assertIsNotNone(self.compiler, "a C++ compiler is required")
@@ -80,7 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("--cmake", default=shutil.which("cmake"))
     args = parser.parse_args()
     CommonLibraryIsaContract.compiler = args.compiler
-    CommonLibraryIsaContract.msvc = args.msvc
+    CommonLibraryIsaContract.msvc = args.msvc or is_msvc_compiler(args.compiler)
     CommonLibraryIsaContract.cmake = args.cmake
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(CommonLibraryIsaContract)
     sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

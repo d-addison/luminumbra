@@ -82,10 +82,10 @@ struct HeightField {
         const int z1 = std::min(z0 + 1, n - 1);
         const double tx = fx - x0;
         const double tz = fz - z0;
-        const double h00 = h[z0 * n + x0];
-        const double h10 = h[z0 * n + x1];
-        const double h01 = h[z1 * n + x0];
-        const double h11 = h[z1 * n + x1];
+        const double h00 = h[static_cast<std::size_t>(z0 * n + x0)];
+        const double h10 = h[static_cast<std::size_t>(z0 * n + x1)];
+        const double h01 = h[static_cast<std::size_t>(z1 * n + x0)];
+        const double h11 = h[static_cast<std::size_t>(z1 * n + x1)];
         const double a = h00 + (h10 - h00) * tx;
         const double b = h01 + (h11 - h01) * tx;
         return a + (b - a) * tz;
@@ -112,7 +112,7 @@ inline HeightField BuildHeightFieldFromTiles(const Luminumbra::Systems::SHIELD_W
     hf.n = per_region * regions + 1;
     hf.ox = static_cast<double>(rx0) * 512.0;
     hf.oz = static_cast<double>(rz0) * 512.0;
-    hf.h.assign(static_cast<std::size_t>(hf.n) * hf.n, 0.0f);
+    hf.h.assign(static_cast<std::size_t>(hf.n) * static_cast<std::size_t>(hf.n), 0.0f);
 
     for (int rz = 0; rz < regions; ++rz) {
         for (int rx = 0; rx < regions; ++rx) {
@@ -125,9 +125,10 @@ inline HeightField BuildHeightFieldFromTiles(const Luminumbra::Systems::SHIELD_W
                     const int gz = rz * per_region + z;
                     if (gx >= hf.n || gz >= hf.n)
                         continue;
-                    const float height =
-                        Luminumbra::World::DequantizeFarLodHeight(tile.height_q[z * sps + x]);
-                    hf.h[static_cast<std::size_t>(gz) * hf.n + gx] = height;
+                    const float height = Luminumbra::World::DequantizeFarLodHeight(
+                        tile.height_q[static_cast<std::size_t>(z * sps + x)]);
+                    hf.h[static_cast<std::size_t>(gz) * static_cast<std::size_t>(hf.n) +
+                         static_cast<std::size_t>(gx)] = height;
                 }
             }
         }
@@ -173,15 +174,15 @@ inline HeightMaxMip BuildHeightMaxMip(const HeightField& hf) {
     mip.ox = hf.ox;
     mip.oz = hf.oz;
     int cells = hf.n - 1;
-    std::vector<float> level0(static_cast<std::size_t>(cells) * cells);
+    std::vector<float> level0(static_cast<std::size_t>(cells) * static_cast<std::size_t>(cells));
     for (int cz = 0; cz < cells; ++cz) {
         for (int cx = 0; cx < cells; ++cx) {
-            const float a = hf.h[cz * hf.n + cx];
-            const float b = hf.h[cz * hf.n + cx + 1];
-            const float c = hf.h[(cz + 1) * hf.n + cx];
-            const float d = hf.h[(cz + 1) * hf.n + cx + 1];
-            level0[static_cast<std::size_t>(cz) * cells + cx] =
-                std::max(std::max(a, b), std::max(c, d));
+            const float a = hf.h[static_cast<std::size_t>(cz * hf.n + cx)];
+            const float b = hf.h[static_cast<std::size_t>(cz * hf.n + cx + 1)];
+            const float c = hf.h[static_cast<std::size_t>((cz + 1) * hf.n + cx)];
+            const float d = hf.h[static_cast<std::size_t>((cz + 1) * hf.n + cx + 1)];
+            level0[static_cast<std::size_t>(cz) * static_cast<std::size_t>(cells) +
+                   static_cast<std::size_t>(cx)] = std::max(std::max(a, b), std::max(c, d));
         }
     }
     mip.dims.push_back(cells);
@@ -189,14 +190,17 @@ inline HeightMaxMip BuildHeightMaxMip(const HeightField& hf) {
 
     while (cells > 1) {
         const int coarse = (cells + 1) / 2;
-        std::vector<float> next(static_cast<std::size_t>(coarse) * coarse,
+        std::vector<float> next(static_cast<std::size_t>(coarse) * static_cast<std::size_t>(coarse),
                                 std::numeric_limits<float>::lowest());
         const std::vector<float>& prev = mip.max_h.back();
         for (int cz = 0; cz < cells; ++cz) {
             for (int cx = 0; cx < cells; ++cx) {
                 const int nz = cz / 2, nx = cx / 2;
-                float& dst = next[static_cast<std::size_t>(nz) * coarse + nx];
-                dst = std::max(dst, prev[static_cast<std::size_t>(cz) * cells + cx]);
+                float& dst = next[static_cast<std::size_t>(nz) * static_cast<std::size_t>(coarse) +
+                                  static_cast<std::size_t>(nx)];
+                dst = std::max(dst,
+                               prev[static_cast<std::size_t>(cz) * static_cast<std::size_t>(cells) +
+                                    static_cast<std::size_t>(cx)]);
             }
         }
         mip.dims.push_back(coarse);
@@ -218,7 +222,9 @@ struct SdfVolume {
 
     std::size_t idx(int x, int y, int z) const {
         return static_cast<std::size_t>(x) +
-               nx * (static_cast<std::size_t>(y) + ny * static_cast<std::size_t>(z));
+               static_cast<std::size_t>(nx) *
+                   (static_cast<std::size_t>(y) +
+                    static_cast<std::size_t>(ny) * static_cast<std::size_t>(z));
     }
     std::size_t bytes() const {
         return d.size() * sizeof(float);
@@ -247,7 +253,9 @@ inline SdfVolume BuildSdfVolume(const HeightField& hf, double voxel_step) {
     v.nx = static_cast<int>(std::ceil(span_xz / voxel_step)) + 1;
     v.nz = v.nx;
     v.ny = std::max(2, static_cast<int>(std::ceil(span_y / voxel_step)) + 1);
-    v.d.assign(static_cast<std::size_t>(v.nx) * v.ny * v.nz, 0.0f);
+    v.d.assign(static_cast<std::size_t>(v.nx) * static_cast<std::size_t>(v.ny) *
+                   static_cast<std::size_t>(v.nz),
+               0.0f);
     for (int z = 0; z < v.nz; ++z) {
         const double wz = v.oz + z * voxel_step;
         for (int y = 0; y < v.ny; ++y) {
@@ -307,9 +315,12 @@ inline SdfMipChain BuildSdfMips(const SdfVolume& base, bool conservative) {
             y = std::min(y, ly - 1);
             z = std::min(z, lz - 1);
             return prev[static_cast<std::size_t>(x) +
-                        plx * (static_cast<std::size_t>(y) + ply * static_cast<std::size_t>(z))];
+                        static_cast<std::size_t>(plx) *
+                            (static_cast<std::size_t>(y) +
+                             static_cast<std::size_t>(ply) * static_cast<std::size_t>(z))];
         };
-        std::vector<float> next(static_cast<std::size_t>(cx) * cy * cz);
+        std::vector<float> next(static_cast<std::size_t>(cx) * static_cast<std::size_t>(cy) *
+                                static_cast<std::size_t>(cz));
         const double coarse_cell = c.level_step(static_cast<int>(c.levels.size()));
         const double half_diag = 0.5 * coarse_cell * std::sqrt(3.0);
         for (int z = 0; z < cz; ++z) {
@@ -338,8 +349,9 @@ inline SdfMipChain BuildSdfMips(const SdfVolume& base, bool conservative) {
                         out = static_cast<float>(avg / 8.0);
                     }
                     next[static_cast<std::size_t>(x) +
-                         cx * (static_cast<std::size_t>(y) + cy * static_cast<std::size_t>(z))] =
-                        out;
+                         static_cast<std::size_t>(cx) *
+                             (static_cast<std::size_t>(y) +
+                              static_cast<std::size_t>(cy) * static_cast<std::size_t>(z))] = out;
                 }
             }
         }

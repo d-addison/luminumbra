@@ -108,34 +108,32 @@ the legacy existing-save query: a plant-only save makes later saves incremental.
 Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
 replacement primitive for the ledger, without claiming cross-file atomicity.
 
-Clock/ledger pair saves are synchronous and non-reentrant on the process's host
-thread. The client calls them during world creation, its main-thread pause-menu
+Clock/ledger pair saves are synchronous and serialize with all persistence writers in
+the process. The client calls them during world creation, its main-thread pause-menu
 quit callback, and shutdown after the main loop returns. Its explicit persistence
 scenario also runs on that thread. The server calls them synchronously from
-`RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after
-the tick loop. Job workers do not call the pair writer. No overlapping production
-pair writers were found, including across sessions in one process. The call sites
-state this ownership contract, and a debug-only atomic assertion guards the whole
-pair writer against concurrent or reentrant calls. It does not serialize saves;
-there is no production locking scheme. Independently launched processes sharing
-one save directory are outside this ownership contract.
+`RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick
+loop. Job workers do not call the pair writer. Public persistence APIs permit
+overlapping calls with stable caller-owned inputs. A process-wide recursive mutex guards
+region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup.
+It serializes writers through reclamation and replacement; nested calls retain ownership
+until the outer call returns. Independently launched processes sharing one save
+directory are outside this ownership contract.
 
-Incoming pairs are validated before either replacement. Forward saves replace
-metadata first; rewinds replace the ledger first, preserving ledger tick <= clock
-tick at every boundary. Ledger bytes are staged as unique
-`<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict
-`chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place.
-A separately mounted region directory causes replacement to fail across devices;
-no copy fallback compromises atomicity. Termination can leave staging debris in
-the save root; loading and later saves ignore it, and the next successful ledger
-save reclaims it, so repeated interruptions cannot accumulate ledger copies until
-the volume is exhausted. Reclamation is safe because saves are serialized per
-destination by construction, so a staging file that already exists was abandoned
-by a process that is no longer writing it. It is best effort: a file that cannot
-be removed is left alone and never blocks the save. Unknown files inside the region
-directory are still refused. The POSIX subprocess regression exits after the
-staging file is flushed and closed, verifies recovery while that file remains, and
-then verifies the next successful save removes it.
+Incoming pairs are validated before either replacement. Forward saves replace metadata
+first; rewinds replace the ledger first, preserving ledger tick <= clock tick at every
+boundary. Ledger bytes are staged as unique
+`<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict `chunks/` and
+`chunks/region/` scans on the save filesystem, then atomically renamed into place. A
+separately mounted region directory causes replacement to fail across devices; no copy
+fallback compromises atomicity. Termination can leave staging debris in the save root;
+loading ignores it, and every later ledger save, including an empty-ledger save,
+attempts to reclaim it. Reclamation holds the shared mutex through cleanup and
+replacement, so existing staging cannot belong to another active in-process writer. It
+is best effort: a file that cannot be removed is left alone and never blocks the save.
+Unknown files inside the region directory are still refused. The POSIX subprocess
+regression exits after the staging file is flushed and closed, verifies recovery while
+that file remains, and then verifies the next successful save removes it.
 
 An accepted partial pair can contain an older ledger than its saved clock. The
 ledger therefore carries two tick values. The canonical scheduler tick advances

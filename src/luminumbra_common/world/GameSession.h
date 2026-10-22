@@ -116,7 +116,7 @@ public:
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
 
-    // Save the current world state
+    // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
 
     // Read-only destination preset/identity check, before any save writes or acknowledgements.
@@ -124,21 +124,30 @@ public:
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
-    // (worlds/saves/<world_id>). Incremental contract: nothing is written when
-    // no chunk carries unsaved voxel edits, so a never-edited world stays
-    // byte-for-byte on the fresh-world path. The first write of an edited
-    // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
+    // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
+    // plants and energy persist even when no chunks are dirty. Active-region saves
+    // also persist metadata; regions-disabled incremental saves reconcile the
+    // presentation calendar, otherwise preserving unmarked legacy metadata bytes.
+    // A save without a prior container emits a full snapshot; later writes flush through
+    // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
+    // chunks, plants, energy and metadata succeed. Per-file atomic writes can persist
+    // partial progress on failure; metadata is saved after the required state.
+    // Full snapshots and persistent active-region save-as exports include every streamed chunk
+    // and commit metadata last. Pass full_snapshot=true for a complete regions-disabled export.
+    // Save-as exports retain canonical dirty flags and active-region save stamps.
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          bool full_snapshot = false);
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
-    // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns true). A refusal returns false and disables saving.
+    // edits are never clobbered by regeneration. Restores the saved water window
+    // cursor; absent metadata or an absent cursor resets it to zero. Malformed
+    // cursors refuse before changing the live cursor. A missing snapshot is a
+    // clean miss (returns true). A refusal returns false and disables saving.
     const std::string& GetWorldOpenError() const {
         return m_worldOpenError;
     }
@@ -497,7 +506,11 @@ private:
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir) const;
+    bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
+                              WorldStateSaveReport* report,
+                              bool full_snapshot,
+                              bool write_metadata);
     bool ReconcileWorldCalendarMetadataTo(const std::filesystem::path& save_dir,
                                           bool has_saved_render_calendar);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir,

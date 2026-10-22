@@ -61,6 +61,7 @@
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
+#include "../simulation/SimWorkCounters.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
@@ -196,7 +197,7 @@ GameSession::~GameSession() {
 void GameSession::ResetWorldSystems() {
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
-    // Keep all dependencies alive while the world destructor publishes completed work.
+    // Keep all dependencies alive while the world destructor fences admitted work.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
     m_worldSystem.reset();
@@ -402,18 +403,19 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
     class BatchGuard {
-        bool& active;
-        bool previous;
-
     public:
         BatchGuard(bool& value, bool enabled)
-            : active(value)
-            , previous(value) {
-            active = enabled;
+            : m_active(value)
+            , m_previous(value) {
+            m_active = enabled;
         }
         ~BatchGuard() {
-            active = previous;
+            m_active = m_previous;
         }
+
+    private:
+        bool& m_active;
+        bool m_previous;
     };
     const BatchGuard guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
     std::uint32_t ticks_executed;
@@ -1492,12 +1494,6 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // Saved worlds adopt the same captured session content as new worlds.
     m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
-    // restore the rotating water sim-window cursor so the loaded session
-    // resimulates the exact windows the original would from the same water state.
-    if (m_worldSystem) {
-        m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
-    }
-
     // same weather-rain wiring as CreateWorld (explicit OFF = no-op).
     ApplyWeatherRainWiring();
 
@@ -1666,7 +1662,9 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
 }
 
 bool GameSession::SaveWorld() {
-    return SaveWorldMetadataTo(GetWorldSaveDir());
+    if (m_transientWorld || m_metadata.worldId.empty())
+        return false;
+    return SaveWorldStateToImpl(GetWorldSaveDir(), nullptr, false, true);
 }
 
 bool GameSession::ReconcileWorldCalendarMetadataTo(const fs::path& save_dir,
@@ -1738,7 +1736,7 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
 }
 } // namespace
 
-bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
+bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&
@@ -1787,11 +1785,11 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     if (m_activeRegionsEnabled) {
         // All production callers save synchronously on the host thread: client
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
-        // Do not dispatch this pair to workers; the writer asserts non-overlap.
+        // The persistence service serializes the whole pair with other writers.
+        auto ledger = m_activeRegionLedger;
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
-                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
+                metadata_json.dump(4) + "\n", ledger, save_dir))
             return false;
-        m_regionDurableDirectory = save_dir;
     } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
                                                              save_dir)) {
         return false;
@@ -1823,34 +1821,27 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
 }
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
-                                   WorldStateSaveReport* report) {
+                                   WorldStateSaveReport* report,
+                                   bool full_snapshot) {
+    return SaveWorldStateToImpl(
+        save_dir, report, full_snapshot, m_activeRegionsEnabled || full_snapshot);
+}
+
+bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
+                                       WorldStateSaveReport* report,
+                                       bool full_snapshot,
+                                       bool write_metadata) {
+    const bool canonical_save = save_dir == GetWorldSaveDir();
+    full_snapshot =
+        full_snapshot || (m_activeRegionsEnabled && !m_transientWorld && !canonical_save);
     WorldStateSaveReport result;
     if (report) {
         *report = result;
     }
-    bool has_saved_render_calendar = false;
-    if (!IsSimulationTickBoundary() ||
-        !ClockConfigurationCompatible(save_dir, &has_saved_render_calendar) ||
-        !m_worldOpenError.empty() || !m_worldSystem || save_dir.empty() ||
+    if (!IsSimulationTickBoundary() || !m_worldOpenError.empty() || !m_worldSystem ||
+        save_dir.empty() ||
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
-    }
-
-    if (!Persistence::WorldSaveService::validate_save(save_dir))
-        return false;
-
-    // Refuse a changed preset or identity before any snapshot write or dirty acknowledgement,
-    // including the chunk-free plant/energy path and saves with active regions disabled.
-    if (!SavedPresetCompatible(save_dir))
-        return false;
-
-    // Clock snapshots can contain energy or metadata without any chunk/plant writer
-    // creating the destination. Create it only after every refusal check passes.
-    if (m_activeRegionsEnabled || m_renderCalendar) {
-        std::error_code error;
-        fs::create_directories(save_dir, error);
-        if (error)
-            return false;
     }
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
@@ -1877,85 +1868,79 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
-    if (dirty_ids.empty()) {
-        // No dirty CHUNKS. Without an existing snapshot this keeps a save-less, no-plant world
-        // byte-for-byte (no chunks/ dir created); a planted world still persists its plants here.
-        const bool plants_ok =
-            Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
-        const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (!plants_ok || !energy_ok)
-            return false;
-        if (report) {
-            *report = result;
-        }
-        return ReconcileWorldCalendarMetadataTo(save_dir, has_saved_render_calendar);
-    }
+    if (report)
+        *report = result;
 
-    const Persistence::WorldSaveService service;
+    // Jobs can need persistence ownership themselves. Quiesce and capture first,
+    // then retain the shared recursive ownership from destination validation
+    // through every payload, metadata publication and dirty acknowledgement.
+    const Persistence::WorldSaveService::SaveOwnership save_ownership;
+    bool has_saved_render_calendar = false;
+    if (!ClockConfigurationCompatible(save_dir, &has_saved_render_calendar) ||
+        !Persistence::WorldSaveService::validate_save(save_dir) || !SavedPresetCompatible(save_dir))
+        return false;
+
     std::vector<std::string> errors;
-    // Subsequent saves rewrite the edited regions of a supported container.
-    const bool has_snapshot = m_activeRegionsEnabled
-                                  ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
-                                  : Persistence::WorldSaveService::has_world_save(save_dir);
-
-    bool ok = false;
-    if (!has_snapshot) {
-        // First save of this world: write the full snapshot, then clear the
-        // dirty flags exactly like the incremental path does.
-        ok = service.save_world(state, save_dir, &errors);
-        if (ok) {
-            for (const ChunkID id : dirty_ids) {
-                if (const auto chunk = state.find_chunk(id)) {
-                    chunk->clear_voxel_data_dirty();
-                }
-            }
+    const Persistence::WorldSaveService service;
+    bool ok = true;
+    const bool write_chunks = full_snapshot || !dirty_ids.empty();
+    if (write_chunks) {
+        // Legacy plant-only saves already count as containers: their next save
+        // writes only dirty regions, preserving the regions-disabled byte contract.
+        const bool has_snapshot = m_activeRegionsEnabled
+                                      ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
+                                      : Persistence::WorldSaveService::has_world_save(save_dir);
+        if (full_snapshot || !has_snapshot)
+            ok = service.save_world(state, save_dir, &errors);
+        else
+            ok = service
+                     .save_dirty_chunks(state,
+                                        save_dir,
+                                        &errors,
+                                        /*acknowledge_dirty=*/false)
+                     .saved;
+    }
+    // A region replacement can succeed before a later writer fails. Invalidate
+    // derived authority after every chunk attempt, including partial failures,
+    // so an older worker result cannot integrate against newly persisted chunks.
+    if (write_chunks) {
+        for (const ChunkID id : dirty_ids) {
+            if (const auto chunk = state.find_chunk(id))
+                m_worldSystem->notify_far_lod_authority_durable(chunk->get_coords());
         }
-    } else {
-        const Persistence::WorldSaveDirtyReport dirty_report =
-            service.save_dirty_chunks(state, save_dir, &errors);
-        ok = dirty_report.saved;
-    }
-
-    // A multi-region save can commit an early atomic LMR1 replacement and then
-    // report failure on a later region. Conservatively invalidate every dirty
-    // chunk's affected far regions after any Phase-A attempt: this rejects a
-    // worker that read an older container even across a partial-save result.
-    // An extra rebuild when nothing committed is safe; missing a partial commit
-    // would allow old derived bytes to integrate as current.
-    for (const ChunkID id : dirty_ids) {
-        if (const auto chunk = state.find_chunk(id)) {
-            m_worldSystem->notify_far_lod_authority_durable(chunk->get_coords());
-        }
-    }
-
-    //  persist plants alongside the chunk write (empty roster -> no file -> byte-identical).
-    if (!Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors)) {
-        ok = false;
-    }
-
-    // persist the stateful energy layer alongside (null/
-    // all-zero layer -> no file -> byte-identical; the plant discipline).
-    const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (!energy_ok)
-        ok = false;
-
-    for (const std::string& error : errors) {
-        LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     }
     if (ok)
-        ok = ReconcileWorldCalendarMetadataTo(save_dir, has_saved_render_calendar);
-    if (ok) {
-        result.saved = true;
-        result.chunks_saved = result.chunks_total; // whole-snapshot layout
-        LUMINUMBRA_CORE_INFO("World state saved: {} chunks ({} dirty) -> {}",
-                             result.chunks_total,
-                             result.chunks_dirty,
-                             save_dir.string());
+        ok = Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors);
+    if (ok)
+        ok = SaveEnergyFieldRecord(save_dir);
+    // Publish complete-save metadata and reconcile presentation calendars only
+    // after every payload succeeds, before acknowledging any dirty chunks.
+    write_metadata = write_metadata && !m_transientWorld;
+    if (ok)
+        ok = write_metadata ? SaveWorldMetadataTo(save_dir)
+                            : ReconcileWorldCalendarMetadataTo(save_dir, has_saved_render_calendar);
+    for (const auto& error : errors)
+        LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
+    if (!ok)
+        return false;
+
+    if (write_metadata && canonical_save && m_activeRegionsEnabled) {
+        m_activeRegionLedger.mark_saved(m_worldClock);
+        m_regionDurableDirectory = save_dir;
     }
-    if (report) {
+    // An export does not persist edits to the canonical save. Keep them pending
+    // there, so the next autosave cannot advance its metadata beside stale chunks.
+    if (m_transientWorld || canonical_save) {
+        for (const ChunkID id : dirty_ids) {
+            if (const auto chunk = state.find_chunk(id))
+                chunk->clear_voxel_data_dirty();
+        }
+    }
+    result.saved = write_chunks;
+    result.chunks_saved = write_chunks ? result.chunks_total : 0;
+    if (report)
         *report = result;
-    }
-    return ok;
+    return true;
 }
 
 bool GameSession::LoadWorldState() {
@@ -1986,6 +1971,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     }
 
     WorldClock saved_clock;
+    std::size_t water_sim_cursor = 0;
     std::optional<Vec3> ambient_anchor;
     std::optional<WorldCalendar> render_calendar;
     bool requires_active_regions = false;
@@ -1995,7 +1981,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                                                             requires_active_regions,
                                                             &clock_errors,
                                                             &ambient_anchor,
-                                                            &render_calendar) ||
+                                                            &render_calendar,
+                                                            &water_sim_cursor) ||
         (requires_active_regions && !m_activeRegionsEnabled)) {
         m_worldOpenError =
             clock_errors.empty()
@@ -2005,8 +1992,10 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return false;
     }
     m_renderCalendar = render_calendar;
-    if (!snapshot_present && !m_activeRegionsEnabled)
+    if (!snapshot_present && !m_activeRegionsEnabled) {
+        m_worldSystem->SetWaterSimWindowCursor(water_sim_cursor);
         return true; // legacy fresh world
+    }
     if (m_activeRegionsEnabled) {
         // Presentation-only saves recorded the calendar but no simulation tick.
         if (render_calendar)
@@ -2145,6 +2134,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
     }
 
+    // Commit the validated cursor only after every refusing load step passes.
+    m_worldSystem->SetWaterSimWindowCursor(water_sim_cursor);
     m_lastLoadedChunkCount = adopted;
     LUMINUMBRA_CORE_INFO("World state loaded: {} chunks adopted ({} in snapshot) from {}",
                          adopted,
@@ -2286,29 +2277,22 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
     if (!m_energyFieldState || save_dir.empty())
         return true;
     if (m_energyFieldState->page_count() == 0) {
-        if (!m_activeRegionsEnabled)
-            return true; // Preserve legacy empty-layer save behavior.
         const auto tick = GetSimulationTickCount();
-        const auto aligned_next = tick + (luminumbra::fields::kEnergyCadenceTicks -
-                                          tick % luminumbra::fields::kEnergyCadenceTicks);
-        if (m_energyFieldState->next_fire_tick() == aligned_next) {
+        const auto absent_remaining = m_activeRegionsEnabled
+                                          ? luminumbra::fields::kEnergyCadenceTicks -
+                                                tick % luminumbra::fields::kEnergyCadenceTicks
+                                          : luminumbra::fields::kEnergyCadenceTicks;
+        const auto next_fire = m_energyFieldState->next_fire_tick();
+        if (next_fire > tick && next_fire - tick == absent_remaining) {
             // Absence reconstructs this phase. Retire any stale nonempty record.
-            std::error_code error;
-            fs::remove(save_dir / "aether_state.efs", error);
-            return !error;
+            return Persistence::WorldSaveService::remove_file_and_staging(save_dir /
+                                                                          "aether_state.efs");
         }
         // A legacy import can retain a different phase after its last unit decays.
         // The existing header alone preserves it without adding zero pages.
     }
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
-    std::ofstream file(save_dir / "aether_state.efs", std::ios::trunc);
-    if (!file.is_open()) {
-        LUMINUMBRA_CORE_ERROR("Failed to write aether state record under {}", save_dir.string());
-        return false;
-    }
-    file << record;
-    file.flush();
-    return file.good();
+    return Persistence::WorldSaveService::write_file_durably(save_dir / "aether_state.efs", record);
 }
 
 std::string GameSession::ComputeAetherStateSubHash() const {

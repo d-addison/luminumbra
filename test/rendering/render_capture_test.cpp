@@ -426,7 +426,10 @@ void WritePpm(const fs::path& path, int width, int height, const std::vector<uns
     output << "P6\n" << width << " " << height << "\n255\n";
     for (int y = height - 1; y >= 0; --y) {
         for (int x = 0; x < width; ++x) {
-            const std::size_t pixel = (static_cast<std::size_t>(y) * width + x) * 4u;
+            const std::size_t pixel =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                 static_cast<std::size_t>(x)) *
+                4u;
             const unsigned char rgb[3] = {rgba[pixel], rgba[pixel + 1u], rgba[pixel + 2u]};
             output.write(reinterpret_cast<const char*>(rgb), 3);
         }

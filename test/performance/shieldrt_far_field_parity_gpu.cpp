@@ -117,10 +117,12 @@ FlatMaxMip FlattenMaxMip(const HeightMaxMip& mip) {
     EXPECT_LE(mip.levels, kMaxMipLevels);
     std::int32_t off = 0;
     for (int L = 0; L < mip.levels; ++L) {
-        f.offset[L] = off;
-        f.dim[L] = mip.dims[L];
-        f.data.insert(f.data.end(), mip.max_h[L].begin(), mip.max_h[L].end());
-        off += static_cast<std::int32_t>(mip.max_h[L].size());
+        f.offset[static_cast<std::size_t>(L)] = off;
+        f.dim[static_cast<std::size_t>(L)] = mip.dims[static_cast<std::size_t>(L)];
+        f.data.insert(f.data.end(),
+                      mip.max_h[static_cast<std::size_t>(L)].begin(),
+                      mip.max_h[static_cast<std::size_t>(L)].end());
+        off += static_cast<std::int32_t>(mip.max_h[static_cast<std::size_t>(L)].size());
     }
     return f;
 }
@@ -337,9 +339,12 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
 
         std::vector<float> dir4(static_cast<std::size_t>(ray_count) * 4, 0.0f);
         for (int i = 0; i < ray_count; ++i) {
-            dir4[i * 4 + 0] = static_cast<float>(dirs[i].x);
-            dir4[i * 4 + 1] = static_cast<float>(dirs[i].y);
-            dir4[i * 4 + 2] = static_cast<float>(dirs[i].z);
+            dir4[static_cast<std::size_t>(i * 4 + 0)] =
+                static_cast<float>(dirs[static_cast<std::size_t>(i)].x);
+            dir4[static_cast<std::size_t>(i * 4 + 1)] =
+                static_cast<float>(dirs[static_cast<std::size_t>(i)].y);
+            dir4[static_cast<std::size_t>(i * 4 + 2)] =
+                static_cast<float>(dirs[static_cast<std::size_t>(i)].z);
         }
         const GLuint dirs_buf =
             MakeStorageBuffer(static_cast<GLsizeiptr>(dir4.size() * sizeof(float)), dir4.data());
@@ -391,13 +396,13 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
         std::vector<double> gt_abs;
         gt_abs.reserve(static_cast<std::size_t>(ray_count));
         for (int i = 0; i < ray_count; ++i) {
-            if (hit_t[i] < 0.0f)
+            if (hit_t[static_cast<std::size_t>(i)] < 0.0f)
                 continue;
             ++hits;
-            const double t = static_cast<double>(hit_t[i]);
-            const double hx = view.eye.x + dirs[i].x * t;
-            const double hy = view.eye.y + dirs[i].y * t;
-            const double hz = view.eye.z + dirs[i].z * t;
+            const double t = static_cast<double>(hit_t[static_cast<std::size_t>(i)]);
+            const double hx = view.eye.x + dirs[static_cast<std::size_t>(i)].x * t;
+            const double hy = view.eye.y + dirs[static_cast<std::size_t>(i)].y * t;
+            const double hz = view.eye.z + dirs[static_cast<std::size_t>(i)].z * t;
 
             // Leg 1: hit lies on the bilinear FarLodStore surface it marched.
             const double self_delta = std::abs(hy - hf.sample(hx, hz));

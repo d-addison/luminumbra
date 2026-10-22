@@ -42,7 +42,8 @@ ActiveRegionLedger Reload(const ActiveRegionLedger& ledger) {
 // Same FNV-1a 64 as the implementation's Hash(), used to re-seal hand-crafted envelopes.
 std::uint64_t Fnv1a64(std::string_view bytes) {
     std::uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char byte : bytes) {
+    for (const char ch : bytes) {
+        const auto byte = static_cast<unsigned char>(ch);
         hash ^= byte;
         hash *= 1099511628211ull;
     }
