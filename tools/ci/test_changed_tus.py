@@ -2720,7 +2720,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.assertEqual(report["status"], "failed")
                     self.assertEqual(report["error"],
                                      "missing compile database entry (possibly disabled configuration): "
-                                     "src/unconfigured.cpp")
+                                     + str(Path("src") / "unconfigured.cpp"))
                     self.assertEqual(sum("-M" in c for c, _ in self.commands), 6)
                     self.assertTrue(all("-M" in c for c, _ in self.commands))
                     self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
