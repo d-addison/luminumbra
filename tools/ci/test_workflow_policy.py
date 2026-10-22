@@ -1525,7 +1525,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(" ".join(command.replace("\\\n", "").split()),
                          "--junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml "
                          "--discovery build/release/ctest-discovery.json --ci-context "
-                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json")
+                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json "
+                         '--preparation-receipt-file "$RUNNER_TEMP/acceptance-preparation-custody.json"')
         upload = named["Upload merged JUnit"]
         self.assertEqual(value(upload, "if", 8),
                          "always() && needs.linux.result == 'success' && "
