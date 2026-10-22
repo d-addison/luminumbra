@@ -8,7 +8,7 @@ import sys
 _CHILD_TIMEOUT = 12
 _LOCAL_PARTITIONS = 64
 _CONTRACT_PARTITIONS = 225
-_EXPECTED_CASES = 466
+_EXPECTED_CASES = 478
 _PHASE_LIMIT = 768
 _phase_records = 0
 
@@ -6686,6 +6686,137 @@ class PublicTreeScanTests(_PhaseCase):
 
 
 class AcceptanceCustodyTests(AcceptanceFixture):
+    def legacy_recovery(self) -> tuple[Path, Path]:
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        output = self.tmp / "legacy-output"
+        backup, candidate = (self.tmp / (".acceptance-" + str(i) * 32) for i in (1, 2))
+        backup.write_bytes(b"old\r\n")
+        candidate.write_bytes(b"new\r\n")
+        old, new = MODULE._transaction_record(backup), MODULE._transaction_record(candidate)
+        MODULE._write_transaction(journal, [{"path": str(output), "old": old["sha256"],
+                                            "backup": old, "new": new}], committed=False)
+        candidate.replace(output)
+        return journal, output
+
+    def _check_legacy_recovery_shares_custody_through_publication(self, mode) -> None:
+        self.prepare_rollback() if mode == "refresh" else self.prepare_refresh()
+        journal, recovered = self.legacy_recovery()
+        marker = journal.with_suffix(".preparation")
+        args = self.base_args()
+        authority = Path(args[-1])
+        export = self.tmp / "export.md"
+        options = []
+        if mode == "write":
+            options = ["--write-doc", str(export)]
+        elif mode in ("refresh", "unchanged"):
+            options = ["--refresh-inventory"]
+        elif mode in ("execution", "junit"):
+            discovery, report = self.execution_inputs()
+            options = ["--junit", str(report), "--discovery", str(discovery)]
+            if mode == "execution":
+                options.extend(("--execution-receipt", str(export)))
+        run_locked, retire = MODULE._run_locked, MODULE._PreparationCustody.retire
+        observed = []
+        def after_recovery(invocation, root):
+            observed.append((marker.exists(), invocation.preparation_custody))
+            return run_locked(invocation, root)
+        with mock.patch.object(MODULE, "_create_cli_custody", wraps=MODULE._create_cli_custody) as enroll, \
+                mock.patch.object(MODULE, "_run_locked", after_recovery), \
+                mock.patch.object(MODULE, "_replace_outputs", wraps=MODULE._replace_outputs) as publish, \
+                mock.patch.object(os, "open", wraps=os.open) as opened, \
+                mock.patch.object(MODULE._PreparationCustody, "retire", autospec=True, side_effect=retire) as retired:
+            code, _, err = self.run_main(*args, *options)
+        self.assertEqual(code, 0, err)
+        receipt = authority.read_text(encoding="utf-8").strip()
+        self.assertEqual(observed, [(True, receipt)])
+        self.assertEqual(enroll.call_count, 1)
+        receipt_opens = [call for call in opened.call_args_list if call.args[0] == authority]
+        self.assertEqual(len(receipt_opens), 1)
+        self.assertTrue(receipt_opens[0].args[1] & os.O_EXCL)
+        self.assertEqual(retired.call_count, 1)
+        self.assertEqual(err.count("preparation custody receipt: "), 1)
+        self.assertEqual(recovered.read_bytes(), b"old\r\n")
+        self.assertFalse(marker.exists())
+        self.assertFalse(journal.exists())
+        self.assertFalse(journal.with_suffix(".pending").exists())
+        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+        if mode in ("write", "refresh", "execution"):
+            self.assertEqual(publish.call_args.kwargs["custody"], receipt)
+            if mode == "execution":
+                self.assertTrue(json.loads(export.read_text(encoding="utf-8"))["ctest_references_passed"])
+            else:
+                document = export if mode == "write" else self.root / "docs/acceptance-matrix.md"
+                self.assertEqual(document.read_text(encoding="utf-8"), MODULE.render_doc(MODULE.load_matrix(self.matrix_path)))
+        else:
+            self.assertEqual(publish.call_args.args[0], [])
+
+    def _check_legacy_recovery_validation_failure_retires_custody(self, failure) -> None:
+        self.prepare_refresh()
+        original = self.matrix_path.read_bytes()
+        journal, recovered = self.legacy_recovery()
+        marker = journal.with_suffix(".preparation")
+        args = self.base_args()
+        authority = Path(args[-1])
+        export = self.tmp / "export.md"
+        export.write_bytes(b"previous export")
+        if failure == "partial":
+            self.matrix_path.write_bytes(b'{"schema":')
+        elif failure in ("empty", "unknown"):
+            matrix = baseline_matrix()
+            if failure == "empty":
+                matrix["rows"] = []
+            else:
+                matrix["schema"] = "unknown"
+            self.write_matrix(matrix)
+        run_locked, load, retire = MODULE._run_locked, MODULE.load_matrix, MODULE._PreparationCustody.retire
+        observed = []
+        def after_recovery(invocation, root):
+            observed.append((marker.exists(), invocation.preparation_custody))
+            if failure == "boundary":
+                raise TimeoutError("validation deadline expired")
+            return run_locked(invocation, root)
+        def load_input(path):
+            if failure == "unreadable" and path == self.matrix_path:
+                raise PermissionError("matrix denied")
+            return load(path)
+        with mock.patch.object(MODULE, "_run_locked", after_recovery), \
+                mock.patch.object(MODULE, "load_matrix", load_input), \
+                mock.patch.object(MODULE, "_replace_outputs", wraps=MODULE._replace_outputs) as publish, \
+                mock.patch.object(os, "open", wraps=os.open) as opened, \
+                mock.patch.object(MODULE._PreparationCustody, "retire", autospec=True, side_effect=retire) as retired:
+            code, _, err = self.run_main(*args, "--write-doc", str(export))
+        self.assertIn(code, (1, 2), err)
+        receipt_bytes = authority.read_bytes()
+        self.assertEqual(observed, [(True, receipt_bytes.decode("utf-8").strip())])
+        self.assertEqual(sum(call.args[0] == authority for call in opened.call_args_list), 1)
+        publish.assert_not_called()
+        self.assertEqual(retired.call_count, 1)
+        self.assertFalse(marker.exists())
+        self.assertFalse(journal.exists())
+        self.assertEqual(recovered.read_bytes(), b"old\r\n")
+        self.assertEqual(export.read_bytes(), b"previous export")
+        self.matrix_path.write_bytes(original)
+        retry = self.base_args()
+        self.assertNotEqual(retry[-1], str(authority))
+        code, _, err = self.run_main(*retry, "--write-doc", str(export))
+        self.assertEqual(code, 0, err)
+        self.assertTrue(Path(retry[-1]).is_file())
+        self.assertEqual(authority.read_bytes(), receipt_bytes)
+        self.assertFalse(marker.exists())
+        self.assertEqual(export.read_text(encoding="utf-8"), MODULE.render_doc(MODULE.load_matrix(self.matrix_path)))
+
+    def test_explicit_enrollment_refuses_legacy_recovery_without_consuming_receipt(self) -> None:
+        self.prepare_refresh()
+        self.legacy_recovery()
+        args = self.base_args()
+        before = self.image()
+        code, _, err = self.run_main(*args, "--enroll-preparation")
+        self.assertEqual(code, 2, err)
+        self.assertFalse(Path(args[-1]).exists())
+        self.assertEqual(self.image(), before)
+        code, _, err = self.run_main(*args, "--write-doc", str(self.tmp / "export.md"))
+        self.assertEqual(code, 0, err)
+
     def test_metadata_directory_aliases_share_canonical_transaction_paths(self) -> None:
         for denied in (False, True):
             with self.subTest(denied=denied), self.retargetable_path(self.root / ".git", denied=denied) as (target, _, _):
@@ -8993,6 +9124,12 @@ _CHILD_ALLOWANCES = {}
 # checks actual work including nested fault grids and setup/cleanup helpers.
 # Every other case reserves one unit for ordinary fixture and import work.
 _STORAGE_ALLOWANCES = {
+    'AcceptanceCustodyTests.test_explicit_enrollment_refuses_legacy_recovery_without_consuming_receipt': 2,
+    'AcceptanceCustodyTests.test_legacy_recovery_validation_failure_retires_custody': 2,
+    'AcceptanceCustodyTests.test_legacy_recovery_validation_failure_retires_custody_case_1': 2,
+    'AcceptanceCustodyTests.test_legacy_recovery_validation_failure_retires_custody_case_2': 2,
+    'AcceptanceCustodyTests.test_legacy_recovery_validation_failure_retires_custody_case_3': 2,
+    'AcceptanceCustodyTests.test_legacy_recovery_validation_failure_retires_custody_case_4': 2,
     'AcceptanceCustodyTests.test_cleanup_and_reset_failures_remain_restartable': 8,
     'AcceptanceCustodyTests.test_cli_rejects_incomplete_or_combined_enrollment_requests': 4,
     'AcceptanceCustodyTests.test_cli_requires_independent_new_authority_outside_recovery_tree': 6,
@@ -9274,6 +9411,11 @@ def _register_storage_cases(owner, name, values):
         case._contract_check = check.__name__
         setattr(owner, selected, case)
 
+
+_register_storage_cases(AcceptanceCustodyTests, 'test_legacy_recovery_shares_custody_through_publication',
+                        tuple((mode,) for mode in ("write", "refresh", "execution", "validate", "junit", "unchanged")))
+_register_storage_cases(AcceptanceCustodyTests, 'test_legacy_recovery_validation_failure_retires_custody',
+                        tuple((failure,) for failure in ("boundary", "unreadable", "partial", "empty", "unknown")))
 
 _register_storage_cases(AcceptanceMatrixTests,
     "test_cli_alias_retargeting_refuses_before_and_after_every_publication",

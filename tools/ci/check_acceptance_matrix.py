@@ -1838,7 +1838,13 @@ def _stage_recovery_copy(
 
 
 def _recover_outputs(journal: Path | None, custody: str | None = None, *, enroll_recovery: bool = False,
-                     receipt_file: Path | None = None) -> None:
+                     receipt_file: Path | None = None) -> str | None:
+    """Recover outputs, transferring any new automatic custody to the caller.
+
+    The caller must retain that custody through publication and retire it when
+    the invocation finishes. Failed recovery retains the delivered receipt's
+    existing restart authority.
+    """
     journal = journal.parent.resolve() / journal.name if journal is not None else None
     owner = _PreparationCustody(journal, custody) if journal is not None and custody is not None else None
     if owner is not None:
@@ -1848,13 +1854,14 @@ def _recover_outputs(journal: Path | None, custody: str | None = None, *, enroll
     elif _preparation_pending(journal):
         raise MatrixError(f"uncertain recovery preparation; outputs and recovery copies retained; inspect "
                           f"{journal.with_suffix('.preparation')} and {journal.with_suffix('.pending')}")
-    _recover_journal(journal, owner, enroll_recovery=enroll_recovery, receipt_file=receipt_file)
+    automatic_custody = _recover_journal(journal, owner, enroll_recovery=enroll_recovery, receipt_file=receipt_file)
     if owner is not None:
         owner.reset()
+    return automatic_custody
 
 
 def _recover_journal(journal: Path | None, owner: _PreparationCustody | None = None,
-                     *, enroll_recovery: bool = False, receipt_file: Path | None = None) -> None:
+                     *, enroll_recovery: bool = False, receipt_file: Path | None = None) -> str | None:
     if journal is None or not journal.exists():
         return
     if _same_path(journal, journal.with_suffix(".lock")):
@@ -2010,7 +2017,8 @@ def _recover_journal(journal: Path | None, owner: _PreparationCustody | None = N
                 _remove_transaction_file(record)
     _verify_transaction_file(journal_record, _JOURNAL_BYTES).unlink()
     if automatic_owner:
-        owner.retire()
+        owner.reset()
+        return receipt
 
 
 def _replace_outputs(
@@ -2956,6 +2964,30 @@ def _create_cli_custody(journal: Path, receipt_file: Path | None,
     return _PreparationCustody.create(journal, journal_record, receipt_file=receipt_file)
 
 
+def _retire_automatic_custody(journal: Path | None, custody: str | None) -> None:
+    if custody is not None and not os.path.lexists(journal):
+        owner = _PreparationCustody(journal, custody)
+        if len(owner.events) == 1 and owner.data == owner.complete:
+            owner.retire()
+
+
+def _run_after_recovery(args: argparse.Namespace, root: Path, journal: Path) -> int:
+    automatic_custody = _recover_outputs(journal, args.preparation_custody, enroll_recovery=True,
+                                         receipt_file=args.preparation_receipt_file)
+    try:
+        if args.retire_preparation:
+            _PreparationCustody(journal, args.preparation_custody).retire()
+            return 0
+        if automatic_custody is not None:
+            args = copy.copy(args)
+            args.preparation_custody = automatic_custody
+        return _run_locked(args, root)
+    finally:
+        # Recovery and publication share one enrollment. This also retires a
+        # clean marker when input validation fails before publication starts.
+        _retire_automatic_custody(journal, automatic_custody)
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _argument_parser().parse_args(argv)
@@ -2994,12 +3026,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.enroll_preparation:
                         print(_create_cli_custody(journal, args.preparation_receipt_file), flush=True)
                         return 0
-                    _recover_outputs(journal, args.preparation_custody, enroll_recovery=True,
-                                     receipt_file=args.preparation_receipt_file)
-                    if args.retire_preparation:
-                        _PreparationCustody(journal, args.preparation_custody).retire()
-                        return 0
-                    return _run_locked(args, root)
+                    return _run_after_recovery(args, root, journal)
                 if journal is not None and (journal.exists() or _preparation_pending(journal)):
                     break
                 if synchronized:
@@ -3023,8 +3050,7 @@ def main(argv: list[str] | None = None) -> int:
         # Recovery needs exclusive ownership. Recheck under that lock before
         # reading inputs; another writer may have completed recovery meanwhile.
         with _refresh_lock(root):
-            _recover_outputs(journal, enroll_recovery=True, receipt_file=args.preparation_receipt_file)
-            return _run_locked(args, root)
+            return _run_after_recovery(args, root, journal)
     except (MatrixError, OSError, UnicodeError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -3159,10 +3185,7 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
         print(f"error: cannot replace output: {exc}", file=sys.stderr)
         return 2
     finally:
-        if automatic_custody is not None and not os.path.lexists(output_journal):
-            owner = _PreparationCustody(output_journal, automatic_custody)
-            if len(owner.events) == 1 and owner.data == owner.complete:
-                owner.retire()
+        _retire_automatic_custody(output_journal, automatic_custody)
     if args.junit:
         for reference in receipt["references"]:
             if not reference["passed"]:

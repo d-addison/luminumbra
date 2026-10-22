@@ -82,8 +82,12 @@ later restart completes it. Reset retains the enrollment line and native marker
 identity for reuse; retirement removes it only after recovery and reset.
 When a legacy journal needs restoration without an existing receipt, recovery
 automatically enrolls and emits a receipt before creating any new staging file.
-Successful recovery retires that automatic enrollment; an interruption uses the
-emitted receipt on restart.
+The invocation retains that automatic enrollment through validation and any
+subsequent publication, creating the caller receipt file only once. Recovery-only
+invocations and failures before publication retire the reset marker on exit;
+successful publication does likewise. The caller receipt remains unchanged.
+An interruption that retains recovery state uses the emitted receipt on restart.
+After a validation failure retires the marker, retry with a fresh receipt pathname.
 
 The limits remain five outputs, 16 MiB per payload file and 64 KiB per metadata
 file. At most fifteen payload artifacts, one pending pathname and 64 preparation
