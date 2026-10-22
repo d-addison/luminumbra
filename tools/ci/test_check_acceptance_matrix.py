@@ -1679,6 +1679,77 @@ class AcceptanceMatrixTests(unittest.TestCase):
 
 
 class ProductionAcceptanceMatrixTests(unittest.TestCase):
+    def test_runtime_and_save_rows_keep_native_qualification_pending(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        recipe = (root / "docs/v0.3-acceptance.md").read_text(encoding="utf-8")
+        command = ("python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> "
+                   "--junit <native.junit.xml> --execution-receipt <acceptance-execution.json>")
+        for row_id in ("iss.385", "iss.429"):
+            with self.subTest(row=row_id):
+                row = row_of(matrix, row_id)
+                self.assertEqual(row["status"], "needs-native-run")
+                self.assertIn("native execution remains required", row["statement"].lower())
+                self.assertTrue(any(item["kind"] == "ctest" for item in row["evidence"]))
+                native = [item for item in row["evidence"] if item["kind"] == "native"]
+                self.assertEqual(native, [{
+                    "kind": "native", "ref": "tools/ci/check_acceptance_matrix.py",
+                    "command": command, "receipt_schema": "luminumbra.acceptance_execution.v1",
+                }])
+                self.assertIn({"kind": "doc", "ref": "docs/v0.3-acceptance.md"}, row["evidence"])
+                errors: list[str] = []
+                MODULE._check_status(errors.append, "covered", row["evidence"])
+                self.assertIn("status covered inconsistent with evidence: "
+                              "native evidence requires needs-native-run", errors)
+                self.assertIn(f"| {row_id} | needs-native-run |", MODULE.render_doc(matrix))
+        for text in ("### Native runtime configuration and durable saves",
+                     "luminumbra.acceptance_execution.v1", "full_acceptance_qualified: false",
+                     "separate-evidence-required", "issue #516"):
+            self.assertIn(text, recipe)
+
+    def test_runtime_and_save_ctest_receipts_cannot_qualify_native_evidence(self) -> None:
+        source = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        matrix = dict(source, rows=[row_of(source, row_id) for row_id in ("iss.385", "iss.429")])
+        before = copy.deepcopy(matrix)
+        names = sorted({item["ref"] for row in matrix["rows"] for item in row["evidence"]
+                        if item["kind"] == "ctest"})
+        index = repository_index()
+        with tempfile.TemporaryDirectory() as directory:
+            discovery, report = (Path(directory) / name for name in ("discovery.json", "native.xml"))
+            discovery.write_text(json.dumps({"kind": "ctestInfo", "tests": [
+                {"name": name} for name in names
+            ]}), encoding="utf-8")
+            suite = ET.Element("testsuite")
+            for name in names:
+                ET.SubElement(suite, "testcase", name=name, status="run")
+            ET.ElementTree(suite).write(report, encoding="utf-8", xml_declaration=True)
+            receipt = MODULE.validate_execution(matrix, index, [report], discovery)
+            self.assertTrue(receipt["ctest_references_passed"])
+            self.assertEqual(receipt["schema"], "luminumbra.acceptance_execution.v1")
+            self.assertEqual(receipt["scope"], "ctest-references-only")
+            self.assertFalse(receipt["full_acceptance_qualified"])
+            self.assertEqual({(item["row"], item["kind"], item["reason"])
+                              for item in receipt["unevaluated"]}, {
+                (row_id, kind, "separate-evidence-required")
+                for row_id in ("iss.385", "iss.429") for kind in ("native", "doc")
+            })
+            # Each row must still refuse missing or adverse native test results.
+            for row in matrix["rows"]:
+                name = next(item["ref"] for item in row["evidence"] if item["kind"] == "ctest")
+                for adverse in ("missing", "skipped", "failure", "error"):
+                    with self.subTest(row=row["id"], adverse=adverse):
+                        changed = copy.deepcopy(suite)
+                        case = next(case for case in changed if case.get("name") == name)
+                        if adverse == "missing":
+                            changed.remove(case)
+                        else:
+                            ET.SubElement(case, adverse)
+                        ET.ElementTree(changed).write(report, encoding="utf-8", xml_declaration=True)
+                        refused = MODULE.validate_execution(matrix, index, [report], discovery)
+                        self.assertFalse(refused["ctest_references_passed"])
+                        self.assertFalse(refused["full_acceptance_qualified"])
+            self.assertEqual(matrix, before)
+
     @immutable_repository_reads()
     def test_deleting_any_required_production_mapping_fails_validation(self) -> None:
         root = MODULE.DEFAULT_ROOT

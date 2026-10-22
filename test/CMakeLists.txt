@@ -1544,6 +1544,7 @@ target_compile_definitions(frontier_gates_test PRIVATE
 
 target_include_directories(frontier_gates_test PRIVATE
 ../src
+${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(frontier_gates_test PRIVATE
@@ -1554,6 +1555,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
     common/SurfaceWorkBudget_test.cpp
@@ -1954,7 +1956,8 @@ target_link_libraries(menu_presentation_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
 add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
-target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt ${CMAKE_DL_LIBS})
+target_include_directories(jolt_startup_test PRIVATE ../src)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt luminumbra_common ${CMAKE_DL_LIBS})
 luminumbra_configure_first_party_target(jolt_startup_test)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(jolt_startup_test PRIVATE
@@ -2540,6 +2543,8 @@ endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
+add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)
 add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
