@@ -508,3 +508,19 @@ native qualification routing.
 The selector regressions also run in the fast lane; shell-selection and
 workflow-policy regressions run in the public-tree job. Shell tests isolate PATH and record every analyzer
 invocation, including tool fallback and failure propagation.
+
+## Acceptance inventory checks
+
+Acceptance refresh and restart custody are specified in
+[acceptance-refresh.md](acceptance-refresh.md). Its 24 contract partitions include
+recovery and custody tests, with four separate public-tree partitions; all keep
+the existing labels and 30-second deadlines. Run the complete Python suite and
+static inventories without a project build:
+
+```bash
+python3 -I -B tools/ci/test_check_acceptance_matrix.py
+python3 -I -B tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
+python3 -I -B tools/ci/validate_public_tree.py --root .
+python3 -I -B tools/ci/test_validate_public_tree.py
+python3 -I -B tools/ci/validate_assets.py --check config/public-asset-inventory.json
+```

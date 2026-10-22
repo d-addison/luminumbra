@@ -495,6 +495,7 @@ class PathGateTests(unittest.TestCase):
         commands = gate.python_test_commands(ROOT)
         for test in (
             "tools/ci/test_ci_paths.py", "tools/ci/test_qualification_capture.py",
+            "tools/ci/test_check_acceptance_matrix.py",
             "tools/ci/test_asan_shards.py", "tools/ci/test_ctest_shards.py",
             "tools/ci/test_workflow_policy.py",
             "tools/perf/test_capture_sim_budget.py", "tools/perf/test_foliage_evidence.py",
