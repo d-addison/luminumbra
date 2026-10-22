@@ -16,7 +16,14 @@
 
 #include <spdlog/sinks/base_sink.h>
 
+#include "../support/UniqueTempPath.h"
+
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -107,4 +114,82 @@ TEST(AudioPhysicsBinding, FailedDeviceInitializationReportsUnavailableAndSuppres
     EXPECT_FALSE(manager.PlayOneShot2D("ui_click"));
     manager.Shutdown();
     EXPECT_FALSE(manager.IsPlaybackEnabled());
+}
+
+namespace {
+std::atomic<std::size_t> audio_allocations{0};
+
+void* CountAudioMalloc(std::size_t size, void*) {
+    void* allocation = std::malloc(size);
+    if (allocation)
+        ++audio_allocations;
+    return allocation;
+}
+
+void CountAudioFree(void* allocation, void*) {
+    if (allocation)
+        --audio_allocations;
+    std::free(allocation);
+}
+
+void* CountAudioRealloc(void* allocation, std::size_t size, void*) {
+    if (size == 0) {
+        CountAudioFree(allocation, nullptr);
+        return nullptr;
+    }
+    const bool was_empty = allocation == nullptr;
+    void* replacement = std::realloc(allocation, size);
+    if (replacement && was_empty)
+        ++audio_allocations;
+    return replacement;
+}
+
+ma_result InitSilentAudio(const ma_engine_config*, ma_engine* engine) {
+    auto config = ma_engine_config_init();
+    config.noDevice = MA_TRUE;
+    config.channels = 2;
+    config.sampleRate = 48000;
+    config.allocationCallbacks = {nullptr, CountAudioMalloc, CountAudioRealloc, CountAudioFree};
+    return ma_engine_init(&config, engine);
+}
+} // namespace
+
+TEST(AudioPhysicsBinding, FailedFileLoadsReleaseAllocationsAndLeaveNoWindNode) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("audio-load-", ".json");
+    const auto root = temp.Path().parent_path();
+    {
+        std::ofstream output(temp.Path());
+        output << R"({"events":{"missing":{"files":["missing.ogg"]},
+                   "invalid":{"files":["invalid.ogg"]}}})";
+        ASSERT_TRUE(output.good());
+    }
+    {
+        std::ofstream output(root / "invalid.ogg", std::ios::binary);
+        output << "partial audio bytes";
+        ASSERT_TRUE(output.good());
+    }
+    auto previous = Log::GetCoreLogger();
+    Log::GetCoreLogger() =
+        std::make_shared<spdlog::logger>("audio-load", std::make_shared<CountingSink>());
+    {
+        Luminumbra::Client::MiniaudioManager manager(root.generic_string() + "/");
+        const bool initialized = manager.Init(InitSilentAudio);
+        EXPECT_TRUE(initialized);
+        if (initialized) {
+            EXPECT_TRUE(manager.LoadBank(temp.Path().filename().generic_string()));
+            for (const char* event : {"missing", "invalid"}) {
+                Luminumbra::Common::AudioEventHandle handle{};
+                EXPECT_FALSE(manager.PlayEvent(event, handle));
+                EXPECT_FALSE(manager.PlayOneShot2D(event));
+                EXPECT_FALSE(manager.PlayOneShot(event, glm::vec3(0)));
+                manager.PlayMusic(event);
+                manager.PlayAmbientLoop(event, glm::vec3(0), 10.0f);
+            }
+            manager.SetWindParameters(glm::vec3(1), 1.0f);
+            manager.SetWindParameters(glm::vec3(1), 0.0f);
+        }
+        manager.Shutdown();
+    }
+    Log::GetCoreLogger() = previous;
+    EXPECT_EQ(audio_allocations.load(), 0u);
 }

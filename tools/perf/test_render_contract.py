@@ -773,6 +773,21 @@ class ScriptedWorkloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'render identity'):
             capture.validate(data, args(traversal=script))
 
+    def test_workload_fixtures_match_current_surface_identity(self):
+        reference = contract.traversal_manifest(
+            (FIXTURES / 'surface-flight.traversal').read_text(encoding='utf-8'))
+        preset = json.loads((FIXTURES.parents[2] / 'worlds/atlas/presets/default.json')
+                            .read_text(encoding='utf-8'))
+        self.assertEqual(reference['preset_revision'], preset['schema_rev'])
+        for kind in contract.WORKLOADS:
+            with self.subTest(kind=kind):
+                manifest = contract.traversal_manifest(
+                    (FIXTURES / (kind.replace('_', '-') + '.traversal'))
+                    .read_text(encoding='utf-8'))
+                for field in ('seed', 'preset', 'preset_revision', 'preset_identity',
+                              'content_identity'):
+                    self.assertEqual(manifest[field], reference[field], field)
+
     def test_scenario_definitions_are_well_formed_and_deterministic(self):
         self.assertEqual(set(contract.WORKLOADS), {'cave', 'edit', 'region_crossing', 'save_load', 'menu_entry'})
         for kind in contract.WORKLOADS:

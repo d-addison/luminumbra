@@ -915,6 +915,41 @@ void content_references() {
         require(policy.allows(content.root() / tree / "included.json"));
     }
     require(policy.allows(content.root() / "data/../res/included.json"));
+    require(policy.allows(content.root() / "data/missing/asset.json"));
+    // An existing file cannot be used as an ancestor of a missing asset.
+    std::error_code resolution_error;
+    require(Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / "data/texture.ltex/child",
+                                                        resolution_error)
+                .empty());
+    require(static_cast<bool>(resolution_error));
+#ifdef _WIN32
+    // The handle spelling must also accept 8.3 aliases, when the volume supplies them.
+    // GetShortPathName returns the long spelling on volumes with short names disabled.
+    std::array<wchar_t, 32768> short_root{}; // Extended Win32 path bound, with terminator.
+    const DWORD short_length = GetShortPathNameW(
+        content.root().c_str(), short_root.data(), static_cast<DWORD>(short_root.size()));
+    require(short_length > 0 && short_length < short_root.size());
+    const std::filesystem::path short_alias(short_root.data());
+    Luminumbra::Filesystem::CaptureContentPaths short_policy;
+    short_policy.enable(short_alias);
+    require(short_policy.allows(short_alias / "data/texture.ltex"));
+    require(short_policy.allows(content.root() / "data/texture.ltex"));
+    const auto native_root = std::filesystem::path(content.root()).make_preferred();
+    if (!Luminumbra::Filesystem::IsWindowsUncPath(native_root)) {
+        const std::filesystem::path extended_root(LR"(\\?\)" + native_root.native());
+        Luminumbra::Filesystem::CaptureContentPaths extended_policy;
+        extended_policy.enable(extended_root);
+        require(extended_policy.allows(extended_root / "data/texture.ltex"));
+        require(extended_policy.allows(content.root() / "data/texture.ltex"));
+    }
+    const auto invalid = Luminumbra::Filesystem::WeaklyCanonicalPath(
+        content.root() / "data/<invalid>", resolution_error);
+    require(invalid.empty() && static_cast<bool>(resolution_error));
+    require(Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / std::wstring(32768, L'x'),
+                                                        resolution_error)
+                .empty());
+    require(resolution_error == std::errc::filename_too_long);
+#endif
     require(!policy.refused());
     // Both absolute and parent-relative references resolve outside the inventory.
     require(!policy.allows(content.root() / "external.ltex"));

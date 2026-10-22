@@ -22,6 +22,12 @@ std::filesystem::path LexicallyNormalPath(const std::filesystem::path& path);
 /// Produces generic separators while retaining both leading UNC separators.
 std::string GenericPathString(const std::filesystem::path& path);
 
+// Resolve links through existing ancestors, including NTFS junctions and short names.
+// A missing suffix is retained; other lookup failures are reported.
+std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path,
+                                          std::error_code& error);
+std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path);
+
 // Explicit UTF-8 conversion, independent of the Windows active code page.
 std::filesystem::path PathFromUtf8(std::string_view text);
 std::string GenericUtf8PathString(const std::filesystem::path& path);

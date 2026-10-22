@@ -1566,6 +1566,7 @@ add_executable(world_open_refusal_test
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
+    persistence/verified_snapshot_region_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
     ../src/luminumbra_server/modes/Replay.cpp

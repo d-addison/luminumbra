@@ -1498,8 +1498,6 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     AttachRegionEditObserver();
     if (!LoadWorldStateFrom(worldPath))
         return false;
-    if (m_activeRegionsEnabled)
-        m_regionDurableDirectory = GetWorldSaveDir();
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
 }

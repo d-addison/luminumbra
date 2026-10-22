@@ -10,6 +10,24 @@
 #include <random>
 
 namespace Luminumbra::Client {
+namespace {
+ma_result InitSoundFromFile(ma_engine* engine,
+                            const char* path,
+                            ma_uint32 flags,
+                            ma_sound_group* group,
+                            ma_fence* fence,
+                            ma_sound* sound) {
+    const auto result = ma_sound_init_from_file(engine, path, flags, group, fence, sound);
+    // A failed resource-manager init in miniaudio leaves this allocation behind.
+    // Its data source has already rolled back; no sound node exists to uninitialize.
+    // Later node-init failures free and zero it inside miniaudio itself.
+    if (result != MA_SUCCESS && sound->pResourceManagerDataSource) {
+        ma_free(sound->pResourceManagerDataSource, &engine->allocationCallbacks);
+        sound->pResourceManagerDataSource = nullptr;
+    }
+    return result;
+}
+} // namespace
 
 MiniaudioManager::MiniaudioManager(const std::string& root_path)
     : m_rootPath(root_path)
@@ -332,7 +350,7 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
         flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
 
     // Handle-based events are gameplay SFX: attach to the sfx bus.
-    if (ma_sound_init_from_file(
+    if (InitSoundFromFile(
             m_engine.get(), full_path.c_str(), flags, GroupFor(BusId::Sfx), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
@@ -409,7 +427,7 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
     auto sound = std::make_unique<ma_sound>();
     const uint32_t flags =
         MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION;
-    if (ma_sound_init_from_file(
+    if (InitSoundFromFile(
             m_engine.get(), full_path.c_str(), flags, GroupFor(bus), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
@@ -443,7 +461,7 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID,
 
     // spatial one-shots attach to their routed bus group
     // (default sfx; Events voices sidechain-duck the ambient bus).
-    if (ma_sound_init_from_file(
+    if (InitSoundFromFile(
             m_engine.get(), full_path.c_str(), flags, GroupFor(bus), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
@@ -502,7 +520,7 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
     }
 
     m_currentMusic = std::make_unique<ma_sound>();
-    ma_result result = ma_sound_init_from_file(
+    ma_result result = InitSoundFromFile(
         m_engine.get(), full_path.c_str(), flags, nullptr, nullptr, m_currentMusic.get());
 
     if (result != MA_SUCCESS) {
@@ -723,15 +741,17 @@ void MiniaudioManager::SetWindParameters(const glm::vec3& direction, float stren
         m_windSound = std::make_unique<ma_sound>();
 
         // The wind bed is a looping ambience: route through the ambient bus.
-        if (ma_sound_init_from_file(m_engine.get(),
-                                    windPath.c_str(),
-                                    MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
-                                    GroupFor(BusId::Ambient),
-                                    nullptr,
-                                    m_windSound.get()) == MA_SUCCESS) {
+        if (InitSoundFromFile(m_engine.get(),
+                              windPath.c_str(),
+                              MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
+                              GroupFor(BusId::Ambient),
+                              nullptr,
+                              m_windSound.get()) == MA_SUCCESS) {
             ma_sound_set_looping(m_windSound.get(), true);
             ma_sound_set_volume(m_windSound.get(), strength * 0.6f);
             ma_sound_start(m_windSound.get());
+        } else {
+            m_windSound.reset();
         }
     } else if (m_windSound) {
         ma_sound_set_volume(m_windSound.get(), strength * 0.6f);
@@ -835,12 +855,12 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID,
     // silently, and a pre-decoded buffer loops seamlessly. Log failure so a missing/!decodable
     // ambient file is diagnosable rather than silent. Ambient beds attach to the
     // ambient bus (child of sfx): user.audio_sfx scales them, events sidechain-duck them.
-    const ma_result amb_rc = ma_sound_init_from_file(m_engine.get(),
-                                                     full_path.c_str(),
-                                                     MA_SOUND_FLAG_DECODE,
-                                                     GroupFor(BusId::Ambient),
-                                                     nullptr,
-                                                     sound.get());
+    const ma_result amb_rc = InitSoundFromFile(m_engine.get(),
+                                               full_path.c_str(),
+                                               MA_SOUND_FLAG_DECODE,
+                                               GroupFor(BusId::Ambient),
+                                               nullptr,
+                                               sound.get());
     if (amb_rc != MA_SUCCESS) {
         LUMINUMBRA_CORE_WARN("PlayAmbientLoop: failed to load '{}' (ma_result {})",
                              full_path,

@@ -115,8 +115,9 @@ public:
 
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
-    // Synchronous read of a caller-owned immutable save snapshot. Runtime content
-    // and subsequent persistence retain this session's configured roots.
+    // Read a caller-owned immutable save snapshot. Keep it alive until the next successful
+    // canonical save or world replacement: region freezes also read its durable directory.
+    // Runtime content and subsequent persistence retain this session's configured roots.
     bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
 
     // Save current persistent state and metadata, including captured spawn changes.

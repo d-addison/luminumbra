@@ -2635,6 +2635,8 @@ int main(int argc, char* argv[]) {
 
     std::string benchmark_created_world_id;
     std::string benchmark_saved_world_digest;
+    // Region freezes keep reading durable authority after the load callback returns.
+    std::unique_ptr<Measurement::VerifiedSaveSnapshot> benchmark_loaded_snapshot;
     auto start_world_creation = [&](const std::string& name,
                                     const std::string& seed,
                                     const std::string& worldType,
@@ -2760,6 +2762,9 @@ int main(int argc, char* argv[]) {
             refuse_world_entry("Could not load this world.");
             return;
         }
+        // Keep the verified directory alive for later region freezes. Replace it only after
+        // the new session has loaded successfully; refusal retains the previous authority.
+        benchmark_loaded_snapshot = std::move(snapshot);
         // LoadWorld restores saved authority before this shared entry path starts generation.
         finish_world_entry();
     };
@@ -3860,6 +3865,7 @@ int main(int argc, char* argv[]) {
                             return Measurement::ActionResult{false, 0};
                         const bool saved = gameSession->SaveWorld();
                         if (saved) {
+                            benchmark_loaded_snapshot.reset();
                             try {
                                 benchmark_saved_world_digest =
                                     Measurement::saved_world_digest(gameSession->GetWorldSaveDir());

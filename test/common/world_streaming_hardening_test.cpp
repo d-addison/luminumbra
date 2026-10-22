@@ -710,7 +710,8 @@ TEST(StreamingHardening, UnpublishedBatchesPreventStreamingQuiescence) {
     world.quiesce_streaming_jobs_for_save();
     world.update(registry, anchor, nullptr);
     const auto pending = world.get_streaming_telemetry_stats();
-    EXPECT_EQ(pending.last_queue_depth, 0u);
+    // Unpublished mesh items remain in the queue depth until activation.
+    EXPECT_EQ(pending.last_queue_depth, 1u);
     EXPECT_EQ(pending.generation_batches, 0u);
     EXPECT_FALSE(pending.promotion_pending);
     EXPECT_EQ(pending.meshing_batches, 1u);
@@ -723,6 +724,7 @@ TEST(StreamingHardening, UnpublishedBatchesPreventStreamingQuiescence) {
     world.activate_due(8);
     world.update(registry, anchor, nullptr);
     const auto complete = world.get_streaming_telemetry_stats();
+    EXPECT_EQ(complete.last_queue_depth, 0u);
     EXPECT_EQ(complete.meshing_batches, 0u);
     EXPECT_EQ(complete.pending_lod_chunks, 0u);
     EXPECT_TRUE(complete.quiescent());
