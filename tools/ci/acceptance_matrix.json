@@ -3922,6 +3922,30 @@
         },
         {
           "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameRetiresHardLinkAliasAndKeepsPathAlias"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameHandlesCaseOnlyDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameRetiresLeafSymlinkToDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameLeafSymlinkPreservesExternalTargetAndOccupiedDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameRefusesDanglingSourceAndDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameKeepsParentSymlinkAliasAndRetiresLeafDestinationAlias"
+        },
+        {
+          "kind": "ctest",
           "ref": "UserPresetPersistence.SourceRemovalFailureKeepsBothCompletePresets"
         },
         {

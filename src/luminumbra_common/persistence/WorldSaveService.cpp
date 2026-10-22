@@ -97,13 +97,14 @@ struct FileIdentity {
 };
 
 bool ReadFileIdentity(const std::filesystem::path& path, FileIdentity& identity) {
+    // Inspect the leaf entry itself; parent symlinks still resolve normally.
 #if defined(_WIN32)
     const HANDLE handle = ::CreateFileW(path.c_str(),
                                         FILE_READ_ATTRIBUTES,
                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                         nullptr,
                                         OPEN_EXISTING,
-                                        FILE_ATTRIBUTE_NORMAL,
+                                        FILE_FLAG_OPEN_REPARSE_POINT,
                                         nullptr);
     if (handle == INVALID_HANDLE_VALUE)
         return false;
@@ -126,9 +127,8 @@ bool ReadFileIdentity(const std::filesystem::path& path, FileIdentity& identity)
     return true;
 }
 
-bool MatchesFileIdentity(const std::filesystem::path& path, const FileIdentity& expected) {
-    FileIdentity current;
-    if (!expected.valid || !ReadFileIdentity(path, current))
+bool SameFileIdentity(const FileIdentity& current, const FileIdentity& expected) {
+    if (!current.valid || !expected.valid)
         return false;
 #if defined(_WIN32)
     return current.volume == expected.volume && current.index_high == expected.index_high &&
@@ -136,6 +136,11 @@ bool MatchesFileIdentity(const std::filesystem::path& path, const FileIdentity& 
 #else
     return current.device == expected.device && current.inode == expected.inode;
 #endif
+}
+
+bool MatchesFileIdentity(const std::filesystem::path& path, const FileIdentity& expected) {
+    FileIdentity current;
+    return ReadFileIdentity(path, current) && SameFileIdentity(current, expected);
 }
 
 bool WriteFileDurably(const std::filesystem::path& destination,
@@ -1774,7 +1779,7 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // Revalidate the parsed source under ownership so another persistence writer
     // cannot change the source between the caller's parse and this transaction.
     {
-        std::ifstream input(source, std::ios::binary);
+        const std::ifstream input(source, std::ios::binary);
         std::ostringstream contents;
         contents << input.rdbuf();
         if (!input || input.bad() || contents.bad() || contents.str() != expected_bytes) {
@@ -1788,7 +1793,11 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
                          (!error || error == std::errc::no_such_file_or_directory);
     bool alias = false;
     if (!missing) {
-        if (error || !(alias = std::filesystem::equivalent(source, destination, error)) || error) {
+        // Follow targets only to admit an existing alias. Retirement below
+        // compares leaf entries so a separate symlink is still removed.
+        if (!error)
+            alias = std::filesystem::equivalent(source, destination, error);
+        if (error || !alias) {
             AddError(errors, "rename destination is occupied or cannot be inspected");
             return false;
         }
@@ -1797,13 +1806,19 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     ReclaimAbandonedStaging(destination);
     if (alias) {
         std::filesystem::path backup;
-        struct BackupCleanup {
-            const std::filesystem::path& path;
+        class BackupCleanup {
+        public:
+            explicit BackupCleanup(const std::filesystem::path& path)
+                : m_path(path) {}
             ~BackupCleanup() {
-                if (!path.empty())
-                    RemoveTemporaryFile(path);
+                if (!m_path.empty())
+                    RemoveTemporaryFile(m_path);
             }
-        } cleanup{backup};
+
+        private:
+            const std::filesystem::path& m_path;
+        };
+        const BackupCleanup cleanup{backup};
         const auto links = std::filesystem::hard_link_count(destination, error);
         if (error) {
             AddError(errors, "cannot inspect rename alias: " + error.message());
@@ -1839,12 +1854,16 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
                 ReplaceRegionFileAtomically(backup, destination, errors);
             return false;
         }
-        // Case and directory aliases still name the replacement. A separate hard
-        // link names the original inode and must be retired after publication.
-        if (std::filesystem::equivalent(source, destination, error) && !error)
-            return true;
-        if (error)
+        // Case and directory aliases still name the replacement entry. Separate
+        // hard links and leaf symlinks must be retired, even when following a
+        // symlink would reach the replacement at destination.
+        FileIdentity remaining_source;
+        if (!ReadFileIdentity(source, remaining_source)) {
+            AddError(errors, "cannot inspect rename source after publication");
             return false;
+        }
+        if (SameFileIdentity(remaining_source, published_identity))
+            return true;
         if (!std::filesystem::remove(source, error) || error) {
             if (!backup.empty() && MatchesFileIdentity(destination, published_identity))
                 ReplaceRegionFileAtomically(backup, destination, errors);

@@ -22,6 +22,7 @@
 #include "support/UniqueTempPath.h"
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <system_error>
 
 namespace {
@@ -302,23 +303,40 @@ TEST(PlantPersistence, EmptyRosterRemovalErrorIsReportedAndCanRetry) {
     barePlant(plants, 1.0f, 0, 5);
     const auto snapshot = F::BuildPlantEntitySnapshot(plants);
     ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(snapshot, dir));
+    ASSERT_TRUE(fs::is_regular_file(path));
+#ifdef _WIN32
+    // MSVC remove can delete read-only files. A CRT reader denies delete sharing
+    // while allowing the validation reader to inspect the existing valid roster.
+    std::ifstream held_roster(path, std::ios::binary);
+    ASSERT_TRUE(held_roster);
+#else
     const auto file_permissions = fs::status(path).permissions();
     const auto parent_permissions = fs::status(path.parent_path()).permissions();
-    // Windows refuses deletion of a read-only file; POSIX checks the parent.
-    // Both still permit the validation reader to read the existing valid roster.
+    // POSIX checks the parent, while validation can still read the valid roster.
     fs::permissions(path, fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read);
     fs::permissions(path.parent_path(),
                     fs::perms::owner_read | fs::perms::owner_exec | fs::perms::group_read |
                         fs::perms::group_exec | fs::perms::others_read | fs::perms::others_exec);
+#endif
     const E::EntityRegistrySnapshot empty;
     std::vector<std::string> errors;
     const bool removed = SS::WorldSaveService::save_plant_entities(empty, dir, &errors);
+#ifdef _WIN32
+    held_roster.close();
+    EXPECT_FALSE(held_roster.fail());
+#else
     fs::permissions(path.parent_path(), parent_permissions);
-    fs::permissions(path, file_permissions);
+    if (fs::exists(path))
+        fs::permissions(path, file_permissions);
+#endif
     EXPECT_FALSE(removed);
     ASSERT_FALSE(errors.empty());
     EXPECT_NE(errors.front().find("failed to remove plant entities file"), std::string::npos);
     EXPECT_TRUE(fs::exists(path));
+    E::EntityRegistrySnapshot retained;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(retained, dir));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(retained),
+              E::SerializeEntityRegistrySnapshotJson(snapshot));
     errors.clear();
     ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(empty, dir, &errors));
     EXPECT_FALSE(fs::exists(path));

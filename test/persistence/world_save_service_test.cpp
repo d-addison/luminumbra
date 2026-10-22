@@ -189,7 +189,120 @@ TEST(WorldSaveService, CheckedRenameRefusesChangedSourceBeforePublishing) {
     EXPECT_EQ(ReadFileBytes(destination), "new");
 }
 
+TEST(WorldSaveService, CheckedRenameRetiresHardLinkAliasAndKeepsPathAlias) {
+    const TempSaveDir save_dir("rename_entry_aliases");
+    const auto source = save_dir.path() / "source.json";
+    const auto destination = save_dir.path() / "destination.json";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(source, "original"));
+    std::filesystem::create_hard_link(source, destination);
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_FALSE(std::filesystem::exists(source));
+    EXPECT_EQ(ReadFileBytes(destination), "new");
+    const auto path_alias = save_dir.path() / "." / destination.filename();
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(destination, path_alias, "new", "updated"));
+    EXPECT_EQ(ReadFileBytes(destination), "updated");
+    for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+        EXPECT_EQ(entry.path(), destination);
+}
+
+TEST(WorldSaveService, CheckedRenameHandlesCaseOnlyDestination) {
+    const TempSaveDir save_dir("rename_case");
+    const auto source = save_dir.path() / "preset.json";
+    const auto destination = save_dir.path() / "PRESET.JSON";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(source, "original"));
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_EQ(ReadFileBytes(destination), "new");
+    std::size_t entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(save_dir.path())) {
+        EXPECT_EQ(ReadFileBytes(entry.path()), "new");
+        ++entries;
+    }
+    EXPECT_EQ(entries, 1u);
+}
+
 #ifndef _WIN32
+TEST(WorldSaveService, CheckedRenameRetiresLeafSymlinkToDestination) {
+    const TempSaveDir save_dir("rename_leaf_to_destination");
+    const auto source = save_dir.path() / "source.json";
+    const auto destination = save_dir.path() / "destination.json";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(destination, "original"));
+    std::filesystem::create_symlink(destination.filename(), source);
+    const DirectoryFlushReset reset;
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(source)));
+    EXPECT_EQ(ReadFileBytes(destination), "original");
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_EQ(std::filesystem::symlink_status(source).type(),
+              std::filesystem::file_type::not_found);
+    EXPECT_EQ(ReadFileBytes(destination), "new");
+    for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+        EXPECT_EQ(entry.path(), destination);
+}
+
+TEST(WorldSaveService, CheckedRenameLeafSymlinkPreservesExternalTargetAndOccupiedDestination) {
+    const TempSaveDir save_dir("rename_leaf_external");
+    const auto external = save_dir.path() / "external.json";
+    const auto source = save_dir.path() / "source.json";
+    const auto destination = save_dir.path() / "destination.json";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(external, "original"));
+    std::filesystem::create_symlink(external.filename(), source);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(destination, "occupied"));
+    EXPECT_FALSE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_EQ(ReadFileBytes(destination), "occupied");
+    EXPECT_EQ(ReadFileBytes(external), "original");
+    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(source)));
+    ASSERT_TRUE(WorldSaveService::remove_file_and_staging(destination));
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_EQ(std::filesystem::symlink_status(source).type(),
+              std::filesystem::file_type::not_found);
+    EXPECT_EQ(ReadFileBytes(destination), "new");
+    EXPECT_EQ(ReadFileBytes(external), "original");
+}
+
+TEST(WorldSaveService, CheckedRenameRefusesDanglingSourceAndDestination) {
+    const TempSaveDir save_dir("rename_dangling");
+    const auto source = save_dir.path() / "source.json";
+    const auto destination = save_dir.path() / "destination.json";
+    const auto missing = save_dir.path() / "missing.json";
+    std::filesystem::create_symlink(missing.filename(), source);
+    EXPECT_FALSE(WorldSaveService::rename_file_durably(source, destination, "", "new"));
+    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(source)));
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    ASSERT_TRUE(WorldSaveService::remove_file_and_staging(source));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(source, "original"));
+    std::filesystem::create_symlink(missing.filename(), destination);
+    EXPECT_FALSE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_EQ(ReadFileBytes(source), "original");
+    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(destination)));
+    EXPECT_FALSE(std::filesystem::exists(missing));
+}
+
+TEST(WorldSaveService, CheckedRenameKeepsParentSymlinkAliasAndRetiresLeafDestinationAlias) {
+    const TempSaveDir save_dir("rename_parent_alias");
+    const auto parent = save_dir.path() / "actual";
+    const auto parent_alias = save_dir.path() / "alias";
+    std::filesystem::create_directory(parent);
+    std::filesystem::create_directory_symlink(parent.filename(), parent_alias);
+    const auto source = parent / "source.json";
+    const auto destination = parent_alias / source.filename();
+    ASSERT_TRUE(WorldSaveService::write_file_durably(source, "original"));
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(source, destination, "original", "new"));
+    EXPECT_EQ(ReadFileBytes(source), "new");
+    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(parent_alias)));
+    const auto leaf_alias = parent / "leaf.json";
+    std::filesystem::create_symlink(source.filename(), leaf_alias);
+    const DirectoryFlushReset reset;
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(WorldSaveService::rename_file_durably(source, leaf_alias, "new", "updated"));
+    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(leaf_alias)));
+    EXPECT_EQ(ReadFileBytes(source), "new");
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(source, leaf_alias, "new", "updated"));
+    EXPECT_FALSE(std::filesystem::exists(source));
+    EXPECT_TRUE(std::filesystem::is_regular_file(std::filesystem::symlink_status(leaf_alias)));
+    EXPECT_EQ(ReadFileBytes(leaf_alias), "updated");
+}
+
 TEST(WorldSaveService, FirstSnapshotRefusesUnflushedAncestorAndRepeatsOnRetry) {
     const TempSaveDir save_dir("snapshot_ancestor");
     const WorldSaveService service;
