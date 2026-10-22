@@ -18,10 +18,26 @@ ma_result InitSoundFromFile(ma_engine* engine,
                             ma_fence* fence,
                             ma_sound* sound) {
     const auto result = ma_sound_init_from_file(engine, path, flags, group, fence, sound);
-    // A failed resource-manager init in miniaudio leaves this allocation behind.
-    // Its data source has already rolled back; no sound node exists to uninitialize.
-    // Later node-init failures free and zero it inside miniaudio itself.
+    // miniaudio 0.11.22 leaves the source allocation on resource-init failure.
+    // A stream's init notification precedes the worker's final source access;
+    // uninit queues an ordered teardown and waits before we release its storage.
+    // Buffered callers here decode synchronously and roll back before returning.
+    // Later sound-node init failures free and zero the source inside miniaudio.
     if (result != MA_SUCCESS && sound->pResourceManagerDataSource) {
+        auto* source = sound->pResourceManagerDataSource;
+        if ((flags & MA_SOUND_FLAG_STREAM) != 0) {
+            auto& stream = source->backend.stream;
+            if (ma_resource_manager_data_stream_result(&stream) == MA_BUSY) {
+                // Synchronous init left BUSY only when it could not post the load job.
+                // A failed post consumes an order number, so queued uninit would wait forever.
+                ma_data_source_uninit(&stream.ds);
+            } else {
+                // On page-allocation failure 0.11.22 already uninitializes the decoder,
+                // but leaves this flag set. Other stream-init failures never set it.
+                stream.isDecoderInitialized = MA_FALSE;
+                ma_resource_manager_data_source_uninit(source);
+            }
+        }
         ma_free(sound->pResourceManagerDataSource, &engine->allocationCallbacks);
         sound->pResourceManagerDataSource = nullptr;
     }

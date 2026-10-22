@@ -619,9 +619,33 @@ def validate_workload(data, manifest):
             raise ValueError('edit workload must hold the camera after edits')
     if kind == 'save_load':
         reload = observed['reload']
-        if not isinstance(reload, dict):
-            raise ValueError('save/load workload did not settle after reload')
         request = warmup + actions[-1]['tick'] - 1
+        if not isinstance(reload, dict):
+            # Report the actual gates from the retained capture. Counts describe
+            # frames with pending work, not sums of queue sizes. The validated
+            # observation limit bounds this diagnostic pass as well.
+            pending = dict.fromkeys(('stream_queue_depth', 'stream_generation_batches',
+                                     'stream_meshing_batches', 'stream_pending_lod_chunks',
+                                     'stream_promotion_pending', 'terrain_upload_candidates',
+                                     'water_upload_candidates', 'foliage_pending',
+                                     'region_scheduler_fault', 'world_not_ready',
+                                     'outside_gameplay'), 0)
+            frames = 0
+            for row in rows:
+                if row['frame'] < request:
+                    continue
+                frames += 1
+                for key in pending:
+                    if key == 'world_not_ready':
+                        active = not row['world_ready']
+                    elif key == 'outside_gameplay':
+                        active = row['state'] != 'gameplay'
+                    else:
+                        active = bool(row[key])
+                    pending[key] += int(active)
+            gates = ', '.join(f'{key}={value}' for key, value in pending.items())
+            raise ValueError('save/load workload did not settle after reload '
+                             f'({frames} observed frames; {gates})')
         if type(reload['request_frame']) is not int or reload['request_frame'] != request:
             raise ValueError('reload request does not match script')
         settled = integer(reload['first_settled_frame'], 'first settled frame', request, warmup + count - 1)

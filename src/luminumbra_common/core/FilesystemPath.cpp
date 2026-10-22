@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
@@ -146,7 +150,32 @@ std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path,
     error = std::make_error_code(std::errc::no_such_file_or_directory);
     return {};
 #else
-    return std::filesystem::weakly_canonical(path, error);
+    auto ancestor = AbsolutePath(path, error);
+    if (error)
+        return {};
+    std::filesystem::path suffix;
+    // Each failed lookup removes one path component. Only a missing component may
+    // form a suffix: libstdc++ weakly_canonical also accepts ENOTDIR as a miss.
+    while (!ancestor.empty()) {
+        const auto canonical = std::filesystem::canonical(ancestor, error);
+        if (!error) {
+            if (!suffix.empty() && !std::filesystem::is_directory(canonical, error)) {
+                if (!error)
+                    error = std::make_error_code(std::errc::not_a_directory);
+                return {};
+            }
+            if (error)
+                return {};
+            return suffix.empty() ? canonical : LexicallyNormalPath(canonical / suffix);
+        }
+        const auto parent = ancestor.parent_path();
+        if (error != std::errc::no_such_file_or_directory || parent == ancestor)
+            return {};
+        suffix = suffix.empty() ? ancestor.filename() : ancestor.filename() / suffix;
+        ancestor = parent;
+    }
+    error = std::make_error_code(std::errc::no_such_file_or_directory);
+    return {};
 #endif
 }
 

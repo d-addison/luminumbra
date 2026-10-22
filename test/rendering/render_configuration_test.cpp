@@ -922,6 +922,26 @@ void content_references() {
                                                         resolution_error)
                 .empty());
     require(static_cast<bool>(resolution_error));
+    require(resolution_error == std::errc::not_a_directory);
+    require_refusal([&] {
+        Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / "data/texture.ltex/child");
+    });
+    for (const auto* suffix : {"child", "missing/child"}) {
+        Luminumbra::Filesystem::CaptureContentPaths invalid_policy;
+        invalid_policy.enable(content.root());
+        require(!invalid_policy.allows(content.root() / "data/texture.ltex" / suffix));
+        require(invalid_policy.refused());
+    }
+    const auto canonical_data =
+        Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / "data");
+    require(Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / "data/missing/asset.json",
+                                                        resolution_error) ==
+            canonical_data / "missing/asset.json");
+    require(!resolution_error);
+    require(Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / std::string(32768, 'x'),
+                                                        resolution_error)
+                .empty());
+    require(resolution_error == std::errc::filename_too_long);
 #ifdef _WIN32
     // The handle spelling must also accept 8.3 aliases, when the volume supplies them.
     // GetShortPathName returns the long spelling on volumes with short names disabled.

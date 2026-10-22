@@ -324,6 +324,43 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
             self.case.test_v4_save_load_success()
         self.assertEqual(self.receipt('save-load')['capture_status'], 'retained')
 
+    def test_unsettled_reload_reports_each_active_gate(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        rows = data['workload']['observations']
+        keys = ('stream_queue_depth', 'stream_generation_batches', 'stream_meshing_batches',
+                'stream_pending_lod_chunks', 'terrain_upload_candidates', 'water_upload_candidates',
+                'stream_promotion_pending', 'foliage_pending', 'region_scheduler_fault')
+        for row in rows:
+            if row['frame'] >= request:
+                row['settled'] = False
+                for key in keys:
+                    row[key] = True if type(row[key]) is bool else 1
+        self.payload = json.dumps(data).encode('utf-8')
+        count = sum(row['frame'] >= request for row in rows)
+        with self.assertRaises(ValueError) as caught:
+            self.case.test_v4_save_load_success()
+        for key in keys:
+            self.assertIn(f'{key}={count}', str(caught.exception))
+        self.assertIn('world_not_ready=0', str(caught.exception))
+        self.assertIn('outside_gameplay=0', str(caught.exception))
+
+    def test_unsettled_reload_reports_unready_world(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        rows = data['workload']['observations']
+        for row in rows:
+            if row['frame'] >= request:
+                row.update(settled=False, world_ready=False)
+        self.payload = json.dumps(data).encode('utf-8')
+        count = sum(row['frame'] >= request for row in rows)
+        with self.assertRaisesRegex(ValueError, f'world_not_ready={count}'):
+            self.case.test_v4_save_load_success()
+
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
         self.real_timeout = True
         self.assert_retained_timeout_capture()
