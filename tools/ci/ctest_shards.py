@@ -17,6 +17,8 @@ import xml.etree.ElementTree as ET
 
 PROFILES = {"asan": ("debug-asan", 2, 300), "gcc": ("release", 4, 180),
             "msvc": ("release", 4, 180), "ucrt64": ("release", 4, 360)}
+SHARD_COUNTS = {"asan": 3, "gcc": 2, "msvc": 2, "ucrt64": 2}
+ASAN_SUITES = ("SimBudgetWorldParity.", "AmbientDeterminismReceipt.")
 FLOORS = {"gcc": 2340, "msvc": 2320, "ucrt64": 2320, "asan": 2320}
 HEAVY_NAMES = frozenset(
     "ActiveRegions/SimBudgetWorldParity.Populated3600TicksPreserveWorldHashAndReplayWork/" + variant
@@ -156,9 +158,47 @@ def relationship_groups(all_tests, eligible, profile):
         prefab = [name for name in eligible if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
         for name in prefab[1:]:
             join(prefab[0], name)
+    if profile == "asan":
+        for suite in ASAN_SUITES:
+            members = [name for name in eligible if suite in name]
+            for name in members[1:]:
+                join(members[0], name)
     for name in eligible:
         require(groups[name] <= selected, "eligible selection breaks fixture, dependency or resource lock closure")
     return groups
+
+
+def shard_ids(profile):
+    return range(1, SHARD_COUNTS[profile] + 1)
+
+
+def _partition_asan(all_tests, eligible, groups, timings):
+    timings = {} if timings is None else timings
+    require(isinstance(timings, dict) and all(isinstance(key, str) and
+            isinstance(value, (int, float)) and not isinstance(value, bool) and
+            0 < value <= sys.float_info.max for key, value in timings.items()), "invalid timings")
+    weights = {}
+    for test in all_tests:
+        cost = next((prop["value"] for prop in test.get("properties", []) if prop["name"] == "COST"), 0)
+        require(isinstance(cost, (int, float)) and not isinstance(cost, bool) and
+                0 <= cost <= sys.float_info.max, "invalid CTest COST")
+        weights[test["name"]] = timings.get(test["name"], cost or 1)
+    # Canonicalize each fixture/suite component once. Work is bounded by the
+    # discovery roster and supplied timing observations, with one sort of groups.
+    components = {id(groups[name]): groups[name] for name in eligible}
+    unique = [tuple(sorted(group)) for group in components.values()]
+    weighted = [(sum(weights[name] for name in group), group) for group in unique]
+    require(all(math.isfinite(weight) for weight, _ in weighted), "invalid group cost")
+    weighted.sort(key=lambda item: (-item[0], item[1]))
+    loads = [0.0] * SHARD_COUNTS["asan"]
+    owners = {}
+    for weight, group in weighted:
+        owner = min(range(len(loads)), key=lambda index: (loads[index], index))
+        loads[owner] += weight
+        owners.update((name, owner) for name in group)
+    assignments = [[name for name in eligible if owners[name] == owner] for owner in range(len(loads))]
+    validate_union(eligible, assignments)
+    return assignments
 
 
 def partition(all_tests, eligible, profile="gcc", timings=None):
@@ -167,19 +207,7 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
     selected = set(eligible)
     assignments = [[], []]
     if profile == "asan":
-        # Preserve the existing ASan placement and heavy parity balance.
-        heavy = [name for name in names if name in selected and "SimBudgetWorldParity." in name]
-        require(len(heavy) in (2, 4), "expected two or four heavy parity tests")
-        owners = {name: index % 2 for index, name in enumerate(heavy)}
-        positions = {name: index for index, name in enumerate(names)}
-        for name in names:
-            if name not in selected:
-                continue
-            group = groups[name]
-            forced = {owners[member] for member in group if member in owners}
-            require(len(forced) <= 1, "fixture group prevents balanced heavy tests")
-            owner = next(iter(forced)) if forced else min(positions[member] for member in group) % 2
-            assignments[owner].append(name)
+        return _partition_asan(all_tests, eligible, groups, timings)
     else:
         timings = {} if timings is None else timings
         require(isinstance(timings, dict) and all(isinstance(key, str) and
@@ -211,20 +239,7 @@ def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _p
     selected = set(eligible)
     assignments = [[], []]
     if profile == "asan":
-        # Selected light plans can omit heavy cases; legacy partition retains
-        # its two-or-four requirement. All relationship checks remain shared.
-        heavy = [name for name in names if name in selected and "SimBudgetWorldParity." in name]
-        require(len(heavy) in (0, 2, 4), "expected zero, two or four heavy parity tests")
-        owners = {name: index % 2 for index, name in enumerate(heavy)}
-        positions = {name: index for index, name in enumerate(names)}
-        for name in names:
-            if name not in selected:
-                continue
-            group = groups[name]
-            forced = {owners[member] for member in group if member in owners}
-            require(len(forced) <= 1, "fixture group prevents balanced heavy tests")
-            owner = next(iter(forced)) if forced else min(positions[member] for member in group) % 2
-            assignments[owner].append(name)
+        return _partition_asan(all_tests, eligible, groups, timings)
     else:
         timings = {} if timings is None else timings
         require(isinstance(timings, dict) and all(isinstance(key, str) and
@@ -374,7 +389,7 @@ def evidence_for(tests, parts, profile, timings=None, roots=None, selection=None
 
 
 def plan(directory, shard, profile="gcc", timings=None, selection=None):
-    require(shard in (0, 1, 2) and not (profile == "asan" and shard == 0), "invalid shard")
+    require(shard in shard_ids(profile) or (shard == 0 and profile != "asan"), "invalid shard")
     all_tests = inventory(read_json(directory / "ctest.all.json"))
     tests = roster(directory)
     roots = inventory_roots(directory)
@@ -423,7 +438,8 @@ def run(directory, profile="gcc"):
     selected_names = select_tests(roster(directory), profile, manifest["selection"])
     validate_union(selected_names, parts)
     shard = manifest["shard"]
-    require(shard in (0, 1, 2) and len(parts) == (1 if shard == 0 else 2), "invalid execution partition")
+    require((shard in shard_ids(profile) or (shard == 0 and profile != "asan"))
+            and len(parts) == (1 if shard == 0 else SHARD_COUNTS[profile]), "invalid execution partition")
     require(shard != 0 or manifest["selection"] in (None, "full"), "qualification requires full selection")
     roots = inventory_roots(directory)
     require(manifest["roots"] == roots, "execution source or build roots differ from plan")
@@ -448,9 +464,9 @@ def merge(directory, output, profile="gcc", evidence=True, full=False, selection
     merged = ET.Element("testsuites")
     common = None
     observed = set()
-    counts = []
+    suite_owners = {suite: set() for suite in ASAN_SUITES}
     reports = []
-    for shard in ((0,) if full else (1, 2)):
+    for shard in ((0,) if full else shard_ids(profile)):
         source = directory / f"shard-{shard}"
         tests = roster(source)
         names = [test["name"] for test in tests]
@@ -463,7 +479,7 @@ def merge(directory, output, profile="gcc", evidence=True, full=False, selection
             selected_names = select_tests(tests, profile, selection)
             require(manifest["selection"] == selection, "shard selection differs from required route")
             validate_union(selected_names, parts)
-            require(len(parts) == (1 if full else 2), "unexpected partition count")
+            require(len(parts) == (1 if full else SHARD_COUNTS[profile]), "unexpected partition count")
             expected = {**evidence_for(tests, parts, profile, manifest["timings"], manifest["roots"], selection), "shard": shard}
             require(manifest == expected, "shard inventory or partition digest mismatch")
             if profile != "asan" and not full:
@@ -471,15 +487,15 @@ def merge(directory, output, profile="gcc", evidence=True, full=False, selection
                         "partition differs from deterministic placement or relationship closure")
             if reports:
                 require(manifest["roots"] == reports[0][2], "shards recorded different source or build roots")
-                require(parts == reports[0][0], "shards disagree on partitions")
                 require(manifest["inventory_digest"] == reports[0][1], "shards discovered different CTest inventories")
+                require(parts == reports[0][0], "shards disagree on partitions")
             reports.append((parts, manifest["inventory_digest"], manifest["roots"]))
         root = ET.parse(source / "ctest.junit.xml").getroot()
         cases = list(root.iter("testcase"))
         executed = [case.get("name") for case in cases]
         require(executed and all(executed), f"shard {shard} ran zero tests or unnamed tests")
         require(len(executed) == len(set(executed)), f"shard {shard} contains duplicate tests")
-        require(not observed.intersection(executed), "tests ran in both shards")
+        require(not observed.intersection(executed), "tests ran in multiple shards")
         require(not any(case.find(tag) is not None for case in cases for tag in ("failure", "error", "skipped")),
                 "shard has failed or unevaluated tests")
         for element in root.iter():
@@ -491,12 +507,14 @@ def merge(directory, output, profile="gcc", evidence=True, full=False, selection
         if evidence:
             require(set(executed) == set(parts[0 if full else shard - 1]), "report differs from assigned partition")
         observed.update(executed)
-        counts.append(sum("SimBudgetWorldParity." in name for name in executed))
+        for suite in ASAN_SUITES:
+            if any(suite in name for name in executed):
+                suite_owners[suite].add(shard)
         require(root.tag in ("testsuite", "testsuites"), "unexpected JUnit root")
         merged.extend([root] if root.tag == "testsuite" else root)
     require(observed == set(select_tests(roster(directory / ("shard-0" if full else "shard-1")), profile, selection)), "executed shard union differs from the planned filtered CTest inventory")
     if profile == "asan":
-        require(counts in (([0, 0],) if selection == "light" else ([1, 1], [2, 2])), "heavy parity tests are not evenly split")
+        require(all(len(owners) <= 1 for owners in suite_owners.values()), "required ASan suite split across shards")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
         staged = Path(temporary) / "merged.xml"
@@ -598,7 +616,7 @@ def main(default_profile="gcc", legacy_evidence=False):
             sub.add_argument("--needs-heavy", default="")
             sub.add_argument("--selection", choices=("full", "light", "heavy"))
         if mode == "plan":
-            sub.add_argument("--shard", type=int, choices=(0, 1, 2), required=True)
+            sub.add_argument("--shard", type=int, choices=range(max(SHARD_COUNTS.values()) + 1), required=True)
             sub.add_argument("--timings", type=Path)
             sub.add_argument("--require-suite", action="append", default=[])
         if mode == "merge":

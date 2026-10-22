@@ -54,7 +54,7 @@ class CTestShardTests(unittest.TestCase):
         for profile in ("asan", "gcc", "msvc", "ucrt64"):
             tests = [*self.tests, test("SimBudgetWorldParity.First"),
                      test("SimBudgetWorldParity.Second")]
-            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+            for shard in (shards.shard_ids(profile) if profile == "asan" else (0, 1, 2)):
                 with self.subTest(profile=profile, shard=shard):
                     output.write_bytes(sentinel)
                     with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
@@ -68,7 +68,7 @@ class CTestShardTests(unittest.TestCase):
         for script, profile in (("asan_shards.py", "asan"), ("ctest_shards.py", "asan"),
                                 ("ctest_shards.py", "gcc"), ("ctest_shards.py", "msvc"),
                                 ("ctest_shards.py", "ucrt64")):
-            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+            for shard in (shards.shard_ids(profile) if profile == "asan" else (0, 1, 2)):
                 with self.subTest(script=script, profile=profile, shard=shard):
                     manifest = self.write_plan(self.root, shard, tests=tests, profile=profile)
                     selected = manifest["partitions"][0 if shard == 0 else shard - 1]
@@ -178,7 +178,15 @@ class CTestShardTests(unittest.TestCase):
                     discovery = json.dumps({"tests": current})
                 CaseProgressResult._phase(profile, "all", 0, "fixture-finish")
                 for selection in ("full", "light", "heavy"):
-                    for shard in (1, 2):
+                    if profile == "asan" and selection == "heavy":
+                        for shard in shards.shard_ids(profile):
+                            before = {name: (self.root / name).read_bytes() for name in
+                                      ("ctest.partition.json", "ctest.shard-index.txt", "step-output")}
+                            with self.assertRaisesRegex(ValueError, "empty CTest shard"):
+                                self.write_plan(self.root, shard, tests=tests, profile=profile, selection=selection)
+                            self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
+                        continue
+                    for shard in shards.shard_ids(profile):
                         with self.subTest(profile=profile, selection=selection, shard=shard):
                             CaseProgressResult._phase(profile, selection, shard, "lane-fixture-start")
                             output.write_bytes(sentinel)
@@ -294,7 +302,7 @@ class CTestShardTests(unittest.TestCase):
         return shards.read_json(directory / "ctest.partition.json")
 
     def reports(self, full=False, profile="gcc"):
-        for shard in ((0,) if full else (1, 2)):
+        for shard in ((0,) if full else shards.shard_ids(profile)):
             directory = self.root / f"shard-{shard}"
             manifest = self.write_plan(directory, shard, profile=profile)
             root = ET.Element("testsuite", failures="0", errors="0", skipped="0")
@@ -327,8 +335,12 @@ class CTestShardTests(unittest.TestCase):
             for name, rows in (("ctest.inventory.json", tests), ("ctest.all.json", all_tests)):
                 (self.root / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
             for selection in (None, "full", "light", "heavy"):
-                lanes = (1, 2, 0) if profile != "asan" and selection in (None, "full") else (1, 2)
+                lanes = (*shards.shard_ids(profile), 0) if profile != "asan" and selection in (None, "full") else shards.shard_ids(profile)
                 selected = shards.select_tests(tests, profile, selection)
+                if profile == "asan" and selection == "heavy":
+                    with self.assertRaisesRegex(ValueError, "empty CTest shard"):
+                        shards._partition_validated(all_tests, selected, profile)
+                    continue
                 for timings, roots, inputs in fixtures:
                     # The general API remains the complete pre-reuse manifest oracle.
                     # Only full capture changes the partition shape between lanes.
@@ -683,8 +695,8 @@ class CTestShardTests(unittest.TestCase):
                     self.assertTrue(all(part == [name for name in names if name in part] for part in parts))
                     self.assertEqual(parts, shards.partition(tests, names, profile, timings))
                     if profile == "asan":
-                        self.assertEqual([sum("SimBudgetWorldParity." in name for name in part)
-                                          for part in parts], [1, 1])
+                        self.assertEqual(sorted(sum("SimBudgetWorldParity." in name for name in part)
+                                               for part in parts), [0, 0, 2])
                     else:
                         reversed_parts = shards.partition(list(reversed(tests)), list(reversed(names)),
                                                           profile, timings)
@@ -720,26 +732,23 @@ class CTestShardTests(unittest.TestCase):
                         operation(changed, names, profile)
                     self.assertEqual(changed, snapshot)
 
-    def test_legacy_asan_heavy_count_and_selected_light_contracts_remain_distinct(self):
+    def test_asan_suite_sizes_and_timing_validation_reach_every_path(self):
         for count in range(6):
             rows = [*self.tests, *(test(f"SimBudgetWorldParity.Case{index}") for index in range(count))]
             names = [row["name"] for row in rows]
             for operation in (shards.partition, shards._partition_validated, shards._partition_projected):
-                allowed = (2, 4) if operation is shards.partition else (0, 2, 4)
                 with self.subTest(count=count, operation=operation.__name__):
-                    if count in allowed:
-                        parts = operation(rows, names, "asan", {"ignored": True})
-                        self.assertEqual(parts, self.relationship_oracle(rows, names, "asan", None))
-                        shards.validate_union(names, parts)
-                    else:
-                        with self.assertRaisesRegex(ValueError, "heavy parity tests"):
-                            operation(rows, names, "asan")
+                    parts = operation(rows, names, "asan")
+                    self.assertEqual(parts, self.relationship_oracle(rows, names, "asan", None))
+                    shards.validate_union(names, parts)
+                    with self.assertRaisesRegex(ValueError, "invalid timings"):
+                        operation(rows, names, "asan", {"ignored": True})
 
     def test_manual_gl_plans_keep_exact_filtered_indices_and_merge_evidence_in_all_profiles(self):
         tests, selected, locked = self.shared_gl_inventory()
         names = [row["name"] for row in selected]
         for profile in shards.PROFILES:
-            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+            for shard in (shards.shard_ids(profile) if profile == "asan" else (0, 1, 2)):
                 with self.subTest(profile=profile, shard=shard):
                     directory = self.root / f"shard-{shard}"
                     manifest = self.write_plan(directory, shard, selected, tests, profile)
@@ -794,7 +803,7 @@ class CTestShardTests(unittest.TestCase):
                  [test("selected", DEPENDS=["middle"]), test("middle", DEPENDS=["manual"]),
                   test("manual", LABELS=["manual"])])
         for profile in shards.PROFILES:
-            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+            for shard in (shards.shard_ids(profile) if profile == "asan" else (0, 1, 2)):
                 for related in edges:
                     tests = [*self.tests, test("SimBudgetWorldParity.First"),
                              test("SimBudgetWorldParity.Second"), *related]
@@ -858,19 +867,20 @@ class CTestShardTests(unittest.TestCase):
             with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "unknown CTest dependency"):
                 shards.partition([*tests, test("manual", LABELS=["manual"], DEPENDS=["unknown"])], names, profile)
 
-    def test_asan_lock_and_dependency_heavy_conflicts_refuse_without_replacing_plan(self):
+    def test_asan_lock_and_dependency_heavy_groups_stay_together(self):
         for properties in ({"RESOURCE_LOCK": ["context"]}, {"DEPENDS": ["SimBudgetWorldParity.Second"]}):
             tests = [*self.tests, test("SimBudgetWorldParity.First", **properties),
                      test("SimBudgetWorldParity.Second", RESOURCE_LOCK=["context"])]
             for filename in ("ctest.all.json", "ctest.inventory.json"):
                 (self.root / filename).write_text(json.dumps({"tests": tests}), encoding="utf-8")
-            for shard in (1, 2):
+            for shard in shards.shard_ids("asan"):
                 for filename in ("ctest.partition.json", "ctest.shard-index.txt"):
                     (self.root / filename).write_bytes(b"previous evidence\n")
-                before = {path: path.read_bytes() for path in self.root.iterdir()}
-                with self.subTest(properties=properties, shard=shard), self.assertRaisesRegex(ValueError, "prevents balanced"):
+                with self.subTest(properties=properties, shard=shard):
                     shards.plan(self.root, shard, "asan")
-                self.assertEqual({path: path.read_bytes() for path in self.root.iterdir()}, before)
+                    parts = shards.read_json(self.root / "ctest.partition.json")["partitions"]
+                    self.assertEqual(sum({"SimBudgetWorldParity.First", "SimBudgetWorldParity.Second"} <= set(part)
+                                         for part in parts), 1)
 
     def test_manual_gl_full_inventory_mismatch_preserves_existing_plan(self):
         tests, selected, locked = self.shared_gl_inventory()
@@ -925,7 +935,7 @@ class CTestShardTests(unittest.TestCase):
         tests = [*self.tests, literal]
         manual = test("Manual", LABELS=["tools", "manual-gpu"])
         all_tests = [manual, *tests]
-        for shard in (1, 2):
+        for shard in shards.shard_ids("gcc"):
             manifest = self.write_plan(self.root, shard, tests, all_tests)
             start, end, stride, *extra = map(int, (self.root / "ctest.shard-index.txt").read_text().split(","))
             indices = [*range(start, end + 1, stride), *extra]
@@ -944,7 +954,7 @@ class CTestShardTests(unittest.TestCase):
         output = self.root / "merged.xml"
         for profile in ("gcc", "msvc", "ucrt64"):
             for full in (False, True):
-                for shard in ((0,) if full else (1, 2)):
+                for shard in ((0,) if full else shards.shard_ids(profile)):
                     for result in (None, "completed", "suppressed", "skipped", "failed", "unknown", ""):
                         with self.subTest(profile=profile, full=full, shard=shard, result=result):
                             self.reports(full=full, profile=profile)
@@ -1124,7 +1134,7 @@ class CTestShardTests(unittest.TestCase):
                         paths = [self.root / f"shard-{shard}" / name for shard in (1, 2)
                                  for name in ("ctest.all.json", "ctest.inventory.json", "ctest.partition.json",
                                               "ctest.shard-index.txt", "ctest.junit.xml")]
-                        # The ten case-owned fixture inputs are bounded before reading.
+                        # The ten mutable case-owned fixture inputs are bounded before reading.
                         self.assertLessEqual(sum(path.stat().st_size for path in paths), 32 * 1024)
                         report_inputs = {path: path.read_bytes() for path in paths}
                     else:
@@ -1180,7 +1190,7 @@ class CTestShardTests(unittest.TestCase):
                 with self.subTest(kind=kind, root=root):
                     self.reports()
                     manifests = []
-                    for shard in (1, 2):
+                    for shard in shards.shard_ids("gcc"):
                         roots = {**original, **({kind: root} if shard == 2 else {})}
                         manifests.append(self.write_plan(self.root / f"shard-{shard}", shard, roots=roots))
                     self.assertNotEqual(manifests[0]["inventory_digest"], manifests[1]["inventory_digest"])
@@ -1377,7 +1387,8 @@ class CTestShardTests(unittest.TestCase):
         script = str(Path(__file__).with_name("ctest_shards.py"))
         for arguments, expected in ((["--shard", "1", "--require-suite", "MissingSuite."], 1),
                                     (["--shard", "0", "--profile", "asan"], 1),
-                                    (["--shard", "3"], 2)):
+                                    (["--shard", "3"], 1),
+                                    (["--shard", "4"], 2)):
             result = subprocess.run([sys.executable, "-I", "-B", script, "plan", "--directory", str(self.root),
                                      *arguments], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -1392,7 +1403,7 @@ class CTestShardTests(unittest.TestCase):
 
     def policy_reports(self, selection, profile="gcc", full=False):
         tests = self.policy_roster(profile)
-        for shard in ((0,) if full else (1, 2)):
+        for shard in ((0,) if full else shards.shard_ids(profile)):
             directory = self.root / f"shard-{shard}"
             manifest = self.write_plan(directory, shard, tests=tests, profile=profile, selection=selection)
             root = ET.Element("testsuite", failures="0", errors="0", skipped="0")
@@ -1414,8 +1425,12 @@ class CTestShardTests(unittest.TestCase):
             self.assertIn("WorldOpenRefusal.QuickCatalogCheck", light)
             for selection in (full, light, heavy):
                 with self.subTest(profile=profile, selection=len(selection)):
-                    parts = shards._partition_validated(tests, selection, profile)
-                    shards.validate_union(selection, parts)
+                    if profile == "asan" and selection == heavy:
+                        with self.assertRaisesRegex(ValueError, "empty CTest shard"):
+                            shards._partition_validated(tests, selection, profile)
+                    else:
+                        parts = shards._partition_validated(tests, selection, profile)
+                        shards.validate_union(selection, parts)
 
     def test_all_full_and_light_unions_preserve_floors_and_required_cases(self):
         for profile, filename in (("asan", "asan.yml"), ("gcc", "ci.yml"),
@@ -1433,7 +1448,7 @@ class CTestShardTests(unittest.TestCase):
             checker = str(Path(__file__).with_name("check_ctest_junit.py"))
             for selection, minimum in (("full", shards.FLOORS[profile]), ("light", shards.FLOORS[profile] - 2)):
                 with self.subTest(profile=profile, selection=selection):
-                    for shard in (1, 2):
+                    for shard in shards.shard_ids(profile):
                         directory = self.root / f"shard-{shard}"
                         manifest = self.write_plan(directory, shard, tests=tests, profile=profile, selection=selection)
                         report = ET.Element("testsuite", failures="0", errors="0", skipped="0")
@@ -1530,13 +1545,24 @@ class CTestShardTests(unittest.TestCase):
                 with self.subTest(profile=profile, selection=selection):
                     self.assertEqual(shards.select_tests(tests, profile, selection),
                                      shards.select_tests(hinted, profile, selection))
-                    for shard in (1, 2):
+                    if profile == "asan" and selection == "heavy":
+                        for rows in (tests, hinted):
+                            with self.assertRaisesRegex(ValueError, "empty CTest shard"):
+                                self.write_plan(self.root, 1, tests=rows, profile=profile, selection=selection)
+                        continue
+                    for shard in shards.shard_ids(profile):
                         before = self.write_plan(self.root, shard, tests=tests, profile=profile, selection=selection)
                         indices = (self.root / "ctest.shard-index.txt").read_bytes()
                         after = self.write_plan(self.root, shard, tests=hinted, profile=profile, selection=selection)
-                        self.assertEqual((self.root / "ctest.shard-index.txt").read_bytes(), indices)
-                        self.assertEqual(after["partitions"], before["partitions"])
-                        self.assertEqual(after["partition_digest"], before["partition_digest"])
+                        if profile == "asan":
+                            self.assertNotEqual(after["partitions"], before["partitions"])
+                            self.assertNotEqual(after["partition_digest"], before["partition_digest"])
+                            self.assertEqual(after["partitions"], self.relationship_oracle(
+                                hinted, shards.select_tests(hinted, profile, selection), profile, None))
+                        else:
+                            self.assertEqual((self.root / "ctest.shard-index.txt").read_bytes(), indices)
+                            self.assertEqual(after["partitions"], before["partitions"])
+                            self.assertEqual(after["partition_digest"], before["partition_digest"])
                         self.assertNotEqual(after["inventory_digest"], before["inventory_digest"])
                         self.assertEqual(after["timings"], before["timings"])
 
@@ -1794,6 +1820,10 @@ class CTestShardTests(unittest.TestCase):
         for profile in shards.PROFILES:
             previous = None
             for selection in ("full", "light", "heavy"):
+                if profile == "asan" and selection == "heavy":
+                    with self.assertRaisesRegex(ValueError, "empty CTest shard"):
+                        self.policy_reports(selection, profile)
+                    continue
                 tests = self.policy_reports(selection, profile)
                 output = self.root / "merged.xml"
                 summary = self.root / "summary"
@@ -2183,7 +2213,7 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
                 self.assertFalse((root / "shard-1").exists())
 
     def test_collect_copy_failure_cleans_staged_evidence(self):
-        for shard in (1, 2):
+        for shard in shards.shard_ids("gcc"):
             (self.root / f"prefix-shard-{shard}-attempt-1").mkdir()
         before = sorted(path.name for path in self.root.iterdir())
         with patch.object(shards.shutil, "copytree", side_effect=OSError("copy failed")), self.assertRaises(OSError):
@@ -2191,7 +2221,7 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), before)
 
     def test_collect_move_failure_rolls_back_exposed_evidence(self):
-        for shard in (1, 2):
+        for shard in shards.shard_ids("gcc"):
             (self.root / f"prefix-shard-{shard}-attempt-1").mkdir()
         before = sorted(path.name for path in self.root.iterdir())
         rename = Path.rename
@@ -2266,6 +2296,9 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
         if profile == "gcc":
             buckets["prefab"] = [name for name in selected
                                  if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
+        if profile == "asan":
+            for suite in ("SimBudgetWorldParity.", "AmbientDeterminismReceipt."):
+                buckets[suite] = [name for name in selected if suite in name]
         for members in buckets.values():
             for left, right in zip(members, members[1:]):
                 edges[left].add(right)
@@ -2289,15 +2322,15 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
                 components.append(tuple(sorted(component)))
         owners = {}
         if profile == "asan":
-            positions = {row["name"]: index for index, row in enumerate(rows)}
-            heavy = [name for name in positions if name in selected and "SimBudgetWorldParity." in name]
-            forced = {name: index % 2 for index, name in enumerate(heavy)}
-            for component in components:
-                choices = {forced[name] for name in component if name in forced}
-                if len(choices) > 1:
-                    raise ValueError("balance")
-                owner = next(iter(choices)) if choices else min(positions[name] for name in component) % 2
+            weights = {row["name"]: (timings or {}).get(row["name"], next(
+                (prop["value"] for prop in row.get("properties", []) if prop["name"] == "COST"), 1) or 1)
+                       for row in rows}
+            ordered = sorted(components, key=lambda group: (-sum(weights[name] for name in group), group))
+            loads = [0.0] * 3
+            for component in ordered:
+                owner = min(range(3), key=lambda index: (loads[index], index))
                 owners.update((name, owner) for name in component)
+                loads[owner] += sum(weights[name] for name in component)
         else:
             unknown = max([60.0, *(timings or {}).values()])
             weights = {component: sum((timings or {}).get(name, unknown) for name in component)
@@ -2310,7 +2343,7 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
                     hashlib.sha256(encoded).hexdigest(), 16) % 2
                 owners.update((name, owner) for name in component)
                 loads[owner] += weights[component]
-        return [[name for name in selected if owners[name] == owner] for owner in range(2)]
+        return [[name for name in selected if owners[name] == owner] for owner in range(shards.SHARD_COUNTS[profile])]
 
     def test_projected_plans_match_traversal_oracle_and_literal_manifests(self):
         for profile in shards.PROFILES:
@@ -2332,10 +2365,14 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
             roots = {"build": "C:/build/世界", "source": "/opt/source"}
             for selection in ("full", "light", "heavy"):
                 selected = shards.select_tests(rows, profile, selection)
+                if profile == "asan" and selection == "heavy":
+                    with self.assertRaisesRegex(ValueError, "empty CTest shard"):
+                        shards._partition_validated(all_rows, selected, profile)
+                    continue
                 for timings in (None, {rows[0]["name"]: 0.25, "unknown-observation": 125.0}):
                     parts = self.relationship_oracle(all_rows, selected, profile, timings)
                     self.assertEqual(shards._partition_validated(all_rows, selected, profile, timings), parts)
-                    for shard in (1, 2):
+                    for shard in shards.shard_ids(profile):
                         with self.subTest(profile=profile, selection=selection, timed=bool(timings), shard=shard):
                             expected = {**shards.evidence_for(rows, parts, profile, timings, roots, selection),
                                         "shard": shard}
@@ -2472,10 +2509,10 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
             self.assertEqual(len(errors), 2)
             self.assertEqual(errors[0], errors[1])
         # Shared validation refuses duplicate inventory names in every path;
-        # valid ASan inputs still ignore timing observations.
+        # valid inputs retain the same generic and projected semantics.
         for profile in shards.PROFILES:
             rows = self.tests + self.tests[:1]
-            timings = {"unused": True} if profile == "asan" else None
+            timings = None
             for projected in (False, True):
                 with self.assertRaisesRegex(ValueError, "duplicate CTest names"):
                     shards._partition_validated(rows, self.names, profile, timings, _projected=projected)

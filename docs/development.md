@@ -152,9 +152,15 @@ cleanup, dependencies and resource locks stay together; CTest keeps its existing
 qualification still sees all required cases. Explicit serial NetSoak, packaging
 checks and diagnostic artifacts remain enabled.
 
-The shared helper also implements ASan's existing two-shard placement, including
-its evenly divided heavy parity tests. ASan retains its original fixture grouping
-and execution settings. Immediately before execution, every producer rechecks
+The shared helper partitions ASan across three shards with a 75-minute job
+deadline. Fixture groups and each of `SimBudgetWorldParity.` and
+`AmbientDeterminismReceipt.` stay together. Groups are assigned in descending
+cost order to the least-loaded shard, with stable name and shard-index ties.
+Optional timing observations override CTest `COST` hints; other tests have unit
+weight. The shard count is shared by planning, execution, merging and manual
+qualification capture. A heavy-only ASan selection refuses because its single
+suite cannot fill three nonempty shards. ASan retains its execution settings.
+Immediately before execution, every producer rechecks
 the ordered discovery roster in the execution environment and refuses drift.
 Indices address the filtered roster and support literal names with regex syntax.
 The reports must match their assigned names exactly. The aggregate checks reject
@@ -204,10 +210,10 @@ and 120 for `WaterDeterminism.WaterResolutionMigrationConvergesAtLoadBothWays`.
 The upper observed durations prioritize the longest cases in fresh build trees
 without `CTestCostData.txt`. Each name must exist in its target's discovered
 `TEST_LIST`; missing or renamed cases fail when CTest loads the discovery hook.
-These hints affect execution order within the selected shard, leaving registration
-order, names, shard membership and full/light/heavy selection unchanged. The hints
-are properties in the inventory digest, so both producers and execution discovery
-must agree on them. They do not supply the planner's optional timing observations.
+These hints affect execution order within the selected shard and balance ASan
+placement. Other lanes retain their existing placement. Registration order, names
+and full/light/heavy selection stay unchanged. The hints are properties in the
+inventory digest, so all producers and execution discovery must agree on them.
 No assertions, seeds, tick counts, test timeouts or manual-test policy change.
 The skip allowlist remains empty: deferral is selection, never a skipped test.
 
@@ -238,14 +244,14 @@ aggregates instead pass `--needs-heavy`; only the exact value `false` selects
 light, and missing or unknown values select full. Single-producer qualification
 refuses any selection other than full. Aggregates accept light only after exact
 selected coverage succeeds, and then print `heavy subset deferred:` with a reason.
-ASan also supports light and keeps both heavy cases balanced on the full route.
+ASan also supports light and keeps both heavy cases together on the full route.
 Full native validation and the existing platform limits remain required after
 merge; offline policy tests do not establish hosted-runner qualification.
 
 For ready pull requests needing native validation, ASan first runs a Python-only
 fast lane with the `ChangedTranslationUnitsContract` and
 `OfflineDependenciesContract` suites registered by the compiler-free contracts
-project. Both shards wait for success; a failed fast lane skips the shards and
+project. All three shards wait for success; a failed fast lane skips the shards and
 fails the required `Linux / GCC ASan` aggregate. The fast lane skips drafts and
 non-C++ routes, preserving their existing rejection and successful path skip,
 respectively. Pushes to main/devel and manual dispatches skip the fast lane and

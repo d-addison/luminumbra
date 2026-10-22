@@ -21,6 +21,7 @@ from contextlib import closing
 from itertools import islice
 import fnmatch
 import hashlib
+import importlib.util
 import io
 import os
 import re
@@ -711,7 +712,7 @@ def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None
 def guarded_jobs(workflows):
     for filename, (job_id, check_name) in GUARDED.items():
         yield filename, job_id, check_name, jobs(workflows[filename])[job_id]
-    yield ("asan.yml", "asan-shard", "Linux / GCC ASan shard ${{ matrix.shard }}/2",
+    yield ("asan.yml", "asan-shard", "Linux / GCC ASan shard ${{ matrix.shard }}/3",
            jobs(workflows["asan.yml"])["asan-shard"])
     ci = jobs(workflows["ci.yml"])
     for job_id, name in (("linux", value(ci["linux"], "name", 4)),
@@ -1219,13 +1220,13 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         blocks = jobs(workflow)
         self.assertEqual(set(blocks), {"changes", "fast-lane", "asan-shard", "asan"})
         shard, aggregate = blocks["asan-shard"], blocks["asan"]
-        self.assertEqual(value(shard, "name", 4), "Linux / GCC ASan shard ${{ matrix.shard }}/2")
+        self.assertEqual(value(shard, "name", 4), "Linux / GCC ASan shard ${{ matrix.shard }}/3")
         self.assertEqual(value(shard, "needs", 4), "[changes, fast-lane]")
         self.assertEqual(value(shard, "if", 4), "${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') && (github.event_name != 'pull_request' || toJSON(github.event.pull_request.draft) != 'false' || needs.fast-lane.result == 'success') }}")
         self.assertEqual(value(shard, "runs-on", 4), "ubuntu-24.04")
-        self.assertEqual(value(shard, "timeout-minutes", 4), "60")
+        self.assertEqual(value(shard, "timeout-minutes", 4), "75")
         self.assertEqual(value(shard, "fail-fast", 6), "false")
-        self.assertEqual(value(shard, "shard", 8), "[1, 2]")
+        self.assertEqual(value(shard, "shard", 8), "[1, 2, 3]")
         self.assertIsNone(value(shard, "continue-on-error", 4))
         self.assertEqual(steps(shard)[0], steps(aggregate)[0])
         self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
@@ -1235,7 +1236,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(shard_steps["Test"], "run", 8),
                          'ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json\n'
                          'ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json\n'
-                         '# Alternate independent tests; keep fixture setup/consumers in one shard.\n'
+                         '# Balance fixture and required-suite groups using recorded costs.\n'
                          'python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"\n'
                          '# Recheck the ordered roster in the same context immediately before CTest.\n'
                          'env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \\\n'
@@ -1301,6 +1302,21 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          "'{\"tests\":\"${{ steps.tests.outcome }}\"}'")
         self.assertIn("name: qualification-asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", aggregate)
         self.assertIn("python3 tools/ci/test_asan_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
+
+    def test_asan_matrix_name_and_planner_count_must_agree(self):
+        spec = importlib.util.spec_from_file_location("ctest_shards", ROOT / "tools/ci/ctest_shards.py")
+        planner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(planner)
+        block = jobs(self.workflows["asan.yml"])["asan-shard"]
+        self.assertEqual(value(block, "shard", 8), str(list(planner.shard_ids("asan"))))
+        for old, new in (("shard: [1, 2, 3]", "shard: [1, 2]"),
+                         ("matrix.shard }}/3", "matrix.shard }}/2")):
+            case = type(self)("test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+            case.workflows = {**self.workflows, "asan.yml": self.workflows["asan.yml"].replace(old, new)}
+            result = unittest.TestResult()
+            case.run(result)
+            self.assertEqual(len(result.failures), 1)
+            self.assertFalse(result.errors)
 
     def test_native_matrices_aggregates_limits_and_full_qualification_route(self):
         ci = jobs(self.workflows["ci.yml"])
@@ -1850,7 +1866,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
         # Model the artifact store across attempts using the actual workflow names.
         artifacts = {}
-        for attempt, producers in ((1, (1, 2)), (2, rerun_shards)):
+        for attempt, producers in ((1, (1, 2, 3)), (2, rerun_shards)):
             for shard in producers:
                 name = render(value(upload, "name", 10), attempt, shard)
                 if name in artifacts:
@@ -1860,20 +1876,39 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         artifacts["asan-junit-" + "a" * 40 + "-9-shard-2"] = (1, 2)
         selected = {name: producer for name, producer in artifacts.items()
                     if fnmatch.fnmatchcase(name, render(value(download, "pattern", 10), 2))}
-        self.assertEqual(len(selected), 2, selected)
+        self.assertEqual(len(selected), 3, selected)
         self.assertEqual(sorted(selected.values(), key=lambda item: item[1]),
-                         [(2 if shard in rerun_shards else 1, shard) for shard in (1, 2)])
+                         [(2 if shard in rerun_shards else 1, shard) for shard in (1, 2, 3)])
         script = render(value(merge, "run", 8), 2)
         for name, (_, shard) in selected.items():
-            self.assertIn(f'mv "build/asan-shards/{name}" "build/asan-shards/shard-{shard}"',
-                          script.replace("$shard", str(shard)))
+            self.assertIn(f'mv "{name}" "build/asan-shards/shard-{shard}"',
+                          script.replace("$shard", str(shard)).replace("$source", name))
+        prepare = script.split(ASAN_MERGE_COMMAND, 1)[0]
+        self.assertNotIn("ctest_shards.py", prepare)
+        for omitted in (None, 3):
+            with self.subTest(omitted=omitted), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name, (attempt, shard) in selected.items():
+                    if shard != omitted:
+                        source = root / "build/asan-shards" / name
+                        source.mkdir(parents=True)
+                        (source / "producer").write_text(str(attempt), encoding="utf-8")
+                result = subprocess.run(
+                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                    cwd=root, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for _, (attempt, shard) in selected.items():
+                    producer = root / f"build/asan-shards/shard-{shard}/producer"
+                    self.assertEqual(producer.exists(), shard != omitted)
+                    if shard != omitted:
+                        self.assertEqual(producer.read_text(encoding="utf-8"), str(attempt))
         self.assertEqual(value(download, "if", 8), "needs.asan-shard.result == 'success'")
 
-    def test_asan_aggregate_only_rerun_downloads_both_original_shards(self):
+    def test_asan_aggregate_only_rerun_downloads_all_original_shards(self):
         self.assert_asan_rerun_artifacts(())
 
     def test_asan_single_shard_rerun_downloads_latest_and_unchanged_shards(self):
-        self.assert_asan_rerun_artifacts((2,))
+        self.assert_asan_rerun_artifacts((3,))
 
     def test_asan_rerun_evidence_retained_for_full_30_day_window(self):
         shard = jobs(self.workflows["asan.yml"])["asan-shard"]
@@ -2960,7 +2995,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 "test_asan_aggregate_accepts_stronger_inventory_checks_after_merge",
                 "test_asan_aggregate_rejects_removed_or_replaced_required_tests",
                 "test_asan_aggregate_rejects_invalid_inventory_and_coverage_commands",
-                "test_asan_aggregate_only_rerun_downloads_both_original_shards",
+                "test_asan_aggregate_only_rerun_downloads_all_original_shards",
                 "test_asan_single_shard_rerun_downloads_latest_and_unchanged_shards",
                 "test_asan_rerun_evidence_retained_for_full_30_day_window",
                 "test_aggregate_status_conditions_use_valid_contexts",
