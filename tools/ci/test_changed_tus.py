@@ -2658,6 +2658,131 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def ci_evidence(self):
         return json.loads((self.root / "evidence.json").read_text())
 
+    def test_ci_included_source_selects_consumers_before_replay_or_deferral(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included input\n", encoding="utf-8")
+        dormant = self.src / "dormant.cpp"
+        dormant.write_text("// unconfigured input\n", encoding="utf-8")
+        clang = self.root / "clang build"
+        clang.mkdir()
+        execute = self.fake_execute
+
+        def including_execute(command, directory, check=True):
+            result = execute(command, directory, check)
+            # Both ordinary and analyzer-only consumers count, across compilers.
+            if "-M" in command and ((str(self.a) in command and "-D__clang_analyzer__" not in command)
+                                    or (str(self.b) in command and "-D__clang_analyzer__" in command)):
+                result.stdout = result.stdout.rstrip("\n") + " " + str(included).replace(" ", "\\ ") + "\n"
+            return result
+
+        for over_budget in (False, True):
+            if over_budget:
+                self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+                self.save_db()
+            (clang / "compile_commands.json").write_text(json.dumps([
+                dict(record, arguments=["clang++", *record["arguments"][1:]]) for record in self.raw]))
+            self.commands.clear()
+            with self.subTest(over_budget=over_budget), \
+                    patch.object(tus, "execute", side_effect=including_execute):
+                self.assertEqual(self.run_ci([included], tracked=[self.a, self.b, included, dormant],
+                                             clang_build_dir=clang), 0)
+                report = self.ci_evidence()
+                count = 6 if over_budget else 4
+                self.assertEqual(report["status"], "deferred" if over_budget else "passed")
+                self.assertEqual(report["selected_count"], count)
+                self.assertEqual(sum("-M" in c for c, _ in self.commands), 2 * count)
+                self.assertEqual(sum(c[0] == "ccache" for c, _ in self.commands), 0 if over_budget else 2)
+                self.assertEqual(sum("-p" in c for c, _ in self.commands), 0 if over_budget else 2)
+                for label in ("gcc", "clang"):
+                    self.assertEqual(set(report["selected"][label]),
+                                     {p.relative_to(self.root).as_posix() for p in (self.a, self.b)})
+                    self.assertEqual(report[label + "_selection"]["included_sources"], ["src/included.cpp"])
+                    self.assertIn({label + "_unconfigured_sources": ["src/dormant.cpp"]},
+                                  report["unsupported_configurations"])
+                self.assertRegex(report["command_fingerprint"], r"^[0-9a-f]{64}$")
+
+    def test_ci_unconsumed_sources_refuse_even_with_over_budget_selection(self):
+        source = self.src / "unconfigured.cpp"
+        source.write_text("// changed input\n", encoding="utf-8")
+        absent = self.src / "absent.cpp"
+        clang = self.budget_databases()
+        for included_by_absent in (False, True):
+            if included_by_absent:
+                absent.write_text('#include "unconfigured.cpp"\n', encoding="utf-8")
+            for over_budget in (False, True):
+                self.commands.clear()
+                with self.subTest(included_by_absent=included_by_absent, over_budget=over_budget):
+                    # Full selection would choose six variants; admission must
+                    # still fail before the budget can defer their replay.
+                    self.assertEqual(self.run_ci([source], full_selection=over_budget,
+                                                 clang_build_dir=clang), 1)
+                    report = self.ci_evidence()
+                    self.assertEqual(report["status"], "failed")
+                    self.assertEqual(report["error"],
+                                     "missing compile database entry (possibly disabled configuration): "
+                                     "src/unconfigured.cpp")
+                    self.assertEqual(sum("-M" in c for c, _ in self.commands), 6)
+                    self.assertTrue(all("-M" in c for c, _ in self.commands))
+                    self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+    def test_ci_included_source_requires_complete_scans_in_each_compiler(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included input\n", encoding="utf-8")
+        clang = self.budget_databases()
+        execute = self.fake_execute
+        for failure in ("unconsumed", "partial", "unreadable", "deadline"):
+            def scan(command, directory, check=True):
+                result = execute(command, directory, check)
+                if "-M" not in command:
+                    return result
+                if command[0] == "clang++":
+                    if failure == "partial":
+                        return subprocess.CompletedProcess(command, 0, "selected-tu: missing.hpp\n", "")
+                    if failure == "unreadable":
+                        raise PermissionError("unreadable included-source scan")
+                    if failure == "deadline":
+                        raise subprocess.TimeoutExpired("included-source scan", 1800)
+                    return result
+                result.stdout = result.stdout.rstrip("\n") + " " + str(included).replace(" ", "\\ ") + "\n"
+                return result
+
+            self.commands.clear()
+            with self.subTest(failure=failure), patch.object(tus, "execute", side_effect=scan):
+                self.assertEqual(self.run_ci([included], full_selection=True, clang_build_dir=clang), 1)
+            report = self.ci_evidence()
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("error", report)
+            self.assertIn("gcc_selection", report)
+            self.assertNotIn("clang_selection", report)
+            self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+
+    def test_local_compile_and_tidy_share_included_source_admission(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included input\n", encoding="utf-8")
+        absent = self.src / "absent.cpp"
+        absent.write_text('#include "included.cpp"\n', encoding="utf-8")
+        for command in ("compile", "tidy"):
+            for consumed in (False, True):
+                def dependencies(entry):
+                    return {entry["file"]} | ({included} if consumed and entry["file"] == self.b else set())
+
+                output, errors = io.StringIO(), io.StringIO()
+                with self.subTest(command=command, consumed=consumed), \
+                        patch.object(tus, "changed_paths", return_value={included}), \
+                        patch.object(tus, "dependencies", side_effect=dependencies), \
+                        patch.object(tus, "run_checks", return_value=[]) as replay, \
+                        redirect_stdout(output), redirect_stderr(errors):
+                    self.assertEqual(tus.main([command, "--root", str(self.root),
+                                               "--build-dir", str(self.build)]), 0 if consumed else 1)
+                    if consumed:
+                        self.assertEqual([e["file"] for e in replay.call_args.args[2]], [self.b])
+                        report = json.loads(output.getvalue().splitlines()[0])
+                        self.assertEqual(report["included_sources"], ["src/included.cpp"])
+                    else:
+                        replay.assert_not_called()
+                        self.assertIn("missing compile database entry (possibly disabled configuration)",
+                                      errors.getvalue())
+
     def test_ci_over_budget_defers_after_scans_and_reports_success_evidence(self):
         clang = self.budget_databases()
         namespace = os.environ.get("CCACHE_NAMESPACE")
@@ -2995,7 +3120,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertIn("src/DormantBackend.cpp", summary)
         self.commands.clear()
         self.assertEqual(self.run_ci([dormant], tracked=[self.a, dormant]), 1)
-        self.assertEqual(self.commands, [])
+        self.assertEqual(len(self.commands), 4)
+        self.assertTrue(all("-M" in command for command, _ in self.commands))
 
     def test_ci_summary_escapes_unusual_filenames(self):
         summary = self.root / "safe-summary.md"

@@ -82,8 +82,10 @@ hand. A failed snapshot leaves a partial cache; retry into a new empty cache.
 FastNoise and the RenderDoc header are committed locally. Keep Diligent, Tracy,
 GNS and Steam disabled for this baseline. Changes to those configurations need
 separately provisioned dependency profiles; Steam needs an owner-provided SDK.
-The baseline database cannot validate disabled configurations. A changed TU
-missing from that database fails explicitly.
+The baseline database cannot validate disabled configurations. A changed source
+fails explicitly when neither a database entry nor a configured translation
+unit's dependency closure consumes it. Sources included only by unconfigured
+translation units also fail.
 
 ## Worker recipe
 
@@ -250,8 +252,10 @@ Other pass-through, unknown separate-value options and MSVC/clang-cl driver
 syntax are refused, including plugins, specs, tool wrappers, profile-data paths
 and response files.
 There is no cached dependency graph. Each invocation reports selected files,
-variant/scan counts, scope, selection time and check time. No-native selections
-report success.
+variant/scan counts, scope, selection time and check time. `included_sources`
+lists first-party source inputs without their own database entries that the
+ordinary or analyzer scans prove are consumed. No-native selections report
+success.
 
 Compile commands retain configuration/determinism options and replace object
 and dependency outputs with isolated scratch objects; objects are removed on
@@ -392,14 +396,23 @@ Configuration generates engine/stb headers; the only build target is `glad`
 for its generated headers. It does not link engine/test targets or run CTest.
 The `ci` command shares the local dependency selector, scans ordinary and
 analyzer contexts and unions both compiler selections. Within the replay budget
-it replays all variants of every selected file. A changed or cross-selected TU
-missing from either database fails visibly. Unconfigured sources and unsupported platforms/backends
-are listed explicitly and retain their specialized full gates.
+it replays all variants of every selected file. Each compiler's dependency scan
+must prove consumption of changed sources, including included `.cpp` inputs
+without their own database entries. A changed source with no configured consumer
+fails with `missing compile database entry (possibly disabled configuration)`;
+this includes standalone sources and sources included only by absent targets.
+A cross-selected TU missing from either database also fails visibly.
+The `gcc_unconfigured_sources` and `clang_unconfigured_sources` report fields
+list tracked first-party sources with neither their own entry nor a proven
+consumer in that compiler's scans. Included sources with proven consumers are
+excluded. Unsupported platforms/backends retain their specialized full gates.
 
 The single default `CI_REPLAY_VARIANT_BUDGET` in `tools/ci/changed_tus.py` is
 5 total command variants across GCC and Clang, counted after union and target
 expansion. Selection, coverage, command admission and fingerprint checks run
-before the budget decision. Above 5 variants the lane reports `status: deferred`,
+after the cheap dependency scans and before expensive replay or the budget
+decision. Missing-consumer refusals still fail when full selection would exceed
+the replay budget. Above 5 variants the lane reports `status: deferred`,
 the selected count and budget, and states that the selection exceeds the
 fast-lane budget and is deferred to the full required builds. Only that explicit
 over-budget decision can turn omitted replay into success; refusals, missing

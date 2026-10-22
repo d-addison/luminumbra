@@ -740,6 +740,11 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
     if full or headers or sources:
         scans = parallel(dependencies, entries, jobs)
     matched_sources = set().union(*scans) if scans else set()
+    # A source without its own command is valid when a configured variant's
+    # ordinary or analyzer dependency closure consumes it.
+    included_sources = {p for p in matched_sources - by_file
+                        if p.is_relative_to(root) and p.suffix.lower() in SOURCE_SUFFIXES
+                        and first_party(p.relative_to(root))}
     missing_sources = sources - by_file - matched_sources
     if missing_sources:
         source = min(missing_sources)
@@ -780,7 +785,8 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
                 raise SelectionError(f"stale database entry for deleted TU: {entry['file']}")
             selected.append(entry)
     return selected, {"full_selection": full, "selection_fallback": fallback, "scan_variants": len(scans),
-                      "cache": "disabled; fresh dependency scans"}
+                      "cache": "disabled; fresh dependency scans",
+                      "included_sources": sorted(p.relative_to(root).as_posix() for p in included_sources)}
 
 
 def warning_family(option: str) -> str | None:
@@ -1304,17 +1310,9 @@ def ci_checks(args, root: Path) -> int:
             if not entries:
                 raise SelectionError(f"empty {label} first-party compile database")
             databases[label] = entries
-            # CI cannot qualify a changed source in an unconfigured backend.
-            # Keep this admission check before dependency probes; local checks
-            # can separately discover sources included by configured variants.
-            configured = {e["file"] for e in entries}
-            missing_changed = sorted(
-                p for p in changed if p.suffix.lower() in SOURCE_SUFFIXES
-                and first_party(p.relative_to(root)) and p.exists()
-                and checked_resolve(p) not in configured)
-            if missing_changed:
-                raise SelectionError("missing compile database entry (possibly disabled configuration): "
-                                     + str(missing_changed[0].relative_to(root)))
+            # Dependency scanning proves consumption of included sources as well
+            # as standalone TUs. Its coverage refusal precedes expensive replay
+            # and cannot be bypassed by the replay deferral budget.
             selected, selection = select(root, entries, changed, args.jobs, build)
             selections[label] = selected
             report[label + "_selection"] = selection
@@ -1323,6 +1321,7 @@ def ci_checks(args, root: Path) -> int:
                 {"file": e["file"].relative_to(root).as_posix(), "directory": str(e["directory"]),
                  "arguments": clean_arguments(e["arguments"])} for e in selected]
             configured = {e["file"] for e in entries}
+            configured.update(root / p for p in selection.get("included_sources", []))
             missing = sorted(p.relative_to(root).as_posix() for p in tracked
                              if p.suffix.lower() in SOURCE_SUFFIXES and first_party(p.relative_to(root))
                              and checked_resolve(p) not in configured)
