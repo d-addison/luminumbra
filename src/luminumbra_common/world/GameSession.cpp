@@ -1434,8 +1434,11 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
-    if (!ReadWorldStateFrom(worldPath, loaded))
+    if (!ReadWorldStateFrom(worldPath, loaded)) {
+        if (m_worldSystem)
+            m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
+    }
 
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
@@ -1685,16 +1688,21 @@ bool GameSession::ReconcileWorldStateMetadataTo(const fs::path& save_dir) {
     // Preserve legacy extensions, including metadata-only transient exports.
     // The water cursor belongs to chunk evolution even without a calendar.
     const auto path = save_dir / "world_info.json";
+    const auto cursor = m_worldSystem->GetWaterSimWindowCursor();
+    const bool metadata_exists = fs::exists(path);
+    // Absent metadata already loads cursor zero; retain the legacy file layout.
+    if (cursor == 0 && !metadata_exists)
+        return true;
     nlohmann::json metadata = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion}};
-    if (fs::exists(path)) {
+    if (metadata_exists) {
         std::ifstream input(path, std::ios::binary);
         metadata = nlohmann::json::parse(input, nullptr, false);
         if (!metadata.is_object())
             return false;
     }
     metadata.erase("renderCalendar");
-    metadata["waterSimCursor"] = m_worldSystem->GetWaterSimWindowCursor();
+    metadata["waterSimCursor"] = cursor;
     std::error_code error;
     fs::create_directories(save_dir, error);
     if (error)
@@ -1973,8 +1981,11 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     }
 
     LoadedWorldState state;
-    if (!ReadWorldStateFrom(save_dir, state))
+    if (!ReadWorldStateFrom(save_dir, state)) {
+        // Refused snapshots invalidate resident chunks, but never publish staged members.
+        m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
+    }
     AdoptWorldStateFrom(save_dir, state);
     return true;
 }

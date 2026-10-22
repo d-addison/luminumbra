@@ -246,6 +246,7 @@ add_executable(common_tests
     # Snapshot cursor restoration and destination refusal cases are discovered
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
     # Deterministic work ceilings and injected negative gates (issue #396).
