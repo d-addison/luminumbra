@@ -526,7 +526,26 @@ TEST(FarWorldWaterContract, ProductionWaterUsesIndependentReadinessAndCombinedSu
     ExpectContains(fragment, "case 200u: albedo = vec3(0.018, 0.065, 0.11);");
     const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
     ExpectContains(pipeline, "upload.water_snapshot_version = chunk.water_mesh_version;");
-    ExpectContains(pipeline, "LadderWaterPassEligible(chunk.water_mesh_version");
+    // Drawing and ownership must certify the retained presentation, even while
+    // the current snapshot is waiting for adoption. Check calls within their
+    // owning functions without depending on local names or line wrapping.
+    const auto draw = ExtractBlock(pipeline, "void RenderPipeline::execute_stage_water(");
+    EXPECT_TRUE(std::regex_search(draw, std::regex(R"(\.\s*PresentedLadderWaterEligible\s*\()")));
+    const auto prepare = ExtractBlock(pipeline, "void RenderPipeline::prepare_frame(");
+    EXPECT_TRUE(
+        std::regex_search(prepare, std::regex(R"(\.\s*SetPresentedLadderWaterUpload\s*\()")));
+    const auto header = ReadShader("src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto eligibility = ExtractBlock(header, "bool PresentedLadderWaterEligible(");
+    EXPECT_TRUE(std::regex_search(
+        eligibility,
+        std::regex(
+            R"(return\s+LadderWaterPassEligible\s*\(\s*mesh_version\s*,\s*mesh_version\s*,)"
+            R"(\s*element_count\s*,\s*LadderUploadValid\s*\(\s*\)\s*,\s*enabled\s*\)\s*;)")));
+    const auto ownership = ExtractBlock(header, "void SetPresentedLadderWaterUpload(");
+    EXPECT_TRUE(std::regex_search(
+        ownership,
+        std::regex(
+            R"(\bSetLadderWaterUpload\s*\(\s*upload\s*,\s*mesh_version\s*,\s*enabled\s*\))")));
     const auto pass = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
     ExpectContains(pass, "stats.far_water_indices += far_stats.water_indices;");
 }

@@ -4468,6 +4468,37 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
 
     EXPECT_NE(source.find("BuildFarLodWorkerTile"), std::string::npos);
     EXPECT_NE(source.find("rebase_authoritative_tile"), std::string::npos);
+    const std::string worker_signature = "FarLodWorkerBuildOutcome BuildFarLodWorkerTile(";
+    const std::string generation_call = "world.GenerateChunkData(generated_chunk, 1);";
+    const auto extract_worker = [&worker_signature](const std::string& text) {
+        const std::size_t begin = text.find(worker_signature);
+        if (begin == std::string::npos)
+            return std::string{};
+        // Namespace-level functions end at an unindented closing brace. Inner
+        // scopes in this source are indented, including the generation loop.
+        const std::size_t end = text.find("\n}", begin);
+        return end == std::string::npos ? std::string{} : text.substr(begin, end + 2 - begin);
+    };
+    const auto worker_generates_chunk = [&extract_worker,
+                                         &generation_call](const std::string& text) {
+        return extract_worker(text).find(generation_call) != std::string::npos;
+    };
+    ASSERT_FALSE(extract_worker(source).empty());
+    EXPECT_TRUE(worker_generates_chunk(source));
+
+    // Removing the live call must fail the same oracle even if an unrelated
+    // function or comment elsewhere still contains the exact generation token.
+    std::string missing_generation = source;
+    const std::size_t live_call =
+        missing_generation.find(generation_call, missing_generation.find(worker_signature));
+    ASSERT_NE(live_call, std::string::npos);
+    missing_generation.erase(live_call, generation_call.size());
+    missing_generation += "\n" + generation_call;
+    EXPECT_NE(missing_generation.find(generation_call), std::string::npos);
+    EXPECT_FALSE(worker_generates_chunk(missing_generation));
+    EXPECT_FALSE(worker_generates_chunk(generation_call));
+    EXPECT_FALSE(worker_generates_chunk(worker_signature + generation_call));
+    EXPECT_TRUE(worker_generates_chunk(worker_signature + "\r\n" + generation_call + "\r\n}\r\n"));
     const std::size_t stale_check = source.find("const bool snapshot_stale");
     const std::size_t owner_save = source.find("save_tile(result.tile");
     ASSERT_NE(stale_check, std::string::npos);
@@ -4591,9 +4622,46 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "result.region_authority_revision = sdf_snapshot->region_authority_revision;",
          "result.persistence_allowed = persistence_allowed;",
          "result.mesh = std::move(outcome.mesh);",
-         "result.tile = std::move(tile);",
-         "std::lock_guard<std::mutex> lock(shared->mutex);",
-         "shared->completed.push_back(std::move(result));"});
+         "result.tile = std::move(tile);"});
+
+    // Both spellings construct the same guard in the enclosing scope. Require
+    // publication immediately after acquiring the shared mutex, on both the
+    // failed-build and successful-build paths, with no intervening scope exit.
+    const auto has_guarded_completion = [](std::string_view text) {
+        std::string compact;
+        for (const char ch : text) {
+            if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+                compact.push_back(ch);
+        }
+        const std::string publish = "shared->completed.push_back(std::move(result));";
+        return compact.find("std::lock_guard<std::mutex>lock(shared->mutex);" + publish) !=
+                   std::string::npos ||
+               compact.find("LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,lock,shared->mutex,"
+                            "\"Farbuildlockwait\");" +
+                            publish) != std::string::npos;
+    };
+    EXPECT_TRUE(has_guarded_completion(
+        section(schedule, "if (!outcome.ok)", "World::FarLodTile& tile = outcome.tile;")));
+    EXPECT_TRUE(has_guarded_completion(
+        section(schedule, "result.tile = std::move(tile);", "JobPriority::Normal")));
+
+    const std::string plain_guard = "std::lock_guard<std::mutex> lock(shared->mutex);";
+    const std::string profiled_guard =
+        "LUMIN_PROFILE_LOCK(\r\n std::lock_guard<std::mutex>, lock, shared->mutex, "
+        "\"Far build lock wait\");";
+    const std::string publication = "shared->completed.push_back(std::move(result));";
+    for (const auto& guard : {plain_guard, profiled_guard}) {
+        EXPECT_TRUE(has_guarded_completion(guard + "\n" + publication));
+        EXPECT_FALSE(has_guarded_completion("{" + guard + "}\n" + publication));
+        EXPECT_FALSE(has_guarded_completion(publication + guard));
+        std::string wrong_mutex = guard;
+        wrong_mutex.replace(wrong_mutex.find("shared->mutex"), 13, "other->mutex");
+        EXPECT_FALSE(has_guarded_completion(wrong_mutex + publication));
+        EXPECT_FALSE(has_guarded_completion(guard));
+    }
+    EXPECT_FALSE(has_guarded_completion(publication));
+    EXPECT_FALSE(has_guarded_completion(""));
+    EXPECT_FALSE(has_guarded_completion("LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>"));
 
     const auto integrate = section(
         source, "void FarLodSystem::integrate_completed_builds()", "void FarLodSystem::update(");
@@ -5303,6 +5371,7 @@ private:
         glUniform1i(Location("u_farWorldLadder"), 0);
         glUniform1i(Location("u_useInstanceOrigin"), 1);
         glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);
+        pool_.mark_submitted(allocation.block_index);
         glBindVertexArray(0);
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
         pool_.free(handle);

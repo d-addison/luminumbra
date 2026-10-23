@@ -3,6 +3,27 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "profiler.build-contract",
+      "source": "issue #433",
+      "statement": "Static source contracts require the existing Linux/GCC GNS compile job to configure the profile preset and build the common library, server, shipping client, QA client and both macro fixtures against pinned Tracy. The bootstrap installs NumPy and Pillow before enabling tests. Disposable TCP accept attempts retain job and future-wait zones without process-lifetime thread-name registration; persistent workers remain named. The licence disclosure links to the repository-hosted notice from generated documentation. Enabled native compile/link qualification is pending a successful CI run; no local profile configure or application build is claimed. Windows and macOS enabled builds, profiler captures and GPU execution remain outside this check. Release/perf lanes retain Tracy disabled.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ProfilerSourceContract"
+        },
+        {
+          "kind": "script",
+          "ref": "test/tools/check_profiler_contract.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.fast-replay-budget",
       "source": "docs/ci/local-checks.md#fast-hosted-validation",
       "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Changed first-party sources are admitted by each compiler's configured dependency closure, including included sources without their own database entries; standalone sources without database entries and sources consumed only by absent targets refuse before replay even above budget. Local compile/tidy share this admission. Included-source reports name proven consumers' inputs, and unconfigured-source reports exclude those inputs. Refusals, missing consumers or cross-selected TU entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes.",
@@ -215,7 +236,7 @@
     {
       "id": "render.frame-scan-schema",
       "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
-      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks.",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 62 existing column indices and appends dirty_columns at index 62, for 63 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
       "status": "covered",
       "evidence": [
         {
@@ -3380,7 +3401,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md now agrees with the ledger's asymmetric half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers the ledger predicate on both axes; integrated boundary regression coverage remains planned under issue #250 for host walking anchors, ground-object edits and pins.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering`: docs/active-regions.md now agrees with the ledger's asymmetric half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers both axes; an integrated boundary regression with full endpoint coverage remains planned under issue #250. Boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence.",
       "evidence": [
         {
           "kind": "ctest",
@@ -3393,6 +3414,11 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals",
+          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both X and Z endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
         },
         {
           "kind": "ctest",
@@ -5392,6 +5418,90 @@
       ]
     },
     {
+      "id": "render.benchmark-far-frame-storage",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. Only v3 issues additional GL queries.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkFrameCountStrictlyParsesBeforeApplyingBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkSerializesEveryMeasuredFarStateAndSummary"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-output-completion",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasRejectPartialWritesAndFlushFailures"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasCheckFileOpenAndDirectoryCreation"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-workload-assignments",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Assignment-form workload options do not become debug overrides or consume successor arguments; non-workload options remain observable overrides.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOverrides.WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides"
+        }
+      ]
+    },
+    {
+      "id": "content.foliage-directory-recovery",
+      "source": "docs/engine-guide.md#shipping-defaults",
+      "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageScanFailuresRemainRetryable"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageFileIoFailureRollsBackBeforeRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageDirectoryProviderExceptionsAreContained"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageUnavailableAndEmptyDirectoriesHaveDistinctResults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSpeciesUsePortableFilenameOrderForDuplicateIds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesRetriesAtDeadlineAndLogsOnlyTransitions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesEmptySuccessIsCachedAndRecoveryIsReportedOnce"
+        }
+      ]
+    },
+    {
       "id": "graphics.horizon-authority",
       "source": "docs/engine-guide.md#world-generation-and-streaming",
       "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
@@ -5408,6 +5518,23 @@
         {
           "kind": "ctest",
           "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+        }
+      ]
+    },
+    {
+      "id": "render.ladder-content-identity",
+      "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
+      "statement": "Both benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/perf/test_perf.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+
         }
       ]
     },

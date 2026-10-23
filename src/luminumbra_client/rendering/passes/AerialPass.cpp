@@ -1,4 +1,5 @@
 #include "AerialPass.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h"
@@ -38,6 +39,7 @@ void AerialPass::set_froxel_input(int volumetric_quality, u32 integrated_texture
 }
 
 void AerialPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL AerialPass.execute");
     //  analytic aerial-perspective in-scatter composited OVER the lit
     // scene in the lighting FBO. Reads the SAME sky-view/transmittance LUTs the
     // dome uses (coherent palette). A no-op if the LUT/shader are unavailable.

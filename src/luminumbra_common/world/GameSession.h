@@ -83,7 +83,8 @@ public:
     GameSession();
     ~GameSession();
 
-    // Initialize a new world with the given parameters.
+    // Initialize a new world with the given parameters. Refusal before adoption
+    // preserves the current world and its save eligibility, including fatal state.
     // customPresetJson (optional): a fully-resolved preset JSON (base preset + create-world
     // customize overrides). When provided it is written into THIS world's own save dir
     // (worlds/saves/<id>/preset.json) and used for generation, so the world is self-contained and
@@ -113,7 +114,9 @@ public:
                               const std::string& seed,
                               const std::string& worldType);
 
-    // Load an existing world from disk
+    // Load an existing world from disk. Catalog/preset preflight refusals preserve
+    // the current world and save eligibility. Snapshot reader refusals clear
+    // resident chunks and disable saving without publishing staged members.
     bool LoadWorld(const std::string& worldId);
 
     // Save current persistent state and metadata, including captured spawn changes.
@@ -147,7 +150,9 @@ public:
     // edits are never clobbered by regeneration. Restores the saved water window
     // cursor; absent metadata or an absent cursor resets it to zero. Malformed
     // cursors refuse before changing the live cursor. A missing snapshot is a
-    // clean miss (returns true). A refusal returns false and disables saving.
+    // clean miss (returns true). Corrupt/incompatible snapshot refusal disables
+    // saving; a tick-boundary refusal leaves the session unchanged.
+    // Latest create/open diagnostic, independent of current-world save eligibility.
     const std::string& GetWorldOpenError() const {
         return m_worldOpenError;
     }
@@ -583,6 +588,9 @@ private:
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
+    // False for fresh, incomplete, or fatally refused snapshot adoption. Operation
+    // diagnostics alone never change this; only coherent adoption enables it.
+    bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 

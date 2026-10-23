@@ -521,6 +521,10 @@ add_executable(foliage_cache_prune_test
     rendering/foliage_cache_prune_test.cpp
 )
 
+add_executable(foliage_surface_slots_test rendering/foliage_surface_slots_test.cpp)
+target_include_directories(foliage_surface_slots_test PRIVATE ../src/luminumbra_client)
+target_link_libraries(foliage_surface_slots_test PRIVATE gtest_main)
+
 target_include_directories(foliage_cache_prune_test PRIVATE
 ../src
 ../src/luminumbra_client
@@ -678,9 +682,11 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
-    # Evidence reuse and column-local invalidation on both scatter backends.
+    # Evidence reuse, stable surface slots and column-local invalidation on both backends.
     rendering/foliage_rebuild_test.cpp
     # Includes deterministic CPU/compute work budgets, idle zero and stale results.
+    # Fresh-pass equivalence and moving horizons on both scatter backends.
+    rendering/foliage_invalidation_test.cpp
 )
 
 target_compile_definitions(pass_context_test PRIVATE
@@ -1954,6 +1960,11 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
+add_executable(upload_budget_test rendering/upload_budget_test.cpp)
+target_include_directories(upload_budget_test PRIVATE ../src)
+target_link_libraries(upload_budget_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(upload_budget_test)
+
 add_executable(menu_presentation_test rendering/menu_presentation_test.cpp
     ../src/luminumbra_client/app/FrameAttribution.cpp)
 target_include_directories(menu_presentation_test PRIVATE ../src)
@@ -1977,6 +1988,7 @@ add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    upload_budget_test
     jolt_startup_test
     frame_attribution_test
     menu_presentation_test
@@ -2011,6 +2023,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test
+    foliage_surface_slots_test
     foliage_visual_contract_test
     render_view_test
     render_smoke_test
@@ -2192,6 +2205,10 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
+add_test(NAME ReplayWorkspacePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_replay_workspace.py")
+add_test(NAME UploadBudgetWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/rendering/test_upload_budget_wiring.py")
 set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
 if(MSVC)
     list(APPEND _common_isa_compiler_args --msvc)
@@ -2504,6 +2521,20 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 # on Windows and can exit inside the renderer without diagnostic output.
 
 # Pure CPU measurement contract, also runnable without a GL context.
+add_library(profiler_disabled_compile OBJECT core/profiler_disabled_compile.cpp)
+target_include_directories(profiler_disabled_compile PRIVATE ../src/luminumbra_common)
+luminumbra_configure_first_party_target(profiler_disabled_compile)
+# Deliberately no link to luminumbra_common/luminumbra_profiler: this target
+# checks disabled macro expansion even when the rest of the build is profiled.
+if(LUMINUMBRA_ENABLE_TRACY)
+    add_library(profiler_enabled_compile OBJECT core/profiler_enabled_compile.cpp)
+    target_include_directories(profiler_enabled_compile PRIVATE ../src/luminumbra_common)
+    target_link_libraries(profiler_enabled_compile PRIVATE luminumbra_profiler)
+    luminumbra_configure_first_party_target(profiler_enabled_compile)
+endif()
+add_test(NAME ProfilerSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/check_profiler_contract.py)
+
 # Generate from the production destructor so a shutdown reversion also changes
 # the native ordering probe. No access hooks are added to the production class.
 set(audio_shutdown_source "${CMAKE_SOURCE_DIR}/src/luminumbra_client/audio/AudioPropagationSystem.cpp")
@@ -2576,6 +2607,8 @@ set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benc
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
     "RenderBenchmarkImplicitCreationFailure;test_implicit_creation_failure"
+    "RenderBenchmarkMeasuredFrameBounds;test_v2_measured_frame_bounds"
+    "RenderBenchmarkIsolationSubmission;test_isolation_submission_reporting"
     "RenderBenchmarkOverrideCollection;test_gl_debug_override_collection"
     "RenderTraversalEmbeddedPresetRefusal;test_embedded_preset_refusal")
     list(GET case 0 test_name)

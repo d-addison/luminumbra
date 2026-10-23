@@ -14,6 +14,7 @@ import unittest
 import perf
 import render_contract as contract
 import validate_render_capture as capture
+from test_perf import far_capture, update_far_summary
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 QUALIFIED = 'NVIDIA GeForce RTX 5070 Ti'
@@ -67,6 +68,109 @@ class RenderContractTests(unittest.TestCase):
     def test_valid_capture(self):
         self.assertEqual(capture.validate(artifact(), args())['verdict'], 'PASS')
 
+    def test_zero_water_resolution_in_v3_captures(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        data['far_world']['frames'][1]['settings']['water_cells_per_side'] = 0
+        self.assertEqual(capture.validate(data, args())['verdict'], 'PASS')
+        self.assertEqual(contract.validate(data, QUALIFIED)['verdict'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'water resolution'):
+            capture.validate(data, args(ladder_baseline=True))
+        with self.assertRaisesRegex(ValueError, 'water resolution'):
+            contract.validate(data, QUALIFIED, ladder_baseline=True)
+
+    def test_ladder_baseline_rejects_measured_frames_and_repairs(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        self.assertEqual(capture.validate(data, args(ladder_baseline=True))['verdict'], 'PASS')
+        self.assertEqual(contract.validate(data, QUALIFIED, ladder_baseline=True)['verdict'], 'PASS')
+        for mutation in [dict(effective_mode='legacy'), dict(suppressed=True),
+                         dict(coverage_settled=False), dict(refusal='SpanRejected')]:
+            refused = copy.deepcopy(data)
+            refused['far_world']['frames'][-1].update(mutation)
+            update_far_summary(refused)
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    capture.validate(refused, args(ladder_baseline=True))
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    contract.validate(refused, QUALIFIED, ladder_baseline=True)
+                self.assertEqual(capture.validate(refused, args())['verdict'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'requires far-world frame evidence'):
+            capture.validate(artifact(), args(ladder_baseline=True))
+
+    def test_outstanding_batches_refuse_baseline_with_zero_deferred_work(self):
+        for field in ('generation_outstanding', 'meshing_outstanding'):
+            data = artifact()
+            data['far_world'] = far_capture()['far_world']
+            data['far_world']['frames'][1]['streaming'][field] = True
+            update_far_summary(data)
+            self.assertEqual(data['far_world']['summary']['unsettled_frames'], 1)
+            with self.subTest(field=field):
+                self.assertEqual(capture.validate(data, args())['verdict'], 'PASS')
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    capture.validate(data, args(ladder_baseline=True))
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    contract.validate(data, QUALIFIED, ladder_baseline=True)
+                data['far_world']['frames'][1]['streaming'][field] = False
+                update_far_summary(data)
+                self.assertEqual(capture.validate(data, args(ladder_baseline=True))['verdict'], 'PASS')
+
+    def test_declared_isolation_cannot_waive_submission_suppression(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        override = {'cli:--isolation-layers': 'foliage'}
+        data['debug_overrides'] = {'active': override, 'declared': dict(override)}
+        data['far_world']['frames'][1].update(
+            suppressed=True, submission_refusal='IsolationSuppressed')
+        update_far_summary(data)
+        self.assertEqual(capture.validate(data, args())['verdict'], 'PASS')
+        self.assertEqual(contract.validate(data, QUALIFIED)['verdict'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+            capture.validate(data, args(ladder_baseline=True))
+        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+            contract.validate(data, QUALIFIED, ladder_baseline=True)
+
+    def test_unavailable_identity_is_refused_by_both_schema_readers(self):
+        for schema in ('luminumbra.render_benchmark.v2', contract.SCHEMA):
+            for index in range(4):
+                if schema == contract.SCHEMA:
+                    data, expected = artifact(), args()
+                else:
+                    data = self.report_capture()
+                    data.update(frames=4, warmup_frames=2)
+                    expected = args(position=[0, 0, 0], yaw=0, pitch=0, tod=0,
+                                    qualified_renderer=None)
+                data['far_world'] = far_capture()['far_world']
+                data['far_world']['frames'][index]['content_identity'] = '0'
+                with self.subTest(schema=schema, index=index):
+                    self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                    expected.ladder_baseline = True
+                    with self.assertRaisesRegex(ValueError, 'Ladder baseline refused.*identity.*unavailable'):
+                        capture.validate(data, expected)
+                    if schema == contract.SCHEMA:
+                        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused.*identity.*unavailable'):
+                            contract.validate(data, QUALIFIED, ladder_baseline=True)
+                    data['far_world']['frames'][index]['content_identity'] = '1'
+                    self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+
+    def test_ladder_baseline_cli_rejection_and_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'capture.json'
+            bootstrap = ("import runpy,sys; sys.path.insert(0,sys.argv[1]); "
+                         "sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0],run_name='__main__')")
+            command = [sys.executable, '-I', '-B', '-c', bootstrap,
+                       str(Path(capture.__file__).parent), str(Path(capture.__file__)), str(path),
+                       '--qualified-renderer', QUALIFIED, '--ladder-baseline']
+            for accepted in (False, True):
+                data = artifact()
+                data['far_world'] = far_capture()['far_world']
+                data['far_world']['frames'][1]['coverage_settled'] = accepted
+                update_far_summary(data)
+                path.write_text(json.dumps(data), encoding='utf-8')
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                self.assertEqual(json.loads(result.stdout)['verdict'], 'PASS' if accepted else 'FAIL')
+
     def test_expected_cell_parameters_match(self):
         expected = args(profile='quality', width=1280, height=720, warmup_frames=2,
                         frames=4, workload_kind='fixed_view')
@@ -86,6 +190,19 @@ class RenderContractTests(unittest.TestCase):
                             ('workload_kind', 'fixed_view')):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'requires a v3 capture'):
                 capture.validate({'schema': 'luminumbra.render_benchmark.v2'}, args(**{name: value}))
+
+    def test_cell_binding_and_ladder_baseline_are_both_required(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        expected = args(profile='quality', width=1280, height=720, warmup_frames=2,
+                        frames=4, workload_kind='fixed_view', ladder_baseline=True)
+        self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+        with self.assertRaisesRegex(ValueError, '--width mismatch'):
+            capture.validate(data, args(**dict(vars(expected), width=3440)))
+        data['far_world']['frames'][-1]['coverage_settled'] = False
+        update_far_summary(data)
+        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+            capture.validate(data, expected)
 
     def test_whole_frame_brackets_pass_sum(self):
         data = artifact()
@@ -588,6 +705,15 @@ class RenderContractTests(unittest.TestCase):
         result = capture.validate(data, args(position=[0, 0, 0], yaw=0, pitch=0, tod=0, qualified_renderer=None))
         self.assertEqual(result['verdict'], 'PASS')
         self.assertEqual(data, before)
+        data.update(frames=4, warmup_frames=2, far_world=far_capture()['far_world'])
+        data['far_world']['frames'][1]['settings']['water_cells_per_side'] = 0
+        report_args = args(position=[0, 0, 0], yaw=0, pitch=0, tod=0, qualified_renderer=None)
+        self.assertEqual(capture.validate(data, report_args)['verdict'], 'PASS')
+        report_args.ladder_baseline = True
+        with self.assertRaisesRegex(ValueError, 'water resolution'):
+            capture.validate(data, report_args)
+        data['far_world']['frames'][1]['settings']['water_cells_per_side'] = 16
+        self.assertEqual(capture.validate(data, report_args)['verdict'], 'PASS')
         data.update(artifact())
         result = capture.validate(data, args(position=[0, 0, 0], yaw=0, pitch=0, tod=0))
         self.assertEqual(result['measurement']['verdict'], 'PASS')

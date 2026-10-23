@@ -377,8 +377,13 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
     const fs::path out_path(destination);
     if (out_path.has_parent_path()) {
         fs::create_directories(out_path.parent_path(), ec);
-        if (ec)
+        if (ec) {
+            LUMINUMBRA_CORE_ERROR("Replay recorder: cannot create parent '{}': {} ({})",
+                                  out_path.parent_path().string(),
+                                  ec.message(),
+                                  ec.value());
             return false;
+        }
     }
     // Exclusive directory creation avoids collisions between concurrent sessions,
     // including processes using the same default dump destination.
@@ -398,9 +403,17 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
             m_output.clear();
             return true;
         }
-        if (ec)
+        if (ec) {
+            LUMINUMBRA_CORE_ERROR("Replay recorder: cannot reserve directory '{}': {} ({})",
+                                  candidate,
+                                  ec.message(),
+                                  ec.value());
             return false;
+        }
     }
+    LUMINUMBRA_CORE_ERROR("Replay recorder: exhausted {} directory candidates beside '{}'",
+                          kSegmentTicks,
+                          destination);
     return false;
 }
 

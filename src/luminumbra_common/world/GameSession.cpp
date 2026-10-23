@@ -79,12 +79,10 @@
 #include "../systems/WindFieldSystem.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
+#include "entt/entity/entity.hpp"
 #include "nlohmann/json.hpp" // For parsing JSON
-#include <cmath>             // std::floor (energy-layer anchor quantization)
-
-#include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
 #include <atomic>
-#include <chrono>
+#include <cmath> // std::floor (energy-layer anchor quantization)
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
@@ -95,6 +93,9 @@
 #include <span>
 #include <string>
 #include <system_error>
+
+#include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
+#include <chrono>
 
 #include <filesystem>
 #include <fstream>
@@ -205,6 +206,7 @@ GameSession::~GameSession() {
 }
 
 void GameSession::ResetWorldSystems() {
+    m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
     // Keep all dependencies alive while the world destructor fences admitted work.
@@ -1216,7 +1218,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& requiredPresetContentHash) {
     m_worldOpenError.clear();
     if (!m_jobSystem) {
-        LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
+        m_worldOpenError = "JobSystem not set before creating world.";
+        LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
         return false;
     }
 
@@ -1386,7 +1389,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     // Save world metadata
     if (m_activeRegionsEnabled)
         RestoreWorldClock(m_worldClock);
+    // Systems, clock and identity are coherent; allow the initial metadata save.
+    m_worldUsable = true;
     if (!transient && !SaveWorld()) {
+        m_worldUsable = false;
         m_worldOpenError = "Could not save the new world's metadata.";
         LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
         return false;
@@ -1435,6 +1441,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
     if (!ReadWorldStateFrom(worldPath, loaded)) {
+        m_worldUsable = false;
         if (m_worldSystem)
             m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
@@ -1484,7 +1491,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     InitializeEnergyFieldState();
     if (m_energyFieldState) {
         const auto recordPath = worldPath / "aether_state.efs";
-        const std::ifstream recordFile(recordPath);
+        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+        std::ifstream recordFile;
+        recordFile.open(recordPath);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();
@@ -1518,6 +1527,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_worldOpenError.clear();
     AttachRegionEditObserver();
     AdoptWorldStateFrom(worldPath, loaded);
+    m_worldUsable = true;
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
 }
@@ -1765,7 +1775,7 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&
          (m_activeRegionsEnabled || !m_renderCalendar)) ||
-        !m_worldOpenError.empty() || !SavedPresetCompatible(save_dir))
+        !m_worldUsable || !SavedPresetCompatible(save_dir))
         return false;
     if (m_activeRegionsEnabled) {
         if (!Persistence::WorldSaveService::validate_save(save_dir))
@@ -1862,8 +1872,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     if (report) {
         *report = result;
     }
-    if (!IsSimulationTickBoundary() || !m_worldOpenError.empty() || !m_worldSystem ||
-        save_dir.empty() ||
+    if (!IsSimulationTickBoundary() || !m_worldUsable || !m_worldSystem || save_dir.empty() ||
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
     }
@@ -1968,7 +1977,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
 
 bool GameSession::LoadWorldState() {
     if (m_transientWorld)
-        return m_worldSystem && m_worldOpenError.empty();
+        return m_worldSystem && m_worldUsable;
     return LoadWorldStateFrom(GetWorldSaveDir());
 }
 
@@ -1976,12 +1985,13 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
+    if (!m_worldUsable || !m_worldSystem || save_dir.empty()) {
         return false;
     }
 
     LoadedWorldState state;
     if (!ReadWorldStateFrom(save_dir, state)) {
+        m_worldUsable = false;
         // Refused snapshots invalidate resident chunks, but never publish staged members.
         m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
@@ -2141,7 +2151,9 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     // onto the loaded session's tick stream (-4).
     if (m_energyFieldState) {
         const fs::path recordPath = save_dir / "aether_state.efs";
-        const std::ifstream recordFile(recordPath);
+        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+        std::ifstream recordFile;
+        recordFile.open(recordPath);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();
@@ -2293,7 +2305,7 @@ void GameSession::InitializeEnergyFieldState() {
 }
 
 bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
-    if (!m_worldOpenError.empty())
+    if (!m_worldUsable)
         return false;
     if (!m_energyFieldState || save_dir.empty())
         return true;
