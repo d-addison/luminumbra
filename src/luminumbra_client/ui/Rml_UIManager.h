@@ -12,6 +12,7 @@
 #include <filesystem> // gallery fixture capture-source override
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility> // For std::move
 #include <vector>
@@ -33,16 +34,18 @@ using WorldCreationCallback = std::function<void(const std::string& name,
 using WorldParamGetter =
     std::function<std::string(const std::string& worldType, const std::string& path)>;
 // Save the current customize-form config (base preset + overrides) as a reusable, named user
-// preset; returns the new world-type id (e.g. "user_my_canyon") on success, "" on failure.
+// preset. overwrite_confirmed applies only to the exact confirmed display name.
+// Returns the new world-type id (e.g. "user_my_canyon") on success, "" on failure.
 using WorldPresetSaver = std::function<std::string(const std::string& displayName,
                                                    const std::string& baseType,
-                                                   const std::vector<WorldGenParam>& params)>;
+                                                   const std::vector<WorldGenParam>& params,
+                                                   bool overwrite_confirmed)>;
 // List saved user presets as (display name, world-type id) so create-world can offer them as
 // selectable starting points alongside the curated presets.
 using WorldPresetList = std::function<std::vector<std::pair<std::string, std::string>>()>;
 // Returns true if saving under `displayName` would collide with an existing user preset
-// (same derived slug). The UI uses this to gate the silently-overwriting saver behind an
-// explicit "overwrite?" confirm. Optional — if unwired, saves proceed without a confirm.
+// (same derived slug). The UI requests explicit overwrite consent; the saver enforces
+// no replacement when consent is absent. Optional — if unwired, only new names save.
 using WorldPresetExists = std::function<bool(const std::string& displayName)>;
 // Delete a saved user preset by its world-type id (e.g. "user_my_canyon"); true on success.
 using WorldPresetDeleter = std::function<bool(const std::string& worldType)>;
@@ -268,7 +271,9 @@ private:
     // world_creation.rml: commit the current customize config as a named user preset via the
     // saver, then refresh the chip row + notification. Factored so the direct save path and the
     // overwrite-confirm path share one implementation.
-    void CommitSavePreset(Rml::ElementDocument* document, const std::string& name);
+    void CommitSavePreset(Rml::ElementDocument* document,
+                          const std::string& name,
+                          bool overwrite_confirmed = false);
 
     // Interfaces are now members, their lifetime is tied to the manager.
     RmlSystem m_systemInterface;
@@ -291,6 +296,7 @@ private:
     bool m_worldScanPending = false;
     WorldParamGetter m_worldParamGetter;
     WorldPresetSaver m_worldPresetSaver;
+    std::optional<std::string> m_pendingPresetOverwrite;
     WorldPresetList m_worldPresetList;
     WorldPresetExists m_worldPresetExists;
     WorldPresetDeleter m_worldPresetDeleter;

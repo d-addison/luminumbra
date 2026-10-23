@@ -1468,7 +1468,10 @@ class BootstrapInterpreterBinding(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         marker = "      - name: Prepare fresh RmlUi build root\n        shell: msys2 {0}\n"
         section = workflow.split(marker, 1)[1]
-        initializer = section.split("run: ", 1)[1].splitlines()[0]
+        initializer = section.split("run: ", 1)[1].splitlines()[0].strip("'")
+        self.assertIn('"$(cygpath -u "$CI_PYTHON_EXECUTABLE")" -I -B', initializer)
+        self.assertIn("CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}",
+                      section.split("      - name: Configure", 1)[0])
         configure = " ".join(textwrap.dedent(section.split("run: >-\n", 1)[1]
                                              .split("\n      - name:", 1)[0]).splitlines())
         # Model an independent discovery candidate through the preset. The real
@@ -1479,10 +1482,12 @@ class BootstrapInterpreterBinding(unittest.TestCase):
                     "Python3_EXECUTABLE": str(self.root / "unselected-python")}}]}), encoding="utf-8")
         sys.path.insert(0, str(MODULE_PATH.parent))
         from ci_shell import bash_executable
-        script = ('python3() { "$FIXTURE_PYTHON" "$@"; }\n' + initializer + "\n" + configure)
+        script = ('python3() { "$FIXTURE_PYTHON" "$@"; }\n'
+                  'cygpath() { printf \'%s\\n\' "$2"; }\n' + initializer + "\n" + configure)
         result = subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", script],
                                 cwd=self.root, capture_output=True, text=True, check=False,
-                                env=dict(os.environ, FIXTURE_PYTHON=Path(sys.executable).as_posix()))
+                                env=dict(os.environ, FIXTURE_PYTHON=Path(sys.executable).as_posix(),
+                                         CI_PYTHON_EXECUTABLE=Path(sys.executable).as_posix()))
         output = result.stdout + result.stderr
         self.assertNotEqual(result.returncode, 0)
         # Stop at the real helper's disconnected-delivery refusal: no project,
@@ -1588,13 +1593,19 @@ class BootstrapInterpreterBinding(unittest.TestCase):
         for name in ("ci.yml", "asan.yml", "performance.yml", "release.yml"):
             source = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
             calls = [line for line in source.splitlines() if "cmake " in line and (
-                re.search(r"cmake --preset (?:release|perf|debug-asan)\b", line)
+                re.search(r"cmake --preset (?:release|perf|debug-asan|profile)\b", line)
                 or (" -S " in line and " -B build/" in line))]
             self.assertTrue(calls, name)
             for call in calls:
                 with self.subTest(path=name, call=call):
                     self.assertIn("-DPython3_EXECUTABLE=", call)
-                    self.assertIn("-I -B -c 'import sys; print(sys.executable)'", call)
+                    if '"-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"' in call or '"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"' in call:
+                        step = source[:source.index(call)].rsplit("      - name:", 1)[1]
+                        self.assertIn("CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}", step)
+                        self.assertRegex(source, r"python-version: ['\"]3\.14\.8['\"]")
+                        self.assertEqual(call.count("-DPython3_EXECUTABLE="), 1)
+                    else:
+                        self.assertIn("-I -B -c 'import sys; print(sys.executable)'", call)
         for name in ("README.md", "CONTRIBUTING.md", "docs/development.md", "docs/index.md",
                      "docs/static-morph-assets.md", "docs/performance.md", "docs/known-limitations.md",
                      "docs/static-preview.md", "docs/dependency-source.md", "docs/ci/local-checks.md",

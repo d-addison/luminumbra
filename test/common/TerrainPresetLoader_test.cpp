@@ -3,32 +3,32 @@
 // warnings, and the validation error contract.
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
+#include "luminumbra/core/Types.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/WorldgenFileReader.h"
+#include "nlohmann/json_fwd.hpp"
+#include <cstddef>
 #include <gtest/gtest.h>
+#include <ios>
+#include <vector>
 
 #include <algorithm>
 #include <array>
-#include <cstddef>
 #include <filesystem>
 #include <fstream>
-#include <ios>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
-#include <vector>
 
 #include <nlohmann/json.hpp>
-#include <nlohmann/json_fwd.hpp>
 
-#include "luminumbra/core/Types.h"
 #include "luminumbra_common/core/FilesystemPath.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/BiomeTable.h"
-#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/StructurePlacement.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
-#include "luminumbra_common/world/WorldgenFileReader.h"
 
 namespace fs = std::filesystem;
 
@@ -70,6 +70,29 @@ constexpr const char* kMinimalPreset = R"({
     }
   }
 })";
+
+TEST(TerrainPresetLoaderTest, WrongTypedOptionalFieldsReturnLoadErrors) {
+    for (const int revision : {6, 7}) {
+        for (const char* field : {"/generation_params/terrain/shaping/peaks_amplitude",
+                                  "/generation_params/terrain/hydro/iterations",
+                                  "/generation_params/biomes/temperature_frequency",
+                                  "/generation_params/features/cave_threshold"}) {
+            SCOPED_TRACE(revision);
+            SCOPED_TRACE(field);
+            auto preset = nlohmann::json::parse(kMinimalPreset);
+            preset["schema_rev"] = revision;
+            preset[nlohmann::json::json_pointer(field)] = "invalid";
+            TerrainPresetLoadResult result;
+            EXPECT_NO_THROW(result = LoadTerrainPresetFromJson(preset, {}, "WrongTypedField"));
+            EXPECT_FALSE(result.ok);
+            EXPECT_TRUE(result.preset_content_hash.empty());
+            EXPECT_EQ(result.params.worldgen_dependencies, nullptr);
+            ASSERT_EQ(result.errors.size(), 1u);
+            EXPECT_NE(result.errors.front().find("failed to resolve world preset"),
+                      std::string::npos);
+        }
+    }
+}
 
 TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "default.json");

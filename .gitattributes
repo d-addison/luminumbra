@@ -27,3 +27,10 @@ docs/assets/visual-baselines/20260908/*.json text eol=lf
 cmake/patches/rmlui-* text eol=lf
 vendor/rmlui/rmlui-6.1-source.json text eol=lf
 tools/ci/rmlui_source.py text eol=lf
+# Jolt overlay identities hash materialized bytes on every checkout.
+cmake/patches/jolt-startup.json text eol=lf
+cmake/patches/jolt-startup.patch text eol=lf
+tools/ci/jolt_startup.py text eol=lf
+tools/ci/path_safety.py text eol=lf
+cmake/jolt_startup.cmake text eol=lf
+vendor/CMakeLists.txt text eol=lf

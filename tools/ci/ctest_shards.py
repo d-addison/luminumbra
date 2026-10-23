@@ -17,6 +17,13 @@ import xml.etree.ElementTree as ET
 
 PROFILES = {"asan": ("debug-asan", 2, 300), "gcc": ("release", 4, 180),
             "msvc": ("release", 4, 180), "ucrt64": ("release", 4, 360)}
+SHARD_COUNTS = {"asan": 3, "gcc": 2, "msvc": 2, "ucrt64": 2}
+ASAN_SUITES = ("SimBudgetWorldParity.", "AmbientDeterminismReceipt.")
+FLOORS = {"gcc": 2340, "msvc": 2320, "ucrt64": 2320, "asan": 2320}
+HEAVY_NAMES = frozenset(
+    "ActiveRegions/SimBudgetWorldParity.Populated3600TicksPreserveWorldHashAndReplayWork/" + variant
+    for variant in ("Disabled", "Enabled")
+)
 RELATIONS = {"FIXTURES_SETUP", "FIXTURES_CLEANUP", "FIXTURES_REQUIRED", "DEPENDS", "RESOURCE_LOCK"}
 
 
@@ -79,6 +86,29 @@ def filtered_tests(tests):
             any("manual" in label for label in prop["value"]) for prop in test.get("properties", []))]
 
 
+def select_tests(tests, profile, selection):
+    names = [test["name"] for test in tests]
+    # None preserves the unselected library API used by the legacy ASan wrapper.
+    # Every CLI plan and merge supplies an explicit, validated policy selection.
+    if selection is None:
+        return names
+    require(selection in ("full", "light", "heavy"), "unknown correctness selection")
+    require(len(names) >= FLOORS[profile], "full discovered inventory below floor")
+    labelled = {test["name"] for test in tests if any(
+        prop["name"] == "LABELS" and "heavy" in prop["value"] for prop in test.get("properties", []))}
+    require(HEAVY_NAMES <= set(names) and labelled == HEAVY_NAMES,
+            "reviewed heavy roster or labels differ from discovered inventory")
+    heavy = [name for name in names if name in HEAVY_NAMES]
+    light = [name for name in names if name not in HEAVY_NAMES]
+    require(not set(light).intersection(heavy) and set(light) | set(heavy) == set(names),
+            "light/heavy union differs from full inventory")
+    return names if selection == "full" else light if selection == "light" else heavy
+
+
+def selection_policy(needs_heavy, explicit=None):
+    return explicit if explicit is not None else "light" if needs_heavy == "false" else "full"
+
+
 def validate_union(names, parts):
     require(isinstance(parts, list) and all(isinstance(part, list) and
             all(isinstance(name, str) and name for name in part) for part in parts), "malformed shard partitions")
@@ -88,11 +118,13 @@ def validate_union(names, parts):
     require(set(flattened) == set(names), "partition union differs from eligible inventory")
 
 
-def partition(all_tests, eligible, profile="gcc", timings=None):
+def relationship_groups(all_tests, eligible, profile):
     inventory({"tests": all_tests})
     names = [test["name"] for test in all_tests]
     require(eligible and len(eligible) == len(set(eligible)) and set(eligible) <= set(names),
             "empty, duplicate or unknown eligible tests")
+    selected = set(eligible)
+    excluded_manual = set(names) - {test["name"] for test in filtered_tests(all_tests)} - selected
     groups = {name: {name} for name in names}
 
     def join(left, right):
@@ -105,7 +137,12 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
         name = test["name"]
         for prop in test.get("properties", []):
             kind = prop["name"]
-            if kind not in RELATIONS or (profile == "asan" and not kind.startswith("FIXTURES_")):
+            if kind not in RELATIONS:
+                continue
+            # Excluded manual tests never execute, so their locks need no shard
+            # placement. Keep all fixture/dependency edges, even through them,
+            # and every lock edge of selected manual or nonmanual tests.
+            if kind == "RESOURCE_LOCK" and name in excluded_manual:
                 continue
             for value in prop["value"]:
                 if kind == "DEPENDS":
@@ -121,24 +158,56 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
         prefab = [name for name in eligible if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
         for name in prefab[1:]:
             join(prefab[0], name)
-    selected = set(eligible)
+    if profile == "asan":
+        for suite in ASAN_SUITES:
+            members = [name for name in eligible if suite in name]
+            for name in members[1:]:
+                join(members[0], name)
     for name in eligible:
         require(groups[name] <= selected, "eligible selection breaks fixture, dependency or resource lock closure")
+    return groups
+
+
+def shard_ids(profile):
+    return range(1, SHARD_COUNTS[profile] + 1)
+
+
+def _partition_asan(all_tests, eligible, groups, timings):
+    timings = {} if timings is None else timings
+    require(isinstance(timings, dict) and all(isinstance(key, str) and
+            isinstance(value, (int, float)) and not isinstance(value, bool) and
+            0 < value <= sys.float_info.max for key, value in timings.items()), "invalid timings")
+    weights = {}
+    for test in all_tests:
+        cost = next((prop["value"] for prop in test.get("properties", []) if prop["name"] == "COST"), 0)
+        require(isinstance(cost, (int, float)) and not isinstance(cost, bool) and
+                0 <= cost <= sys.float_info.max, "invalid CTest COST")
+        weights[test["name"]] = timings.get(test["name"], cost or 1)
+    # Canonicalize each fixture/suite component once. Work is bounded by the
+    # discovery roster and supplied timing observations, with one sort of groups.
+    components = {id(groups[name]): groups[name] for name in eligible}
+    unique = [tuple(sorted(group)) for group in components.values()]
+    weighted = [(sum(weights[name] for name in group), group) for group in unique]
+    require(all(math.isfinite(weight) for weight, _ in weighted), "invalid group cost")
+    weighted.sort(key=lambda item: (-item[0], item[1]))
+    loads = [0.0] * SHARD_COUNTS["asan"]
+    owners = {}
+    for weight, group in weighted:
+        owner = min(range(len(loads)), key=lambda index: (loads[index], index))
+        loads[owner] += weight
+        owners.update((name, owner) for name in group)
+    assignments = [[name for name in eligible if owners[name] == owner] for owner in range(len(loads))]
+    validate_union(eligible, assignments)
+    return assignments
+
+
+def partition(all_tests, eligible, profile="gcc", timings=None):
+    groups = relationship_groups(all_tests, eligible, profile)
+    names = [test["name"] for test in all_tests]
+    selected = set(eligible)
     assignments = [[], []]
     if profile == "asan":
-        # Preserve the existing ASan placement and heavy parity balance.
-        heavy = [name for name in names if name in selected and "SimBudgetWorldParity." in name]
-        require(len(heavy) in (2, 4), "expected two or four heavy parity tests")
-        owners = {name: index % 2 for index, name in enumerate(heavy)}
-        positions = {name: index for index, name in enumerate(names)}
-        for name in names:
-            if name not in selected:
-                continue
-            group = groups[name]
-            forced = {owners[member] for member in group if member in owners}
-            require(len(forced) <= 1, "fixture group prevents balanced heavy tests")
-            owner = next(iter(forced)) if forced else min(positions[member] for member in group) % 2
-            assignments[owner].append(name)
+        return _partition_asan(all_tests, eligible, groups, timings)
     else:
         timings = {} if timings is None else timings
         require(isinstance(timings, dict) and all(isinstance(key, str) and
@@ -154,9 +223,127 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
             owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
             assignments[owner].extend(group)
             loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
-        # CTest executes indices in registration order.
+        # Preserve registration order for index selection; COST controls scheduling.
         owners = {name: owner for owner, part in enumerate(assignments) for name in part}
         assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
+    validate_union(eligible, assignments)
+    return assignments
+
+
+def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _projected=False):
+    # Opt-in selects an implementation, never ownership or input provenance.
+    if _projected and type(profile) is str and profile != "asan":
+        return _partition_projected(all_tests, eligible, profile, timings)
+    groups = relationship_groups(all_tests, eligible, profile)
+    names = [test["name"] for test in all_tests]
+    selected = set(eligible)
+    assignments = [[], []]
+    if profile == "asan":
+        return _partition_asan(all_tests, eligible, groups, timings)
+    else:
+        timings = {} if timings is None else timings
+        require(isinstance(timings, dict) and all(isinstance(key, str) and
+                isinstance(value, (int, float)) and not isinstance(value, bool) and
+                math.isfinite(value) and value > 0 for key, value in timings.items()), "invalid timings")
+        # Unknown tests get at least a minute, or the largest known observation.
+        unknown_weight = max([60.0, *timings.values()])
+        unique = sorted({tuple(sorted(groups[name])) for name in eligible})
+        loads = [0.0, 0.0]
+        if timings:
+            unique.sort(key=lambda group: (-sum(timings.get(name, unknown_weight) for name in group), group))
+        for group in unique:
+            owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
+            assignments[owner].extend(group)
+            loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
+        # Preserve registration order for index selection; COST controls scheduling.
+        owners = {name: owner for owner, part in enumerate(assignments) for name in part}
+        assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
+    validate_union(eligible, assignments)
+    return assignments
+
+
+def _grouping_shape(all_tests, eligible, profile, timings):
+    """Guard observations of relationship_groups without input callbacks."""
+    if type(profile) is not str or profile == "asan" or type(all_tests) is not list or type(eligible) is not list:
+        return False
+    for name in eligible:
+        if type(name) is not str:
+            return False
+    for test in all_tests:
+        if type(test) is not dict:
+            return False
+        # Check every key before lookup: even an unrelated custom key can
+        # collide with a queried string and run its hash/equality hooks.
+        for key in test:
+            if type(key) is not str:
+                return False
+        if type(test.get("name")) is not str:
+            return False
+        command = test.get("command")
+        if type(command) is not list:
+            return False
+        for argument in command:
+            if type(argument) is not str:
+                return False
+        properties = test.get("properties", [])
+        if type(properties) is not list:
+            return False
+        for prop in properties:
+            if type(prop) is not dict:
+                return False
+            for key in prop:
+                if type(key) is not str:
+                    return False
+            kind = prop.get("name")
+            if type(kind) is not str:
+                return False
+            if kind in RELATIONS or kind == "LABELS":
+                values = prop.get("value")
+                if type(values) is not list:
+                    return False
+                for value in values:
+                    if type(value) is not str:
+                        return False
+    if timings is not None:
+        if type(timings) is not dict:
+            return False
+        for key, value in timings.items():
+            if type(key) is not str or (type(value) is not int and type(value) is not float):
+                return False
+    # Ignored values are never inspected. Aliases need no ownership assumption:
+    # the local grouping state never writes into either input graph.
+    return True
+
+
+def _partition_projected(all_tests, eligible, profile="gcc", timings=None):
+    # Every observed value is checked anew, including independently read names.
+    # Unsupported shapes use the unchanged generic path without prior callbacks.
+    if not _grouping_shape(all_tests, eligible, profile, timings):
+        return _partition_validated(all_tests, eligible, profile, timings)
+    groups = relationship_groups(all_tests, eligible, profile)
+    # Shared grouping validates closure. Canonicalize each selected component
+    # once, by its local set identity, rather than once per eligible member.
+    components = {id(groups[name]): groups[name] for name in eligible}
+    assignments = [[], []]
+    timings = {} if timings is None else timings
+    require(isinstance(timings, dict) and all(isinstance(key, str) and
+            isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(value) and value > 0 for key, value in timings.items()), "invalid timings")
+    # Unknown tests get at least a minute, or the largest known observation.
+    unknown_weight = max([60.0, *timings.values()])
+    # Each local component is canonicalized once, including overlapping edges.
+    unique = sorted(tuple(group) if len(group) == 1 else tuple(sorted(group))
+                    for group in components.values())
+    loads = [0.0, 0.0]
+    if timings:
+        unique.sort(key=lambda group: (-sum(timings.get(name, unknown_weight) for name in group), group))
+    for group in unique:
+        owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
+        assignments[owner].extend(group)
+        loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
+    # Preserve registration order for index selection; COST controls scheduling.
+    owners = {name: owner for owner, part in enumerate(assignments) for name in part}
+    assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
     validate_union(eligible, assignments)
     return assignments
 
@@ -183,8 +370,10 @@ def execution_inventory(tests):
     # Backtrace IDs locate declarations in a separate diagnostic graph. All
     # execution values remain literal, including paths, regexes and environment.
     # Only property registration order is immaterial; value/argument order is not.
+    # Empty builtin lists need only a fresh list; custom sequences still sort.
     result = [{**{key: value for key, value in test.items() if key != "backtrace"},
-               "properties": sorted(test.get("properties", []), key=lambda prop: prop["name"])} for test in tests]
+               "properties": ([] if type(props := test.get("properties", [])) is list and not props else
+                              sorted(props, key=lambda prop: prop["name"]))} for test in tests]
     try:
         json.dumps(result, allow_nan=False)
     except (TypeError, ValueError) as error:
@@ -192,31 +381,42 @@ def execution_inventory(tests):
     return result
 
 
-def evidence_for(tests, parts, profile, timings=None, roots=None):
+def evidence_for(tests, parts, profile, timings=None, roots=None, selection=None):
     validate_inventory_roots(roots)
     contract = {"roots": roots, "tests": execution_inventory(tests)}
-    return {"version": 3, "profile": profile, "roots": roots, "timings": timings or {}, "inventory_digest": digest(contract),
-            "partition_digest": digest(parts), "partitions": parts}
+    return {"version": 4, "selection": selection, "profile": profile, "roots": roots, "timings": timings or {}, "inventory_digest": digest(contract),
+            "partition_digest": digest({"selection": selection, "partitions": parts}), "partitions": parts}
 
 
-def plan(directory, shard, profile="gcc", timings=None):
-    require(shard in (0, 1, 2) and not (profile == "asan" and shard == 0), "invalid shard")
+def plan(directory, shard, profile="gcc", timings=None, selection=None):
+    require(shard in shard_ids(profile) or (shard == 0 and profile != "asan"), "invalid shard")
     all_tests = inventory(read_json(directory / "ctest.all.json"))
     tests = roster(directory)
     roots = inventory_roots(directory)
     eligible = [test["name"] for test in tests]
     require(eligible == [test["name"] for test in filtered_tests(all_tests)],
             "filtered CTest roster or ordering differs from inventory")
-    require(evidence_for(tests, [eligible], profile, roots=roots) ==
-            evidence_for(filtered_tests(all_tests), [eligible], profile, roots=roots),
+    validated = evidence_for(tests, [eligible], profile, roots=roots, selection=selection)
+    require(validated ==
+            evidence_for(filtered_tests(all_tests), [eligible], profile, roots=roots, selection=selection),
             "discovery CTest execution inventory differs between inventories")
-    parts = [eligible] if shard == 0 else partition(all_tests, eligible, profile, timings)
-    manifest = {**evidence_for(tests, parts, profile, timings, roots), "shard": shard}
+    selected = select_tests(tests, profile, selection)
+    require(shard != 0 or selection in (None, "full"), "qualification requires full selection")
+    if shard == 0:
+        relationship_groups(all_tests, eligible, profile)
+        parts = [selected]
+    else:
+        parts = _partition_validated(all_tests, selected, profile, timings, _projected=True)
+    # Reuse identity only within this call: tests and roots must remain unchanged
+    # after independent discovery validation, including during selection/partition.
+    manifest = {**validated, "selection": selection, "timings": timings or {},
+                "partition_digest": digest({"selection": selection, "partitions": parts}),
+                "partitions": parts, "shard": shard}
     names = parts[0 if shard == 0 else shard - 1]
     positions = {name: index for index, name in enumerate(eligible, 1)}
     indices = [positions[name] for name in names]
-    selection = [indices[0], indices[0], 1, *indices[1:]]
-    (directory / "ctest.shard-index.txt").write_text(",".join(map(str, selection)) + "\n", encoding="utf-8")
+    index_selection = [indices[0], indices[0], 1, *indices[1:]]
+    (directory / "ctest.shard-index.txt").write_text(",".join(map(str, index_selection)) + "\n", encoding="utf-8")
     (directory / "ctest.partition.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     # Library callers can plan synthetic inventories inside a running CTest step.
     # Only the CLI publishes the real producer's workflow output.
@@ -235,15 +435,18 @@ def run(directory, profile="gcc"):
     manifest = read_json(directory / "ctest.partition.json")
     require(manifest["profile"] == profile, "execution profile differs from plan")
     parts = manifest["partitions"]
-    validate_union(planned, parts)
+    selected_names = select_tests(roster(directory), profile, manifest["selection"])
+    validate_union(selected_names, parts)
     shard = manifest["shard"]
-    require(shard in (0, 1, 2) and len(parts) == (1 if shard == 0 else 2), "invalid execution partition")
+    require((shard in shard_ids(profile) or (shard == 0 and profile != "asan"))
+            and len(parts) == (1 if shard == 0 else SHARD_COUNTS[profile]), "invalid execution partition")
+    require(shard != 0 or manifest["selection"] in (None, "full"), "qualification requires full selection")
     roots = inventory_roots(directory)
     require(manifest["roots"] == roots, "execution source or build roots differ from plan")
-    require(manifest == {**evidence_for(roster(directory), parts, profile, manifest["timings"], roots), "shard": shard},
+    require(manifest == {**evidence_for(roster(directory), parts, profile, manifest["timings"], roots, manifest["selection"]), "shard": shard},
             "execution partition digest differs from plan")
-    require(evidence_for(current_tests, parts, profile, manifest["timings"], roots) ==
-            evidence_for(roster(directory), parts, profile, manifest["timings"], roots),
+    require(evidence_for(current_tests, parts, profile, manifest["timings"], roots, manifest["selection"]) ==
+            evidence_for(roster(directory), parts, profile, manifest["timings"], roots, manifest["selection"]),
             "CTest execution inventory differs from plan")
     selected = parts[0 if shard == 0 else shard - 1]
     positions = {name: index for index, name in enumerate(planned, 1)}
@@ -256,13 +459,14 @@ def run(directory, profile="gcc"):
                            "--timeout", str(timeout), "--output-junit", "ctest.junit.xml"]).returncode
 
 
-def merge(directory, output, profile="gcc", evidence=True, full=False):
+def merge(directory, output, profile="gcc", evidence=True, full=False, selection=None, reason=""):
+    require(not full or selection in (None, "full"), "qualification requires full selection")
     merged = ET.Element("testsuites")
     common = None
     observed = set()
-    counts = []
+    suite_owners = {suite: set() for suite in ASAN_SUITES}
     reports = []
-    for shard in ((0,) if full else (1, 2)):
+    for shard in ((0,) if full else shard_ids(profile)):
         source = directory / f"shard-{shard}"
         tests = roster(source)
         names = [test["name"] for test in tests]
@@ -272,24 +476,26 @@ def merge(directory, output, profile="gcc", evidence=True, full=False):
         if evidence:
             manifest = read_json(source / "ctest.partition.json")
             parts = manifest["partitions"]
-            validate_union(names, parts)
-            require(len(parts) == (1 if full else 2), "unexpected partition count")
-            expected = {**evidence_for(tests, parts, profile, manifest["timings"], manifest["roots"]), "shard": shard}
+            selected_names = select_tests(tests, profile, selection)
+            require(manifest["selection"] == selection, "shard selection differs from required route")
+            validate_union(selected_names, parts)
+            require(len(parts) == (1 if full else SHARD_COUNTS[profile]), "unexpected partition count")
+            expected = {**evidence_for(tests, parts, profile, manifest["timings"], manifest["roots"], selection), "shard": shard}
             require(manifest == expected, "shard inventory or partition digest mismatch")
             if profile != "asan" and not full:
-                require(parts == partition(tests, names, profile, manifest["timings"]),
+                require(parts == partition(tests, selected_names, profile, manifest["timings"]),
                         "partition differs from deterministic placement or relationship closure")
             if reports:
                 require(manifest["roots"] == reports[0][2], "shards recorded different source or build roots")
-                require(parts == reports[0][0], "shards disagree on partitions")
                 require(manifest["inventory_digest"] == reports[0][1], "shards discovered different CTest inventories")
+                require(parts == reports[0][0], "shards disagree on partitions")
             reports.append((parts, manifest["inventory_digest"], manifest["roots"]))
         root = ET.parse(source / "ctest.junit.xml").getroot()
         cases = list(root.iter("testcase"))
         executed = [case.get("name") for case in cases]
         require(executed and all(executed), f"shard {shard} ran zero tests or unnamed tests")
         require(len(executed) == len(set(executed)), f"shard {shard} contains duplicate tests")
-        require(not observed.intersection(executed), "tests ran in both shards")
+        require(not observed.intersection(executed), "tests ran in multiple shards")
         require(not any(case.find(tag) is not None for case in cases for tag in ("failure", "error", "skipped")),
                 "shard has failed or unevaluated tests")
         for element in root.iter():
@@ -301,12 +507,14 @@ def merge(directory, output, profile="gcc", evidence=True, full=False):
         if evidence:
             require(set(executed) == set(parts[0 if full else shard - 1]), "report differs from assigned partition")
         observed.update(executed)
-        counts.append(sum("SimBudgetWorldParity." in name for name in executed))
+        for suite in ASAN_SUITES:
+            if any(suite in name for name in executed):
+                suite_owners[suite].add(shard)
         require(root.tag in ("testsuite", "testsuites"), "unexpected JUnit root")
         merged.extend([root] if root.tag == "testsuite" else root)
-    require(observed == set(common), "executed shard union differs from the planned filtered CTest inventory")
+    require(observed == set(select_tests(roster(directory / ("shard-0" if full else "shard-1")), profile, selection)), "executed shard union differs from the planned filtered CTest inventory")
     if profile == "asan":
-        require(counts in ([1, 1], [2, 2]), "heavy parity tests are not evenly split")
+        require(all(len(owners) <= 1 for owners in suite_owners.values()), "required ASan suite split across shards")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
         staged = Path(temporary) / "merged.xml"
@@ -315,7 +523,36 @@ def merge(directory, output, profile="gcc", evidence=True, full=False):
             shutil.copyfile(directory / "shard-0/ctest.junit.xml", staged)
         else:
             ET.ElementTree(merged).write(staged, encoding="utf-8", xml_declaration=True)
-        staged.replace(output)
+        if evidence:
+            receipt = {key: manifest[key] for key in
+                       ("version", "selection", "profile", "inventory_digest", "partition_digest")}
+            receipt["executed_digest"] = digest(sorted(observed))
+            receipt["executed_count"] = len(observed)
+            staged_receipt = Path(temporary) / "selection.json"
+            staged_receipt.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+        if evidence:
+            receipt_output = output.with_suffix(".selection.json")
+            previous_receipt = Path(temporary) / "previous-selection.json"
+            if receipt_output.exists():
+                shutil.copyfile(receipt_output, previous_receipt)
+            staged_receipt.replace(receipt_output)
+            try:
+                staged.replace(output)
+            except OSError:
+                if previous_receipt.exists():
+                    previous_receipt.replace(receipt_output)
+                else:
+                    receipt_output.unlink()
+                raise
+        else:
+            staged.replace(output)
+    if selection == "light":
+        summary = "heavy subset deferred: " + (reason if reason == "reviewed_presentation_or_docs"
+                                               else "reviewed presentation-only or safe documentation paths")
+        print(summary)
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+                handle.write(summary + "\n")
     print(f"Merged {len(observed)} tests")
 
 
@@ -367,22 +604,31 @@ def gate(result, cpp, cancelled, event, draft, qualification, enabled, classific
 def main(default_profile="gcc", legacy_evidence=False):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="mode", required=True)
+    # Gate never parses another mode; keep every parser and its implicit prog.
+    gate_only = len(sys.argv) > 1 and sys.argv[1] == "gate"
     for mode in ("plan", "run", "merge"):
         sub = commands.add_parser(mode)
+        if gate_only:
+            continue
         sub.add_argument("--directory", type=Path, required=True)
         sub.add_argument("--profile", choices=PROFILES, default=default_profile)
+        if mode in ("plan", "merge"):
+            sub.add_argument("--needs-heavy", default="")
+            sub.add_argument("--selection", choices=("full", "light", "heavy"))
         if mode == "plan":
-            sub.add_argument("--shard", type=int, choices=(0, 1, 2), required=True)
+            sub.add_argument("--shard", type=int, choices=range(max(SHARD_COUNTS.values()) + 1), required=True)
             sub.add_argument("--timings", type=Path)
             sub.add_argument("--require-suite", action="append", default=[])
         if mode == "merge":
             sub.add_argument("--output", type=Path, required=True)
             sub.add_argument("--full", action="store_true")
+            sub.add_argument("--reason", default="")
     sub = commands.add_parser("collect")
-    sub.add_argument("--directory", type=Path, required=True)
-    sub.add_argument("--prefix", required=True)
-    sub.add_argument("--attempt", type=int, required=True)
-    sub.add_argument("--full", action="store_true")
+    if not gate_only:
+        sub.add_argument("--directory", type=Path, required=True)
+        sub.add_argument("--prefix", required=True)
+        sub.add_argument("--attempt", type=int, required=True)
+        sub.add_argument("--full", action="store_true")
     sub = commands.add_parser("gate")
     for key in ("result", "cpp", "cancelled", "event", "draft", "qualification", "enabled", "classification"):
         sub.add_argument("--" + key, required=True)
@@ -391,14 +637,16 @@ def main(default_profile="gcc", legacy_evidence=False):
         if args.mode == "plan":
             names = planned_roster(args.directory)
             require(all(any(suite in name for name in names) for suite in args.require_suite), "missing expected CTest suite")
-            prefab = plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None)
+            prefab = plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None,
+                          selection_policy(args.needs_heavy, args.selection))
             if os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
                     handle.write(f"prefab={'true' if prefab else 'false'}\n")
         elif args.mode == "run":
             return run(args.directory, args.profile)
         elif args.mode == "merge":
-            merge(args.directory, args.output, args.profile, evidence=not legacy_evidence, full=args.full)
+            merge(args.directory, args.output, args.profile, evidence=not legacy_evidence, full=args.full,
+                  selection=selection_policy(args.needs_heavy, args.selection), reason=args.reason)
         elif args.mode == "collect":
             collect(args.directory, args.prefix, args.attempt, args.full)
         else:

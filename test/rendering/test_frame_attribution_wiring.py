@@ -193,6 +193,25 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertRegex(main, r"rb_stream_ms, rb_render_bucket_ms, _presentMs, _other,")
         self.assertIn("rb_render_call += rb_render_call_ms;", main)
 
+    def test_slow_frame_keeps_far_reporting_with_exclusive_attribution(self):
+        slow = compact(block(self.main, "if (_wallMs > 12.0"))
+        self.assertIn("const auto slow_far = renderPipeline.far_world_reporting_state();", slow)
+        self.assertIn("frame_attribution_enabled ? buckets.other(_wallMs, phase_scope.snapshot())", slow)
+        self.assertRegex(slow, r"rb_stream_ms, rb_render_bucket_ms, _presentMs, _other,")
+        for field in ("far_requested", "far_effective", "far_refusal", "far_suppressed",
+                      "far_submission_refusal", "far_settled"):
+            self.assertIn(field + "={}", slow)
+        for value in ("FarWorldModeName(slow_far.selection.requested)",
+                      "FarWorldModeName(slow_far.selection.effective)",
+                      "FarWorldRefusalName(slow_far.selection.refusal)",
+                      "FarWorldReportSuppressed(slow_far)",
+                      "FarWorldSubmissionRefusalName( slow_far.submission_refusal)",
+                      "slow_far.coverage_settled"):
+            self.assertIn(value, slow)
+        self.assertIn("foliage_frame.rebuild_ms, rb_menu_ms, rb_ui_ms,", slow)
+        self.assertIn('"foliage={:.1f} menu={:.1f} ui={:.1f} | "', slow)
+        self.assertIn("foliage-split:", slow)
+
     def test_collection_and_split_log_require_explicit_opt_in(self):
         main = compact(self.main)
         self.assertIn('frame_csv_enabled = HasCommandLineFlag(argc, argv, "--frame-attribution-csv")', main)
@@ -270,6 +289,13 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertGreater(len(timers), 10)
         for arguments in timers:
             self.assertTrue(compact(arguments).endswith(", collect_attribution"))
+
+    def test_const_frame_scopes_allow_callback_collection(self):
+        scope = block(self.header, "class FoliageFrameScope")
+        self.assertIn("mutable FoliageFrame m_frame{};", scope)
+        runtime = read(ROOT / "test/rendering/graphics_runtime_test.cpp")
+        self.assertIn("const Attribution::FoliageFrameScope frame(true);", runtime)
+        self.assertIn("return frame.snapshot().rebuild.reasons;", runtime)
 
     def test_both_frozen_entry_points_are_counted_once(self):
         rebuild = block(self.foliage, "void FoliagePass::rebuild_instances(")
@@ -361,7 +387,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
         self.assertIn("foliage_frame.capacity, foliage_frame.count_known, "
-                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot())", main)
+                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot(), foliage_frame.uploads)", main)
         scope = compact(block(self.foliage, "~RebuildAttributionScope()"))
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)
@@ -374,7 +400,7 @@ class FrameAttributionWiring(unittest.TestCase):
             self.assertIn(f"Attribution::phase_total_ms() - {parent}_phases_before", main)
         self.assertIn("buckets.other(_wallMs, phase_scope.snapshot())", main)
         self.assertIn("buckets.other(frame_ms, phases)", compact(self.collector))
-        self.assertIn("count_generation, phases)",
+        self.assertIn("count_generation, phases, uploads)",
                       compact(block(self.collector, "bool FrameRecorder::record(")))
         self.assertIn("Phase::WorldCreateCallback", block(self.main, "auto start_world_creation ="))
         self.assertIn("Phase::WorldLoadCallback", block(self.main, "auto start_world_load ="))
@@ -1015,10 +1041,16 @@ class FrameAttributionWiring(unittest.TestCase):
     def test_capture_writer_reports_write_flush_and_close_failures(self):
         writer = block(read(CLIENT / "rendering/PixelIo.cpp"), "bool WritePixelBufferPpm(")
         tail = writer[writer.index("output.write("):]
-        self.assertLess(tail.index("output.flush();"), tail.index("output.close();"))
-        self.assertLess(tail.index("output.close();"), tail.index("if (!output)"))
-        self.assertIn("return false;", block(tail, "if (!output)"))
-        self.assertLess(tail.index("if (!output)"), tail.index("return true;"))
+        helper = read(CLIENT / "rendering/PixelIo.h")
+        flush = block(helper, "bool FlushCaptureStream(")
+        self.assertLess(flush.index("output.flush();"), flush.index("return static_cast<bool>(output);"))
+        close = block(helper, "bool CloseCaptureFile(")
+        self.assertLess(close.index("FlushCaptureStream(output)"), close.index("output.close();"))
+        self.assertIn("return flushed && static_cast<bool>(output);", close)
+        failure = block(tail, "if (!CloseCaptureFile(output))")
+        self.assertIn("return false;", failure)
+        self.assertIn("Failed to finish screenshot artifact", failure)
+        self.assertLess(tail.index("if (!CloseCaptureFile(output))"), tail.index("return true;"))
 
     def test_thumbnail_keys_and_readback_refusals_preserve_batch_progress(self):
         source = read(CLIENT / "app/MenuScreens.cpp")
@@ -1086,6 +1118,21 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertTrue(record.startswith("if (!active()) return false; return write_csv_row(m_out,"))
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
+
+    def test_csv_nullable_counts_precede_both_complete_upload_lanes(self):
+        writer = compact(block(self.collector, "bool write_csv_row("))
+        self.assertIn("if (count_known) out << generated_count; out << ','; "
+                      "if (count_known) out << count_generation;", writer)
+        self.assertLess(writer.index("if (count_known)"), writer.index("append_uploads("))
+        self.assertIn("append_uploads(uploads.terrain, uploads.terrain_pending); "
+                      "append_uploads(uploads.water, uploads.water_pending); "
+                      "for (const double value : phases.milliseconds()) out << ',' << value; "
+                      "out << '\\n';",
+                      writer)
+        append = compact(block(writer, "const auto append_uploads ="))
+        self.assertEqual(append, "out << ',' << work.elapsed_ms << ',' << work.overshoot_ms "
+                         "<< ',' << work.attempts << ',' << work.adopted << ',' << work.bytes "
+                         "<< ',' << work.byte_overshoot << ',' << pending;")
 
     def test_deterministic_work_gates_are_registered_on_standard_targets(self):
         cmake = read(ROOT / "test/CMakeLists.txt")

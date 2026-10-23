@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../rendering/UploadBudget.h"
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -89,9 +91,16 @@ struct FoliageRebuild {
     FallbackReason fallback = FallbackReason::None;
 };
 
-// Every rebuild on the render thread contributes, including preview and QA
-// callers. Storage is constant size; paths are Mixed when calls differ.
+struct RenderUploads {
+    Rendering::UploadWorkStats terrain{};
+    Rendering::UploadWorkStats water{};
+    std::size_t terrain_pending = 0;
+    std::size_t water_pending = 0;
+};
+// Every rebuild and render integration on the render thread contributes,
+// including preview and QA callers. Storage is constant size.
 struct FoliageFrame {
+    RenderUploads uploads{};
     FoliageRebuild rebuild{};
     double rebuild_ms = 0;
     std::uint64_t capacity = 0;
@@ -115,6 +124,7 @@ private:
     FoliageFrame* m_previous = nullptr;
 };
 bool foliage_frame_active();
+void record_render_uploads(const Rendering::UploadWorkStats& work, bool water, std::size_t pending);
 void record_foliage_rebuild(const FoliageRebuild& rebuild,
                             double milliseconds,
                             std::uint64_t capacity,
@@ -266,7 +276,8 @@ bool write_csv_row(std::ostream& out,
                    bool count_known,
                    std::uint64_t generated_count,
                    std::uint64_t count_generation,
-                   const PhaseTotals& phases = {});
+                   const PhaseTotals& phases = {},
+                   const RenderUploads& uploads = {});
 
 // Flush and close an open CSV file, preserving write, flush, and close failures.
 // Uses the default non-throwing stream exception mask, as do the CSV writers.
@@ -289,7 +300,8 @@ public:
                 bool count_known,
                 std::uint64_t generated_count,
                 std::uint64_t count_generation,
-                const PhaseTotals& phases = {});
+                const PhaseTotals& phases = {},
+                const RenderUploads& uploads = {});
 
 private:
     // Fixed 64 KiB stream buffer; frames stream to disk without a retained history.
