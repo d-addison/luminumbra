@@ -1,11 +1,14 @@
 #include "luminumbra_client/app/FrameAttribution.h"
+#include "luminumbra_client/rendering/PixelIo.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <streambuf>
 #include <string>
@@ -114,20 +117,29 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
         "repack_ms,hash_ms,upload_ms,palette_scratch_ms,dispatch_ms,cpu_fallback_ms,"
         "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_bytes,"
         "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-        "instance_capacity,generated_count,count_generation\n");
+        "instance_capacity,generated_count,count_generation,"
+        "terrain_work_ms,terrain_overshoot_ms,terrain_attempts,terrain_adopted,terrain_work_bytes,"
+        "terrain_byte_overshoot,terrain_pending,water_work_ms,water_overshoot_ms,water_attempts,"
+        "water_adopted,water_work_bytes,water_byte_overshoot,water_pending,"
+        "ui_update_ms,ui_render_ms,ui_filters_ms,menu_scene_ms,preview_adoption_ms,"
+        "document_load_ms,texture_load_ms,shader_load_ms,shader_first_use_ms,"
+        "world_create_callback_ms,world_load_callback_ms\n");
     std::ostringstream unknown;
     write_csv_row(unknown, 401, 60, buckets, foliage, 262144, false, 262144, 7);
     EXPECT_EQ(unknown.str(),
               "401,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
               "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
               "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
-              "2048,4096,8192,1,cpu,column_capacity,262144,,\n");
+              "2048,4096,8192,1,cpu,column_capacity,262144,,,"
+              "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,"
+              "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,"
+              "0.000000,0.000000,0.000000,0.000000\n");
     EXPECT_EQ(fields(header.str()).size(), fields(unknown.str()).size());
     std::ostringstream known;
     write_csv_row(known, 402, 60, buckets, foliage, 262144, true, 123, 7);
     EXPECT_EQ(fields(known.str()).size(), fields(header.str()).size());
     EXPECT_EQ(fields(known.str()).at(35), "123");
-    EXPECT_EQ(fields(known.str()).at(36), "7\n");
+    EXPECT_EQ(fields(known.str()).at(36), "7");
     std::ostringstream zero;
     write_csv_row(zero, 403, 60, buckets, foliage, 262144, true, 0, 8);
     EXPECT_EQ(fields(zero.str()).at(35), "0");
@@ -137,7 +149,43 @@ TEST(FrameAttribution, CsvRecordsShortFramesPastTheSlowFrameWindow) {
     std::ostringstream out;
     write_csv_row(out, 9000, 1, {}, {}, 262144, false, 0, 0);
     EXPECT_EQ(out.str().substr(0, 14), "9000,1.000000,");
-    EXPECT_NE(out.str().find(",not_called,none,262144,,\n"), std::string::npos);
+    EXPECT_NE(out.str().find(",not_called,none,262144,,,0.000000"), std::string::npos);
+}
+
+TEST(FrameAttribution, UploadCountersAccumulateAcrossRenderAndMenuAndResetEveryFrame) {
+    {
+        FoliageFrameScope frame(true);
+        record_render_uploads({1, 1, 500, 400, 5, 2}, false, 3);
+        record_render_uploads({2, 1, 100, 0, 2, 0}, false, 1);
+        record_render_uploads({1, 1, 20, 0, 1.5, 0.5}, true, 2);
+        const auto& uploads = frame.snapshot().uploads;
+        EXPECT_EQ(uploads.terrain.attempts, 3u);
+        EXPECT_EQ(uploads.terrain.adopted, 2u);
+        EXPECT_EQ(uploads.terrain.bytes, 600u);
+        EXPECT_EQ(uploads.terrain.byte_overshoot, 400u);
+        EXPECT_DOUBLE_EQ(uploads.terrain.elapsed_ms, 7);
+        EXPECT_DOUBLE_EQ(uploads.terrain.overshoot_ms, 2);
+        EXPECT_EQ(uploads.terrain_pending, 4u);
+        EXPECT_EQ(uploads.water_pending, 2u);
+        std::ostringstream row;
+        PhaseTotals phases;
+        phases.add(Phase::UiUpdate, 3, 0, 0);
+        write_csv_row(row, 1, 20, {}, {}, 0, false, 0, 0, phases, uploads);
+        const auto columns = fields(row.str());
+        EXPECT_EQ(columns.at(37), "7.000000");
+        EXPECT_EQ(columns.at(38), "2.000000");
+        EXPECT_EQ(columns.at(41), "600");
+        EXPECT_EQ(columns.at(42), "400");
+        EXPECT_EQ(columns.at(43), "4");
+        EXPECT_EQ(columns.at(44), "1.500000");
+        EXPECT_EQ(columns.at(50), "2");
+        EXPECT_EQ(columns.at(51), "3.000000");
+        EXPECT_EQ(columns.size(), 51u + kPhaseCount);
+    }
+    record_render_uploads({1, 1, 10, 0, 1, 0}, false, 10);
+    FoliageFrameScope next(true);
+    EXPECT_EQ(next.snapshot().uploads.terrain.attempts, 0u);
+    EXPECT_EQ(next.snapshot().uploads.terrain_pending, 0u);
 }
 
 TEST(FrameAttribution, NestedRebuildsAreRemovedFromTheirParentBuckets) {
@@ -240,6 +288,7 @@ TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFram
 TEST(FrameAttribution, FrameCollectorsAreIsolatedAcrossThreads) {
     FoliageFrameScope frame(true);
     record_foliage_rebuild({}, 10, 262144, 123, 7);
+    record_render_uploads({1, 1, 10, 0, 1, 0}, false, 2);
     // The parent stays idle until join so a shared-pointer regression fails
     // deterministically without racing accesses to either frame.
     bool worker_initially_active = false;
@@ -249,10 +298,12 @@ TEST(FrameAttribution, FrameCollectorsAreIsolatedAcrossThreads) {
     std::thread worker([&] {
         worker_initially_active = foliage_frame_active();
         record_foliage_rebuild({}, 20, 262144, 456, 8);
+        record_render_uploads({2, 1, 20, 0, 2, 0}, false, 3);
         {
             FoliageFrameScope worker_frame(true);
             worker_scope_active = foliage_frame_active();
             record_foliage_rebuild({}, 30, 262144, 789, 9);
+            record_render_uploads({3, 2, 30, 0, 3, 0}, true, 4);
             worker_snapshot = worker_frame.snapshot();
         }
         worker_finally_active = foliage_frame_active();
@@ -263,9 +314,15 @@ TEST(FrameAttribution, FrameCollectorsAreIsolatedAcrossThreads) {
     EXPECT_FALSE(worker_finally_active);
     EXPECT_EQ(worker_snapshot.rebuild.rebuild_calls, 1u);
     EXPECT_EQ(worker_snapshot.generated_count, 789u);
+    EXPECT_EQ(worker_snapshot.uploads.terrain.attempts, 0u);
+    EXPECT_EQ(worker_snapshot.uploads.water.attempts, 3u);
+    EXPECT_EQ(worker_snapshot.uploads.water_pending, 4u);
     EXPECT_TRUE(foliage_frame_active());
     EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 1u);
     EXPECT_EQ(frame.snapshot().generated_count, 123u);
+    EXPECT_EQ(frame.snapshot().uploads.terrain.attempts, 1u);
+    EXPECT_EQ(frame.snapshot().uploads.terrain_pending, 2u);
+    EXPECT_EQ(frame.snapshot().uploads.water.attempts, 0u);
     record_foliage_rebuild({}, 40, 262144, 321, 10);
     EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 2u);
     EXPECT_EQ(frame.snapshot().generated_count, 321u);
@@ -282,6 +339,8 @@ TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
     FoliageFrameScope disabled;
     EXPECT_FALSE(foliage_frame_active());
     record_foliage_rebuild({}, 10, 262144, 123, 7);
+    record_render_uploads({1, 1, 10, 0, 1, 0}, false, 2);
+    EXPECT_EQ(disabled.snapshot().uploads.terrain.attempts, 0u);
     EXPECT_EQ(disabled.snapshot().rebuild.rebuild_calls, 0u);
     EXPECT_DOUBLE_EQ(disabled.snapshot().rebuild_ms, 0);
     {
@@ -291,13 +350,98 @@ TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
             FoliageFrameScope nested_disabled(false);
             EXPECT_FALSE(foliage_frame_active());
             record_foliage_rebuild({}, 10, 262144, 123, 7);
+            record_render_uploads({1, 1, 10, 0, 1, 0}, false, 2);
         }
         EXPECT_TRUE(foliage_frame_active());
         EXPECT_EQ(enabled.snapshot().rebuild.rebuild_calls, 0u);
+        EXPECT_EQ(enabled.snapshot().uploads.terrain.attempts, 0u);
         record_foliage_rebuild({}, 10, 262144, 123, 7);
+        record_render_uploads({1, 1, 10, 0, 1, 0}, false, 2);
         EXPECT_EQ(enabled.snapshot().rebuild.rebuild_calls, 1u);
+        EXPECT_EQ(enabled.snapshot().uploads.terrain.attempts, 1u);
     }
     EXPECT_FALSE(foliage_frame_active());
+}
+
+TEST(FrameAttribution, ConstCollectorsOwnMutableTotalsAndResetTheNextFrame) {
+    {
+        const FoliageFrameScope foliage(true);
+        const PhaseFrameScope phases(true);
+        {
+            const PhaseScope scene(Phase::MenuScene);
+            record_foliage_rebuild({}, 0, 262144, std::nullopt, 0);
+            EXPECT_TRUE(scene.is_current());
+        }
+        EXPECT_EQ(phases.snapshot().completed_scopes(Phase::MenuScene), 1u);
+        EXPECT_EQ(foliage.snapshot().rebuild.rebuild_calls, 1u);
+        EXPECT_EQ(foliage.snapshot().capacity, 262144u);
+        EXPECT_FALSE(foliage.snapshot().count_known);
+        EXPECT_EQ(foliage.snapshot().generated_count, 0u);
+        EXPECT_EQ(foliage.snapshot().count_generation, 0u);
+    }
+    EXPECT_FALSE(foliage_frame_active());
+    EXPECT_DOUBLE_EQ(phase_total_ms(), 0);
+    const FoliageFrameScope next_foliage(true);
+    const PhaseFrameScope next_phases(true);
+    EXPECT_EQ(next_foliage.snapshot().rebuild.rebuild_calls, 0u);
+    EXPECT_EQ(next_phases.snapshot().completed_scopes(Phase::MenuScene), 0u);
+}
+
+TEST(FrameAttribution, PhaseCollectorsAreIsolatedAcrossThreads) {
+    const PhaseFrameScope frame(true);
+    const PhaseScope parent(Phase::MenuScene);
+    bool worker_saw_parent = false;
+    bool worker_scope_active = false;
+    bool worker_frame_active = false;
+    bool worker_disabled_active = false;
+    bool worker_restored = false;
+    bool worker_finally_saw_parent = false;
+    double worker_initial_total = -1;
+    double worker_final_total = -1;
+    PhaseTotals worker_totals;
+    // The parent stays idle until join: shared-state mutations fail without
+    // concurrent reads/writes or assumptions about scheduler/clock precision.
+    std::thread worker([&] {
+        worker_saw_parent = parent.is_current();
+        worker_initial_total = phase_total_ms();
+        {
+            const PhaseFrameScope worker_frame(true);
+            worker_frame_active = worker_frame.is_current();
+            {
+                const PhaseScope ui(Phase::UiUpdate);
+                worker_scope_active = ui.is_current();
+                {
+                    const PhaseFrameScope disabled(false);
+                    const PhaseScope ignored(Phase::UiFilters);
+                    worker_disabled_active = disabled.is_current() || ignored.is_current();
+                }
+                worker_restored = worker_frame.is_current() && ui.is_current();
+            }
+            worker_totals = worker_frame.snapshot();
+        }
+        worker_finally_saw_parent = parent.is_current();
+        worker_final_total = phase_total_ms();
+    });
+    worker.join();
+    EXPECT_FALSE(worker_saw_parent);
+    EXPECT_DOUBLE_EQ(worker_initial_total, 0);
+    EXPECT_TRUE(worker_frame_active);
+    EXPECT_TRUE(worker_scope_active);
+    EXPECT_FALSE(worker_disabled_active);
+    EXPECT_TRUE(worker_restored);
+    EXPECT_FALSE(worker_finally_saw_parent);
+    EXPECT_DOUBLE_EQ(worker_final_total, 0);
+    EXPECT_EQ(worker_totals.completed_scopes(Phase::UiUpdate), 1u);
+    EXPECT_EQ(worker_totals.completed_scopes(Phase::UiFilters), 0u);
+    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::UiUpdate), 0u);
+    EXPECT_TRUE(frame.is_current());
+    EXPECT_TRUE(parent.is_current());
+    {
+        const PhaseScope ui(Phase::UiUpdate);
+        EXPECT_TRUE(ui.is_current());
+    }
+    EXPECT_TRUE(parent.is_current());
+    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::UiUpdate), 1u);
 }
 
 // A bounded sink that accepts a prefix, then reports a write error on every
@@ -352,6 +496,31 @@ protected:
         return -1;
     }
 };
+
+TEST(CaptureArtifacts, TruncatedIndexFlushFailureAndCompleteStreamAreDistinct) {
+    using namespace Luminumbra::Rendering;
+    FailingBuffer short_output;
+    std::ostream truncated(&short_output);
+    EXPECT_FALSE(WriteCaptureStream(truncated, std::string(80, ' ') + "[]\n"));
+    EXPECT_FALSE(truncated.good());
+    FlushFailingBuffer flush_output;
+    std::ostream flush_failure(&flush_output);
+    EXPECT_FALSE(WriteCaptureStream(flush_failure, "[]\n"));
+    std::ofstream unopened;
+    EXPECT_FALSE(CloseCaptureFile(unopened));
+    std::ostringstream complete;
+    EXPECT_TRUE(WriteCaptureStream(complete, "[]\n"));
+    EXPECT_EQ(complete.str(), "[]\n");
+    std::size_t bytes = 19;
+    EXPECT_FALSE(CapturePixelBytes(0, 1, 3, bytes));
+    EXPECT_FALSE(CapturePixelBytes(1, -1, 3, bytes));
+    EXPECT_FALSE(CapturePixelBytes(1, 1, 0, bytes));
+    EXPECT_FALSE(CapturePixelBytes(1, 1, std::numeric_limits<std::size_t>::max(), bytes));
+    EXPECT_FALSE(CapturePixelBytes(std::numeric_limits<int>::max(), 2, 4, bytes));
+    EXPECT_EQ(bytes, 19u); // refusal leaves the caller's allocation size untouched
+    EXPECT_TRUE(CapturePixelBytes(2, 3, 3, bytes));
+    EXPECT_EQ(bytes, 18u);
+}
 
 class FrameRecorderTest : public ::testing::Test {
 protected:
@@ -440,8 +609,14 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     {
         FrameRecorder recorder(true, root / "logs");
         ASSERT_TRUE(recorder.active());
-        for (std::uint64_t frame = 1; frame <= 501; ++frame)
-            ASSERT_TRUE(recorder.record(frame, 1, {}, {}, 262144, false, 262144, 0));
+        for (std::uint64_t frame = 1; frame <= 501; ++frame) {
+            // Exercise unavailable, observed zero and observed nonzero counts
+            // across buffer flushes. Capacity is never a generated count.
+            const bool known = frame % 3 != 0;
+            const auto count = frame % 3 == 1 ? 0u : 123u;
+            ASSERT_TRUE(
+                recorder.record(frame, 1, {}, {}, 262144, known, known ? count : 262144, frame));
+        }
         EXPECT_TRUE(recorder.finish());
         EXPECT_FALSE(recorder.active());
         EXPECT_FALSE(recorder.record(502, 1, {}, {}, 262144, false, 262144, 0));
@@ -451,15 +626,39 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     std::ifstream input(root / "logs/frame-attribution.csv", std::ios::binary);
     ASSERT_TRUE(input.good());
     std::string line;
+    ASSERT_TRUE(std::getline(input, line));
+    const auto header = fields(line);
+    ASSERT_EQ(header.size(), 51u + kPhaseCount);
+    EXPECT_EQ(header.at(34), "instance_capacity");
+    EXPECT_EQ(header.at(35), "generated_count");
+    EXPECT_EQ(header.at(36), "count_generation");
     std::string last;
-    std::size_t rows = 0;
+    std::size_t rows = 1;
     while (std::getline(input, line)) {
         last = line;
+        const auto columns = fields(line);
+        ASSERT_EQ(columns.size(), header.size());
+        EXPECT_EQ(columns.at(0), std::to_string(rows));
+        EXPECT_EQ(columns.at(1), "1.000000");
+        EXPECT_EQ(columns.at(34), "262144");
+        EXPECT_EQ(columns.at(35), rows % 3 == 0 ? "" : rows % 3 == 1 ? "0" : "123");
+        EXPECT_EQ(columns.at(36), rows % 3 == 0 ? "" : std::to_string(rows));
+        // Upload fields follow the nullable counts; all fourteen must retain
+        // their exact zero values and time precision on every buffered row.
+        for (std::size_t column = 37; column < 51; ++column) {
+            SCOPED_TRACE(header.at(column));
+            const bool time = column == 37 || column == 38 || column == 44 || column == 45;
+            EXPECT_EQ(columns.at(column), time ? "0.000000" : "0");
+        }
         ++rows;
     }
     ASSERT_EQ(rows, 502u); // Header and every frame, including beyond 400.
+    EXPECT_TRUE(input.eof());
     EXPECT_EQ(last.substr(0, 13), "501,1.000000,");
     EXPECT_EQ(fields(last).at(34), "262144");
-    EXPECT_EQ(last.substr(last.size() - 2), ",,");
+    EXPECT_EQ(fields(last).at(35), "");
+    EXPECT_EQ(fields(last).at(36), "");
+    for (std::size_t index = 51; index < 51 + kPhaseCount; ++index)
+        EXPECT_EQ(fields(last).at(index), "0.000000");
 }
 } // namespace

@@ -465,7 +465,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
 
     def test_persistence_uses_session_state_and_fatal_snapshot_refusals_latch_it(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
-        for name in ("SaveWorldMetadataTo", "SaveWorldStateTo", "SaveEnergyFieldRecord",
+        for name in ("SaveWorldMetadataTo", "SaveWorldStateToImpl", "SaveEnergyFieldRecord",
                      "LoadWorldStateFrom"):
             with self.subTest(consumer=name):
                 body = self.function(source, name)
@@ -473,6 +473,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                     if name == "LoadWorldStateFrom" else body[:body.index("return false;")]
                 self.assertIn("!m_worldUsable", admission)
                 self.assertNotIn("m_worldOpenError", admission)
+        wrapper = self.function(source, "SaveWorldStateTo")
+        self.assertIn("return SaveWorldStateToImpl(", wrapper)
         readiness = self.function(source, "LoadWorldState")
         self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
         snapshot = self.function(source, "LoadWorldStateFrom")
@@ -484,6 +486,11 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertEqual(len(failures), 5)
         self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 5)
         self.assertNotIn("m_worldUsable = true;", snapshot)
+        runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
+        full_snapshot = runner.split("ServerWorldRunner::SaveFullSnapshot()", 1)[1].split(
+            "ServerWorldRunner::StreamedChunkCount()", 1)[0]
+        self.assertNotIn("GetWorldOpenError()", full_snapshot)
+        self.assertIn("m_session->SaveWorldStateTo(", full_snapshot)
 
     def test_normal_custom_validation_precedes_directory_and_uses_prepared_identity(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
@@ -501,6 +508,66 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("m_presetContentHash = preset.preset_content_hash;", adoption)
         self.assertIn("m_speciesTable = preset.params.worldgen_dependencies->species_table;", adoption)
         self.assertNotIn("LoadTerrainPreset", adoption)
+
+
+class FarVolumeAdmissionSourceContract(unittest.TestCase):
+    """Guard bounded publication structure; native behaviour stays a native test."""
+
+    def method(self, path, start, end):
+        source = read_source("src/luminumbra_client/rendering/" + path)
+        return source.split(start, 1)[1].split(end, 1)[0]
+
+    def test_admission_uses_bounded_sorted_scratch_and_monotonic_free_cursors(self):
+        for path, start, end in (
+                ("FarVolumeHandoff.cpp", "bool FarVolumeHandoff::StageTarget(",
+                 "void FarVolumeHandoff::Reject("),
+                ("FarVolumeResidency.cpp", "bool FarVolumeResidency::ReplaceWanted(",
+                 "void FarVolumeResidency::Reject(")):
+            with self.subTest(path=path):
+                body = self.method(path, start, end)
+                self.assertIn("std::sort(incoming.begin(), incoming.end()", body)
+                self.assertIn("tier.key_index[tier.entries.size() + count++]", body)
+                self.assertLess(body.index("count == tier.entries.size()"),
+                                body.index("tier.key_index[tier.entries.size() + count++]"))
+                self.assertIn("tier.order[index] == 0", body)
+                self.assertIn("auto& cursor = next_free[number]", body)
+                self.assertIn("entry = &tier.entries[cursor++]", body)
+                self.assertIn("tier.queue.ForgetMatching", body)
+                self.assertNotIn("queue.Forget(", body)
+                self.assertNotRegex(body, r"std::(?:none_of|find_if|count_if)")
+                self.assertNotRegex(body, r"for\s*\([^;]*;\s*j\s*<\s*(?:i|index)\b")
+
+    def test_live_lookup_and_rebuild_have_no_hash_collision_chains(self):
+        for owner in ("FarVolumeHandoff", "FarVolumeResidency"):
+            with self.subTest(owner=owner):
+                lookup = self.method(owner + ".cpp", "const " + owner + "::Entry* " +
+                                     owner + "::Find(", owner + "::Entry* " + owner + "::Find(")
+                self.assertIn("std::lower_bound", lookup)
+                self.assertNotIn("for (", lookup)
+                self.assertNotIn("while (", lookup)
+                rebuild = self.method(owner + ".cpp", "void " + owner +
+                                      "::Tier::RebuildIndex(", owner + "::" + owner + "(")
+                self.assertIn("std::sort", rebuild)
+                self.assertNotIn("while (", rebuild)
+                self.assertIn("++work.key_comparisons", rebuild)
+                drain = read_source("src/luminumbra_client/rendering/" + owner + ".cpp").split(
+                    "void " + owner + "::CancelAndDrain()", 1)[1]
+                self.assertIn("index_count = 0", drain)
+
+    def test_batch_retirement_does_not_search_descriptors_per_selected_key(self):
+        header = read_source("src/luminumbra_client/rendering/FarVolumeBuildQueue.h")
+        batch = header.split("std::size_t ForgetMatching(", 1)[1].split(
+            "bool Retry(", 1)[0]
+        self.assertIn("noexcept(predicate", batch)
+        self.assertIn("index < descriptors_.size()", batch)
+        self.assertIn("ForgetAt(index)", batch)
+        self.assertNotIn("Find(", batch)
+        self.assertNotIn("Cancel(", batch)
+        forget = self.method("FarVolumeBuildQueue.cpp", "void FarVolumeBuildQueue::ForgetAt(",
+                             "bool FarVolumeBuildQueue::Retry(")
+        self.assertIn("CancelAt(index)", forget)
+        self.assertNotIn("Find(", forget)
+        self.assertNotIn("Cancel(", forget)
 
 
 if __name__ == "__main__":

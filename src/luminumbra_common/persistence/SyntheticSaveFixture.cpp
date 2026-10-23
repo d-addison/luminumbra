@@ -96,11 +96,12 @@ void FillChunk(Chunk& chunk, const SyntheticSaveSpec& spec, std::uint64_t index)
     if (spec.payload == FixturePayload::Noise) {
         for (std::size_t k = 0; k < sdf_count; ++k) {
             const auto h = LatticeHash(spec.seed, index, k);
-            chunk.sdf_data[k] = (static_cast<int>(h >> 56) - 128) / 16.0f;
+            chunk.sdf_data[k] = static_cast<float>(static_cast<int>(h >> 56) - 128) / 16.0f;
         }
         for (std::size_t k = 0; k < heightmap_count; ++k) {
             const auto h = LatticeHash(spec.seed, index, k + 0x1000000ull);
-            chunk.heightmap_data[k] = 8.0f + (static_cast<int>(h >> 56) % 32) / 4.0f;
+            chunk.heightmap_data[k] =
+                8.0f + static_cast<float>(static_cast<int>(h >> 56) % 32) / 4.0f;
         }
     }
     if (index < spec.edit_count) {
@@ -200,11 +201,6 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
             {"spawnPoint", {{"x", 8}, {"y", 18}, {"z", 8}}},
             {"waterSimCursor", 0},
         };
-        std::vector<std::string> errors;
-        if (!WorldSaveService::save_metadata(metadata.dump(4) + "\n", report.save_dir, &errors))
-            return Fail(std::move(report),
-                        errors.empty() ? "metadata write failed" : errors.front());
-
         WorldStreamingState state;
         const auto coords = SyntheticChunkCoords(spec.chunk_count);
         for (std::size_t i = 0; i < coords.size(); ++i) {
@@ -216,6 +212,12 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
         if (!WorldSaveService{}.save_world(state, report.save_dir, &save_errors))
             return Fail(std::move(report),
                         save_errors.empty() ? "world save failed" : save_errors.front());
+        // Publish catalog metadata only after all required state exists. The
+        // owned new directory is removed by cleanup if either writer fails.
+        if (!WorldSaveService::save_metadata(
+                metadata.dump(4) + "\n", report.save_dir, &save_errors))
+            return Fail(std::move(report),
+                        save_errors.empty() ? "metadata write failed" : save_errors.front());
         report.chunks_written = spec.chunk_count;
 
         const auto region_dir = WorldSaveService::region_directory(report.save_dir);

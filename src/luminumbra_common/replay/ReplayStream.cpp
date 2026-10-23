@@ -47,13 +47,13 @@ void PutU16(std::vector<std::uint8_t>& out, std::uint16_t v) {
 }
 
 void PutU32(std::vector<std::uint8_t>& out, std::uint32_t v) {
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
     }
 }
 
 void PutU64(std::vector<std::uint8_t>& out, std::uint64_t v) {
-    for (int i = 0; i < 8; ++i) {
+    for (std::size_t i = 0; i < 8; ++i) {
         out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
     }
 }
@@ -96,8 +96,8 @@ struct Cursor {
             ok = false;
             return false;
         }
-        v = static_cast<std::uint16_t>(data[pos]) |
-            (static_cast<std::uint16_t>(data[pos + 1]) << 8);
+        v = static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[pos]) |
+                                       (static_cast<std::uint16_t>(data[pos + 1]) << 8));
         pos += 2;
         return true;
     }
@@ -107,7 +107,7 @@ struct Cursor {
             return false;
         }
         v = 0;
-        for (int i = 0; i < 4; ++i) {
+        for (std::size_t i = 0; i < 4; ++i) {
             v |= static_cast<std::uint32_t>(data[pos + i]) << (8 * i);
         }
         pos += 4;
@@ -119,7 +119,7 @@ struct Cursor {
             return false;
         }
         v = 0;
-        for (int i = 0; i < 8; ++i) {
+        for (std::size_t i = 0; i < 8; ++i) {
             v |= static_cast<std::uint64_t>(data[pos + i]) << (8 * i);
         }
         pos += 8;
@@ -259,7 +259,8 @@ void AppendRecordFrame(std::vector<std::uint8_t>& out,
 
 std::string Fnv1a64Hex(const std::string& text) {
     std::uint64_t hash = 1469598103934665603ULL; // FNV offset basis
-    for (unsigned char ch : text) {
+    for (const char character : text) {
+        const auto ch = static_cast<unsigned char>(character);
         hash ^= static_cast<std::uint64_t>(ch);
         hash *= 1099511628211ULL; // FNV prime
     }
@@ -310,7 +311,7 @@ bool ReplayWriter::Finalize(std::uint64_t tick_count) {
         return false;
 
     // Patch the header tick_count in place (fixed offset; see AppendHeader).
-    for (int i = 0; i < 8; ++i) {
+    for (std::size_t i = 0; i < 8; ++i) {
         m_buffer[kTickCountOffset + i] = static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
     }
 
@@ -512,7 +513,7 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
     if (m_elided_tick != 0)
         m_header.version = kLrec1ElidedVersion;
     AppendHeader(header, m_header);
-    for (int i = 0; i < 8; ++i)
+    for (std::size_t i = 0; i < 8; ++i)
         header[kTickCountOffset + i] = static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
     if (m_elided_tick != 0) {
         PutU8(header, static_cast<std::uint8_t>(RecordType::ElidedPrefix));

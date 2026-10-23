@@ -1,9 +1,35 @@
 #include "FarWorldRenderer.h"
+#include "core/JobSystem.h"
+#include "luminumbra_client/rendering/FarVolumeBuildQueue.h"
+#include "luminumbra_client/rendering/FarVolumeGpuBackend.h"
+#include "luminumbra_client/rendering/FarVolumeResidency.h"
+#include "luminumbra_client/rendering/FarWorldCaveSelection.h"
+#include "luminumbra_client/rendering/FarWorldDiagnostics.h"
+#include "luminumbra_client/rendering/FarWorldOwnership.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
+#include "luminumbra_client/rendering/FarWorldWaterMesh.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeRuntime.h"
+#include "world/FarVolumeTierMemory.h"
+#include "world/FarVolumeTile.h"
+#include "world/FarWantedSet.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 using namespace World;
@@ -86,21 +112,25 @@ FarWorldExperimentalLimits FarWorldDevelopmentLimits() noexcept {
     for (auto& queue : limits.residency.queues)
         queue = {64,
                  2,
-                 {{131 * 131, 20'000'000},
+                 {{131ULL * 131, 20'000'000},
                   {131'072, 16'384},
                   {1'048'576, 3'000'000, 300'000, 1'000'000}},
-                 16 * 1024 * 1024};
-    limits.frame = {2, 2, 16 * 1024 * 1024};
+                 16ULL * 1024 * 1024};
+    limits.frame = {2, 2, 16ULL * 1024 * 1024};
     limits.spans = {-8192, 8192, 2048};
-    limits.max_fixture_bytes = 8 * 1024 * 1024;
-    limits.build_headroom_bytes = 64 * 1024 * 1024;
+    limits.max_fixture_bytes = 8ULL * 1024 * 1024;
+    limits.build_headroom_bytes = 64ULL * 1024 * 1024;
     return limits;
 }
 
 FarWorldRenderer::FarWorldRenderer(FarWorldMode requested)
     : requested_(requested) {}
 FarWorldRenderer::~FarWorldRenderer() {
-    Shutdown();
+    try {
+        Shutdown();
+    } catch (...) {
+        std::terminate();
+    }
 }
 void FarWorldRenderer::CheckOwner() const {
     if (std::this_thread::get_id() != owner_ || submitting_)
@@ -618,7 +648,7 @@ void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
                                          std::size_t indices,
                                          std::uint64_t legacy_epoch) {
     CheckOwner();
-    diagnostic_ = {};
+    diagnostic_.Reset();
     diagnostic_.captured = true;
     diagnostic_.selection = selection;
     const auto cave_policy = CavePolicy(selection);
@@ -718,7 +748,7 @@ void FarWorldRenderer::Drain() {
     requests_ = {};
     advanced_frame_.reset();
     last_frame_ = {};
-    diagnostic_ = {};
+    diagnostic_.Reset();
     diagnostic_tiers_ = {};
     submission_refusal_ = FarWorldSubmissionRefusal::None;
     world_epoch_ = 0;

@@ -1,4 +1,5 @@
 #include "TerrainPresetLoader.h"
+#include "core/Profiler.h"
 
 #include <algorithm>
 #include <array>
@@ -35,7 +36,8 @@ constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void HashBytes(std::uint64_t& hash, std::string_view bytes) {
-    for (const unsigned char byte : bytes) {
+    for (const char character : bytes) {
+        const auto byte = static_cast<unsigned char>(character);
         hash ^= byte;
         hash *= kFnvPrime;
     }
@@ -468,6 +470,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
                                           const std::filesystem::path& data_root) {
+    LUMIN_PROFILE_ZONE_N("File preset load");
     TerrainPresetLoadResult result;
 
     std::ifstream file(preset_path);
@@ -843,6 +846,7 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                const std::filesystem::path& data_root,
                                std::string& json_text,
                                std::string& error) {
+    LUMIN_PROFILE_ZONE_N("File preset override load");
     std::ifstream file(preset_path);
     if (!file) {
         error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);

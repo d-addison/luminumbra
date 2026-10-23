@@ -10,6 +10,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(LUMINUMBRA_ENABLE_TRACY)
+#include <chrono>
+#endif
+
 namespace Luminumbra {
 
 using Job = std::function<void()>;
@@ -74,6 +78,9 @@ private:
     struct PooledJob {
         Job job;
         std::shared_ptr<JobCompletionState> completion;
+#if defined(LUMINUMBRA_ENABLE_TRACY)
+        std::chrono::steady_clock::time_point enqueued_at{};
+#endif
     };
 
     // a contiguous ring buffer of PooledJob slots.

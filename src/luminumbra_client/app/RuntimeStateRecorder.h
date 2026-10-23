@@ -61,7 +61,7 @@ bool MemoryWatermarkExceeded(const RuntimeScenarioConfig& config,
 class RuntimeStateRecorder {
 public:
     RuntimeStateRecorder(RuntimeScenarioConfig config,
-                         std::unique_ptr<Luminumbra::Rendering::Camera>& camera);
+                         std::unique_ptr<Luminumbra::Rendering::Camera>& camera_ref);
 
     const std::filesystem::path& artifact_dir() const;
     const std::filesystem::path& crash_dir() const;
@@ -155,7 +155,7 @@ public:
     RuntimeScenarioFrameRecorder(bool enabled,
                                  int coverage_radius,
                                  std::filesystem::path output_dir,
-                                 std::unique_ptr<Luminumbra::Rendering::Camera>& camera);
+                                 std::unique_ptr<Luminumbra::Rendering::Camera>& camera_ref);
 
     bool enabled() const;
 

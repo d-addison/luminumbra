@@ -92,28 +92,23 @@ TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication)
         EXPECT_EQ(StreamingBacklog(world), 1u);
         EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 1u);
 
-        // The fixed activation latency is eight ticks for each stage.
+        // Both promotion stages retain the original eight-tick due date.
         world.begin_tick(8);
         world.activate_due(8);
         EXPECT_EQ(StreamingBacklog(world), 1u);
         EXPECT_EQ(chunk->current_lod.load(), 1);
         EXPECT_EQ(chunk->mesh_version.load(), old_version);
-        world.begin_tick(9);
-        world.activate_due(9);
         if (needs_promotion) {
-            // Publishing sim truth dispatches stage B; the active coarse mesh
-            // remains Ready and the backlog stays nonzero until B publishes.
-            ASSERT_FALSE(chunk->sdf_data.empty());
             EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
             EXPECT_EQ(chunk->pending_lod.load(), 0);
             EXPECT_EQ(chunk->current_lod.load(), 1);
             EXPECT_EQ(StreamingBacklog(world), 1u);
-            world.quiesce_streaming_jobs_for_save();
-            world.begin_tick(16);
-            world.activate_due(16);
-            EXPECT_EQ(StreamingBacklog(world), 1u);
-            world.begin_tick(17);
-            world.activate_due(17);
+        }
+        world.begin_tick(9);
+        world.activate_due(9);
+        if (needs_promotion) {
+            ASSERT_FALSE(chunk->sdf_data.empty());
+            EXPECT_EQ(world.pending_publication_chunks(), 0u);
         }
         EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
         EXPECT_EQ(chunk->pending_lod.load(), -1);
@@ -182,6 +177,10 @@ TEST(DeterministicWorkBudget, DeferredGenerationKeepsTelemetryBackloggedBetweenA
             EXPECT_GT(world.get_streaming_telemetry_stats().last_queue_depth, 0u);
         }
         EXPECT_GT(world.get_streaming_telemetry_stats().settled_queue_depth, 0u);
+        world.clear_world(nullptr);
+        world.begin_tick(12);
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 0u);
     }
 }
 
@@ -259,15 +258,16 @@ TEST(DeterministicWorkBudget, OccupiedPromotionLaneKeepsRefusedCandidatesInBackl
         const std::size_t regular_remeshes = include_regular_remesh ? 1u : 0u;
         const auto& streaming = world.get_last_streaming_budget_stats();
         EXPECT_EQ(streaming.meshing_candidates, 2u + regular_remeshes);
-        EXPECT_EQ(streaming.scheduled_meshing, 2u + regular_remeshes);
-        EXPECT_EQ(streaming.deferred_meshing, 0u);
+        EXPECT_EQ(streaming.scheduled_meshing, 0u);
+        EXPECT_EQ(streaming.submitted_meshing, 0u);
+        EXPECT_EQ(streaming.deferred_meshing, 2u + regular_remeshes);
         for (std::size_t i = 1; i <= 2; ++i) {
             EXPECT_EQ(chunks[i]->get_state(), ChunkState::Ready);
             EXPECT_EQ(chunks[i]->pending_lod.load(), -1);
         }
-        // The occupied lane refuses both selected promotions. An ordinary
-        // remesh in the same batch is accepted, so only it leaves candidates.
-        EXPECT_EQ(world.pending_publication_chunks(), 1u + regular_remeshes);
+        // The occupied lane holds the sorted suffix, including an ordinary
+        // remesh after the first refused promotion. No request is discarded.
+        EXPECT_EQ(world.pending_publication_chunks(), 1u);
         EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 3u + regular_remeshes);
         EXPECT_EQ(StreamingBacklog(world), 3u + regular_remeshes);
 
@@ -277,13 +277,20 @@ TEST(DeterministicWorkBudget, OccupiedPromotionLaneKeepsRefusedCandidatesInBackl
         world.update(registry, anchor, nullptr);
         EXPECT_EQ(chunks[1]->pending_lod.load(), 0);
         EXPECT_EQ(chunks[2]->pending_lod.load(), 0);
-        EXPECT_EQ(world.pending_publication_chunks(), 3u + regular_remeshes);
-        EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 3u + regular_remeshes);
-        EXPECT_EQ(StreamingBacklog(world), 3u + regular_remeshes);
+        EXPECT_EQ(world.pending_publication_chunks(), 2u + regular_remeshes);
+        EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 2u + regular_remeshes);
+        EXPECT_EQ(StreamingBacklog(world), 2u + regular_remeshes);
 
+        // The suffix selected at tick 2 keeps its original due tick 10, even
+        // though the occupied promotion lane delayed admission until tick 9.
+        world.activate_due(9);
+        EXPECT_EQ(StreamingBacklog(world), 2u + regular_remeshes);
+        world.begin_tick(10);
+        world.activate_due(10);
+        EXPECT_EQ(StreamingBacklog(world), 0u);
         world.begin_tick(17);
         world.activate_due(17);
-        EXPECT_EQ(StreamingBacklog(world), 2u);
+        EXPECT_EQ(StreamingBacklog(world), 0u);
         world.begin_tick(25);
         world.activate_due(25);
         EXPECT_EQ(StreamingBacklog(world), 0u);

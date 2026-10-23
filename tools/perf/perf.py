@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+from fixture_paths import read_text
+
 
 SCHEMA = "luminumbra.perf_run.v2"
 COMPARISON_SCHEMA = "luminumbra.perf_comparison.v1"
@@ -157,7 +159,7 @@ def write_json(path: Path, value: Any) -> None:
 
 
 def load_build_manifest(path: Path) -> dict[str, Any]:
-    document = json.loads(path.read_text(encoding="utf-8"))
+    document = json.loads(read_text(path.parent, path))
     compiler = document.get("compiler") if isinstance(document, dict) else None
     configuration = document.get("configuration") if isinstance(document, dict) else None
     if document.get("schema") != "luminumbra.performance_build.v1" or not isinstance(
@@ -244,7 +246,7 @@ def canonical_identity(document: dict[str, Any]) -> dict[str, Any]:
 
 def validate_server_smoke_evidence(path: Path, parameters: dict[str, Any]) -> None:
     try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
+        evidence = json.loads(read_text(path.parent, path))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"server smoke evidence is missing or invalid: {exc}") from exc
     expected = {
@@ -278,7 +280,7 @@ def validate_server_smoke_evidence(path: Path, parameters: dict[str, Any]) -> No
 def read_evidence_metric(path: Path, name: str) -> float:
     spec = EVIDENCE_METRICS[name]
     try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
+        evidence = json.loads(read_text(path.parent, path))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"evidence for metric {name} is missing or invalid: {exc}") from exc
     value: Any = evidence
@@ -675,7 +677,7 @@ def validate_run(document: Any) -> list[str]:
 
 
 def load_run(path: Path) -> dict[str, Any]:
-    document = json.loads(path.read_text(encoding="utf-8"))
+    document = json.loads(read_text(path.parent, path))
     errors = validate_run(document)
     if errors:
         raise ValueError("; ".join(errors))
@@ -719,7 +721,7 @@ def load_rebaseline(path: Path | None = None) -> dict[str, str] | None:
     """Load the tracked declaration; absence means the strict default applies."""
     path = REBASELINE_PATH if path is None else path
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(read_text(path.parent, path))
     except FileNotFoundError:
         return None
     except (OSError, json.JSONDecodeError) as exc:

@@ -113,7 +113,7 @@ std::vector<PlaneSegmentBits> SharedPlaneSegments(const FarLodRegionMesh& mesh,
             indices[2] >= mesh.vertices.size()) {
             continue;
         }
-        for (int edge = 0; edge < 3; ++edge) {
+        for (std::size_t edge = 0; edge < 3; ++edge) {
             const VoxelVertex& a = mesh.vertices[indices[edge]];
             const VoxelVertex& b = mesh.vertices[indices[(edge + 1) % 3]];
             // A region mesh is closed on one side of this exact sample plane,

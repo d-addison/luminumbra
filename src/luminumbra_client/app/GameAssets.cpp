@@ -101,7 +101,8 @@ std::string AssetFileSha256(const std::filesystem::path& path) {
     std::uint64_t bytes = 0;
     std::array<unsigned char, 64> block{};
     for (;;) {
-        input.read(reinterpret_cast<char*>(block.data()), block.size());
+        input.read(reinterpret_cast<char*>(block.data()),
+                   static_cast<std::streamsize>(block.size()));
         const auto count = static_cast<size_t>(input.gcount());
         bytes += count;
         if (bytes > 512u * 1024u * 1024u || input.bad())

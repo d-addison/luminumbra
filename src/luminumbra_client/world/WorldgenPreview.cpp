@@ -1,4 +1,6 @@
 #include "world/WorldgenPreview.h"
+#include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 
 #include <algorithm>
 #include <cmath>
@@ -75,7 +77,8 @@ WorldgenPreview::~WorldgenPreview() {
     // member tears down so a build in flight can't write into freed state.
     m_shutdown.store(true);
     {
-        std::lock_guard<std::mutex> lk(m_build_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lk, m_build_mutex, "Preview build lock wait");
         m_build_pending.store(true); // wake the worker so it observes shutdown
     }
     m_build_cv.notify_all();
@@ -145,7 +148,7 @@ void WorldgenPreview::ensure_target(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
+bool WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
                                     const std::filesystem::path& data_root,
                                     int seed) {
     // Build candidate TerrainGenParams IN MEMORY via the additive loader seam,
@@ -158,15 +161,17 @@ void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
         m_last_error =
             result.errors.empty() ? "candidate preset parse failed" : result.errors.front();
         LUMINUMBRA_CORE_WARN("WorldgenPreview candidate parse failed: {}", m_last_error);
-        return;
+        return false;
     }
     // Remember the data root so the foliage scatter set resolves.
     m_data_root = data_root;
     set_params(result.params, seed);
+    return true;
 }
 
 void WorldgenPreview::set_params(const Systems::TerrainGenParams& params, int seed) {
-    std::lock_guard<std::mutex> lk(m_candidate_mutex);
+    LUMIN_PROFILE_LOCK(
+        std::lock_guard<std::mutex>, lk, m_candidate_mutex, "Preview candidate lock wait");
     m_pending_params = params;
     m_pending_seed = seed;
     m_have_pending = true;
@@ -222,9 +227,11 @@ void WorldgenPreview::start_worker() {
 }
 
 void WorldgenPreview::worker_loop() {
+    LUMIN_PROFILE_THREAD("World preview worker");
     for (;;) {
         {
-            std::unique_lock<std::mutex> lk(m_build_mutex);
+            LUMIN_PROFILE_LOCK(
+                std::unique_lock<std::mutex>, lk, m_build_mutex, "Preview build lock wait");
             // Wait for a build request. CRITICAL: also wait until any PREVIOUS
             // result has been consumed by the main thread (m_build_done cleared in
             // the swap) before starting the next build — otherwise this worker
@@ -232,9 +239,9 @@ void WorldgenPreview::worker_loop() {
             // (a data race on the pending world/water/registry). This serialises
             // pending ownership: worker owns it while building; main owns it during
             // the swap; never both at once.
-            m_build_cv.wait(lk, [this] {
+            LUMIN_PROFILE_WAIT("Preview condition wait", m_build_cv.wait(lk, [this] {
                 return m_shutdown.load() || (m_build_pending.load() && !m_build_done.load());
-            });
+            }));
             if (m_shutdown.load()) {
                 return;
             }
@@ -253,6 +260,7 @@ void WorldgenPreview::worker_loop() {
 }
 
 void WorldgenPreview::build_world_pending() {
+    LUMIN_PROFILE_ZONE_N("Preview worker job");
     // WORKER THREAD. Writes ONLY m_pending_* members. No GL here: worldgen,
     // EnsureSurfaceReadyNear (meshing) and WaterSystem are all CPU — in the real
     // game they run on worker threads too.
@@ -261,7 +269,8 @@ void WorldgenPreview::build_world_pending() {
     Systems::TerrainGenParams params;
     int seed = 0;
     {
-        std::lock_guard<std::mutex> lk(m_candidate_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lk, m_candidate_mutex, "Preview candidate lock wait");
         params = m_pending_params;
         seed = m_pending_seed;
     }
@@ -292,6 +301,8 @@ void WorldgenPreview::build_world_pending() {
 }
 
 void WorldgenPreview::swap_pending_into_live(Rendering::RenderPipeline& pipeline) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::PreviewAdoption);
     // GL/MAIN THREAD. Called only after observing m_build_done == true, at which
     // point the worker is BLOCKED (its loop waits for m_build_done to clear before
     // touching pending again), so the main thread solely owns the pending members
@@ -333,7 +344,8 @@ void WorldgenPreview::swap_pending_into_live(Rendering::RenderPipeline& pipeline
     // this one was building — keep the flag set in that case so the lazy kick
     // stays suppressed; otherwise clear it (this build is fully adopted).
     {
-        std::lock_guard<std::mutex> lk(m_build_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lk, m_build_mutex, "Preview build lock wait");
         m_build_done.store(false);
         m_build_inflight.store(m_build_pending.load());
     }
@@ -345,7 +357,8 @@ bool WorldgenPreview::tick(float dt) {
         return false;
     bool dirty = false;
     {
-        std::lock_guard<std::mutex> lk(m_candidate_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lk, m_candidate_mutex, "Preview candidate lock wait");
         if (!m_have_pending || !m_pending_dirty) {
             // No pending change; nothing to rebuild. (A first-use build is forced
             // by render when no world exists yet.)
@@ -373,7 +386,8 @@ bool WorldgenPreview::tick(float dt) {
     // swap + generation bump happen later on the GL thread (render path).
     start_worker();
     {
-        std::lock_guard<std::mutex> lk(m_build_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lk, m_build_mutex, "Preview build lock wait");
         m_build_inflight.store(true);
         m_build_pending.store(true);
     }
@@ -579,6 +593,7 @@ void WorldgenPreview::clear_precipitation(Rendering::RenderPipeline& pipeline) {
 }
 
 bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
+    const Attribution::PhaseScope scene_phase(Attribution::Phase::MenuScene);
     if (!m_active)
         return false;
     m_drain_pipeline =
@@ -601,7 +616,8 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
         m_first_build_requested = true;
         start_worker();
         {
-            std::lock_guard<std::mutex> lk(m_build_mutex);
+            LUMIN_PROFILE_LOCK(
+                std::lock_guard<std::mutex>, lk, m_build_mutex, "Preview build lock wait");
             m_build_inflight.store(true);
             m_build_pending.store(true);
         }
@@ -638,6 +654,7 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
 }
 
 bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt) {
+    const Attribution::PhaseScope scene_phase(Attribution::Phase::MenuScene);
     if (!m_active)
         return false;
     m_drain_pipeline =
@@ -654,7 +671,8 @@ bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, 
         m_first_build_requested = true;
         start_worker();
         {
-            std::lock_guard<std::mutex> lk(m_build_mutex);
+            LUMIN_PROFILE_LOCK(
+                std::lock_guard<std::mutex>, lk, m_build_mutex, "Preview build lock wait");
             m_build_inflight.store(true);
             m_build_pending.store(true);
         }

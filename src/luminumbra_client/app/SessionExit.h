@@ -18,12 +18,12 @@ void PollSessionFault(world::GameSession& session, RequestQuit request_quit) {
 }
 
 // The client drains world readers before calling this and clears the world
-// afterwards. Preserve its existing state -> spawn anchor -> metadata order.
+// afterwards. Capture the spawn anchor before the complete save.
 template<typename UpdateSpawn, typename MarkSaved>
 void SaveSessionOnExit(world::GameSession* session,
                        UpdateSpawn update_spawn,
                        MarkSaved mark_saved) {
-    if (session && session->SaveWorldState()) {
+    if (session) {
         update_spawn();
         if (session->SaveWorld())
             mark_saved();

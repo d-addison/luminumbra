@@ -1106,9 +1106,11 @@ void DrawSettingsContents(ClientAppContext& app,
             console.SetOpen(true);
     }
     if (ImGui::Button("Save settings")) {
-        const std::string path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();
+        const auto path = luminumbra::core::SystemConfig::DefaultUserOverlayPath().u8string();
         const bool ok = console.SavePreferences();
-        LUMINUMBRA_CORE_INFO("Settings {} ({})", ok ? "saved" : "save FAILED", path);
+        LUMINUMBRA_CORE_INFO("Settings {} ({})",
+                             ok ? "saved" : "save FAILED",
+                             std::string(path.begin(), path.end()));
     }
     ImGui::TextDisabled("user.* — client-only, never hashed");
     bool perf = console.Widgets().Visible("perf.hud");

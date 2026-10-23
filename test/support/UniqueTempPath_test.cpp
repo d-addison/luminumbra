@@ -79,3 +79,56 @@ TEST(UniqueTempPath, ReservationSkipsPreExistingFileAndReservedDirectoryCandidat
     std::getline(blocker, contents);
     EXPECT_EQ(contents, "keep");
 }
+
+TEST(UniqueTempPath, ExhaustedDirectoryCandidatesRemainUntouched) {
+    const ScopedTempFile workspace("luminumbra-temp-exhaustion-", ".unused");
+    const auto root = workspace.Path().parent_path();
+    // Fill the helper's entire bounded candidate set without relying on clocks.
+    for (int attempt = 0; attempt < Luminumbra::TestSupport::detail::kTempPathAttempts; ++attempt) {
+        ASSERT_TRUE(fs::create_directory(root / ("candidate_" + std::to_string(attempt))));
+    }
+    const auto marker = root / "candidate_0/retained";
+    {
+        std::ofstream output(marker);
+        ASSERT_TRUE(output.is_open());
+        output << "keep";
+        ASSERT_TRUE(output.good());
+    }
+
+    std::error_code error;
+    const auto reserved =
+        Luminumbra::TestSupport::detail::ReserveTempDirectory(root, "candidate", error);
+    EXPECT_TRUE(reserved.empty());
+    EXPECT_EQ(error, std::make_error_code(std::errc::file_exists));
+    for (int attempt = 0; attempt < Luminumbra::TestSupport::detail::kTempPathAttempts; ++attempt) {
+        EXPECT_TRUE(fs::is_directory(root / ("candidate_" + std::to_string(attempt))));
+    }
+    std::ifstream input(marker);
+    ASSERT_TRUE(input.is_open());
+    std::string contents;
+    std::getline(input, contents);
+    EXPECT_EQ(contents, "keep");
+}
+
+TEST(UniqueTempPath, NonDirectoryParentRefusesWithoutRemovingTheOccupant) {
+    const ScopedTempFile workspace("luminumbra-temp-parent-", ".unused");
+    const auto parent = workspace.Path();
+    {
+        std::ofstream output(parent);
+        ASSERT_TRUE(output.is_open());
+        output << "keep";
+        ASSERT_TRUE(output.good());
+    }
+
+    std::error_code error;
+    const auto reserved =
+        Luminumbra::TestSupport::detail::ReserveTempDirectory(parent, "candidate", error);
+    EXPECT_TRUE(reserved.empty());
+    EXPECT_TRUE(error);
+    ASSERT_TRUE(fs::is_regular_file(parent));
+    std::ifstream input(parent);
+    ASSERT_TRUE(input.is_open());
+    std::string contents;
+    std::getline(input, contents);
+    EXPECT_EQ(contents, "keep");
+}

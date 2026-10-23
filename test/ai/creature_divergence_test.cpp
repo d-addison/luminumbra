@@ -41,7 +41,7 @@ double evolveMeanCos(bool selectNarrow, int gens) {
         });
         pop.resize(8); // survivors
         std::vector<CreatureGenome> next = pop;
-        for (int i = 0; i < 8; ++i)
+        for (std::size_t i = 0; i < 8; ++i)
             next.push_back(BreedSensoryInto(CreatureGenome{}, pop[i], pop[(i + 1) % 8], rng));
         pop = next;
     }

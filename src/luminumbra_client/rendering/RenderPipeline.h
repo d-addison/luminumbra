@@ -20,6 +20,7 @@
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
 #include "StaticModelTex.h"         // StaticModelTex hoisted to namespace scope
 #include "TerrainSubmit.h"          // SubmitTerrainChunksFn + TerrainSubmitStats
+#include "UploadBudget.h"
 #include "core/AssetManager.h"
 #include "core/IsolationConfig.h" // isolation/layer render mode (backdrop + spawn-suppression)
 #include "luminumbra_common/components/LightingComponents.h"
@@ -107,6 +108,14 @@ struct ChunkRenderData {
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
+
+    void SetPresentedTerrainUpload(FarWorldLiveUpload& upload,
+                                   const ChunkGeometryPool& pool) const noexcept {
+        upload.snapshot_version = mesh_version;
+        upload.uploaded_version = mesh_version;
+        upload.uploaded_indices = element_count;
+        upload.valid_allocation = pool.valid_allocation(pool_handle, element_count);
+    }
 };
 
 struct WaterRenderData {
@@ -123,6 +132,16 @@ struct WaterRenderData {
 
     bool LadderUploadValid() const noexcept {
         return vao_id != 0 && vbo_id != 0 && ebo_id != 0 && ladder_upload_version == mesh_version;
+    }
+
+    // Retained water is the presented version until replacement adoption. Both
+    // the draw list and far-water mask must consume this same certificate.
+    bool PresentedLadderWaterEligible(bool enabled) const noexcept {
+        return LadderWaterPassEligible(
+            mesh_version, mesh_version, element_count, LadderUploadValid(), enabled);
+    }
+    void SetPresentedLadderWaterUpload(FarWorldLiveUpload& upload, bool enabled) const noexcept {
+        SetLadderWaterUpload(upload, mesh_version, enabled);
     }
 
     void SetLadderWaterUpload(FarWorldLiveUpload& upload,
@@ -159,6 +178,8 @@ struct WaterRenderData {
 class RenderPipeline {
 public:
     struct MeshUploadFrameStats {
+        UploadWorkStats terrain_budget{};
+        UploadWorkStats water_budget{};
         size_t snapshot_count = 0;
         size_t terrain_upload_candidates = 0;
         size_t terrain_uploads = 0;
@@ -367,7 +388,8 @@ public:
                       Systems::SHIELD_WorldSystem& world_system,
                       const Camera& camera,
                       float deltaTime,
-                      bool wireframe = false);
+                      bool wireframe = false,
+                      UploadPresentation presentation = UploadPresentation::Streaming);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -500,6 +522,9 @@ public:
     void set_sky_lut_gpu_enabled(bool e) {
         m_sky_lut.set_gpu_skyview_enabled(e);
     }
+    bool sky_lut_gpu_enabled() const {
+        return m_sky_lut.gpu_skyview_enabled();
+    }
     const glm::vec2& taau_jitter_ndc() const {
         return m_taau_jitter_ndc;
     } // sub-pixel projection jitter for the G-buffer
@@ -512,6 +537,11 @@ public:
     void clear_all_chunk_data(); // Force clear all cached chunk render data
     const MeshUploadFrameStats& get_last_mesh_upload_stats() const {
         return m_last_mesh_upload_stats;
+    }
+    // Presentation readiness only. Never use to gate simulation or collision.
+    bool render_uploads_settled() const {
+        return m_last_mesh_upload_stats.terrain_uploads_deferred == 0 &&
+               m_last_mesh_upload_stats.water_uploads_deferred == 0;
     }
     const RenderPassFrameStats& get_last_render_pass_stats() const {
         return m_last_render_pass_stats;
@@ -979,6 +1009,7 @@ private:
         size_t terrain_index_count = 0;
         size_t water_vertex_count = 0;
         size_t water_index_count = 0;
+        bool water_metadata_valid = true;
 
         bool has_terrain_mesh() const {
             return terrain_vertex_count > 0 && terrain_index_count > 0;
@@ -997,6 +1028,20 @@ private:
             return !vertices.empty() && !indices.empty();
         }
     };
+
+    struct MeshUploadCandidate {
+        ChunkMeshSnapshot chunk{};
+        bool is_new = false;
+        bool is_stale = false;
+        float distance_sq = 0;
+        std::size_t bytes = 0;
+    };
+    UploadQueue<MeshUploadCandidate> m_terrain_upload_queue;
+    UploadQueue<MeshUploadCandidate> m_water_upload_queue;
+    template<bool Water>
+    void manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
+                                   const Camera& camera,
+                                   double preparation_ms = 0);
 
     // build the SSAO pass contract from pipeline state.
     // Shared by the render_frame call site and capture_ssao_parity so the gated
@@ -1057,7 +1102,8 @@ private:
                        Systems::SHIELD_WorldSystem& world_system,
                        const Camera& camera,
                        float deltaTime,
-                       bool wireframe);
+                       bool wireframe,
+                       UploadPresentation presentation);
     void dispatch_stages(const Camera& camera);
     FarReplayCamera replay_camera(const Camera& camera) const;
 
@@ -1105,7 +1151,8 @@ private:
 
     void ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
     void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
-                                    const Camera& camera);
+                                    const Camera& camera,
+                                    double preparation_ms);
     bool copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);

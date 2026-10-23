@@ -1,4 +1,6 @@
 #include "GroundDecalPass.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../Camera.h"
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -80,6 +82,7 @@ void GroundDecalPass::update_scent(const ScentFieldRenderMirror& mirror) {
 }
 
 void GroundDecalPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL GroundDecalPass.execute");
     if (!m_active || !m_shader || !m_shader->IsValid() || m_vao == 0 || m_scent_tex == 0)
         return;
 
@@ -108,7 +111,7 @@ void GroundDecalPass::execute(const RenderContext& ctx) {
     m_shader->setInt("gDepth", 2);
 
     glBindVertexArray(m_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 }
 

@@ -596,15 +596,51 @@ cap; “uncapped” refers to the recording duration and number of rows.
 
 The frame interval runs from loop entry through buffer swap. Its exclusive
 buckets are sim, stream, render submission, present, foliage rebuilds,
-scatter input preparation, plant rebake, event polling, menu rendering and UI
-rendering. `other_ms` is the remainder; these buckets plus the remainder sum to
-`frame_ms`. Rebuilds from preview and QA callers also enter the foliage bucket;
-any nested rebuild time is subtracted from its render or menu parent. Menu
-rendering includes the menu's UI; `ui_ms` covers the separate
-in-game RmlUi and final ImGui render calls. SLOWFRAME preserves its existing
+scatter input preparation, plant rebake, event polling, residual menu work and
+residual UI work, together with the phases below. Rebuilds from preview and QA
+callers also enter the foliage bucket; any nested rebuild time is subtracted
+from its render, menu or poll parent. SLOWFRAME preserves its existing
 field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
 `other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
 remains rebuild time only.
+
+Issue #402 appends these CPU wall-time columns after `count_generation`, in order:
+
+| Column | Work measured |
+|---|---|
+| `ui_update_ms` | RmlUi layout/update |
+| `ui_render_ms` | RmlUi rendering, excluding nested phases |
+| `ui_filters_ms` | UI filter submission, including blur |
+| `menu_scene_ms` | Scenic menu and preview scene rendering or cached-image presentation |
+| `preview_adoption_ms` | Adopting a completed preview world |
+| `document_load_ms` | Synchronous UI document loading |
+| `texture_load_ms` | UI texture loading and upload |
+| `shader_load_ms` | Shader source loading, compilation and linking |
+| `shader_first_use_ms` | First program binding and first draw/dispatch submission, including raw compute programs |
+| `world_create_callback_ms` | Synchronous world-creation callback work |
+| `world_load_callback_ms` | Synchronous world-loading callback work |
+
+These phases are exclusive: an enclosing phase excludes its nested phases and
+direct foliage rebuild time. `render_ms`, `menu_ms`, `poll_ms` and `ui_ms` now
+exclude the phases completed inside each measured parent. `foliage_ms` likewise
+excludes shader load/first-use phases completed inside a rebuild. In particular,
+`menu_ms` no longer includes attributed scenic/preview or RmlUi work, `ui_ms`
+excludes the separate in-game RmlUi phases (and still includes final ImGui work),
+and `poll_ms` excludes attributed synchronous world callbacks. `other_ms` also
+excludes all appended phases. The corrected identity is:
+
+```text
+frame_ms = sim_ms + stream_ms + render_ms + present_ms + foliage_ms
+         + scatter_ms + rebake_ms + poll_ms + menu_ms + ui_ms
+         + ui_update_ms + ui_render_ms + ui_filters_ms + menu_scene_ms
+         + preview_adoption_ms + document_load_ms + texture_load_ms
+         + shader_load_ms + shader_first_use_ms
+         + world_create_callback_ms + world_load_callback_ms + other_ms
+```
+
+CSV rounding can introduce a small difference. The remainder is not clamped:
+a negative value exposes overlapping inputs. These are CPU submission costs;
+first-use collection adds no GPU waits or readbacks.
 
 Foliage stage times are CPU wall time, including GL submission calls, without
 GPU waits or new readbacks. `signature_ms` includes polling existing evidence
@@ -641,9 +677,67 @@ snapshot belongs to the last invocation in that frame. With no invocation,
 capacity is zero and the generated count is empty. Each pass also exposes its
 last collected invocation's diagnostic without affecting its rebuild decision.
 
-The optional profiling build uses `-DLUMINUMBRA_ENABLE_TRACY=ON` in a separate
-build directory. The client links the profiler interface in all variants; with
-the default `OFF` setting it adds no profiling definitions or dependencies.
+Use the dedicated `profile` variant for Tracy captures (issue #395):
+
+```sh
+cmake --preset profile
+cmake --build --preset profile --target luminumbra_client_app
+```
+
+This uses `RelWithDebInfo`, frame pointers, and `LUMINUMBRA_ENABLE_TRACY=ON`
+in `build/profile`. Start a matching Tracy viewer and launch the client from that
+build. Tracy runs on demand, recording when the viewer connects. Configuring this
+variant fetches the upstream source; for offline use, supply an already
+provisioned checkout with `-DFETCHCONTENT_SOURCE_DIR_TRACY=/path/to/tracy`.
+The fetch settings in `cmake/tracy.cmake` pin Tracy v0.13.1 to an exact
+upstream revision; check out that same revision for offline use. Tracy uses the BSD-3-Clause licence; its verbatim notice is in
+[Third-party licenses](https://github.com/d-addison/luminumbra/blob/devel/THIRD_PARTY_LICENSES.md#tracy-v0131) and must accompany
+redistributed Tracy-enabled binaries.
+
+The `perf`, default, debug and release configurations disable Tracy. Their event
+macros expand to nothing, discard arguments, and add no profiler symbols,
+allocations, threads, dependency links or Tracy network fetch. Use `perf` for
+uninstrumented benchmark results and determinism gates. The shared worker library
+and client/server consumers inherit the same profiling definition in a profile
+build.
+
+Enabled-build qualification is pending a successful native CI run. The existing
+`GNS transport / compile probe` job configures the `profile` preset and builds
+the common library, server, shipping client and QA client against the pinned
+Tracy source, plus compile-only fixtures for enabled and disabled macro forms.
+This checks Linux/GCC compilation and linking, including loader/world jobs,
+capture presentation and inline rendering headers. Source-contract checks alone
+do not qualify the enabled build. No local profile configure or application
+build has been run for this change. Windows/MSVC, Windows/GCC and macOS enabled
+builds, profiler connection/capture behaviour and GPU execution remain
+unqualified by this compile check. Release/perf determinism and measurement
+lanes continue to use Tracy disabled.
+
+Stable timeline names include `Client frame` (scope begin/end, including early
+exit), the `Client` frame mark, `Worker job execution`, and `Job queue delay (ms)`.
+Capture-only rendering uses `Client capture frame` and `Client capture` marks.
+The queue plot measures from ring insertion to execution start for both priority
+lanes and both single and batch dispatch. Its timestamp storage and clock reads
+exist only in profile builds. Worker thread names identify the job pool, world
+preview, audio propagation and saved-world catalog workers. Disposable TCP accept
+threads retain their `TCP accept worker job` zone without explicit thread names,
+which Tracy retains for the process lifetime.
+
+`Job queue lock wait`, `Job completion lock wait`, `World chunks lock wait`,
+`Chunk state lock wait`, `Worldgen epoch lock wait`, the hydrology and far-build
+lock zones cover acquisition only. Condition waits, job completion waits, TCP
+future waits and `Client present wait` have separate scopes. File zones cover
+world/save reads, durable writes and replacement on Windows and POSIX, and both
+preset loading paths. `Shader compile` and `Shader link` cover driver calls in
+the material, compute, foliage, impostor and both UI shader paths.
+
+`GL <PassClass>.execute*` zones measure CPU submission for each major pass,
+including offscreen/preview consumers. Depth blits and opaque snapshots have
+their own `GL` zones. These complement the existing foliage rebuild/upload zones
+and frame-attribution buckets. GPU elapsed times still come from the existing
+asynchronous GPU queries; CPU submission zones do not imply GPU completion.
+All profiling values are observational: scheduling, wait predicates, simulation
+ordering and authoritative decisions never consume them.
 
 Completed GPU counts are only exposed with readback active and a matching build
 generation. Ordinary and frozen rebuilds clear the known count until that
@@ -656,3 +750,80 @@ also obey the disabled readback policy. Frame scans use `luminumbra.frame_scan.v
 `null` when unavailable. Readers must preserve unknown counts rather than
 coercing them to zero. `foliage.instance_capacity` is storage capacity, never a
 substitute count. The overlay labels capacity explicitly.
+
+Terrain and water adoption (issue #390) uses independent presentation budgets.
+The named, compile-time validated defaults in `rendering/UploadBudget.h` are:
+
+| Queue | Payload bytes/frame | Attempts/frame | Progress floor | Time/frame |
+| --- | ---: | ---: | ---: | ---: |
+| Terrain | 4 MiB | 8 | 1 | 3 ms |
+| Water | 1 MiB | 8 | 1 | 1 ms |
+
+Valid ranges are 1 byte through 64 MiB, 1 through 64 attempts, a floor from 1
+through the count limit, and 0.1 through 16 ms. The time interval starts before
+candidate discovery, lifecycle cleanup and ordering. Terrain also charges the
+shared snapshot preparation. Payload copying, foliage ground-query construction
+and GPU submission are inside the same interval. The byte cost is the checked
+vertex-plus-index payload size, charged once per attempt before copying, even
+when an attempt fails. It is separate from driver storage capacity and the
+existing counters for successful payload copies.
+
+After the progress floor, another upload starts only if its entire payload fits
+the remaining byte budget and the time budget has not expired. The count ceiling
+is unconditional. An indivisible upload can exceed time; the progress floor can
+also exceed bytes. Both overshoots are measured, including preparation that has
+already exceeded the time limit before the first attempt. A valid pending upload
+therefore always gets at least one attempt; a failed or superseded payload is
+retried without blocking other pending work. New arrivals are ordered by distance,
+new before replacement, then chunk ID. Existing pending work retains FIFO position,
+including when refreshed to a newer version, so nearer arrivals cannot starve it.
+
+Resident terrain and its foliage support stay available while replacements wait;
+pool growth allocates before releasing the old slice. Water uses a staging slot
+and publishes it only after both writes and attribute validation succeed, retaining
+the old buffers on failure in both Legacy and Ladder modes. The presented water
+version supplies both draw eligibility and far-water ownership while a replacement
+waits, preventing overlapping live and far surfaces. Empty water replacements use
+the same bounded adoption queue and remove the resident draw when adopted.
+The spare-water-slot cache remains bounded at 1024 entries. These queues never gate
+world publication, activation, collision readiness, water simulation or hashes.
+Legacy and Ladder far-tile integration retain their separate existing policies.
+
+The attribution CSV appends `terrain_` and `water_` fields for `work_ms`,
+`overshoot_ms`, `attempts`, `adopted`, `work_bytes`, `byte_overshoot` and `pending`.
+They aggregate every integration call in a presented frame, including menu and
+preview calls. Pending is the sum of each call's remaining backlog observations,
+not a global count of unique chunks. These are inclusive sub-measurements of the
+existing render/menu buckets; do not add their times again to the exclusive frame
+sum. Coverage frame observations expose the same work statistics per integration;
+the benchmark's final streaming record includes its settled status and limits.
+
+Benchmark warmup is a minimum: its final warmup frame waits for both upload queues
+to settle. Scene captures, survey stations, world visual sweeps, frame scans, parity captures,
+benchmark screenshots and terrain AOVs also wait for adoption. Traversal's measured
+frames keep normal budgets and include backlog; its final capture waits again.
+Use `--frame-attribution-csv` during fixed-view and traversal benchmarks to compare
+settled zero-adoption frames against per-frame streaming work and overshoot.
+Additional settling does not advance traversal ticks or measured frame IDs.
+The benchmark records extra presented settling frames in `upload_settling_frames`
+(`warmup` and `capture`), separately from the requested minimum `warmup_frames`.
+The held final benchmark warmup and report frames, standalone capture waits and
+synchronous survey/sweep upload drains advance both upload lanes with the same
+limits, but defer scene preparation after adoption and omit GPU drawing while
+either queue remains pending. The frame that reaches residency draws normally
+before warmup completes or capture proceeds. This avoids repeating a full
+software-rendered scene for each single-upload progress pass. Required settling
+frames, every measured frame, interactive rendering and previews draw normally;
+there is no software-renderer exemption from the upload budget.
+
+Settling uses work counts, with no clock input to world state. The initial pending
+terrain-plus-water backlog allows one render pass per item. Work published by a
+render pass adds one pass per observed arrival, up to 8192 arrivals per wait;
+continuous publication beyond this allowance fails explicitly. Successful adoptions
+are counted when detecting arrivals, including when the backlog stays level or
+shrinks. Persistent failures consume the remaining passes. The same policy covers
+synchronous qualification drains and presented warmup/capture waits. Failure returns
+an incomplete result, writes a failed capture record where applicable, and exits
+standalone captures with a nonzero status. The existing frame-scan watchdog remains
+in effect. AOV observations are capped at the requested warmup plus measured frames
+and one capture frame (at most 8192 records); settling retries do not append records.

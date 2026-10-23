@@ -99,8 +99,9 @@ EnergyFieldState::Page& EnergyFieldState::EnsurePage(int px, int pz) {
     auto it = m_pages.find(key);
     if (it == m_pages.end()) {
         Page page;
-        page.values.assign(
-            static_cast<std::size_t>(kEnergyPageCells) * kEnergyPageCells * m_channels, 0);
+        page.values.assign(static_cast<std::size_t>(kEnergyPageCells) * kEnergyPageCells *
+                               static_cast<std::size_t>(m_channels),
+                           0);
         page.last_step = m_fires_completed;
         it = m_pages.emplace(key, std::move(page)).first;
     }
@@ -168,7 +169,9 @@ std::uint64_t EnergyFieldState::ApplyDeposits() {
         const int lx = cx - px * kEnergyPageCells;
         const int lz = cz - pz * kEnergyPageCells;
         const std::size_t idx =
-            (static_cast<std::size_t>(lz) * kEnergyPageCells + lx) * m_channels + d.channel;
+            (static_cast<std::size_t>(lz) * kEnergyPageCells + static_cast<std::size_t>(lx)) *
+                static_cast<std::size_t>(m_channels) +
+            static_cast<std::size_t>(d.channel);
         std::uint32_t clipped = 0;
         page.values[idx] = SaturatingAdd16(page.values[idx], d.amount, clipped);
         clipped_total += clipped;
@@ -200,13 +203,14 @@ void EnergyFieldState::DecayAndDiffuseWindow() {
                 for (int lz = 0; lz < kEnergyPageCells; ++lz) {
                     for (int lx = 0; lx < kEnergyPageCells; ++lx) {
                         const std::uint16_t v =
-                            page.values[(static_cast<std::size_t>(lz) * kEnergyPageCells + lx) *
-                                            m_channels +
-                                        ch];
+                            page.values[(static_cast<std::size_t>(lz) * kEnergyPageCells +
+                                         static_cast<std::size_t>(lx)) *
+                                            static_cast<std::size_t>(m_channels) +
+                                        static_cast<std::size_t>(ch)];
                         if (v == 0)
                             continue;
                         win[static_cast<std::size_t>(pz * kEnergyPageCells + lz) * n +
-                            (px * kEnergyPageCells + lx)] = v;
+                            static_cast<std::size_t>(px * kEnergyPageCells + lx)] = v;
                         any = true;
                     }
                 }
@@ -225,7 +229,8 @@ void EnergyFieldState::DecayAndDiffuseWindow() {
                 std::fill(next.begin(), next.end(), 0u);
                 for (int z = 0; z < n; ++z) {
                     for (int x = 0; x < n; ++x) {
-                        const std::size_t i = static_cast<std::size_t>(z) * n + x;
+                        const std::size_t i =
+                            static_cast<std::size_t>(z) * n + static_cast<std::size_t>(x);
                         const std::uint32_t v = win[i];
                         if (v == 0)
                             continue;
@@ -271,7 +276,8 @@ void EnergyFieldState::DecayAndDiffuseWindow() {
                         for (int lz = 0; lz < kEnergyPageCells && !page_needed; ++lz) {
                             for (int lx = 0; lx < kEnergyPageCells; ++lx) {
                                 if (win[static_cast<std::size_t>(pz * kEnergyPageCells + lz) * n +
-                                        (px * kEnergyPageCells + lx)] != 0) {
+                                        static_cast<std::size_t>(px * kEnergyPageCells + lx)] !=
+                                    0) {
                                     page_needed = true;
                                     break;
                                 }
@@ -284,11 +290,12 @@ void EnergyFieldState::DecayAndDiffuseWindow() {
                         (it != m_pages.end()) ? it->second : EnsurePage(px0 + px, pz0 + pz);
                     for (int lz = 0; lz < kEnergyPageCells; ++lz) {
                         for (int lx = 0; lx < kEnergyPageCells; ++lx) {
-                            page.values[(static_cast<std::size_t>(lz) * kEnergyPageCells + lx) *
-                                            m_channels +
-                                        ch] =
+                            page.values[(static_cast<std::size_t>(lz) * kEnergyPageCells +
+                                         static_cast<std::size_t>(lx)) *
+                                            static_cast<std::size_t>(m_channels) +
+                                        static_cast<std::size_t>(ch)] =
                                 win[static_cast<std::size_t>(pz * kEnergyPageCells + lz) * n +
-                                    (px * kEnergyPageCells + lx)];
+                                    static_cast<std::size_t>(px * kEnergyPageCells + lx)];
                         }
                     }
                 }
@@ -350,7 +357,9 @@ std::uint16_t EnergyFieldState::at_cell(int cx, int cz, int channel) const {
     const int lx = cx - px * kEnergyPageCells;
     const int lz = cz - pz * kEnergyPageCells;
     return it->second
-        .values[(static_cast<std::size_t>(lz) * kEnergyPageCells + lx) * m_channels + channel];
+        .values[(static_cast<std::size_t>(lz) * kEnergyPageCells + static_cast<std::size_t>(lx)) *
+                    static_cast<std::size_t>(m_channels) +
+                static_cast<std::size_t>(channel)];
 }
 
 std::uint64_t EnergyFieldState::total_raw() const {
@@ -471,7 +480,8 @@ bool EnergyFieldState::DeserializeRecord(const std::string& record, std::uint64_
         if (!(ls >> tag >> px >> pz) || tag != 'P')
             return false;
         Page page;
-        page.values.assign(static_cast<std::size_t>(kEnergyPageCells) * kEnergyPageCells * channels,
+        page.values.assign(static_cast<std::size_t>(kEnergyPageCells) * kEnergyPageCells *
+                               static_cast<std::size_t>(channels),
                            0);
         page.last_step = 0;
         std::string cell;

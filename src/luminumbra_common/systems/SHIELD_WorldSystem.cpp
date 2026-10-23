@@ -6,7 +6,9 @@
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
+#include "core/Profiler.h"
 #include "entt/entt.hpp"
+#include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
 #include "world/SurfaceWorkBudget.h"
 #include <algorithm> // Required for std::max and std::min
@@ -25,6 +27,7 @@
 #include <memory>
 #include <optional>
 #include <shared_mutex>
+#include <span>
 #include <stdexcept>
 #include <thread> // opt-in job-wedge watchdog monitor thread
 #include <unordered_map>
@@ -59,6 +62,15 @@ constexpr std::size_t STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN = 3;
 constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
                                         (Luminumbra::CHUNK_SIZE_Y + 1) *
                                         (Luminumbra::CHUNK_SIZE_Z + 1);
+constexpr std::size_t kHeightmapCells =
+    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+// Fixed lattice/grid bounds make every size calculation safe before allocation.
+// Reserving this maximum for stage A guarantees its entire stage-B handoff fits.
+constexpr std::size_t kMaxMeshingSnapshotBytes =
+    kFullSdfLattice * (sizeof(float) + sizeof(Luminumbra::u8)) + kHeightmapCells * sizeof(float) +
+    std::size_t{32} * 32u * (2u * sizeof(float) + sizeof(Luminumbra::Vec2) + sizeof(std::int32_t));
+static_assert(kMaxMeshingSnapshotBytes <=
+              Luminumbra::Systems::SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
 
 //  (activation queue ): the FIXED activation pipeline latency K, in sim
 // ticks. A batch dispatched at tick D becomes sim-visible at D+K — a pure
@@ -79,6 +91,29 @@ constexpr std::int64_t kActivationPipelineLatencyTicks = 8;
 constexpr std::size_t kMaxGenerationBatchesInFlight = 3;
 constexpr std::size_t kMaxMeshingBatchesInFlight =
     static_cast<std::size_t>(kActivationPipelineLatencyTicks) + 1;
+
+namespace {
+// All dispatches nested in one update share the same byte allowance. Explicit
+// blocking drains start a fresh bounded pass for each finite request prefix.
+class MeshingSnapshotPass {
+public:
+    MeshingSnapshotPass(std::size_t& bytes, bool& active)
+        : m_active(active)
+        , m_was_active(active) {
+        if (!active) {
+            bytes = 0;
+        }
+        active = true;
+    }
+    ~MeshingSnapshotPass() {
+        m_active = m_was_active;
+    }
+
+private:
+    bool& m_active;
+    bool m_was_active;
+};
+} // namespace
 
 // SIMD over-read guard for FastNoise2's
 // GenPositionArray2D. That entry point's tail does an UNCONDITIONAL full-width
@@ -106,6 +141,33 @@ std::size_t PadToNoiseSimd(std::size_t count) {
 namespace Luminumbra::Systems {
 
 namespace {
+
+std::size_t MeshingSnapshotBytes(const Luminumbra::Chunk& chunk, bool terrain_required) {
+    std::size_t bytes = 0;
+    if (terrain_required) {
+        if (chunk.sdf_data.size() == kFullSdfLattice) {
+            bytes += kFullSdfLattice * sizeof(float);
+        }
+        if (chunk.heightmap_data.size() == kHeightmapCells) {
+            bytes += kHeightmapCells * sizeof(float);
+        }
+        if (chunk.material_data.size() == kFullSdfLattice) {
+            bytes += kFullSdfLattice * sizeof(Luminumbra::u8);
+        }
+    }
+    const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
+    if (resolution > 1 && resolution <= 32) {
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+        bytes += std::min(cells, chunk.water_level_data.size()) * sizeof(float);
+        bytes += std::min(cells, chunk.water_flow_data.size()) * sizeof(Luminumbra::Vec2);
+        bytes += std::min(cells, chunk.water_sim_terrain_height.size()) * sizeof(float);
+        if (chunk.water_depth_mm.size() == cells) {
+            bytes += cells * sizeof(std::int32_t);
+        }
+    }
+    return bytes;
+}
 
 template<typename T>
 FastNoise::SmartNode<T> NewWorldNoise() {
@@ -464,17 +526,8 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
 }
 
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
-    wait_for_hydro_prefetch_jobs();
-    wait_for_generation_jobs();
-    // Drain promotion workers with RAW waits — teardown must not publish or
-    // dispatch stage-B jobs, only guarantee no worker still touches chunks.
-    if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
-        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
-    }
-    if (m_job_system && m_streaming_state.promotion_job_handle.counter) {
-        m_job_system->wait(m_streaming_state.promotion_job_handle);
-    }
-    wait_for_meshing_jobs();
+    // Teardown fences every owned callback without publishing or admitting work.
+    quiesce_streaming_jobs_for_save();
 }
 
 void SHIELD_WorldSystem::wait_for_generation_jobs() {
@@ -673,6 +726,7 @@ SHIELD_WorldSystem::ActivationShadowReport SHIELD_WorldSystem::activation_shadow
 }
 
 void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
+    wait_for_hydro_prefetch_jobs();
     if (!m_job_system) {
         return;
     }
@@ -698,7 +752,7 @@ void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
 }
 
 void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
-    // activation queue : publish, in FIFO order, exactly the batches due at or
+    // Publish, in stable due order, exactly the batches due at or
     // before `tick`. A due-but-unfinished batch BLOCKS on its jobs (K
     // under-covering is a wall-clock cost, never a schedule change); a batch
     // with due_tick -1 (no tick source at dispatch) publishes when drained.
@@ -706,59 +760,86 @@ void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
     // ActivationQueueSemantics gtest; the per-tick barrier force-drains
     // everything regardless of due ticks.
 
-    // Generation lane.
-    while (!m_streaming_state.generation_batches.empty()) {
-        auto& front = m_streaming_state.generation_batches.front();
-        const bool due =
-            front.due_tick < 0 ? !has_active_job(front.handle) : front.due_tick <= tick;
-        if (!due) {
-            break;
-        }
-        if (m_job_system && front.handle.counter) {
-            m_job_system->wait(front.handle);
-        }
-        publish_front_generation_batch(/*force=*/true);
-    }
-
-    // Promotion lane (depth 1): publish sim truth + dispatch stage B when due.
-    if (promotion_pipeline_pending()) {
-        const std::int64_t promo_due = m_streaming_state.promotion_due_tick;
-        const bool due = promo_due < 0 ? !promotion_jobs_active() : promo_due <= tick;
-        if (due) {
-            if (m_job_system) {
-                if (m_streaming_state.promotion_job_handle_high.counter) {
-                    m_job_system->wait(m_streaming_state.promotion_job_handle_high);
-                }
-                if (m_streaming_state.promotion_job_handle.counter) {
-                    m_job_system->wait(m_streaming_state.promotion_job_handle);
-                }
+    bool dispatched_deferred = false;
+    do {
+        dispatched_deferred = false;
+        // Generation lane.
+        while (!m_streaming_state.generation_batches.empty()) {
+            auto& front = m_streaming_state.generation_batches.front();
+            const bool due =
+                front.due_tick < 0 ? !has_active_job(front.handle) : front.due_tick <= tick;
+            if (!due) {
+                break;
             }
-            process_completed_promotion_jobs(/*force=*/true);
-            if (!promotion_pipeline_pending()) {
-                m_streaming_state.promotion_due_tick = -1;
-            }
-        }
-    }
-
-    // Meshing lane.
-    while (!m_streaming_state.meshing_batches.empty()) {
-        auto& front = m_streaming_state.meshing_batches.front();
-        const bool due = front.due_tick < 0
-                             ? !(has_active_job(front.handle) || has_active_job(front.handle_high))
-                             : front.due_tick <= tick;
-        if (!due) {
-            break;
-        }
-        if (m_job_system) {
-            if (front.handle_high.counter) {
-                m_job_system->wait(front.handle_high);
-            }
-            if (front.handle.counter) {
+            if (m_job_system && front.handle.counter) {
                 m_job_system->wait(front.handle);
             }
+            publish_front_generation_batch(/*force=*/true);
         }
-        publish_front_meshing_batch(/*force=*/true);
-    }
+
+        // Promotion lane (depth 1): publish sim truth + dispatch stage B when due.
+        if (promotion_pipeline_pending()) {
+            const std::int64_t promo_due = m_streaming_state.promotion_due_tick;
+            const bool due = promo_due < 0 ? !promotion_jobs_active() : promo_due <= tick;
+            if (due) {
+                if (m_job_system) {
+                    if (m_streaming_state.promotion_job_handle_high.counter) {
+                        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
+                    }
+                    if (m_streaming_state.promotion_job_handle.counter) {
+                        m_job_system->wait(m_streaming_state.promotion_job_handle);
+                    }
+                }
+                process_completed_promotion_jobs(/*force=*/true);
+                if (!promotion_pipeline_pending()) {
+                    m_streaming_state.promotion_due_tick = -1;
+                }
+            }
+        }
+
+        // Meshing lane.
+        while (!m_streaming_state.meshing_batches.empty()) {
+            auto& front = m_streaming_state.meshing_batches.front();
+            const bool due = front.due_tick < 0 ? !(has_active_job(front.handle) ||
+                                                    has_active_job(front.handle_high))
+                                                : front.due_tick <= tick;
+            if (!due) {
+                break;
+            }
+            if (m_job_system) {
+                if (front.handle_high.counter) {
+                    m_job_system->wait(front.handle_high);
+                }
+                if (front.handle.counter) {
+                    m_job_system->wait(front.handle);
+                }
+            }
+            publish_front_meshing_batch(/*force=*/true);
+        }
+        // Stage B may have been held behind a full meshing FIFO above. Complete
+        // that handoff only after due batches actually freed its lane.
+        if (!m_streaming_state.pending_promotion_mesh.empty() &&
+            (m_streaming_state.promotion_due_tick < 0 ||
+             m_streaming_state.promotion_due_tick <= tick) &&
+            m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
+            const auto before = m_streaming_state.pending_promotion_mesh.size();
+            process_completed_promotion_jobs(/*force=*/true);
+            dispatched_deferred = m_streaming_state.pending_promotion_mesh.size() < before;
+        }
+        // Deferred descriptors belong to their original dispatch tick. Settle that
+        // finite prefix when due, without forcing future batches to publish early.
+        if (deferred_meshing_pending() &&
+            (m_deferred_meshing_due_tick < 0 || m_deferred_meshing_due_tick <= tick) &&
+            !promotion_pipeline_pending() &&
+            m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
+            const auto before = m_deferred_meshing_cursor;
+            dispatch_deferred_meshing();
+            dispatched_deferred = dispatched_deferred || m_deferred_meshing_cursor != before ||
+                                  !deferred_meshing_pending();
+        }
+        // Every continuation consumes a descriptor or completes a stage-B handoff.
+        // Tick-stamped jobs block when due; unticked jobs use completion checks.
+    } while (dispatched_deferred);
 }
 
 void SHIELD_WorldSystem::wait_for_promotion_jobs() {
@@ -831,6 +912,14 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     //  5b: gate by FIFO depth (deterministic), not raw job activity.
     if (!m_streaming_state.pending_promotion_mesh.empty() &&
         m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
+        if (m_meshing_snapshot_pass_active &&
+            m_streaming_state.pending_promotion_mesh.size() >
+                (kMeshingSnapshotByteBudget - m_last_meshing_snapshot_bytes) /
+                    kMaxMeshingSnapshotBytes) {
+            return; // Keep every reservation until the entire handoff fits.
+        }
+        // Stage A reserved kMaxMeshingSnapshotBytes per item. This entire stage-B
+        // queue fits kMeshingSnapshotByteBudget even if water grids changed size.
         std::vector<MeshingWorkItem> stage_b;
         stage_b.reserve(m_streaming_state.pending_promotion_mesh.size());
         for (const auto& item : m_streaming_state.pending_promotion_mesh) {
@@ -844,18 +933,26 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
             if (it == m_streaming_state.chunks.end() || it->second.get() != item.chunk.get()) {
                 continue;
             }
-            stage_b.push_back(
-                {item.chunk, item.lod_level, /*terrain_mesh_required=*/true, item.high_priority});
+            // Stage A reserved this LOD without starting a meshing job. Release
+            // that reservation at the main-thread handoff so the ordinary
+            // in-flight guard admits exactly one stage-B dispatch.
+            item.chunk->pending_lod.store(-1, std::memory_order_release);
+            stage_b.push_back({item.chunk,
+                               item.lod_level,
+                               /*terrain_mesh_required=*/true,
+                               item.high_priority,
+                               item.transition_faces});
         }
         m_streaming_state.pending_promotion_mesh.clear();
         if (!stage_b.empty()) {
-            dispatch_meshing_jobs(stage_b);
+            dispatch_meshing_jobs(stage_b, m_streaming_state.promotion_due_tick);
         }
     }
 }
 
 std::size_t
-SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote) {
+SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote,
+                                            std::int64_t due_tick) {
     process_completed_promotion_jobs(/*force=*/false);
     if (promotion_jobs_active()) {
         // One promotion batch in flight at a time (the meshing lane's
@@ -885,7 +982,7 @@ SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& 
         chunk->pending_promotion_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(work_item.lod_level, std::memory_order_release);
         m_streaming_state.promotion_job_chunks.push_back(
-            {chunk, work_item.lod_level, work_item.high_priority});
+            {chunk, work_item.lod_level, work_item.high_priority, work_item.transition_faces});
         shadow_note_promotion_dispatch(chunk->get_id()); //  shadow
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
@@ -922,8 +1019,7 @@ SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& 
     m_promotion_batches_dispatched++;
     m_promotion_chunks_dispatched += m_streaming_state.promotion_job_chunks.size();
     // tick-keyed activation stamp (inert until the swap).
-    m_streaming_state.promotion_due_tick =
-        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+    m_streaming_state.promotion_due_tick = due_tick;
 
     if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
         if (!high_priority_jobs.empty()) {
@@ -941,7 +1037,8 @@ SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& 
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        process_completed_promotion_jobs(/*force=*/true);
+        // Inline completion obeys the same activation schedule as worker completion.
+        process_completed_promotion_jobs(/*force=*/false);
     }
     return chunks_to_promote.size();
 }
@@ -961,7 +1058,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
             pending.store(false, std::memory_order_release);
         }
     } writer_intent_reset{m_worldgen_writer_pending};
-    std::unique_lock<std::shared_mutex> worldgen_epoch(m_worldgen_epoch_mutex);
+    LUMIN_PROFILE_LOCK(std::unique_lock<std::shared_mutex>,
+                       worldgen_epoch,
+                       m_worldgen_epoch_mutex,
+                       "Worldgen epoch lock wait");
     // Publish parameters and seed under the same epoch as their generators.
     // Preview readers must retain the previous complete world until they release it.
     if (params) {
@@ -980,6 +1080,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     }
     // Terrain height is a pure function of seed/params; drop dependent spans too.
     m_column_surface_span_cache.clear();
+    {
+        const std::lock_guard<std::mutex> prefetch_lock(m_hydro_prefetch_mutex);
+        m_hydro_prefetch_inflight.clear();
+    }
 
     // FastNoise2 uses a node-based system to build complex generators.
 
@@ -1484,11 +1588,24 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x,
 }
 
 void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) const {
+    LUMIN_PROFILE_ZONE_N("Hydrology prefetch batch");
     // Warm the hydraulic-erosion region cache AHEAD of chunk-gen demand on
     // background jobs, so the (expensive) per-region bake never lands on the
     // gen/main critical path when the camera flies into new terrain. Each region
     // bakes ONCE; the inflight set stops re-dispatching it before its job lands,
     // and the cache check stops re-dispatching baked regions.
+    const std::lock_guard<std::mutex> dispatch_lock(m_hydro_prefetch_dispatch_mutex);
+    if (has_active_job(m_hydro_prefetch_handle)) {
+        return;
+    }
+    {
+        // A drained counter may precede destruction of its last callable copy.
+        // Keep the single batch until every callback owner releases its key.
+        const std::lock_guard<std::mutex> prefetch_lock(m_hydro_prefetch_mutex);
+        if (!m_hydro_prefetch_inflight.empty()) {
+            return;
+        }
+    }
     const float cs = m_params.hydro_cell_size_m;
     if (!m_params.hydro_enabled || m_job_system == nullptr || cs <= 0.0f) {
         return;
@@ -1548,13 +1665,19 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
         }
     }
     if (!jobs.empty()) {
-        m_job_system->dispatch_batch(jobs); // fire-and-forget background bakes
+        m_hydro_prefetch_handle = m_job_system->dispatch_batch(jobs);
     }
 }
 
 void SHIELD_WorldSystem::wait_for_hydro_prefetch_jobs() const {
-    std::unique_lock<std::mutex> lock(m_hydro_prefetch_mutex);
-    m_hydro_prefetch_finished.wait(lock, [this]() { return m_hydro_prefetch_inflight.empty(); });
+    const std::lock_guard<std::mutex> dispatch_lock(m_hydro_prefetch_dispatch_mutex);
+    if (m_job_system && m_hydro_prefetch_handle.counter) {
+        m_job_system->wait(m_hydro_prefetch_handle);
+    }
+    m_hydro_prefetch_handle = {};
+    std::unique_lock<std::mutex> prefetch_lock(m_hydro_prefetch_mutex);
+    m_hydro_prefetch_finished.wait(prefetch_lock,
+                                   [this]() { return m_hydro_prefetch_inflight.empty(); });
 }
 
 float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
@@ -1687,9 +1810,11 @@ bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
         has_live_grid = true;
         const float lx = world_pos.x - static_cast<float>(coords.x * CHUNK_SIZE_X);
         const float lz = world_pos.z - static_cast<float>(coords.z * CHUNK_SIZE_Z);
-        const int x = std::clamp(static_cast<int>(lx * res / CHUNK_SIZE_X), 0, res - 1);
-        const int z = std::clamp(static_cast<int>(lz * res / CHUNK_SIZE_Z), 0, res - 1);
-        const std::size_t cell = static_cast<std::size_t>(z) * side + x;
+        const int x =
+            std::clamp(static_cast<int>(lx * static_cast<float>(res) / CHUNK_SIZE_X), 0, res - 1);
+        const int z =
+            std::clamp(static_cast<int>(lz * static_cast<float>(res) / CHUNK_SIZE_Z), 0, res - 1);
+        const std::size_t cell = static_cast<std::size_t>(z) * side + static_cast<std::size_t>(x);
         const float bed = static_cast<float>(chunk->water_bed_mm[cell]) / 1000.0f;
         const float depth = static_cast<float>(chunk->water_depth_mm[cell]) / 1000.0f;
         if (depth > 0.05f && world_pos.y >= bed && world_pos.y < bed + depth - 0.05f)
@@ -2140,6 +2265,7 @@ float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) cons
 
 void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     int base_x, int base_z, int size_x, int size_z, float* out) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height grid batch");
     // SIMD-batched twin of ComputeShapedHeightSample over an integer-aligned
     // column grid. MUST stay byte-for-byte equal to calling ComputeShapedHeight
     // per column (the batch-vs-scalar parity gtest pins ==), so the per-channel
@@ -2436,6 +2562,7 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     const float* xs, const float* zs, std::size_t count, float* out, bool apply_hydro) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height position batch");
     if (apply_hydro) {
         ComputeShapedHeightsAtPositionsImpl<true>(xs, zs, count, out, /*complete_shaping=*/true);
     } else {
@@ -2963,6 +3090,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const std::vector<Vec3>& anchor_positions,
                                 PhysicsSystem* physics_system) {
+    const MeshingSnapshotPass snapshot_pass(m_last_meshing_snapshot_bytes,
+                                            m_meshing_snapshot_pass_active);
     // runtime telemetry ( implementation note): split the 300ms+ streaming spike by sub-phase.
     m_dbg_stream = {};
     auto _dbg_prev = std::chrono::steady_clock::now();
@@ -3113,10 +3242,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             meshed_columns[horizontal_chunk_key(coords.x, coords.z)].push_back({coords.y, lod});
         }
 
-        // Returns the transition faces this chunk needs against current neighbor
-        // LODs that are NOT yet baked into its mesh. Mirrors the neighbor criteria
-        // used by dispatch_meshing_jobs so a triggered remesh always converges.
-        auto missing_transition_faces = [&](const Luminumbra::Chunk& chunk, int lod_level) -> u8 {
+        // Capture the complete transition mask against this scheduler pass's
+        // neighbor LODs. Carrying it in each descriptor avoids world rescans in
+        // blocking subpasses; later scheduler passes detect newly arrived seams.
+        auto required_transition_faces = [&](const Luminumbra::Chunk& chunk, int lod_level) -> u8 {
+            if (get_lod_step_for_level(lod_level) <= 1) {
+                return Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+            }
             const IVec3 coords = chunk.get_coords();
             u8 required = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
             auto require_face_if_neighbor_is_finer =
@@ -3143,9 +3275,19 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
             require_face_if_neighbor_is_finer(
                 0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
-            return static_cast<u8>(required & static_cast<u8>(~chunk.applied_transition_faces.load(
-                                                  std::memory_order_acquire)));
+            return required;
         };
+
+        // At most one capped scheduler prefix: map only retained descriptors,
+        // then mark membership during the existing candidate scan. Old requests
+        // can remain valid even after anchor motion removes them from candidates.
+        std::unordered_map<ChunkID, std::size_t> deferred_indices;
+        deferred_indices.reserve(m_deferred_meshing.size() - m_deferred_meshing_cursor);
+        for (std::size_t index = m_deferred_meshing_cursor; index < m_deferred_meshing.size();
+             ++index) {
+            m_deferred_meshing[index].current_candidate = false;
+            deferred_indices.emplace(m_deferred_meshing[index].chunk->get_id(), index);
+        }
 
         // Chunk state logging removed from hot path - too expensive
 
@@ -3201,7 +3343,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                     terrain_mesh_required = false;
                 } else if (get_lod_step_for_level(required_lod) > 1 &&
                            !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty() &&
-                           missing_transition_faces(*chunk_ptr, required_lod) !=
+                           (required_transition_faces(*chunk_ptr, required_lod) &
+                            static_cast<u8>(~chunk_ptr->applied_transition_faces.load(
+                                std::memory_order_acquire))) !=
                                Luminumbra::World::MarchingCubes::kNoTransitionFaces) {
                     // A finer neighbor arrived after this coarse chunk was meshed:
                     // remesh so the now-required boundary transition skirts are
@@ -3256,6 +3400,34 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                               vertical_surface_distance,
                                               distance_sq});
             }
+
+            const auto retained = deferred_indices.find(chunk_ptr->get_id());
+            if (retained != deferred_indices.end() &&
+                m_deferred_meshing[retained->second].chunk == chunk_ptr) {
+                auto& item = m_deferred_meshing[retained->second];
+                // Refresh in the existing scan, without changing prefix ownership
+                // or its due tick. Even a satisfied request still owns a remesh,
+                // but must use today's LOD and neighbors rather than undo it.
+                if (required_lod < 0) {
+                    const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
+                                              Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                    required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
+                                                              chunk_center,
+                                                              closest_anchor,
+                                                              chunk_ptr->current_lod.load());
+                }
+                item.lod_level = required_lod;
+                if (needs_meshing) {
+                    item.terrain_mesh_required = terrain_mesh_required;
+                }
+                const bool has_active_mesh = state == Luminumbra::ChunkState::Ready &&
+                                             !chunk_ptr->mesh_vertices.empty() &&
+                                             !chunk_ptr->mesh_indices.empty();
+                item.high_priority = !has_active_mesh &&
+                                     retained->second < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
+                item.transition_faces = required_transition_faces(*chunk_ptr, required_lod);
+                item.current_candidate = needs_meshing;
+            }
         }
 
         m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
@@ -3298,7 +3470,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
         m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : meshing_budget;
 
-        if (!meshing_candidates.empty() && !meshing_job_active) {
+        if (!meshing_candidates.empty() && !meshing_job_active && !deferred_meshing_pending()) {
             std::sort(meshing_candidates.begin(),
                       meshing_candidates.end(),
                       [](const MeshingCandidate& a, const MeshingCandidate& b) {
@@ -3326,10 +3498,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 // exactly the near-field holes.
                 const bool high_priority = !meshing_candidates[i].has_active_mesh &&
                                            i < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
-                chunks_to_mesh_jobs.push_back({meshing_candidates[i].chunk,
-                                               meshing_candidates[i].required_lod,
-                                               meshing_candidates[i].terrain_mesh_required,
-                                               high_priority});
+                chunks_to_mesh_jobs.push_back(
+                    {meshing_candidates[i].chunk,
+                     meshing_candidates[i].required_lod,
+                     meshing_candidates[i].terrain_mesh_required,
+                     high_priority,
+                     required_transition_faces(*meshing_candidates[i].chunk,
+                                               meshing_candidates[i].required_lod)});
             }
 
             m_last_streaming_budget_stats.scheduled_meshing = chunks_to_mesh_jobs.size();
@@ -3337,9 +3512,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 meshing_candidates.size() - chunks_to_mesh_jobs.size();
         }
 
-        if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
-            m_last_streaming_budget_stats.submitted_meshing =
-                dispatch_meshing_jobs(chunks_to_mesh_jobs);
+        if (!chunks_to_mesh_jobs.empty()) {
+            m_deferred_meshing = std::move(chunks_to_mesh_jobs);
+            m_deferred_meshing_cursor = 0;
+            m_deferred_meshing_due_tick =
+                m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+        }
+        if (deferred_meshing_pending() && !meshing_job_active) {
+            const auto result = dispatch_deferred_meshing();
+            m_last_streaming_budget_stats.scheduled_meshing = result.admitted;
+            m_last_streaming_budget_stats.submitted_meshing = result.submitted_candidates;
+            m_last_streaming_budget_stats.deferred_meshing =
+                meshing_candidates.size() - result.submitted_candidates;
         }
 
         // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS
@@ -3355,7 +3539,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         // signals (main-thread events), not wall-clock job counters — the last
         // scheduler read to be de-timed ahead of the barrier removal.
         const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
-                               !promotion_pipeline_pending() && !generation_batch_outstanding();
+                               !promotion_pipeline_pending() && !generation_batch_outstanding() &&
+                               !deferred_meshing_pending();
         m_last_pass_drained = quiescent;
         if (quiescent) {
             m_last_serviced_generation = m_dirty_generation;
@@ -3424,7 +3609,16 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     // Pending items leave the candidate set at dispatch, even when their
     // active mesh keeps them Ready. Count them through publication, plus
     // candidates not submitted this frame (including a backpressured lane).
-    const std::size_t queue_depth = pending_publication_chunks() +
+    // Retained requests outside this scan still own future work. The suffix is
+    // bounded by the existing scheduler prefix, never by the resident world.
+    const auto retained_non_candidates = static_cast<std::size_t>(std::count_if(
+        m_deferred_meshing.begin() + static_cast<std::ptrdiff_t>(m_deferred_meshing_cursor),
+        m_deferred_meshing.end(),
+        [](const MeshingWorkItem& item) { return !item.current_candidate; }));
+    m_last_streaming_budget_stats.deferred_meshing =
+        m_last_streaming_budget_stats.meshing_candidates -
+        m_last_streaming_budget_stats.submitted_meshing + retained_non_candidates;
+    const std::size_t queue_depth = pending_publication_chunks() + retained_non_candidates +
                                     m_deferred_generation_candidates +
                                     (m_last_streaming_budget_stats.meshing_candidates -
                                      m_last_streaming_budget_stats.submitted_meshing);
@@ -3897,11 +4091,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     // settle the two-stage promotion pipeline too (publish staged
     // sim truth, dispatch + drain the stage-B render meshes) so the surface
     // band below observes fully settled chunks, exactly as before the split.
-    Luminumbra::Core::WaitWithJobWatchdog(
-        job_watchdog, "EnsureSurfaceReadyNear/promotion-drain", [this]() {
-            wait_for_promotion_jobs();
-            wait_for_meshing_jobs();
-        });
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/promotion-drain",
+                                          [this]() { wait_for_streaming_jobs(); });
 
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     // Preflight the exact vertical work before allocating or changing chunks.
@@ -4250,11 +4442,13 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float dx = wx - center.x, dz = wz - center.z;
                 if (dx * dx + dz * dz <= r2)
-                    sum += c->water_depth_mm[z * res + x];
+                    sum += c->water_depth_mm[static_cast<std::size_t>(z * res + x)];
             }
         }
     }
@@ -4299,12 +4493,14 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z)
             for (int x = 0; x < res; ++x) {
-                const std::int32_t b = c->water_bed_mm[z * res + x];
+                const std::int32_t b = c->water_bed_mm[static_cast<std::size_t>(z * res + x)];
                 if (b > 2000 &&
                     b < lowest) { // above sea (valley floor, not coast) and the lowest so far
                     lowest = b;
-                    const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                    const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                    const float wx = static_cast<float>(cc.x * CHUNK_SIZE_X) +
+                                     (static_cast<float>(x) + 0.5f) * cw_x;
+                    const float wz = static_cast<float>(cc.z * CHUNK_SIZE_Z) +
+                                     (static_cast<float>(z) + 0.5f) * cw_z;
                     pos_out = Vec3(wx, static_cast<float>(b) / 1000.0f, wz);
                     bed_m_out = static_cast<float>(b) / 1000.0f;
                     found = true;
@@ -4343,13 +4539,16 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                if (c->water_depth_mm[z * res + x] < 2500)
+                if (c->water_depth_mm[static_cast<std::size_t>(z * res + x)] < 2500)
                     continue; // need real depth (>=2.5 m)
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                const float surf = static_cast<float>(c->water_bed_mm[z * res + x] +
-                                                      c->water_depth_mm[z * res + x]) /
-                                   1000.0f;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float surf =
+                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] +
+                                       c->water_depth_mm[static_cast<std::size_t>(z * res + x)]) /
+                    1000.0f;
                 for (int a = 0; a < 8; ++a) {
                     const float ang = static_cast<float>(a) * 0.7853981634f;
                     const float ox = std::cos(ang), oz = std::sin(ang);
@@ -4407,13 +4606,17 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const std::int32_t d = c->water_depth_mm[z * res + x];
+                const std::int32_t d = c->water_depth_mm[static_cast<std::size_t>(z * res + x)];
                 if (d <= best)
                     continue;
                 best = d;
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                const float surf_y = static_cast<float>(c->water_bed_mm[z * res + x] + d) / 1000.0f;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float surf_y =
+                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] + d) /
+                    1000.0f;
                 best_pos = Vec3(wx, surf_y, wz);
             }
         }
@@ -4484,9 +4687,11 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
         return terrain;
     const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
     const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
-    const int sx = std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * res), 0, res - 1);
-    const int sz = std::clamp(static_cast<int>((lz / CHUNK_SIZE_Z) * res), 0, res - 1);
-    return c->water_level_data[sz * res + sx];
+    const int sx =
+        std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * static_cast<float>(res)), 0, res - 1);
+    const int sz =
+        std::clamp(static_cast<int>((lz / CHUNK_SIZE_Z) * static_cast<float>(res)), 0, res - 1);
+    return c->water_level_data[static_cast<std::size_t>(sz * res + sx)];
 }
 
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
@@ -5270,26 +5475,60 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         });
     }
 
+    // Both execution backends retain the original dispatch tick until publication.
+    batch.due_tick =
+        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
     if (m_job_system && !jobs.empty()) {
         batch.handle = m_job_system->dispatch_batch(jobs);
-        // tick-keyed activation stamp (inert until the
-        // barrier swap; -1 with no tick source = publish-when-drained).
-        batch.due_tick =
-            m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
         const JobHandle handle = batch.handle;
         m_streaming_state.generation_batches.push_back(std::move(batch));
         return handle;
     }
-    return {}; // no batch dispatched (all requests skipped, or no job system)
+    if (!jobs.empty()) {
+        for (auto& job : jobs) {
+            job();
+        }
+        m_streaming_state.generation_batches.push_back(std::move(batch));
+        publish_completed_generation_jobs(/*force=*/false);
+    }
+    return {}; // inline execution, or every request was already generated
 }
 
-std::size_t
-SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
+bool SHIELD_WorldSystem::deferred_meshing_pending() const {
+    return m_deferred_meshing_cursor < m_deferred_meshing.size();
+}
+
+SHIELD_WorldSystem::MeshingDispatchResult SHIELD_WorldSystem::dispatch_deferred_meshing() {
+    const auto result = dispatch_meshing_jobs(
+        std::span<const MeshingWorkItem>(m_deferred_meshing).subspan(m_deferred_meshing_cursor),
+        m_deferred_meshing_due_tick);
+    m_deferred_meshing_cursor += result.consumed;
+    if (!deferred_meshing_pending()) {
+        m_deferred_meshing.clear();
+        m_deferred_meshing_cursor = 0;
+        m_deferred_meshing_due_tick = -1;
+    }
+    return result;
+}
+
+SHIELD_WorldSystem::MeshingDispatchResult
+SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunks_to_mesh,
+                                          std::int64_t due_tick) {
+    const MeshingSnapshotPass snapshot_pass(m_last_meshing_snapshot_bytes,
+                                            m_meshing_snapshot_pass_active);
     process_completed_meshing_jobs(/*force=*/false);
     //  5b: refuse by FIFO depth (deterministic), not by raw job
-    // activity. Refused items re-candidate on a later pass, as always.
-    if (m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight) {
-        return 0;
+    // activity. Unconsumed descriptors stay queued for a later bounded pass.
+    const auto batch_depth = m_streaming_state.meshing_batches.size();
+    // If every ordinary batch is due after a pending promotion, retain one
+    // of the nine slots for stage B. Batches due by the promotion tick can
+    // fill the lane: activate_due drains them before completing the handoff.
+    if (batch_depth >= kMaxMeshingBatchesInFlight ||
+        (batch_depth + 1u >= kMaxMeshingBatchesInFlight && promotion_pipeline_pending() &&
+         due_tick > m_streaming_state.promotion_due_tick &&
+         m_streaming_state.meshing_batches.front().due_tick >
+             m_streaming_state.promotion_due_tick)) {
+        return {};
     }
 
     //  ( step 1): LOD0 promotions of chunks without a full
@@ -5309,13 +5548,38 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
     std::vector<MeshingWorkItem> promotion_items;
     std::vector<MeshingWorkItem> mesh_items;
     mesh_items.reserve(chunks_to_mesh.size());
+    std::size_t reserved_bytes = m_last_meshing_snapshot_bytes;
+    std::size_t consumed = 0;
+    // The existing candidate-count cap bounds classification; this byte budget
+    // additionally bounds all bulk copies, including inline promotion re-entry.
     for (const MeshingWorkItem& work_item : chunks_to_mesh) {
+        const auto live = m_streaming_state.chunks.find(work_item.chunk->get_id());
+        if (live == m_streaming_state.chunks.end() || live->second != work_item.chunk ||
+            work_item.chunk->pending_lod.load(std::memory_order_acquire) >= 0) {
+            ++consumed;
+            continue;
+        }
         const int step = get_lod_step_for_level(work_item.lod_level);
         const bool has_malformed_sdf = work_item.terrain_mesh_required &&
                                        !work_item.chunk->sdf_data.empty() &&
                                        work_item.chunk->sdf_data.size() != kFullSdfLattice;
         const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
                                      work_item.chunk->sdf_data.size() != kFullSdfLattice;
+        const bool promotion_required = needs_sim_truth || has_malformed_sdf;
+        if (promotion_required && promotion_pipeline_pending()) {
+            break;
+        }
+        const std::size_t snapshot_bytes =
+            promotion_required
+                ? kMaxMeshingSnapshotBytes
+                : MeshingSnapshotBytes(*work_item.chunk, work_item.terrain_mesh_required);
+        if (snapshot_bytes > kMeshingSnapshotByteBudget - reserved_bytes) {
+            // Leave the sorted suffix untouched: no flags, versions or pending-LOD
+            // reservations change. A fresh pass always fits one maximum-sized item.
+            break;
+        }
+        reserved_bytes += snapshot_bytes;
+        ++consumed;
         if (has_malformed_sdf) {
             LUMINUMBRA_CORE_WARN(
                 "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
@@ -5326,8 +5590,7 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
                 work_item.chunk->sdf_data.size(),
                 kFullSdfLattice);
         }
-        ((needs_sim_truth || has_malformed_sdf) ? promotion_items : mesh_items)
-            .push_back(work_item);
+        (promotion_required ? promotion_items : mesh_items).push_back(work_item);
     }
     // Guard: only hand items to the promotion lane when its whole pipeline is
     // idle. This makes the stage-B re-entry into dispatch_meshing_jobs
@@ -5335,40 +5598,20 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
     // dispatch_promotion_jobs' head can only ever see empty state from here),
     // rather than relying on the caller-side scheduling gate alone. Refused
     // items re-candidate on a later pass — the meshing lane's semantics.
-    std::size_t accepted_promotions = 0;
+    std::size_t admitted_promotions = 0;
     if (!promotion_items.empty() && !promotion_pipeline_pending()) {
-        accepted_promotions = dispatch_promotion_jobs(promotion_items);
+        admitted_promotions = dispatch_promotion_jobs(promotion_items, due_tick);
     }
     if (mesh_items.empty()) {
-        return accepted_promotions;
+        const auto submitted = static_cast<std::size_t>(std::count_if(
+            promotion_items.begin(), promotion_items.end(), [](const MeshingWorkItem& item) {
+                return item.current_candidate;
+            }));
+        return {admitted_promotions, consumed, admitted_promotions == 0 ? 0 : submitted};
     }
 
-    // Snapshot meshed-chunk LODs per horizontal column once so the
-    // transition-face checks below are hash lookups instead of a full
-    // chunk-map scan per face per work item (O(batch * chunks) before,
-    // which dominated the dispatch frame once backlog-scaled batches
-    // landed). Mirrors the candidate-side snapshot built in update.
-    struct DispatchMeshedColumnEntry {
-        const Luminumbra::Chunk* chunk = nullptr;
-        int y = 0;
-        int lod = 0;
-    };
-    std::unordered_map<u64, std::vector<DispatchMeshedColumnEntry>> meshed_columns;
-    meshed_columns.reserve(m_streaming_state.chunks.size());
-    for (const auto& [neighbor_id, neighbor] : m_streaming_state.chunks) {
-        (void)neighbor_id;
-        if (!neighbor || neighbor->mesh_vertices.empty() || neighbor->mesh_indices.empty()) {
-            continue;
-        }
-        const int neighbor_lod = neighbor->current_lod.load(std::memory_order_acquire);
-        if (neighbor_lod < 0) {
-            continue;
-        }
-        const IVec3 neighbor_coords = neighbor->get_coords();
-        meshed_columns[horizontal_chunk_key(neighbor_coords.x, neighbor_coords.z)].push_back(
-            {neighbor.get(), neighbor_coords.y, neighbor_lod});
-    }
-
+    // Transition masks travel with the finite scheduler prefix. Subpasses
+    // never rescan the world; later scheduler passes detect newly arrived seams.
     // Near-field hole-fill candidates (no active mesh yet, capped prefix of
     // the sorted batch) ride the High job lane so visible gaps close ahead of
     // bulk meshing, generation, and LOD/water remeshes; everything else stays
@@ -5376,12 +5619,12 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
     // prefix first, so this mirrors the existing priority order.
     std::vector<Luminumbra::Job> high_priority_jobs;
     std::vector<Luminumbra::Job> normal_priority_jobs;
-    // build this dispatch's batch record locally; it is
-    // appended to the lane FIFO at the dispatch below. The due stamp (5a-3)
+    // Build this dispatch's batch record locally; insert it in stable due
+    // order below. Stage B can arrive after ordinary batches due later.
+    // The due stamp (5a-3)
     // is inert until the barrier swap; -1 = publish-when-drained (client).
     StreamingState::MeshingBatch mesh_batch;
-    mesh_batch.due_tick =
-        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+    mesh_batch.due_tick = due_tick;
     mesh_batch.chunks.reserve(mesh_items.size());
     for (const MeshingWorkItem& work_item : mesh_items) {
         auto& chunk = work_item.chunk;
@@ -5402,86 +5645,70 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(lod_level, std::memory_order_release);
 
-        auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
-        if (terrain_mesh_required && step > 1) {
-            const IVec3 coords = chunk->get_coords();
-            auto add_face_if_neighbor_is_finer =
-                [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
-                    const auto column_it =
-                        meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
-                    if (column_it == meshed_columns.end()) {
-                        return;
-                    }
-                    for (const DispatchMeshedColumnEntry& entry : column_it->second) {
-                        if (entry.chunk == chunk.get()) {
-                            continue;
-                        }
-                        if (entry.lod < lod_level ||
-                            (entry.lod != lod_level && entry.y != coords.y)) {
-                            transition_faces |= static_cast<
-                                Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
-                            return;
-                        }
-                    }
-                };
-
-            add_face_if_neighbor_is_finer(
-                -1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
-            add_face_if_neighbor_is_finer(
-                1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
-            add_face_if_neighbor_is_finer(
-                0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
-            add_face_if_neighbor_is_finer(
-                0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
+        const auto transition_faces = terrain_mesh_required && step > 1
+                                          ? work_item.transition_faces
+                                          : Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+        // Snapshot every mutable chunk input before enqueueing. Water keeps advancing
+        // while batches are pending; workers must never read its live vectors.
+        auto scratch_owner = std::make_shared<Luminumbra::Chunk>(chunk->get_coords());
+        auto& snapshot = *scratch_owner;
+        m_last_meshing_snapshot_bytes += MeshingSnapshotBytes(*chunk, terrain_mesh_required);
+        const int resolution = chunk->current_water_resolution.load(std::memory_order_acquire);
+        snapshot.current_water_resolution.store(resolution, std::memory_order_release);
+        // Water snapshots are bounded by the maximum 32*32 simulation grid.
+        // Validate before multiplying or copying, including corrupt saved metadata.
+        if (resolution > 1 && resolution <= 32) {
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+            const auto copy_mirror = [cells](const auto& source, auto& destination) {
+                destination.assign(source.begin(),
+                                   source.begin() +
+                                       static_cast<std::ptrdiff_t>(std::min(cells, source.size())));
+            };
+            copy_mirror(chunk->water_level_data, snapshot.water_level_data);
+            copy_mirror(chunk->water_flow_data, snapshot.water_flow_data);
+            copy_mirror(chunk->water_sim_terrain_height, snapshot.water_sim_terrain_height);
+            // The mesher uses depth only for an exact grid; missing, partial
+            // and oversized grids all use the procedural-height fallback.
+            if (chunk->water_depth_mm.size() == cells) {
+                snapshot.water_depth_mm = chunk->water_depth_mm;
+            }
+            snapshot.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
+                                         std::memory_order_release);
         }
-        mesh_batch.chunks.push_back({chunk, terrain_mesh_required, transition_faces});
+        if (terrain_mesh_required) {
+            // Classification above guarantees an empty or exact full lattice.
+            // Each terrain channel is bounded by one chunk's padded lattice.
+            snapshot.sdf_data = chunk->sdf_data;
+            if (chunk->heightmap_data.size() == kHeightmapCells) {
+                snapshot.heightmap_data = chunk->heightmap_data;
+            }
+            if (chunk->material_data.size() == kFullSdfLattice) {
+                snapshot.material_data = chunk->material_data;
+            }
+        }
+        mesh_batch.chunks.push_back({chunk,
+                                     terrain_mesh_required,
+                                     transition_faces,
+                                     scratch_owner,
+                                     chunk->mesh_version.load(std::memory_order_acquire),
+                                     chunk->water_mesh_version.load(std::memory_order_acquire),
+                                     chunk->voxel_revision()});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
-        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
+        lane_jobs.emplace_back([this,
+                                chunk,
+                                scratch_owner = std::move(scratch_owner),
+                                step,
+                                transition_faces,
+                                terrain_mesh_required]() {
             try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope(); //
-                Luminumbra::Chunk scratch(chunk->get_coords());
-                scratch.water_level_data = chunk->water_level_data;
-                scratch.water_flow_data = chunk->water_flow_data;
-                scratch.water_sim_terrain_height = chunk->water_sim_terrain_height;
-                scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
-                                            std::memory_order_release);
-                scratch.water_mesh_generated.store(false, std::memory_order_release);
-                scratch.current_water_resolution.store(
-                    chunk->current_water_resolution.load(std::memory_order_acquire),
-                    std::memory_order_release);
-
+                // World samplers read seed/params/noise only. Their setters drain the
+                // streaming lanes before mutation; the epoch scope also protects noise.
+                // SetWaterSystem likewise drains meshing before replacing the pointer.
+                const auto worldgen_scope = acquire_worldgen_sample_scope();
+                auto& scratch = *scratch_owner;
                 if (terrain_mesh_required) {
-                    if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
-                        //  tripwire: meshing NEVER generates sim
-                        // truth. A unit-step item without a full live voxel
-                        // field must have been routed through the promotion
-                        // lane at dispatch — reaching here is a regression of
-                        // the activation queue decoupling, not a recoverable state.
-                        LUMINUMBRA_CORE_ERROR(
-                            "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
-                            "lane without full sim truth (sdf size {} != {}) — the  "
-                            "promotion routing is broken; failing the mesh",
-                            chunk->get_coords().x,
-                            chunk->get_coords().y,
-                            chunk->get_coords().z,
-                            chunk->sdf_data.size(),
-                            kFullSdfLattice);
-                        chunk->pending_mesh_failed.store(true, std::memory_order_release);
-                        return;
-                    }
-                    scratch.sdf_data = chunk->sdf_data;
-                    scratch.heightmap_data = chunk->heightmap_data;
-                    // carry the live material channel so stage-B
-                    // promotion meshes classify authored structure voxels
-                    // exactly as the old fused backfill+mesh job did (its
-                    // scratch had materials stamped by GenerateChunkData).
-                    // Also fixes the latent authored-material loss on plain
-                    // remeshes, which copied only sdf+heightmap. Mesh bytes
-                    // are world_hash-excluded either way (empty -> empty,
-                    //  lazy alloc preserved).
-                    scratch.material_data = chunk->material_data;
-
                     // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
                     Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
                     Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
@@ -5509,9 +5736,6 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
                 }
                 chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
                 chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
-                chunk->water_mesh_generated.store(
-                    scratch.water_mesh_generated.load(std::memory_order_acquire),
-                    std::memory_order_release);
                 chunk->pending_mesh_ready.store(true, std::memory_order_release);
 
                 // Job completion debug logging removed to prevent segfault
@@ -5540,7 +5764,6 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
         if (!normal_priority_jobs.empty()) {
             mesh_batch.handle = m_job_system->dispatch_batch(normal_priority_jobs);
         }
-        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
     } else {
         for (auto& job : high_priority_jobs) {
             job();
@@ -5548,10 +5771,32 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
-        process_completed_meshing_jobs(/*force=*/true);
     }
-    return accepted_promotions + mesh_items.size();
+    // At most nine records: insertion moves only bounded batch descriptors,
+    // never chunk buffers. upper_bound preserves dispatch order for equal ticks,
+    // including unticked (-1) client batches.
+    auto& batches = m_streaming_state.meshing_batches;
+    const auto position =
+        std::upper_bound(batches.begin(),
+                         batches.end(),
+                         due_tick,
+                         [](std::int64_t due, const StreamingState::MeshingBatch& batch) {
+                             return due < batch.due_tick;
+                         });
+    batches.insert(position, std::move(mesh_batch));
+    if (!m_job_system) {
+        process_completed_meshing_jobs(/*force=*/false);
+    }
+    const auto candidate_count = [](const std::vector<MeshingWorkItem>& items) {
+        return static_cast<std::size_t>(
+            std::count_if(items.begin(), items.end(), [](const MeshingWorkItem& item) {
+                return item.current_candidate;
+            }));
+    };
+    return {admitted_promotions + mesh_items.size(),
+            consumed,
+            candidate_count(mesh_items) +
+                (admitted_promotions == 0 ? 0 : candidate_count(promotion_items))};
 }
 
 bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
@@ -5583,7 +5828,14 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
         const bool mesh_ready = chunk->pending_mesh_ready.load(std::memory_order_acquire);
         const bool mesh_failed = chunk->pending_mesh_failed.load(std::memory_order_acquire);
 
-        if (mesh_ready && !mesh_failed) {
+        const auto live = m_streaming_state.chunks.find(chunk->get_id());
+        const bool current_result =
+            live != m_streaming_state.chunks.end() && live->second == chunk &&
+            chunk->mesh_version.load(std::memory_order_acquire) == job_chunk.mesh_version &&
+            chunk->water_mesh_version.load(std::memory_order_acquire) ==
+                job_chunk.water_mesh_version &&
+            chunk->voxel_revision() == job_chunk.voxel_revision;
+        if (mesh_ready && !mesh_failed && current_result) {
             if (job_chunk.terrain_mesh_required) {
                 //  ( step 1): the LOD0-promotion backfill
                 // publish that used to live here moved to
@@ -5603,7 +5855,34 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
             chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
             chunk->water_mesh_version++;
-            chunk->water_mesh_dirty_ticks = 0;
+            // Publish the dispatch state, but retain any invalidation caused by
+            // subsequent simulation ticks. Comparison is bounded by 32*32 cells;
+            // malformed/oversized live grids cannot trigger an unbounded copy.
+            const auto& snapshot = *job_chunk.scratch;
+            const int resolution =
+                snapshot.current_water_resolution.load(std::memory_order_acquire);
+            const auto cells =
+                resolution > 1 && resolution <= 32
+                    ? static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)
+                    : 0u;
+            const bool water_unchanged =
+                chunk->current_water_resolution.load(std::memory_order_acquire) == resolution &&
+                chunk->has_water_sim.load(std::memory_order_acquire) ==
+                    snapshot.has_water_sim.load(std::memory_order_acquire) &&
+                cells != 0u && snapshot.water_level_data.size() == cells &&
+                chunk->water_level_data.size() >= cells &&
+                std::equal(snapshot.water_level_data.begin(),
+                           snapshot.water_level_data.end(),
+                           chunk->water_level_data.begin()) &&
+                // Match depth availability as well as values. Unused tails
+                // and unavailable depth values cannot invalidate the mesh.
+                (chunk->water_depth_mm.size() == cells) == !snapshot.water_depth_mm.empty() &&
+                std::equal(snapshot.water_depth_mm.begin(),
+                           snapshot.water_depth_mm.end(),
+                           chunk->water_depth_mm.begin());
+            chunk->water_mesh_generated.store(
+                water_unchanged && snapshot.water_mesh_generated.load(std::memory_order_acquire),
+                std::memory_order_release);
             chunk->set_state(Luminumbra::ChunkState::Ready);
         } else if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
             chunk->set_state(Luminumbra::ChunkState::Idle);
@@ -5630,9 +5909,8 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
 }
 
 void SHIELD_WorldSystem::process_completed_meshing_jobs(bool force) {
-    // Drain every publishable front batch, in FIFO order (publication order
-    // == dispatch order — deterministic; stops at the first still-running or
-    // not-yet-due batch so later batches never publish ahead of an earlier one).
+    // Drain publishable front batches in stable due order. Both job lanes must
+    // finish before publication; explicit force drains ignore tick stamps.
     while (publish_front_meshing_batch(force)) {}
 }
 
@@ -5641,14 +5919,12 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
     // GenerateChunkData concurrently, so generator state must not be mutated
     // until the whole pipeline (including stage B) has settled.
     wait_for_streaming_jobs();
-    wait_for_hydro_prefetch_jobs();
 
     reinitialize_noise(&params);
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
     wait_for_streaming_jobs();
-    wait_for_hydro_prefetch_jobs();
 
     reinitialize_noise(nullptr, seed);
 }
@@ -5662,6 +5938,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
         }
     }
     m_streaming_state.chunks.clear();
+    m_deferred_generation_candidates = 0;
     m_shadow_generation_dispatch_tick.clear();
     m_shadow_promotion_dispatch_tick.clear();
     LUMINUMBRA_CORE_INFO("World cleared.");
@@ -5681,7 +5958,7 @@ void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
 }
 
 void SHIELD_WorldSystem::SetWaterSystem(WaterSystem* water_system) {
-    wait_for_meshing_jobs();
+    wait_for_admitted_streaming_jobs();
 
     m_water_system = water_system;
 }
@@ -5692,21 +5969,25 @@ IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
                  static_cast<int>(std::floor(position.z / CHUNK_SIZE_Z)));
 }
 
-void SHIELD_WorldSystem::wait_for_streaming_jobs() {
-    //  ( step 1): the SEQUENCED drain. Sim truth for LOD0
-    // promotions is generated on the promotion lane and published before its
-    // render mesh is dispatched (stage B) — and the whole two-stage pipeline
-    // still settles inside ONE call, so every per-tick observation point
-    // (availability digest, collision pass, water init, world_hash) sees
-    // exactly the same settled state per tick as the old fused pipeline.
+void SHIELD_WorldSystem::wait_for_admitted_streaming_jobs() {
+    // Fence every admitted lane and publish both promotion stages before a
+    // dependency can change. Budget-deferred descriptors hold no worker inputs
+    // or dependency pointers; full synchronous observations settle those below.
     wait_for_generation_jobs();
+    wait_for_hydro_prefetch_jobs();
     wait_for_meshing_jobs();   // publish any in-flight render meshes; frees the lanes
     wait_for_promotion_jobs(); // publish staged sim truth + dispatch stage B
     wait_for_meshing_jobs();   // publish stage-B render meshes — same call, same tick
-    if (promotion_pipeline_pending()) {
-        LUMINUMBRA_CORE_ERROR(
-            "wait_for_streaming_jobs: promotion pipeline still pending after the "
-            "sequenced drain — the activation queue same-tick settlement invariant is broken");
+}
+
+void SHIELD_WorldSystem::wait_for_streaming_jobs() {
+    wait_for_admitted_streaming_jobs();
+    // The finite scheduler prefix also owns requests not yet admitted under the
+    // 256 KiB snapshot bound. Each subpass consumes at least one descriptor;
+    // promotion stages settle before the next one. No world rescan or retries.
+    while (deferred_meshing_pending()) {
+        dispatch_deferred_meshing();
+        wait_for_admitted_streaming_jobs();
     }
 }
 
@@ -5752,7 +6033,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
         affected_z[z_count++] = home_rz + 1;
 
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     for (std::size_t z = 0; z < z_count; ++z) {
         for (std::size_t x = 0; x < x_count; ++x) {
             m_far_lod_region_revisions[{affected_x[x], affected_z[z]}] = revision;
@@ -5761,7 +6045,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
 }
 
 u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const {
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     const auto found = m_far_lod_region_revisions.find({rx, rz});
     return found == m_far_lod_region_revisions.end() ? 0u : found->second;
 }
