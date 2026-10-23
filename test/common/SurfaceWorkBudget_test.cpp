@@ -410,14 +410,34 @@ TEST(SurfaceWorkBudget, TallSurfaceRefusalRetainsUnpublishedPromotionBatch) {
     EXPECT_EQ(world.snapshot_streamed_chunks().size(), 1u);
     EXPECT_EQ(world.far_lod_authority_revision(), original_revision);
 
-    // Stage A publishes at tick 8; its stage-B mesh retains its own due tick.
+    // Completed stage-A data stays unpublished until the original due tick.
+    world.begin_tick(7);
+    world.activate_due(7);
+    EXPECT_EQ(world.pending_publication_chunks(), 1u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Meshing);
+    EXPECT_EQ(chunk->pending_lod.load(), 0);
+    EXPECT_TRUE(chunk->pending_promotion_ready.load());
+    EXPECT_FALSE(chunk->pending_promotion_failed.load());
+    EXPECT_EQ(chunk->current_lod.load(), original_lod);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version);
+    EXPECT_EQ(chunk->sdf_data, original_sdf);
+    EXPECT_EQ(chunk->pending_sdf_data, staged_sdf);
+    EXPECT_EQ(chunk->heightmap_data, original_heightmap);
+    EXPECT_EQ(world.far_lod_authority_revision(), original_revision);
+
+    // Stage B inherits stage A's due tick, so this activation publishes both.
     world.begin_tick(8);
     world.activate_due(8);
     EXPECT_EQ(chunk->sdf_data, staged_sdf);
     EXPECT_TRUE(chunk->pending_sdf_data.empty());
     EXPECT_FALSE(chunk->pending_promotion_ready.load());
-    EXPECT_EQ(world.pending_publication_chunks(), 1u);
-    EXPECT_EQ(chunk->mesh_version.load(), original_version);
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Ready);
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_EQ(chunk->current_lod.load(), 0);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);
+
+    // A later fence and activation cannot publish the same mesh twice.
     world.quiesce_streaming_jobs_for_save();
     world.begin_tick(16);
     world.activate_due(16);
