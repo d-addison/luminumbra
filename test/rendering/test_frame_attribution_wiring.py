@@ -193,6 +193,25 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertRegex(main, r"rb_stream_ms, rb_render_bucket_ms, _presentMs, _other,")
         self.assertIn("rb_render_call += rb_render_call_ms;", main)
 
+    def test_slow_frame_keeps_far_reporting_with_exclusive_attribution(self):
+        slow = compact(block(self.main, "if (_wallMs > 12.0"))
+        self.assertIn("const auto slow_far = renderPipeline.far_world_reporting_state();", slow)
+        self.assertIn("frame_attribution_enabled ? buckets.other(_wallMs, phase_scope.snapshot())", slow)
+        self.assertRegex(slow, r"rb_stream_ms, rb_render_bucket_ms, _presentMs, _other,")
+        for field in ("far_requested", "far_effective", "far_refusal", "far_suppressed",
+                      "far_submission_refusal", "far_settled"):
+            self.assertIn(field + "={}", slow)
+        for value in ("FarWorldModeName(slow_far.selection.requested)",
+                      "FarWorldModeName(slow_far.selection.effective)",
+                      "FarWorldRefusalName(slow_far.selection.refusal)",
+                      "FarWorldReportSuppressed(slow_far)",
+                      "FarWorldSubmissionRefusalName( slow_far.submission_refusal)",
+                      "slow_far.coverage_settled"):
+            self.assertIn(value, slow)
+        self.assertIn("foliage_frame.rebuild_ms, rb_menu_ms, rb_ui_ms,", slow)
+        self.assertIn('"foliage={:.1f} menu={:.1f} ui={:.1f} | "', slow)
+        self.assertIn("foliage-split:", slow)
+
     def test_collection_and_split_log_require_explicit_opt_in(self):
         main = compact(self.main)
         self.assertIn('frame_csv_enabled = HasCommandLineFlag(argc, argv, "--frame-attribution-csv")', main)
@@ -270,6 +289,13 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertGreater(len(timers), 10)
         for arguments in timers:
             self.assertTrue(compact(arguments).endswith(", collect_attribution"))
+
+    def test_const_frame_scopes_allow_callback_collection(self):
+        scope = block(self.header, "class FoliageFrameScope")
+        self.assertIn("mutable FoliageFrame m_frame{};", scope)
+        runtime = read(ROOT / "test/rendering/graphics_runtime_test.cpp")
+        self.assertIn("const Attribution::FoliageFrameScope frame(true);", runtime)
+        self.assertIn("return frame.snapshot().rebuild.reasons;", runtime)
 
     def test_both_frozen_entry_points_are_counted_once(self):
         rebuild = block(self.foliage, "void FoliagePass::rebuild_instances(")

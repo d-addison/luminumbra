@@ -3117,7 +3117,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         PrefetchHydroRegions(anchor.x, anchor.z, 768.0f);
     }
 
+    // Diagnostic backlog survives between activation passes, even after dispatched
+    // batches drain. Only the next activation pass recomputes these deferrals.
+    const auto deferred_generation = m_last_streaming_budget_stats.deferred_generation;
     m_last_streaming_budget_stats = {};
+    m_last_streaming_budget_stats.deferred_generation = deferred_generation;
     m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
     m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
@@ -3655,6 +3659,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     }
     m_streaming_telemetry_stats.max_deferred_age_frames = std::max(
         m_streaming_telemetry_stats.max_deferred_age_frames, m_deferred_backlog_age_frames);
+    // Cache publication-pending work after dispatch. Lane capacity and raw worker
+    // completion do not establish that the streaming pipeline has settled.
+    m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
+    m_last_streaming_budget_stats.meshing_job_active =
+        meshing_batch_outstanding() || promotion_pipeline_pending();
 }
 
 bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors,

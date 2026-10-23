@@ -11,8 +11,9 @@ activation evidence remain separate work.
 `--render-benchmark output.json` continues to write
 `luminumbra.render_benchmark.v2`. The default frame count (120), warmup (60),
 3840×1600 capture size, configured render scale, legacy GPU timer ring and v2
-writer remain the legacy path. Omitting every new option allocates no measurement
-ring and issues no additional GL queries. No system configuration entry is added.
+writer retain their existing behavior. Both benchmark schemas allocate a bounded
+frame ring for far-mode evidence; only v3 issues additional GL queries. Ordinary
+play allocates no measurement ring. No system configuration entry is added.
 World generation, hash order, saves, preset revision 6, LMR1 container v2, world
 manifest v1 and FSD2 payload v3 are unaffected.
 
@@ -46,7 +47,12 @@ measurement starts; disagreement is refused with exit 2. V3 needs
 1..18000 measured frames and 1..18000 warmup frames. It does not silently
 truncate a window, drop overflow samples, or substitute a missing timer with zero.
 V3 writes JSON in binary stream mode; the v2 writer retains its existing mode.
-An incomplete v3 artifact write makes the client exit unsuccessfully.
+An incomplete artifact write makes the client exit unsuccessfully for either
+schema, including open, directory creation, partial write, flush and close errors.
+Workload options accept both separate values and assignment form (for example,
+`--render-benchmark-frames=4`) without becoming debug overrides. Assignment form
+never consumes the following argument; other CLI options still require exact
+override declarations.
 
 Example fixed view (the shader-state checks remain optional for v3):
 
@@ -73,6 +79,78 @@ frame count equals the expected tick count, within the 18000-frame capacity.
 Streaming transients inside the measured window are included. The example is
 surface flight only; cave-walk and edited-world save/bake qualification are not
 supplied.
+
+## Far-mode reporting and Ladder baselines
+
+Both v2 and v3 include `far_world.frames`, one row for every measured frame,
+and `far_world.summary`. Warmup and the report/screenshot frame are excluded.
+Measured windows in both schemas are bounded to 1..18000 frames; oversized
+requests fail before allocating sample storage. Rendering selection, authority
+binding, scheduling and submission are unchanged by this instrumentation (issue #392).
+
+Each row records `frame`, `requested_mode`, `effective_mode` (`legacy` or
+`ladder`), `refusal` (the exact selection enum name), `submission_refusal` (the
+exact submission enum name), `suppressed`, and `coverage_settled`. Suppression
+includes both the submission override and submission refusals such as
+`LiveOwnershipIncomplete`; these can leave the effective mode as Ladder.
+Coverage is settled only with a complete captured and advanced Ladder snapshot,
+available water, a nonempty wanted set, current covering and settled counts equal
+to wanted in every tier, no pending/building/ready work, rejected or evicted tiles,
+horizon refusal, incomplete water coverage or draw refusal. Tile and tier wanted
+counts must agree. This reports current far coverage, without
+certifying the independent station expected-set or 90-second qualification gate.
+
+Each row's `settings` records resolved `gns_compiled` (standalone
+GameNetworkingSockets build availability, including both enabled and disabled
+builds), `water_cells_per_side` (actual water solver resolution), `active_regions`
+(the session value) and `grass_density_scale` (the foliage pass value, or `null`
+when absent). Row `content_identity` is the immutable far authority's decimal
+uint64 identity, with `"0"` meaning unavailable. `world_content_identity` records
+the loaded terrain/content hash; v3 additionally retains its existing workload
+preset revision, preset identity and world content identity. The summary contains
+count maps for `requested_mode`, `effective_mode`, `refusal`,
+`submission_refusal`, plus `suppressed_frames` and `unsettled_frames`. Each row
+also includes cached `streaming` counts for `generation_pending`,
+`meshing_pending` and `terrain_uploads_pending`, plus `generation_outstanding`
+and `meshing_outstanding` booleans. The counts describe deferred work; the
+booleans include dispatched batches awaiting publication and the promotion
+pipeline. A frame is counted as unsettled if its far coverage is unsettled,
+any streaming count is nonzero, or either outstanding flag is true. Terrain
+isolation reports `suppressed=true` with `submission_refusal=IsolationSuppressed`
+for both Legacy and Ladder, because the G-buffer gates their shared submission
+path on the Terrain layer.
+
+Startup logs the current requested/effective mode, selection refusal, suppression
+and submission refusal. Subsequent mode or reason changes and submission
+suppression/refusal transitions log once per transition. Coverage settling alone
+does not generate a mode-transition log. SLOWFRAME lines include these far-mode
+fields and the settled flag.
+
+Any run submitted as a **Ladder baseline** must use `--ladder-baseline`:
+
+```sh
+python3 tools/perf/validate_render_capture.py capture.json \
+  --qualified-renderer 'NVIDIA GeForce RTX 5070 Ti' --ladder-baseline
+python3 tools/perf/perf.py validate capture.json --ladder-baseline
+```
+
+The first command performs full v3 measurement validation plus the Ladder rule.
+The second checks only the measured far-mode evidence in either benchmark
+schema; it does not establish timer, adapter or performance validity. With the
+full v2 checker, also supply its existing pose/TOD arguments. The Ladder rule
+rejects missing, malformed, noncontiguous or incomplete frame evidence,
+inconsistent summary counts, and any measured frame requesting/effectively using
+Legacy, reporting a refusal, suppressed submission, unsettled far coverage or
+pending streaming work, or an unavailable (zero) far authority content identity.
+It cannot be waived by override declarations or by a passing final report frame.
+Older captures without these additive fields remain diagnostic inputs when the
+Ladder-baseline rule is not requested; they cannot qualify as Ladder baselines.
+The existing registered FarWorldDiagnostics C++ cases cover transition decisions,
+coverage and serialization. The registered performance and render-contract Python
+suites cover refusal controls and repair of individual measured frames.
+`RenderBenchmarkMeasuredFrameBounds` registers strict v2/v3 frame-count refusals,
+and `RenderBenchmarkIsolationSubmission` checks isolation reporting. The
+existing native runner cases require far-mode rows and the dynamic startup log.
 
 ## Artifact v3
 

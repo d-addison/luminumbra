@@ -3356,7 +3356,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md and the ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the half-open interval on both axes; an integrated boundary regression for walking anchors, ground-object edits and region pins with full endpoint coverage remains planned under issue #250.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; an integrated boundary regression with full endpoint coverage remains planned; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250. Full walking-anchor, ground-object edit and pin boundary coverage remains planned.",
       "evidence": [
         {
           "kind": "ctest",
@@ -3369,6 +3369,11 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals",
+          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both X and Z endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
         },
         {
           "kind": "ctest",
@@ -5150,6 +5155,127 @@
       ]
     },
     {
+      "id": "render.benchmark-far-frame-storage",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. Only v3 issues additional GL queries.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkFrameCountStrictlyParsesBeforeApplyingBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkSerializesEveryMeasuredFarStateAndSummary"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-output-completion",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasRejectPartialWritesAndFlushFailures"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasCheckFileOpenAndDirectoryCreation"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-workload-assignments",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Assignment-form workload options do not become debug overrides or consume successor arguments; non-workload options remain observable overrides.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOverrides.WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides"
+        }
+      ]
+    },
+    {
+      "id": "content.foliage-directory-recovery",
+      "source": "docs/engine-guide.md#shipping-defaults",
+      "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageScanFailuresRemainRetryable"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageFileIoFailureRollsBackBeforeRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageDirectoryProviderExceptionsAreContained"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageUnavailableAndEmptyDirectoriesHaveDistinctResults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSpeciesUsePortableFilenameOrderForDuplicateIds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesRetriesAtDeadlineAndLogsOnlyTransitions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesEmptySuccessIsCachedAndRecoveryIsReportedOnce"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+        }
+      ]
+    },
+    {
+      "id": "render.ladder-content-identity",
+      "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
+      "statement": "Both benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/perf/test_perf.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+
+        }
+      ]
+    },
+    {
       "id": "render.committed-residency-handoff",
       "source": "docs/far-volume-memory.md#serving-and-target-handoff",
       "statement": "The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Bounded retired-key history permits traversal beyond descriptor capacity while preserving serving/target span checks and global publication checks. Controller, renderer and diagnostic regressions using a fake GPU driver cover software behaviour for result-slot backpressure, overlap admission, supersession, upload failure and drain ownership. Native rendering qualification is still outstanding.",
@@ -5583,26 +5709,6 @@
       "requirements": [
         "dw.station.099",
         "dw.station.100"
-      ]
-    },
-    {
-      "id": "graphics.horizon-authority",
-      "source": "docs/engine-guide.md#world-generation-and-streaming",
-      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
-      "status": "covered",
-      "evidence": [
-        {
-          "kind": "ctest",
-          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
-        },
-        {
-          "kind": "ctest",
-          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
-        },
-        {
-          "kind": "ctest",
-          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
-        }
       ]
     },
     {

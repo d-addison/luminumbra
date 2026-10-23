@@ -1069,7 +1069,7 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // write the FULL in-memory streamed-chunk set (not dirty-gated) so
     // a loaded session can adopt exactly this set. Reuses WorldSaveService.
     if (!m_booted || !m_session || !m_session->GetWorldSystem() ||
-        !m_session->IsSimulationTickBoundary() || !m_session->GetWorldOpenError().empty()) {
+        !m_session->IsSimulationTickBoundary()) {
         return 0;
     }
     const std::filesystem::path save_dir = m_session->GetWorldSaveDir();

@@ -4,6 +4,45 @@
 #include <nlohmann/json.hpp>
 
 namespace Luminumbra::Rendering {
+bool FarWorldReportChanged(const std::optional<FarWorldReportingState>& previous,
+                           const FarWorldReportingState& current) noexcept {
+    return !previous || previous->selection.requested != current.selection.requested ||
+           previous->selection.effective != current.selection.effective ||
+           previous->selection.refusal != current.selection.refusal ||
+           previous->selection.submit != current.selection.submit ||
+           previous->submission_refusal != current.submission_refusal;
+}
+
+FarWorldReportingState FarWorldReportState(const FarWorldDiagnosticSnapshot& s,
+                                           bool terrain_submission) noexcept {
+    FarWorldReportingState result{
+        .selection = s.selection,
+        .submission_refusal = terrain_submission ? s.submission_refusal
+                                                 : FarWorldSubmissionRefusal::IsolationSuppressed,
+        .coverage_settled = s.captured && s.complete && s.advanced &&
+                            s.selection.effective == FarWorldMode::Ladder &&
+                            !s.upload.horizon_refused && s.ladder_water_available};
+    std::size_t remaining = s.tile_count;
+    result.coverage_settled =
+        result.coverage_settled && remaining > 0 && remaining <= s.tiles.size();
+    // Five fixed tiers: no tile traversal or allocation in per-frame reporting.
+    for (const auto& tier : s.tiers) {
+        const auto& resident = tier.resident;
+        if (resident.wanted > remaining)
+            result.coverage_settled = false;
+        else
+            remaining -= resident.wanted;
+        result.coverage_settled =
+            result.coverage_settled && resident.wanted == resident.settled &&
+            resident.wanted == resident.covering && !resident.pending && !resident.building &&
+            !resident.ready && !resident.request_rejected && !resident.budget_evicted &&
+            !tier.draw_refusals && resident.water_known_dry_tiles <= resident.wanted &&
+            resident.water_wet_tiles == resident.wanted - resident.water_known_dry_tiles;
+    }
+    result.coverage_settled = result.coverage_settled && remaining == 0;
+    return result;
+}
+
 const char* FarWorldModeName(FarWorldMode mode) noexcept {
     return mode == FarWorldMode::Ladder ? "ladder" : "legacy";
 }
@@ -43,6 +82,8 @@ const char* FarWorldSubmissionRefusalName(FarWorldSubmissionRefusal refusal) noe
             return "BackendUnavailable";
         case FarWorldSubmissionRefusal::DrawRejected:
             return "DrawRejected";
+        case FarWorldSubmissionRefusal::IsolationSuppressed:
+            return "IsolationSuppressed";
     }
     return "Unknown";
 }
