@@ -279,13 +279,15 @@ def require_matching_render_identity(first, second):
         raise ValueError('capture warmup/presentation offset differs')
 
 
-def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None):
+def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None,
+             ladder_baseline=False):
     if data.get('schema') not in SCHEMAS:
         raise ValueError('unsupported render measurement schema')
     if data['schema'] == WORKLOAD_SCHEMA:
         validate_workload(data, traversal_manifest(data['workload']['script']))
     if data.get('gpu_timers_supported') is not True:
         raise ValueError('GPU timers unavailable')
+    perf.validate_far_world_reporting(data, ladder_baseline)
     count = integer(data['frames'], 'frames', 1)
     warmup = integer(data['warmup_frames'], 'warmup_frames', 1)
     adapter = data['adapter']
@@ -652,6 +654,7 @@ def validate_workload(data, manifest):
         first = next((r['frame'] for r in rows if r['frame'] >= request and r['settled']), None)
         if first != settled:
             raise ValueError('reload must report the first settled frame')
+        integer(reload['settling_passes'], 'reload settling passes', 1, 2**64 - 1)
         elapsed = number(reload['elapsed_ms'], 'reload elapsed')
         coverage = sum(r['frame_wall_ms'] for r in data['frame_samples'][request - warmup:settled - warmup + 1])
         if elapsed > coverage + 1e-6:

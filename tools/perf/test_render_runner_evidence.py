@@ -758,6 +758,8 @@ class RenderRunnerRegistrationTests(unittest.TestCase):
             'RenderCaptureOptionMissingValuesRefusal': 'test_capture_option_missing_values_refusal',
             'RenderTraversalOwnerOptionFormsRefusal': 'test_traversal_owner_option_forms_refusal',
             'RenderBenchmarkImplicitCreationFailure': 'test_implicit_creation_failure',
+            'RenderBenchmarkMeasuredFrameBounds': 'test_v2_measured_frame_bounds',
+            'RenderBenchmarkIsolationSubmission': 'test_isolation_submission_reporting',
             'RenderBenchmarkOverrideCollection': 'test_gl_debug_override_collection',
             'RenderTraversalEmbeddedPresetRefusal': 'test_embedded_preset_refusal',
         }

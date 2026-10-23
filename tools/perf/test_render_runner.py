@@ -16,6 +16,7 @@ import unittest
 import render_crash_capture as crash_capture
 
 import render_contract as contract
+import perf
 import render_runner_process as process_runner
 
 
@@ -224,11 +225,28 @@ class RenderRunnerTests(unittest.TestCase):
         first = self.run_client('first', ['--traversal', str(self.script)])
         second = self.run_client('second', ['--traversal', str(self.script)])
         for data in (first, second):
+            self.assertIn('far_world', data)
+            perf.validate_far_world_reporting(data)
+            for key, mode in (('requested_mode', 'ladder'), ('effective_mode', 'legacy'),
+                              ('refusal', 'ImmutableAuthorityUnavailable')):
+                self.assertEqual(data['far_world']['summary'][key], {mode: data['frames']})
+            self.assertEqual(data['world_content_identity'], data['workload']['content_identity'])
             contract.validate(data, data['adapter']['renderer'], traversal=self.script)
             self.assertEqual(data['workload']['actual_ticks'], 4)
             self.assertEqual([row['tick'] for row in data['workload']['camera_samples']], [1, 2, 3, 4])
         self.assertEqual(first['workload']['camera_samples'], second['workload']['camera_samples'])
         self.assertEqual(first['workload']['actual_ticks'], second['workload']['actual_ticks'])
+        for name in ('first', 'second'):
+            output = (OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')).read_text(
+                errors='replace', encoding='utf-8')
+            self.assertIn('Far world: requested=ladder effective=legacy refusal=ImmutableAuthorityUnavailable', output)
+        for name, option in (('separate', ['--render-benchmark-frames', '4']),
+                             ('assigned', ['--render-benchmark-frames=4'])):
+            with self.subTest(frame_option=name):
+                log = self.run_client('traversal-frames-' + name,
+                                      ['--traversal', str(self.script), *option], expected_exit=2)
+                self.assertIn('Traversal owns the measured duration; '
+                              'omit --render-benchmark-frames', log)
 
     def short_save_load_script(self):
         script = self.root / 'save-load.traversal'
@@ -370,6 +388,38 @@ class RenderRunnerTests(unittest.TestCase):
         log = self.run_client('missing', ['--world-preset', 'nonexistent_render_test_preset'], expected_exit=2)
         self.assertIn('World open refused', log)
         self.assertIn('nonexistent_render_test_preset', log)
+
+    def test_v2_measured_frame_bounds(self):
+        for schema in ('v2', 'v3'):
+            for index, count in enumerate(('0', '-1', '18001', '999999999999999999999999',
+                                           '4junk', '4.0', '+4', ' 4', '4 ', '')):
+                for assigned in (False, True):
+                    option = (['--render-benchmark-frames=' + count] if assigned
+                              else ['--render-benchmark-frames', count])
+                    with self.subTest(schema=schema, count=count, assigned=assigned):
+                        log = self.run_client(f'bounded-{schema}-{index}-{int(assigned)}', option,
+                                              expected_exit=2, schema=schema)
+                        self.assertIn('Render benchmark requires 1..18000 measured frames', log)
+            log = self.run_client('missing-' + schema, ['--render-benchmark-frames'],
+                                  expected_exit=2, schema=schema)
+            self.assertIn('Render benchmark requires 1..18000 measured frames', log)
+
+    def test_isolation_submission_reporting(self):
+        declaration = self.root / 'overrides.json'
+        declaration.write_text(json.dumps({'cli:--isolation-layers': 'foliage'}), encoding='utf-8')
+        data = self.run_client('isolated', ['--render-benchmark-frames', '4',
+                                          '--isolation-layers', 'foliage',
+                                          '--declare-render-overrides', str(declaration)])
+        contract.validate(data, data['adapter']['renderer'])
+        self.assertEqual(data['far_world']['summary']['suppressed_frames'], 4)
+        self.assertEqual(data['far_world']['summary']['submission_refusal'],
+                         {'IsolationSuppressed': 4})
+        for row in data['far_world']['frames']:
+            self.assertTrue(row['suppressed'])
+            self.assertEqual(row['submission_refusal'], 'IsolationSuppressed')
+        output = (OPTIONS.artifacts / (self._testMethodName + '-isolated.log')).read_text(
+            errors='replace', encoding='utf-8')
+        self.assertIn('suppressed=true submission_refusal=IsolationSuppressed', output)
 
     def test_gl_debug_override_collection(self):
         environment = dict(self.environment, LUMIN_GL_DEBUG='1')

@@ -1,5 +1,6 @@
 #include "ParticlePass.h"
 #include "../FarWorldReplay.h"
+#include "core/Profiler.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/AttributedGl.h"
 
@@ -634,6 +635,7 @@ void ParticlePass::update(float dt) {
 }
 
 std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL ParticlePass.execute");
     // No-op (zero draw work) when nothing to render: keeps existing visual gates
     // byte-stable.
     if (!m_shader || !m_shader->IsValid() || m_frame_instance_count == 0 || m_vao == 0) {

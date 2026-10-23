@@ -353,14 +353,12 @@ jobs:
             build-essential cmake extra-cmake-modules libabsl-dev \
             libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libprotobuf-dev \
             libssl-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
-            protobuf-compiler wayland-protocols xorg-dev
-      - name: Configure GNS compile command
+            protobuf-compiler python3-numpy python3-pil wayland-protocols xorg-dev
+      - name: Configure GNS and Tracy profile compile check
         run: |
-          cmake -S . -B build/gns-probe -G Ninja \
-            -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
-      - name: Build the sockets transport and server modes against GNS
+          cmake --preset profile -B build/gns-probe \
+            -DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON
+      - name: Build production applications against GNS and pinned Tracy
         run: |
           # Upgraded from a -fsyntax-only probe of one file to a real build.
           # SteamNetworkingTransport and GnsTransport now share NetSocketsTransport,
@@ -370,13 +368,20 @@ jobs:
           # building the GNS side is the only way to get real compile coverage of
           # the socket logic the Steam transport also runs. A syntax check could
           # not catch a link-level or template-instantiation break; this can.
-          cmake --build build/gns-probe --target luminumbra_common luminumbra_server_app --parallel 4
+          # Compile and link the actual common, server, shipping client and QA
+          # capture paths with Tracy enabled. Do not run profiled determinism or
+          # performance tests; their release/perf lanes remain uninstrumented.
+          cmake --build build/gns-probe --parallel 4 --target \
+            luminumbra_common luminumbra_server_app luminumbra_client_app luminumbra_client_qa_app \
+            profiler_enabled_compile profiler_disabled_compile
           # Fail loudly if the shared body was not actually part of that build,
           # so this job cannot silently degrade back into proving nothing.
           find build/gns-probe -name 'NetSocketsTransport.cpp.o' -print -quit \
             | grep -q . || { echo "NetSocketsTransport.cpp was not compiled"; exit 1; }
           find build/gns-probe -path '*/modes/Gns.cpp.o' -print -quit \
             | grep -q . || { echo "Gns.cpp was not compiled"; exit 1; }
+      - name: Check profiler build and source contracts
+        run: ctest --test-dir build/gns-probe --no-tests=error -R '^ProfilerSourceContract$' --output-on-failure
 
   diligent-rhi:
     name: Diligent RHI / software GL
@@ -1492,6 +1497,7 @@ jobs:
           echo "Aggregate dependencies did not pass" >&2
           exit 1
       - name: Require all clang-tidy shards to pass
+        if: always()
         env:
           TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}
           CI_PATHS_RESULT: ${{ needs.changes.result }}

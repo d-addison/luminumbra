@@ -7,6 +7,7 @@
 // this one process, driven turn-by-turn so the loopback queues carry their frames.
 
 #include "../support/SystemConfigVariants.h"
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -33,14 +34,10 @@ namespace fs = std::filesystem;
 namespace {
 
 fs::path LockstepTempDir() {
-#ifdef LUMINUMBRA_TEST_ARTIFACT_DIR
-    fs::path dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "lockstep-unit";
-#else
-    fs::path dir = fs::temp_directory_path() / "luminumbra-lockstep-unit";
-#endif
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    return dir;
+    // CTest runs cases in separate processes. Reserve this process's namespace
+    // exclusively and retain it until all local sessions/recorders have closed.
+    static const Luminumbra::TestSupport::ScopedTempFile workspace("lockstep_", ".unused");
+    return workspace.Path().parent_path();
 }
 
 // A deterministic per-peer fake "world": the hash is a function of (tick, a per-peer
@@ -458,6 +455,8 @@ TEST(LockstepSessionTest, ClosureAcrossReceiveBatchesPreservesQueuedLateDesync) 
 TEST(LockstepSessionTest, LateDesyncAfterSendRefusalSurvivesAnExhaustedReceiveBudget) {
     for (const auto refusal : {net::MessageType::Input, net::MessageType::Hash}) {
         for (const std::uint64_t divergence : {1u, 2u}) {
+            SCOPED_TRACE(static_cast<int>(refusal));
+            SCOPED_TRACE(divergence);
             auto [local, peer] = net::MakeLoopbackPair();
             RejectingTransport rejecting(*local);
             ReplenishingTransport transport(rejecting);
@@ -1625,8 +1624,9 @@ TEST(LockstepSessionTest, DifferentPeerInputsMergeIdenticallyUnderTransientRefus
     ASSERT_TRUE(b_finished);
     EXPECT_EQ(a_state.applied, b_state.applied);
     ASSERT_EQ(a_state.applied.size(), 10u);
-    for (std::uint8_t tick = 1; tick <= 10; ++tick)
+    for (std::uint8_t tick = 1; tick <= 10; ++tick) {
         EXPECT_EQ(a_state.applied[tick - 1], (std::vector<std::uint8_t>{0, tick, 1, tick}));
+    }
 }
 
 TEST(LockstepSessionTest, TransientInputAndHashRefusalsRetryExactFramesInOrder) {
@@ -1709,8 +1709,9 @@ TEST(LockstepSessionTest, TransientInputAndHashRefusalsRetryExactFramesInOrder) 
         ASSERT_EQ(transport.State().refused_frames.size(), 5u);
         const auto& first_refused =
             type == net::MessageType::Input ? expected.front() : expected[4];
-        for (std::size_t index = 0; index < 3; ++index)
+        for (std::size_t index = 0; index < 3; ++index) {
             EXPECT_EQ(transport.State().refused_frames[index], first_refused);
+        }
         EXPECT_EQ(transport.State().refused_frames[3], expected.back());
         EXPECT_EQ(transport.State().refused_frames[4], expected.back());
     }

@@ -31,6 +31,7 @@ class Camera;
 //. Pure glue over existing engine primitives.
 // Returns false when world systems are missing or surface preparation is refused.
 // ===========================================================================
+// False means the survey is incomplete; callers must report capture failure.
 bool RunSceneSurvey(GLFWwindow* window,
                     world::GameSession& session,
                     RenderPipeline& pipeline,

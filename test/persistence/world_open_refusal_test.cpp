@@ -136,6 +136,8 @@ struct WorldOpenFixtureState {
 class WorldOpenRefusal : public testing::TestWithParam<std::tuple<int, int>>,
                          protected WorldOpenFixtureState {
 protected:
+    void CheckLegacyFullSnapshotRefusalAndRecovery();
+
     void SetUp() override {
         root = UniqueRoot();
         fs::create_directories(root / "worlds/atlas/presets");
@@ -359,9 +361,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
     ASSERT_FALSE(error.empty());
     if (obsolete) {
         EXPECT_EQ(error, WorldSaveService::kObsoleteWorldMessage);
-    } else if (future)
+    } else if (future) {
         EXPECT_NE(error.find("future"), std::string::npos);
-    else {
+    } else {
         EXPECT_NE(error, WorldSaveService::kObsoleteWorldMessage);
         EXPECT_EQ(error.find("future"), std::string::npos);
     }
@@ -826,8 +828,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             EXPECT_EQ(inspected.preset_path, historical);
             if (saved_metadata.value("presetIdentity", identity) == identity) {
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
-            } else
+            } else {
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            }
             EXPECT_EQ(DiskBytes(root), before);
         }
         // Even metadata without an identity must refuse if its frozen file is absent.
@@ -2157,7 +2160,7 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
     }
 }
 
-TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses) {
+void WorldOpenRefusal::CheckLegacyFullSnapshotRefusalAndRecovery() {
     // This case exercises the legacy clock path, independently of shipping defaults.
     Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
@@ -2173,16 +2176,21 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRef
     const auto chunks = runner.StreamedChunkCount();
     ASSERT_GT(chunks, 0u);
     bool called = false;
+    std::size_t callback_count = 0;
     runner.Session()->GetSimulationEventBus().subscribe([&](const auto&) {
         called = true;
+        ++callback_count;
         EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
     });
     runner.Session()->GetSimulationEventBus().publish(1, "save", "");
     ASSERT_EQ(runner.Session()->TickSimulation(runner.Session()->GetSimulationClock().fixed_dt()),
               1u);
     EXPECT_TRUE(called);
-    // A failed open leaves old streamed chunks available but blocks metadata saving.
-    // A full snapshot must report that refusal in the legacy mode too.
+    EXPECT_EQ(callback_count, 1u);
+    const auto* world_system = runner.Session()->GetWorldSystem();
+    const auto metadata = runner.Session()->GetMetadata();
+    const auto streamed = world_system->snapshot_streamed_chunks();
+    // A refused candidate leaves the current world saveable.
     const auto pending_chunks = runner.Session()->GetWorldSystem()->snapshot_streamed_chunks();
     ASSERT_FALSE(pending_chunks.empty());
     const auto& pending_chunk = pending_chunks.front();
@@ -2190,13 +2198,70 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRef
     pending_chunk->heightmap_data.front() += 1.0f;
     pending_chunk->mark_voxel_data_dirty();
     ASSERT_FALSE(runner.Session()->LoadWorld("missing-world"));
+    ASSERT_TRUE(runner.Session()->SaveWorld());
+    ASSERT_EQ(runner.Session()->GetWorldSaveDir(), save);
+    EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
+    const auto before_fault = DiskBytes(save);
+
+    // A valid, empty tick-zero sidecar independently requires active-region metadata.
+    // The legacy session must refuse that metadata save, while chunk persistence remains
+    // valid. Keep a hard-link witness outside the save to verify ownership before removal.
+    const auto ledger_path = WorldSaveService::active_regions_path(save);
+    const auto ledger_owner = root / "metadata-failure-ledger";
+    ASSERT_FALSE(fs::exists(ledger_path));
+    ASSERT_FALSE(fs::exists(ledger_owner));
+    const auto ledger_bytes = world::ActiveRegionLedger{}.encode();
+    ASSERT_NO_FATAL_FAILURE(Write(ledger_path, ledger_bytes));
+    fs::create_hard_link(ledger_path, ledger_owner);
+    ASSERT_TRUE(fs::equivalent(ledger_path, ledger_owner));
+    ASSERT_EQ(fs::hard_link_count(ledger_path), 2u);
+    world::WorldClock stored_clock;
+    bool requires_active_regions = false;
+    ASSERT_TRUE(WorldSaveService::read_clock_metadata(save, stored_clock, requires_active_regions));
+    ASSERT_TRUE(requires_active_regions);
+    ASSERT_EQ(stored_clock.tick(), 0u);
+    ASSERT_TRUE(WorldSaveService::validate_save(save));
+    pending_chunk->mark_voxel_data_dirty();
+    const auto fault_bytes = DiskBytes(save);
     ASSERT_FALSE(runner.Session()->SaveWorld());
+    EXPECT_EQ(DiskBytes(save), fault_bytes);
     const SnapshotDestinationBytes before(root);
     EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
     before.ExpectUnchanged();
     EXPECT_TRUE(pending_chunk->is_voxel_data_dirty());
     EXPECT_EQ(runner.StreamedChunkCount(), chunks);
+    EXPECT_EQ(DiskBytes(save), fault_bytes);
+
+    ASSERT_TRUE(fs::equivalent(ledger_path, ledger_owner));
+    ASSERT_EQ(Read(ledger_path), ledger_bytes);
+    ASSERT_EQ(Read(ledger_owner), ledger_bytes);
+    ASSERT_EQ(fs::hard_link_count(ledger_path), 2u);
+    ASSERT_TRUE(fs::remove(ledger_path));
+    ASSERT_EQ(fs::hard_link_count(ledger_owner), 1u);
+    ASSERT_TRUE(fs::remove(ledger_owner));
+    EXPECT_EQ(DiskBytes(save), before_fault);
+    ASSERT_TRUE(runner.Session()->SaveWorld());
+    EXPECT_EQ(DiskBytes(save), before_fault);
+    EXPECT_EQ(runner.Session()->GetWorldSystem(), world_system);
+    EXPECT_EQ(world_system->snapshot_streamed_chunks(), streamed);
+    EXPECT_EQ(runner.StreamedChunkCount(), chunks);
+    const auto& retained = runner.Session()->GetMetadata();
+    EXPECT_EQ(retained.worldId, metadata.worldId);
+    EXPECT_EQ(retained.name, metadata.name);
+    EXPECT_EQ(retained.seed, metadata.seed);
+    EXPECT_EQ(retained.worldType, metadata.worldType);
+    EXPECT_EQ(retained.creationTime, metadata.creationTime);
+    EXPECT_EQ(retained.spawnPoint, metadata.spawnPoint);
+    EXPECT_EQ(callback_count, 1u);
     runner.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
+    CheckLegacyFullSnapshotRefusalAndRecovery();
+}
+
+TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses) {
+    CheckLegacyFullSnapshotRefusalAndRecovery();
 }
 
 TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata) {

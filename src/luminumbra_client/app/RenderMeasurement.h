@@ -2,19 +2,48 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <istream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 namespace Luminumbra::Client::Measurement {
 
 inline constexpr std::size_t kMaxFrames = 18000;
+inline int benchmark_frame_count(int argc, char* argv[]) {
+    constexpr std::string_view flag = "--render-benchmark-frames";
+    std::string_view value = "120";
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        if (arg == flag) {
+            value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view{};
+            break;
+        }
+        if (arg.size() > flag.size() && arg.substr(0, flag.size()) == flag &&
+            arg[flag.size()] == '=') {
+            value = arg.substr(flag.size() + 1);
+            break;
+        }
+    }
+    if (value.empty())
+        throw std::invalid_argument("Render benchmark requires 1..18000 measured frames");
+    int count = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (error != std::errc{} || end != value.data() + value.size() || count < 1 ||
+        count > static_cast<int>(kMaxFrames))
+        throw std::invalid_argument("Render benchmark requires 1..18000 measured frames");
+    return count;
+}
+
 inline constexpr std::size_t kPassCount = 11;
 inline constexpr std::array<const char*, kPassCount> kPassNames = {"shadow",
                                                                    "gbuffer",
@@ -59,6 +88,27 @@ inline std::array<double, 5> summarize(const std::vector<double>& values) {
             percentile(deviations, 0.5)};
 }
 
+// Names point only to static enum-name literals. No per-frame strings or allocations.
+struct FarFrameSample {
+    const char* requested_mode = "unknown";
+    const char* effective_mode = "unknown";
+    const char* refusal = "Unknown";
+    const char* submission_refusal = "Unknown";
+    bool suppressed = false, coverage_settled = false;
+    bool gns_compiled = false, active_regions = false;
+    int water_cells_per_side = 0;
+    std::optional<float> grass_density_scale;
+    std::uint64_t content_identity = 0;
+    std::size_t generation_pending = 0, meshing_pending = 0, terrain_uploads_pending = 0;
+    bool generation_outstanding = false, meshing_outstanding = false;
+};
+
+inline bool far_frame_settled(const FarFrameSample& sample) noexcept {
+    return sample.coverage_settled && sample.generation_pending == 0 &&
+           sample.meshing_pending == 0 && sample.terrain_uploads_pending == 0 &&
+           !sample.generation_outstanding && !sample.meshing_outstanding;
+}
+
 struct FrameSample {
     std::uint64_t frame = 0;
     std::optional<double> wall;
@@ -68,6 +118,7 @@ struct FrameSample {
     std::optional<double> passSum;
     std::array<std::optional<double>, kPassCount> passes{};
     std::array<bool, kPassCount> issued{};
+    FarFrameSample far_world;
 };
 
 // One bounded measured window. Refuse overflow instead of dropping a measured frame.
@@ -75,10 +126,18 @@ struct FrameSample {
 class SampleRing {
 public:
     explicit SampleRing(std::size_t capacity)
-        : slots_(capacity) {
-        if (capacity == 0 || capacity > kMaxFrames)
+        : slots_(checked_capacity(capacity)) {}
+
+private:
+    static std::size_t checked_capacity(std::size_t capacity) {
+        // At most 18000 fixed-size samples; check before vector allocation.
+        if (capacity == 0 || capacity > kMaxFrames ||
+            capacity > std::numeric_limits<std::size_t>::max() / sizeof(FrameSample))
             throw std::invalid_argument("measured window must contain 1..18000 frames");
+        return capacity;
     }
+
+public:
     FrameSample& append(std::uint64_t frame) {
         if (count_ == slots_.size())
             throw std::runtime_error("measured sample ring exhausted");
@@ -137,6 +196,9 @@ public:
         slot.begun = {};
         slot.ended = {};
         slot.repeated = {};
+        slot.accumulated = {};
+        slot.accumulated_issued = {};
+        slot.invalid = {};
         active_ = &slot;
         if (supported_)
             backend_.stamp(slot.queries[0]);
@@ -154,6 +216,13 @@ public:
             active_->ended.at(pass) = true;
             backend_.stamp(active_->queries.at(3 + pass * 2));
         }
+    }
+    // A reload action can render multiple complete passes inside one measured
+    // frame. Resolve each segment before reusing its fixed query ids; retain
+    // every segment's duration and any failure in O(kPassCount) storage.
+    void checkpoint_passes() {
+        if (supported_ && active_)
+            accumulate_passes(*active_);
     }
     void end_frame() {
         if (supported_ && active_)
@@ -178,6 +247,9 @@ private:
         std::array<bool, kPassCount> begun{};
         std::array<bool, kPassCount> ended{};
         std::array<bool, kPassCount> repeated{};
+        std::array<double, kPassCount> accumulated{};
+        std::array<bool, kPassCount> accumulated_issued{};
+        std::array<bool, kPassCount> invalid{};
         std::uint64_t frame = 0;
         bool pending = false;
     };
@@ -187,30 +259,50 @@ private:
         if (!wait && !backend_.available(slot.queries[1]))
             return;
         auto& sample = samples_.at(slot.frame);
-        const auto read = [&](std::size_t offset) -> std::optional<double> {
-            const auto begin = backend_.result(slot.queries[offset]);
-            const auto end = backend_.result(slot.queries[offset + 1]);
-            if (end < begin)
-                return std::nullopt;
-            return static_cast<double>(end - begin) / 1.0e6;
-        };
-        sample.gpu = read(0);
+        sample.gpu = read_interval(slot, 0);
+        accumulate_passes(slot);
         double sum = 0.0;
         bool complete = sample.gpu.has_value();
-        for (std::size_t pass = 0; pass < slot.begun.size(); ++pass) {
-            sample.issued[pass] = slot.begun[pass] || slot.ended[pass];
+        for (std::size_t pass = 0; pass < slot.accumulated.size(); ++pass) {
+            sample.issued[pass] = slot.accumulated_issued[pass];
             if (!sample.issued[pass])
-                continue; // no work was dispatched; this is not a missing timer
-            if (slot.begun[pass] && slot.ended[pass] && !slot.repeated[pass])
-                sample.passes[pass] = read(2 + pass * 2);
+                continue;
+            if (!slot.invalid[pass])
+                sample.passes[pass] = slot.accumulated[pass];
             complete = complete && sample.passes[pass].has_value();
-            const auto& passSample = sample.passes[pass];
-            if (passSample)
-                sum += *passSample;
+            if (sample.passes[pass])
+                sum += *sample.passes[pass];
         }
         if (complete)
             sample.passSum = sum;
         slot.pending = false;
+    }
+    std::optional<double> read_interval(const Slot& slot, std::size_t offset) {
+        const auto begin = backend_.result(slot.queries[offset]);
+        const auto end = backend_.result(slot.queries[offset + 1]);
+        if (end < begin)
+            return std::nullopt;
+        return static_cast<double>(end - begin) / 1.0e6;
+    }
+    void accumulate_passes(Slot& slot) {
+        for (std::size_t pass = 0; pass < slot.begun.size(); ++pass) {
+            if (!slot.begun[pass] && !slot.ended[pass])
+                continue;
+            slot.accumulated_issued[pass] = true;
+            if (slot.begun[pass] && slot.ended[pass] && !slot.repeated[pass]) {
+                const auto duration = read_interval(slot, 2 + pass * 2);
+                if (duration) {
+                    slot.accumulated[pass] += *duration;
+                    slot.invalid[pass] =
+                        slot.invalid[pass] || !std::isfinite(slot.accumulated[pass]);
+                } else
+                    slot.invalid[pass] = true;
+            } else
+                slot.invalid[pass] = true;
+        }
+        slot.begun = {};
+        slot.ended = {};
+        slot.repeated = {};
     }
     SampleRing& samples_;
     Backend backend_;

@@ -163,6 +163,61 @@ bool dispatch_actions(const std::vector<Traversal::Action>& actions,
     return true;
 }
 
+// The newly loaded client's water system starts unpaused. Residency preparation
+// must preserve saved water while performing extra updates without live ticks.
+// Restore live stepping on every exit, including a refused drain or exception.
+template<class World>
+class ReloadWaterPause {
+public:
+    explicit ReloadWaterPause(World& world)
+        : m_world(world) {
+        m_world.SetWaterBootPaused(true);
+    }
+    ~ReloadWaterPause() {
+        m_world.SetWaterBootPaused(false);
+    }
+    ReloadWaterPause(const ReloadWaterPause&) = delete;
+    ReloadWaterPause& operator=(const ReloadWaterPause&) = delete;
+
+private:
+    World& m_world;
+};
+
+inline bool reload_residency_observed(std::uint64_t passes, int activation_interval) noexcept {
+    return activation_interval > 0 && passes >= static_cast<std::uint64_t>(activation_interval);
+}
+
+// Reload keeps its script pose and presentation tick until every gate drains.
+// The watchdog bounds consecutive passes without a new work frontier, rather
+// than the total restream duration. Four scalar high-water marks use O(1) space;
+// oscillating or shrinking counters cannot buy more passes.
+class ReloadSettlingWatchdog {
+public:
+    static constexpr std::size_t kNoProgressPasses = 300;
+    bool waiting(bool settled, const std::array<std::uint64_t, 4>& progress) {
+        if (m_failed || settled)
+            return false;
+        bool advanced = false;
+        for (std::size_t index = 0; index < progress.size(); ++index) {
+            if (progress[index] > m_frontier[index]) {
+                m_frontier[index] = progress[index];
+                advanced = true;
+            }
+        }
+        m_idle = advanced ? 0 : m_idle + 1;
+        m_failed = m_idle >= kNoProgressPasses;
+        return !m_failed;
+    }
+    bool failed() const {
+        return m_failed;
+    }
+
+private:
+    std::array<std::uint64_t, 4> m_frontier{};
+    std::size_t m_idle = 0;
+    bool m_failed = false;
+};
+
 class ReloadInterval {
 public:
     using Clock = std::chrono::steady_clock;

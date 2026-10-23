@@ -97,6 +97,7 @@ target_include_directories(luminumbra_common SYSTEM PUBLIC
 )
 
 target_link_libraries(luminumbra_common PUBLIC
+    luminumbra_profiler
     entt
     Jolt
     nlohmann_json

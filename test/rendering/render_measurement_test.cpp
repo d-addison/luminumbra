@@ -131,6 +131,62 @@ void gpu_queries() {
     require(repeated.at(0).gpu.has_value() && !repeated.at(0).passSum);
     duplicate.shutdown();
 
+    SampleRing segmented(1);
+    GpuQueryRing<FakeQueries> segments(segmented, FakeQueries{state});
+    segments.initialize();
+    segmented.append(0);
+    segments.begin_frame(0);
+    for (int segment = 0; segment < 600; ++segment) {
+        segments.begin_pass(1);
+        segments.end_pass(1);
+        segments.checkpoint_passes();
+    }
+    segments.end_frame();
+    segments.drain();
+    require(segmented.at(0).issued[1] && segmented.at(0).passes[1] == 600.0);
+    require(segmented.at(0).passSum == 600.0);
+    segments.shutdown();
+
+    SampleRing failedSegment(1);
+    GpuQueryRing<FakeQueries> failedSegments(failedSegment, FakeQueries{state});
+    failedSegments.initialize();
+    failedSegment.append(0);
+    failedSegments.begin_frame(0);
+    failedSegments.begin_pass(1); // A partial segment remains invalid after a valid one.
+    failedSegments.checkpoint_passes();
+    failedSegments.begin_pass(1);
+    failedSegments.end_pass(1);
+    failedSegments.checkpoint_passes();
+    failedSegments.end_frame();
+    failedSegments.drain();
+    require(failedSegment.at(0).issued[1] && !failedSegment.at(0).passes[1]);
+    require(!failedSegment.at(0).passSum);
+    failedSegments.shutdown();
+
+    for (int malformed = 0; malformed < 3; ++malformed) {
+        SampleRing refusedSegment(1);
+        const auto firstQuery = state->nextId + 1;
+        GpuQueryRing<FakeQueries> refusedSegments(refusedSegment, FakeQueries{state});
+        refusedSegments.initialize();
+        refusedSegment.append(0);
+        refusedSegments.begin_frame(0);
+        if (malformed != 0)
+            refusedSegments.begin_pass(1);
+        refusedSegments.end_pass(1);
+        if (malformed == 1) {
+            refusedSegments.begin_pass(1);
+            refusedSegments.end_pass(1);
+        } else if (malformed == 2) {
+            state->timestamps.at(firstQuery + 5) = state->timestamps.at(firstQuery + 4) - 1;
+        }
+        refusedSegments.checkpoint_passes();
+        refusedSegments.end_frame();
+        refusedSegments.drain();
+        require(refusedSegment.at(0).issued[1] && !refusedSegment.at(0).passes[1]);
+        require(!refusedSegment.at(0).passSum);
+        refusedSegments.shutdown();
+    }
+
     state->supported = false;
     SampleRing unsupported(1);
     GpuQueryRing<FakeQueries> unavailable(unsupported, FakeQueries{state});
@@ -139,6 +195,7 @@ void gpu_queries() {
     unavailable.begin_frame(0);
     unavailable.begin_pass(1);
     unavailable.end_pass(1);
+    unavailable.checkpoint_passes();
     unavailable.end_frame();
     unavailable.drain();
     require(!unsupported.at(0).gpu && !unsupported.at(0).passSum);
@@ -360,6 +417,60 @@ void workload_dispatch() {
 }
 
 void reload_boundaries() {
+    require(!reload_residency_observed(0, 4));
+    require(!reload_residency_observed(3, 4));
+    require(reload_residency_observed(4, 4));
+    require(reload_residency_observed(5, 4));
+    require(!reload_residency_observed(600, 0));
+    require(!reload_residency_observed(600, -1));
+    require(reload_residency_observed(std::numeric_limits<std::uint64_t>::max(), 4));
+    struct LoadedWorld {
+        bool paused = false;
+        void SetWaterBootPaused(bool on) {
+            paused = on;
+        }
+    } world;
+    {
+        const ReloadWaterPause water_pause(world);
+        require(world.paused);
+    }
+    require(!world.paused);
+    refuses([&] {
+        const ReloadWaterPause water_pause(world);
+        require(world.paused);
+        throw std::runtime_error("refused residency preparation");
+    });
+    require(!world.paused);
+    ReloadSettlingWatchdog progressing;
+    // A restream may exceed the script's 300 ticks while still doing real work.
+    for (std::uint64_t pass = 1; pass <= 600; ++pass)
+        require(progressing.waiting(false, {pass, 0, 0, 0}));
+    require(!progressing.waiting(true, {600, 0, 0, 0}));
+    require(!progressing.failed());
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+        ReloadSettlingWatchdog stalled;
+        std::array<std::uint64_t, 4> counters{};
+        counters[lane] = 1;
+        require(stalled.waiting(false, counters));
+        for (std::size_t pass = 1; pass < ReloadSettlingWatchdog::kNoProgressPasses; ++pass) {
+            // Repeated/decreasing counters are not progress; oscillation cannot
+            // keep a stuck lane alive. Empty progress also expires at the bound.
+            counters[lane] = pass % 2;
+            require(stalled.waiting(false, counters));
+        }
+        require(!stalled.waiting(false, counters));
+        require(stalled.failed());
+        require(!stalled.waiting(false, {100, 100, 100, 100}));
+        require(stalled.failed());
+    }
+    ReloadSettlingWatchdog empty;
+    for (std::size_t pass = 1; pass < ReloadSettlingWatchdog::kNoProgressPasses; ++pass)
+        require(empty.waiting(false, {}));
+    require(!empty.waiting(false, {}));
+    require(empty.failed());
+    ReloadSettlingWatchdog immediate;
+    require(!immediate.waiting(true, {}));
+    require(!immediate.failed());
     using namespace std::chrono;
     ReloadInterval interval;
     const ReloadInterval::Clock::time_point origin{};

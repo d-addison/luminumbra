@@ -6,6 +6,7 @@
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
+#include "core/Profiler.h"
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
@@ -1057,7 +1058,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
             pending.store(false, std::memory_order_release);
         }
     } writer_intent_reset{m_worldgen_writer_pending};
-    std::unique_lock<std::shared_mutex> worldgen_epoch(m_worldgen_epoch_mutex);
+    LUMIN_PROFILE_LOCK(std::unique_lock<std::shared_mutex>,
+                       worldgen_epoch,
+                       m_worldgen_epoch_mutex,
+                       "Worldgen epoch lock wait");
     // Publish parameters and seed under the same epoch as their generators.
     // Preview readers must retain the previous complete world until they release it.
     if (params) {
@@ -1584,6 +1588,7 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x,
 }
 
 void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) const {
+    LUMIN_PROFILE_ZONE_N("Hydrology prefetch batch");
     // Warm the hydraulic-erosion region cache AHEAD of chunk-gen demand on
     // background jobs, so the (expensive) per-region bake never lands on the
     // gen/main critical path when the camera flies into new terrain. Each region
@@ -2260,6 +2265,7 @@ float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) cons
 
 void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     int base_x, int base_z, int size_x, int size_z, float* out) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height grid batch");
     // SIMD-batched twin of ComputeShapedHeightSample over an integer-aligned
     // column grid. MUST stay byte-for-byte equal to calling ComputeShapedHeight
     // per column (the batch-vs-scalar parity gtest pins ==), so the per-channel
@@ -2556,6 +2562,7 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     const float* xs, const float* zs, std::size_t count, float* out, bool apply_hydro) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height position batch");
     if (apply_hydro) {
         ComputeShapedHeightsAtPositionsImpl<true>(xs, zs, count, out, /*complete_shaping=*/true);
     } else {
@@ -3110,7 +3117,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         PrefetchHydroRegions(anchor.x, anchor.z, 768.0f);
     }
 
+    // Diagnostic backlog survives between activation passes, even after dispatched
+    // batches drain. Only the next activation pass recomputes these deferrals.
+    const auto deferred_generation = m_last_streaming_budget_stats.deferred_generation;
     m_last_streaming_budget_stats = {};
+    m_last_streaming_budget_stats.deferred_generation = deferred_generation;
     m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
     m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
@@ -3655,6 +3666,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     }
     m_streaming_telemetry_stats.max_deferred_age_frames = std::max(
         m_streaming_telemetry_stats.max_deferred_age_frames, m_deferred_backlog_age_frames);
+    // Cache publication-pending work after dispatch. Lane capacity and raw worker
+    // completion do not establish that the streaming pipeline has settled.
+    m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
+    m_last_streaming_budget_stats.meshing_job_active =
+        meshing_batch_outstanding() || promotion_pipeline_pending();
 }
 
 bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors,
@@ -4058,34 +4074,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         return false;
     }
 
-    // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
-    // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
-    // load. If one wedges (the intermittent freeze), the LAST line printed names the
-    // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
-    // runs at world-load/teleport, not per-frame.
-    const auto _esrn_t0 = std::chrono::steady_clock::now();
-    // ALL THREE unbounded waits in this function run under the
-    // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
-    // collision-build batch below was wrapped, so a generation/meshing wedge still
-    // hung silently). Observability only — hash-neutral, OFF in determinism gates.
-    const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...",
-                         world_pos.x,
-                         world_pos.z);
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/generation-drain",
-                                          [this]() { wait_for_generation_jobs(); });
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/meshing-drain",
-                                          [this]() { wait_for_meshing_jobs(); });
-    // settle the two-stage promotion pipeline too (publish staged
-    // sim truth, dispatch + drain the stage-B render meshes) so the surface
-    // band below observes fully settled chunks, exactly as before the split.
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/promotion-drain",
-                                          [this]() { wait_for_streaming_jobs(); });
-
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     // Preflight the exact vertical work before allocating or changing chunks.
     // At most 625 columns and 8192 chunks, including both vertical margins.
@@ -4126,6 +4114,35 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         return false;
     if (surface_capacity > chunks_to_consider_for_collision.max_size())
         return false;
+
+    // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
+    // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
+    // load. If one wedges (the intermittent freeze), the LAST line printed names the
+    // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
+    // runs at world-load/teleport, not per-frame.
+    const auto _esrn_t0 = std::chrono::steady_clock::now();
+    // ALL THREE unbounded waits in this function run under the
+    // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
+    // collision-build batch below was wrapped, so a generation/meshing wedge still
+    // hung silently). Observability only — hash-neutral, OFF in determinism gates.
+    const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...",
+                         world_pos.x,
+                         world_pos.z);
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/generation-drain",
+                                          [this]() { wait_for_generation_jobs(); });
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/meshing-drain",
+                                          [this]() { wait_for_meshing_jobs(); });
+    // settle the two-stage promotion pipeline too (publish staged
+    // sim truth, dispatch + drain the stage-B render meshes) so the surface
+    // band below observes fully settled chunks, exactly as before the split.
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/promotion-drain",
+                                          [this]() { wait_for_streaming_jobs(); });
+
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
@@ -6063,7 +6080,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
         affected_z[z_count++] = home_rz + 1;
 
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     for (std::size_t z = 0; z < z_count; ++z) {
         for (std::size_t x = 0; x < x_count; ++x) {
             m_far_lod_region_revisions[{affected_x[x], affected_z[z]}] = revision;
@@ -6072,7 +6092,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
 }
 
 u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const {
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     const auto found = m_far_lod_region_revisions.find({rx, rz});
     return found == m_far_lod_region_revisions.end() ? 0u : found->second;
 }

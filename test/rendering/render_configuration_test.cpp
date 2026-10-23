@@ -7,6 +7,7 @@
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/foliage/SpeciesRegistry.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldgenFileReader.h"
 
@@ -900,6 +901,27 @@ void species_capture_references(const TemporaryContent& content) {
         require(registry.size() == 2 && registry.FindByName("retained") != nullptr &&
                 registry.FindByName("deer") != nullptr &&
                 registry.FindByName("outside") == nullptr);
+    }
+    luminumbra::foliage::SpeciesRegistry foliage_registry;
+    require(foliage_registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+    errors.clear();
+    io_failed = false;
+    require(foliage_registry.LoadFromDirectory(directory, errors, &io_failed) == 1);
+    require(!io_failed && errors.empty());
+    for (const bool report_failure : {false, true}) {
+        errors.clear();
+        io_failed = false;
+        require(foliage_registry.LoadFromDirectory(
+                    content.root(), errors, report_failure ? &io_failed : nullptr) == 0);
+        require(!errors.empty() && io_failed == report_failure);
+        errors.clear();
+        io_failed = false;
+        require(foliage_registry.LoadFromDirectory<EscapingSpeciesDirectoryIterator>(
+                    directory, errors, report_failure ? &io_failed : nullptr) == 0);
+        require(!errors.empty() && io_failed == report_failure);
+        require(foliage_registry.size() == 2 && foliage_registry.Find("retained") != nullptr &&
+                foliage_registry.Find("deer") != nullptr &&
+                foliage_registry.Find("outside") == nullptr);
     }
 }
 
