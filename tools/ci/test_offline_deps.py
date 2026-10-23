@@ -43,6 +43,16 @@ diagnostics = importlib.util.module_from_spec(diagnostic_spec)
 diagnostic_spec.loader.exec_module(diagnostics)
 
 
+def copy_jolt_overlay_inputs(root):
+    # The fixture supplies its own vendor declarations; copy the other inputs
+    # hashed by the real Jolt overlay identity, including its Python imports.
+    for relative in ("tools/ci/jolt_startup.py", "tools/ci/path_safety.py", "cmake/jolt_startup.cmake",
+                     "cmake/patches/jolt-startup.json", "cmake/patches/jolt-startup.patch"):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+
+
 class ContainmentTests(unittest.TestCase):
     def test_lexical_boundaries_match_explicit_table_and_pathlib(self):
         tables = (
@@ -482,11 +492,7 @@ class OfflineDependenciesTests(unittest.TestCase):
 
     def test_stage_all_real_declaration_overrides(self):
         (self.root / "vendor/CMakeLists.txt").write_text((ROOT / "vendor/CMakeLists.txt").read_text())
-        for relative in ("tools/ci/jolt_startup.py", "tools/ci/path_safety.py", "cmake/jolt_startup.cmake",
-                         "cmake/patches/jolt-startup.json", "cmake/patches/jolt-startup.patch"):
-            target = self.root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / relative, target)
+        copy_jolt_overlay_inputs(self.root)
         lock = deps.unresolved_lock(self.root)
         lock["status"] = "resolved"
         for name in lock["dependencies"]:
@@ -2000,6 +2006,7 @@ class CachedGitSafetyTests(unittest.TestCase):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text("fixture\n")
         (self.root / "vendor/CMakeLists.txt").write_text("\n".join(declarations))
+        copy_jolt_overlay_inputs(self.root)
         lock = deps.unresolved_lock(self.root)
         lock["status"] = "resolved"
         for name, entry in lock["dependencies"].items():

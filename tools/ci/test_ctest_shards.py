@@ -574,6 +574,24 @@ class CTestShardTests(unittest.TestCase):
     def test_windows_contract_reservations_cover_both_projects_and_preserve_shards(self):
         local_names = {"ChangedTranslationUnitsContract", "OfflineDependenciesContract",
                        "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"}
+        borrowed_input_names = {
+            "RmlUiSourceScriptContract", "RmlUiSourceCommandContract",
+            "LocalRmlUiRecipeContract", "LocalRmlUiRecoveryFailureContract",
+            *{"RmlUiSourceFixture_" + name for name in (
+                "every_changed_file_preserves_operations_defaults_and_enum_declarations",
+                "files_mixed_missing_extra_and_partial_refuse_untouched",
+                "git_pin_index_modes_flags_alternates_and_config_refusals",
+                "interruption_at_each_publication_boundary_never_marks_incomplete_ready",
+                "mode_and_unreadable_refuse", "nonordinary_files_and_links",
+                "operation_assertions_use_strict_utf8_with_a_cp1252_default")},
+            *{"RmlUiSourceRecovery_" + name for name in (
+                "borrowed_archive_without_git_returns_its_original_metadata",
+                "borrowed_recovery_refuses_unknown_partial_and_changed_metadata",
+                "setup_final_verification_failure_returns_the_complete_input",
+                "teardown_refusal_preserves_ancestor_and_can_retry_both_locations")},
+            *{"LocalRmlUiRecovery_" + name for name in (
+                "beforepatch", "afterpatch", "beforerename", "afterrename", "receipt", "configure")},
+        }
         priorities = {"WorkflowPolicyContract": 30, "ChangedTranslationUnitsContract": 29,
                       **{f"CTestShardContractPart{index}": 25 for index in range(1, 9)},
                       "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
@@ -592,17 +610,23 @@ class CTestShardTests(unittest.TestCase):
                     with self.subTest(windows=windows, standalone=standalone, name=row["name"]):
                         if python_contract:
                             selected.append(row["name"])
-                            self.assertEqual(props["TIMEOUT"], 30)
+                            borrowed_input = row["name"] in borrowed_input_names
+                            self.assertEqual(props["TIMEOUT"], 60 if borrowed_input else 30)
                             expected = 4 if windows else 2 if row["name"] == "WorkflowPolicyContractPart9" else 1
                             self.assertEqual(props.get("PROCESSORS", 1), expected)
                             self.assertEqual(props.get("COST", 0), priorities.get(row["name"], 0) if windows else 0)
                             for relationship in shards.RELATIONS:
-                                self.assertNotIn(relationship, props)
+                                if borrowed_input and relationship == "RESOURCE_LOCK":
+                                    self.assertEqual(props[relationship], ["rmlui_offline_input"])
+                                else:
+                                    self.assertNotIn(relationship, props)
                         else:
                             self.assertNotIn("PROCESSORS", props)
                             self.assertNotIn("COST", props)
                 self.assertTrue(local_names <= set(selected))
-                self.assertEqual(len(selected), 4 if standalone else 27 if windows else 29)
+                self.assertEqual(len(selected), 4 if standalone else 48 if windows else 50)
+                if not standalone:
+                    self.assertTrue(borrowed_input_names <= set(selected))
                 names = [row["name"] for row in rows]
                 unthrottled = copy.deepcopy(rows)
                 for row in unthrottled:

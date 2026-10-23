@@ -1987,6 +1987,9 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
     # Every borrowed-input consumer shares custody; recovery cases have separate
     # entries so real Git publication stays inside the existing deadlines.
+    set(_rmlui_source_contracts
+        RmlUiSourceScriptContract RmlUiSourceCommandContract
+        LocalRmlUiRecipeContract LocalRmlUiRecoveryFailureContract)
     add_test(
         NAME RmlUiSourceScriptContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
@@ -2009,6 +2012,7 @@ if(BUILD_TESTING)
                     SourceFiles.test_${fixture})
         set_tests_properties(RmlUiSourceFixture_${fixture}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts RmlUiSourceFixture_${fixture})
     endforeach()
     add_test(
         NAME RmlUiSourceCommandContract
@@ -2029,6 +2033,7 @@ if(BUILD_TESTING)
                     BorrowedFixtureRecovery.test_${recovery})
         set_tests_properties(RmlUiSourceRecovery_${recovery}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts RmlUiSourceRecovery_${recovery})
     endforeach()
     add_test(
         NAME LocalRmlUiRecipeContract
@@ -2043,6 +2048,7 @@ if(BUILD_TESTING)
                     LocalRecipeRecovery.test_publication_${boundary}_returns_borrowed_input)
         set_tests_properties(LocalRmlUiRecovery_${boundary}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts LocalRmlUiRecovery_${boundary})
     endforeach()
     add_test(
         NAME LocalRmlUiRecoveryFailureContract
@@ -2081,6 +2087,7 @@ if(BUILD_TESTING)
             WorkflowPolicyContractPart8 WorkflowPolicyContractPart9
             QualificationCaptureContract SlowestTestsScriptContract
             LocalCheckRegistrationContract
+            ${_rmlui_source_contracts}
             PROPERTIES PROCESSORS 4)
         # Explicit costs seed longest-first scheduling on fresh runners.
         set_property(TEST WorkflowPolicyContract PROPERTY COST 30)

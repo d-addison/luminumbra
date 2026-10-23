@@ -798,6 +798,35 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for filename in GUARDED
         }
 
+    def test_profile_source_checker_requires_complete_ordered_configuration(self):
+        spec = importlib.util.spec_from_file_location(
+            "profile_contract", ROOT / "test/tools/check_profiler_contract.py")
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        contract.check_enabled_compile()
+        original_read = contract.read
+        workflow = self.workflows["ci.yml"]
+        init = "          python3 -I -B tools/ci/rmlui_source.py init --root build/gns-probe\n"
+        binding = "\"-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')\""
+        flags = "-DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON"
+        mutations = [
+            workflow.replace(init, ""),
+            workflow.replace(init, "").replace(flags + "\n", flags + "\n" + init),
+            workflow.replace(init, init.replace("gns-probe", "wrong-root")),
+            workflow.replace(binding, ""),
+            workflow.replace(binding, binding.replace("python3 -I -B -c", "python3 -c")),
+            workflow.replace("-DBUILD_TESTING=ON", "-DBUILD_TESTING=OFF"),
+            workflow.replace("-DBUILD_TESTING=ON", ""),
+            workflow.replace("-DLUMINUMBRA_ENABLE_GNS=ON", ""),
+        ]
+        for index, mutated in enumerate(mutations):
+            with self.subTest(mutation=index):
+                self.assertNotEqual(mutated, workflow)
+                with patch.object(contract, "read", side_effect=lambda path:
+                                  mutated if path == ".github/workflows/ci.yml" else original_read(path)):
+                    with self.assertRaisesRegex(AssertionError, "CI must configure the enabled profile preset"):
+                        contract.check_enabled_compile()
+
     def test_performance_apt_install_steps_have_bounded_updates_and_retries(self):
         install_jobs = []
         for job_id, job in jobs(self.workflows["performance.yml"]).items():
