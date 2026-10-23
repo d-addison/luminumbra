@@ -2,6 +2,7 @@
 
 #include "FarVolumeResidency.h"
 #include "FarWorldSelection.h"
+#include <memory>
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
 
@@ -30,7 +31,8 @@ enum class FarWorldSubmissionRefusal {
     LiveOwnershipIncomplete,
     LogicalStoreAdmission,
     BackendUnavailable,
-    DrawRejected
+    DrawRejected,
+    IsolationSuppressed
 };
 struct FarWorldDiagnosticSnapshot {
     FarWorldSelection selection;
@@ -49,7 +51,26 @@ struct FarWorldDiagnosticSnapshot {
     std::array<FarWorldTierDiagnostic, World::kFarTierCount> tiers{};
     std::array<FarWorldTileDiagnostic, kFarWorldDiagnosticTiles> tiles{};
     std::size_t tile_count = 0, draws = 0, indices = 0;
+    // Reconstruct in place: a whole-snapshot temporary can exhaust debug stacks.
+    void Reset() noexcept {
+        std::destroy_at(this);
+        std::construct_at(this);
+    }
 };
+// Constant-size reporting state; coverage changes do not produce mode-transition logs.
+struct FarWorldReportingState {
+    FarWorldSelection selection;
+    FarWorldSubmissionRefusal submission_refusal = FarWorldSubmissionRefusal::None;
+    bool coverage_settled = false;
+};
+inline bool FarWorldReportSuppressed(const FarWorldReportingState& state) noexcept {
+    return !state.selection.submit || state.submission_refusal != FarWorldSubmissionRefusal::None;
+}
+bool FarWorldReportChanged(const std::optional<FarWorldReportingState>& previous,
+                           const FarWorldReportingState& current) noexcept;
+// Terrain isolation gates the shared Legacy/Ladder submission path in the G-buffer.
+FarWorldReportingState FarWorldReportState(const FarWorldDiagnosticSnapshot& snapshot,
+                                           bool terrain_submission = true) noexcept;
 // A paired render keeps selection/plane and disables only scheduling/submission.
 constexpr FarWorldSelection FarWorldSubmissionOverride(FarWorldSelection selected,
                                                        bool submission) noexcept {

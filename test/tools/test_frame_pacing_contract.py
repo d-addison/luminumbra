@@ -110,7 +110,8 @@ class FramePacingSourceContract(unittest.TestCase):
         apply = "if(swap_interval!=applied_swap_interval){glfwSwapInterval(swap_interval);"
         self.assertIn(apply + "applied_swap_interval=swap_interval;}", loop)
         self.assertLess(resolve, loop.index(apply))
-        self.assertLess(loop.index(apply), loop.index("glfwSwapBuffers(window);"))
+        self.assertLess(loop.index(apply), loop.index(
+            'LUMIN_PROFILE_WAIT("Clientpresentwait",glfwSwapBuffers(window));'))
 
     def test_all_measurement_overrides_reach_all_production_calls(self):
         self.assert_measurement_wiring(self.main)

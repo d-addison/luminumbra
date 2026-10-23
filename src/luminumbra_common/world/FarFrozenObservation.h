@@ -110,6 +110,17 @@ public:
     FarFrozenUse use() const noexcept {
         return use_;
     }
+    // Allocation lifetime stays with the image, including every worker alias.
+    const FarVolumeMemoryPool* memory_pool() const noexcept {
+        return pool_.get();
+    }
+    std::shared_ptr<FarVolumeMemoryPool> memory_pool_handle() const noexcept {
+        return pool_;
+    }
+    // Sample/vector payload only; the shared allocation is also charged in pool.
+    std::uint64_t payload_bytes() const noexcept {
+        return lease_.bytes();
+    }
     FarCaveMode caves() const noexcept {
         return caves_;
     }

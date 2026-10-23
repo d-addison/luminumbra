@@ -1,14 +1,809 @@
 #!/usr/bin/env python3
 """Controlled-workload identity and isolation contracts; stdlib only."""
+import contextlib
+import errno
+import hashlib
+import io
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
+import types
 import unittest
+from unittest import mock
 
+import fixture_paths
 import prepare_server_comparison as comparison
+from test_fixture_hash import (ROOTED_REFERENCES, ESCAPING_REFERENCES, directory_link,
+                               remove_directory_link, symlink_or_skip)
+
+
+# Snapshot only the small, exclusively owned fixtures, with bounded traversal,
+# retained file bytes and link text. This is not a concurrent-writer protocol.
+SNAPSHOT_MAX_ENTRIES = 4096
+SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
+SNAPSHOT_MAX_LINK_CHARS = 32768
 
 
 class ComparisonFixtureTest(unittest.TestCase):
+    def test_identity_normalizes_configuration_newlines(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "data/common").mkdir(parents=True)
+            (root / "worlds/atlas/presets").mkdir(parents=True)
+            marker = root / comparison.MARKER
+            identities = []
+            for newline in (b"\n", b"\r\n", b"\r"):
+                marker.write_bytes(b'{"controlled":true}' + newline)
+                identities.append(comparison.identity(root))
+            self.assertEqual(identities, [identities[0]] * 3)
+
+    def test_identity_refuses_external_preset_references(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "data/common").mkdir(parents=True)
+            presets = root / "worlds/atlas/presets"
+            presets.mkdir(parents=True)
+            (root / comparison.MARKER).write_text("controlled")
+            for reference in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                with self.subTest(reference=reference):
+                    with self.assertRaisesRegex(ValueError, "fixture reference"):
+                        comparison.identity(root)
+
+    def test_preparation_refuses_unsafe_links_before_copy_or_source_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            base, head = parent / "base", parent / "head"
+            common = base / "data/common"
+            common.mkdir(parents=True)
+            (base / "worlds/atlas/presets").mkdir(parents=True)
+            outside = parent / "outside.json"
+            outside.write_text("{}")
+            symlink_or_skip(self, common / "systems.json", outside)
+            with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                comparison.prepare(base, head, parent / "receipt.json")
+            self.assertFalse((base / "perf-common").exists())
+            self.assertFalse((head / "perf-common").exists())
+            self.assertFalse((parent / "receipt.json").exists())
+
+    def test_preparation_refuses_unsafe_preset_before_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base, head = Path(temp) / "base", Path(temp) / "head"
+            (base / "data/common").mkdir(parents=True)
+            presets = base / "worlds/atlas/presets"
+            presets.mkdir(parents=True)
+            for reference in ("../outside.json", r"a\b/../../..\biomes.json"):
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, "escapes root"):
+                    comparison.prepare(base, head, Path(temp) / "receipt.json")
+                self.assertFalse((base / "perf-common").exists())
+                self.assertFalse((head / "perf-common").exists())
+                self.assertFalse((Path(temp) / "receipt.json").exists())
+
+    def test_preparation_carries_validated_native_dependency_paths(self):
+        reference = r"a\b/../..\biomes.json"
+        native_name = "biomes.json" if os.name == "nt" else r"..\biomes.json"
+        for present in (False, True):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as temp:
+                base, head = Path(temp) / "base", Path(temp) / "head"
+                for checkout in (base, head):
+                    source = checkout / "src/luminumbra_server/ServerWorldRunner.cpp"
+                    source.parent.mkdir(parents=True)
+                    source.write_text('    bool world_ready = false;\n'
+                        '    world_system->debug_set_streaming_radius_cap(m_config.test_streaming_radius_cap);\n')
+                common = base / "data/common"
+                common.mkdir(parents=True)
+                (common / "systems.json").write_text('{}')
+                presets = base / "worlds/atlas/presets"
+                presets.mkdir(parents=True)
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                dependency = base / "data" / native_name
+                if present:
+                    dependency.write_bytes(b'{"biomes":[]}')
+                schema = head / "src/luminumbra_common/core/ConfigSchema.json"
+                schema.parent.mkdir(parents=True)
+                schema.write_text('{"keys":[]}')
+                receipt = Path(temp) / "receipt.json"
+                comparison.prepare(base, head, receipt)
+                self.assertTrue(receipt.is_file())
+                for checkout in (base, head):
+                    copied = checkout / "perf-common/data" / native_name
+                    self.assertEqual(copied.exists(), present)
+                    if present:
+                        self.assertEqual(copied.read_bytes(), dependency.read_bytes())
+                self.assertEqual(comparison.identity(base / "perf-common"),
+                                 comparison.identity(head / "perf-common"))
+
+    def test_dependency_status_errors_refuse_before_any_preparation_write(self):
+        # Model Python 3.14 querying semantics even on older interpreters:
+        # exists() suppresses every OSError, whereas stat() preserves it.
+        original_stat = Path.stat
+        for relative in ("extra/branch.json", "extra/leaf.json"):
+            for error_type, number in ((PermissionError, errno.EACCES),
+                                       (OSError, errno.EIO),
+                                       (NotADirectoryError, errno.ENOTDIR)):
+                for consumer in ("hash", "identity", "prepare"):
+                    with self.subTest(path=relative, error=number, consumer=consumer), \
+                            tempfile.TemporaryDirectory() as temp:
+                        parent = Path(temp).resolve()
+                        base, head = self.comparison_checkouts(parent)
+                        (base / comparison.MARKER).write_text("controlled")
+                        target = base / "data" / relative
+                        failure = error_type(number, "dependency status refused", str(target))
+                        before = self.tree_contents(parent)
+                        inspected = []
+
+                        def failing_stat(path, *args, **kwargs):
+                            if path == target:
+                                inspected.append(path)
+                                raise failure
+                            return original_stat(path, *args, **kwargs)
+
+                        def querying_exists(path, *, follow_symlinks=True):
+                            try:
+                                path.stat(follow_symlinks=follow_symlinks)
+                            except OSError:
+                                return False
+                            return True
+
+                        with mock.patch.object(Path, "stat", failing_stat), \
+                                mock.patch.object(Path, "exists", querying_exists):
+                            with self.assertRaises(error_type) as caught:
+                                if consumer == "hash":
+                                    comparison.fixture_hash(base / "worlds/atlas/presets",
+                                                            reference_root=base / "data")
+                                elif consumer == "identity":
+                                    comparison.identity(base)
+                                else:
+                                    comparison.prepare(base, head, parent / "receipt.json")
+                            self.assertIs(caught.exception, failure)
+                        self.assertTrue(inspected)
+                        self.assertEqual(self.tree_contents(parent), before)
+                        self.assertFalse((base / "perf-common").exists())
+                        self.assertFalse((head / "perf-common").exists())
+                        self.assertFalse((parent / "receipt.json").exists())
+
+    def test_dependency_open_and_partial_read_errors_leave_preparation_unchanged(self):
+        original_open, original_fdopen = os.open, os.fdopen
+        for relative in ("extra/branch.json", "extra/leaf.json"):
+            for stage in ("open", "read"):
+                for error_type, number in ((PermissionError, errno.EACCES), (OSError, errno.EIO)):
+                    with self.subTest(path=relative, stage=stage, error=number), \
+                            tempfile.TemporaryDirectory() as temp:
+                        parent = Path(temp).resolve()
+                        base, head = self.comparison_checkouts(parent)
+                        target = base / "data" / relative
+                        status = target.stat()
+                        failure = error_type(number, "dependency read refused", str(target))
+                        before = self.tree_contents(parent)
+                        partial = []
+
+                        def failing_open(path, *args, **kwargs):
+                            if stage == "open" and path in (target, target.name):
+                                raise failure
+                            return original_open(path, *args, **kwargs)
+
+                        @contextlib.contextmanager
+                        def failing_reader(stream):
+                            with stream:
+                                def read(*args, **kwargs):
+                                    partial.append(stream.read(1))
+                                    raise failure
+                                yield types.SimpleNamespace(read=read)
+
+                        def failing_fdopen(descriptor, *args, **kwargs):
+                            stream = original_fdopen(descriptor, *args, **kwargs)
+                            opened = os.fstat(descriptor)
+                            if stage == "read" and (opened.st_dev, opened.st_ino) == (status.st_dev, status.st_ino):
+                                return failing_reader(stream)
+                            return stream
+
+                        with mock.patch.object(fixture_paths.os, "open", failing_open), \
+                                mock.patch.object(fixture_paths.os, "fdopen", failing_fdopen):
+                            with self.assertRaises(error_type) as caught:
+                                comparison.prepare(base, head, parent / "receipt.json")
+                            self.assertIs(caught.exception, failure)
+                        self.assertEqual(partial, [b"{"] if stage == "read" else [])
+                        self.assertEqual(self.tree_contents(parent), before)
+                        self.assertFalse((parent / "receipt.json").exists())
+                        self.assertFalse((base / "perf-common").exists())
+                        self.assertFalse((head / "perf-common").exists())
+
+    def test_missing_external_and_transitive_dependencies_keep_null_fallback(self):
+        for relative in ("extra/branch.json", "extra/leaf.json"):
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                (base / "data" / relative).unlink()
+                source = comparison.fixture_hash(base / "worlds/atlas/presets",
+                                                  reference_root=base / "data")
+                receipt = parent / "receipt.json"
+                comparison.prepare(base, head, receipt)
+                self.assertTrue(receipt.is_file())
+                for checkout in (base, head):
+                    root = checkout / "perf-common"
+                    self.assertFalse((root / "data" / relative).exists())
+                    self.assertEqual(comparison.fixture_hash(root / "worlds/atlas/presets",
+                                                             reference_root=root / "data"), source)
+                self.assertEqual(comparison.identity(base / "perf-common"),
+                                 comparison.identity(head / "perf-common"))
+
+    def test_real_dependency_status_refusal_preserves_preparation_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            target = base / "data/extra/leaf.json"
+            directory = target.parent
+            previous_mode = directory.stat().st_mode
+            try:
+                directory.chmod(0)
+                try:
+                    target.stat()
+                except PermissionError:
+                    # Snapshot before restricting traversal, then compare again
+                    # after restoring it; the production consumer gets no mock.
+                    directory.chmod(previous_mode)
+                    before = self.tree_contents(parent)
+                    directory.chmod(0)
+                    with self.assertRaises((OSError, ValueError)):
+                        comparison.prepare(base, head, parent / "receipt.json")
+                    directory.chmod(previous_mode)
+                    self.assertEqual(self.tree_contents(parent), before)
+                    self.assertFalse((parent / "receipt.json").exists())
+                    self.assertFalse((base / "perf-common").exists())
+                    self.assertFalse((head / "perf-common").exists())
+                else:
+                    # Privileged users and some filesystems ignore chmod denial.
+                    self.assertTrue(stat.S_ISREG(target.stat().st_mode))
+                    print("Filesystem traversal denial unavailable for these credentials; "
+                          "exact status-error injection remains exercised")
+            finally:
+                directory.chmod(previous_mode)
+
+    def test_real_nondirectory_dependency_is_not_silently_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            blocker = base / "data/extra/blocker"
+            blocker.write_text("not a directory")
+            target = blocker / "table.json"
+            (base / "data/extra/leaf.json").write_text(json.dumps({
+                "generation_params": {"biomes": {"table": "extra/blocker/table.json"}}}))
+            before = self.tree_contents(parent)
+            try:
+                target.stat()
+            except FileNotFoundError:
+                # Some hosts classify this as ENOENT. Only that exception is
+                # allowed to select the documented missing-dependency fallback.
+                comparison.prepare(base, head, parent / "receipt.json")
+                self.assertTrue((parent / "receipt.json").is_file())
+            except OSError:
+                with self.assertRaises((OSError, ValueError)):
+                    comparison.prepare(base, head, parent / "receipt.json")
+                self.assertEqual(self.tree_contents(parent), before)
+                self.assertFalse((parent / "receipt.json").exists())
+                self.assertFalse((base / "perf-common").exists())
+                self.assertFalse((head / "perf-common").exists())
+            else:
+                self.fail("a child of a regular file unexpectedly has metadata")
+
+    def test_expanded_traversal_refusals_preserve_both_checkouts_and_receipt(self):
+        import fixture_hash
+        for workload in ("common", "presets", "dependencies"):
+            with self.subTest(workload=workload), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                if workload == "dependencies":
+                    # A narrow tree with a transitive external chain. Both
+                    # individual trees fit; dependency work must share the cap.
+                    for i in range(14):
+                        name = f"extra/chain{i + 1}.json"
+                        (base / f"data/extra/chain{i}.json").write_text(json.dumps(
+                            {"generation_params": {"biomes": {"table": name}}}))
+                    (base / "data/extra/branch.json").write_text(json.dumps(
+                        {"generation_params": {"biomes": {"table": "extra/chain0.json"}}}))
+                else:
+                    root = base / ("data/common" if workload == "common" else "worlds/atlas/presets")
+                    target = root / "template"
+                    target.mkdir()
+                    (target / "empty").mkdir()
+                    # Each directory alias adds work even with no regular file.
+                    for i in range(6):
+                        link = root / f"alias{i}"
+                        directory_link(link, target)
+                try:
+                    receipt = parent / "receipt.json"
+                    before = self.tree_contents(parent)
+                    with mock.patch.object(fixture_hash, "MAX_FIXTURE_ENTRIES", 12, create=True), \
+                            self.assertRaisesRegex(ValueError, "entry budget"):
+                        comparison.prepare(base, head, receipt)
+                    self.assertEqual(before, self.tree_contents(parent))
+                    self.assertFalse(receipt.exists())
+                    self.assertFalse((base / "perf-common").exists())
+                    self.assertFalse((head / "perf-common").exists())
+                finally:
+                    if workload != "dependencies":
+                        for i in reversed(range(6)):
+                            remove_directory_link(root / f"alias{i}")
+
+    def test_bounded_copy_keeps_alias_names_empty_directories_and_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            common = base / "data/common"
+            target = common / "template"
+            (target / "empty").mkdir(parents=True)
+            (target / "leaf.bin").write_bytes(b"leaf")
+            links = [common / name for name in ("left", "right")]
+            try:
+                for link in links:
+                    directory_link(link, target)
+                comparison.prepare(base, head, parent / "receipt.json")
+                for checkout in (base, head):
+                    copied = checkout / "perf-common"
+                    for name in ("template", "left", "right"):
+                        folder = copied / "data/common" / name
+                        self.assertTrue((folder / "empty").is_dir())
+                        self.assertEqual((folder / "leaf.bin").read_bytes(), b"leaf")
+                        self.assertFalse(folder.is_symlink())
+                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode),
+                                         stat.S_IMODE(target.stat().st_mode))
+                    self.assertEqual(comparison.identity(base / "perf-common"), comparison.identity(copied))
+                document = json.loads((parent / "receipt.json").read_text())
+                self.assertEqual(document["runs"][0]["fixture_hash"],
+                                 document["runs"][1]["fixture_hash"])
+            finally:
+                for link in reversed(links):
+                    if link.exists():
+                        remove_directory_link(link)
+
+    def test_copy_uses_completed_plan_without_rescanning_after_destination_creation(self):
+        import fixture_hash
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            original = os.scandir
+            def scan(path):
+                # All source expansion must finish before the first payload is
+                # created. Identity reads after copying may scan destinations.
+                if (base / "perf-common").exists() and Path(path).is_relative_to(base) \
+                        and not Path(path).is_relative_to(base / "perf-common"):
+                    raise AssertionError("source rescanned after destination creation")
+                return original(path)
+            with mock.patch.object(os, "scandir", side_effect=scan):
+                comparison.prepare(base, head, parent / "receipt.json")
+            self.assertTrue((parent / "receipt.json").is_file())
+
+    @staticmethod
+    def comparison_checkouts(parent):
+        base, head = parent / "base", parent / "head"
+        for checkout in (base, head):
+            source = checkout / "src/luminumbra_server/ServerWorldRunner.cpp"
+            source.parent.mkdir(parents=True)
+            source.write_text('    bool world_ready = false;\n'
+                '    world_system->debug_set_streaming_radius_cap(m_config.test_streaming_radius_cap);\n')
+        data = base / "data"
+        (data / "common").mkdir(parents=True)
+        (data / "common/systems.json").write_text('{}')
+        (data / "common/biomes.json").write_text('{"biomes":[]}')
+        (data / "extra").mkdir()
+        document = lambda table: json.dumps({"generation_params": {"biomes": {"table": table}}})
+        (data / "extra/branch.json").write_text(document("extra/leaf.json"))
+        (data / "extra/leaf.json").write_text('{"biomes":[1]}')
+        native_name = "biomes.json" if os.name == "nt" else r"..\biomes.json"
+        (data / native_name).write_text('{"biomes":[2]}')
+        presets = base / "worlds/atlas/presets"
+        presets.mkdir(parents=True)
+        for name, reference in (("default", "common/biomes.json"), ("extra", "extra/branch.json"),
+                                ("native", r"a\b/../..\biomes.json"), ("missing", "extra/missing.json")):
+            (presets / f"{name}.json").write_text(document(reference))
+        schema = head / "src/luminumbra_common/core/ConfigSchema.json"
+        schema.parent.mkdir(parents=True)
+        schema.write_text('{"keys":[{"section":"sim","json_name":"active_regions"}]}')
+        return base, head
+
+    @staticmethod
+    def tree_contents(root):
+        # The caller may select a root alias, but descendant redirects must be
+        # recorded without visiting their targets, including dangling junctions.
+        result, pending, remaining = {}, [root], SNAPSHOT_MAX_BYTES
+        while pending:
+            for path in pending.pop().iterdir():
+                if len(result) >= SNAPSHOT_MAX_ENTRIES:
+                    raise ValueError("fixture snapshot entry limit exceeded")
+                name = path.relative_to(root).as_posix()
+                metadata = os.lstat(path)  # DirEntry.stat has zero Windows file IDs.
+                attributes = metadata.st_file_attributes if os.name == "nt" else 0
+                tag = metadata.st_reparse_tag if os.name == "nt" else 0
+                reparse = attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                if stat.S_ISLNK(metadata.st_mode) or reparse:
+                    # Win32 IO_REPARSE_TAG_SYMLINK and IO_REPARSE_TAG_MOUNT_POINT.
+                    if reparse and tag not in (0xA000000C, 0xA0000003):
+                        raise ValueError("unsupported fixture snapshot reparse tag")
+                    target = os.readlink(path)
+                    if len(target) > SNAPSHOT_MAX_LINK_CHARS:
+                        raise ValueError("fixture snapshot link text limit exceeded")
+                    identity = tuple(getattr(metadata, field) for field in (
+                        "st_mode", "st_dev", "st_ino", "st_nlink", "st_size",
+                        "st_mtime_ns", "st_ctime_ns"))
+                    result[name] = ("link", (identity, attributes, tag, target))
+                elif stat.S_ISDIR(metadata.st_mode):
+                    result[name] = ("directory", None)
+                    pending.append(path)
+                elif stat.S_ISREG(metadata.st_mode):
+                    if metadata.st_size > remaining:
+                        raise ValueError("fixture snapshot byte limit exceeded")
+                    with path.open("rb") as stream:
+                        content = stream.read(remaining + 1)
+                    if len(content) > remaining:
+                        raise ValueError("fixture snapshot byte limit exceeded")
+                    if len(content) != metadata.st_size:
+                        raise ValueError("fixture snapshot file size changed")
+                    remaining -= len(content)
+                    result[name] = ("file", content)
+                else:
+                    raise ValueError("unsupported fixture snapshot entry type")
+        return result
+
+    def test_tree_contents_records_real_directory_links_and_cleanup(self):
+        for target_kind in ("missing", "outside", "cycle"):
+            with self.subTest(target_kind=target_kind), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                root = parent / "fixture"
+                root.mkdir()
+                (root / "empty").mkdir()
+                (root / "ordinary.json").write_bytes(b"{}")
+                outside = parent / "outside"
+                outside.mkdir()
+                sentinel = outside / "sentinel.json"
+                sentinel.write_bytes(b"outside")
+                target = {"missing": outside / "missing", "outside": outside,
+                          "cycle": root}[target_kind]
+                link = root / "redirect.json"
+                directory_link(link, target)
+                try:
+                    before = self.tree_contents(root)
+                    self.assertEqual(set(before), {"empty", "ordinary.json", "redirect.json"})
+                    self.assertEqual(before["empty"], ("directory", None))
+                    self.assertEqual(before["ordinary.json"], ("file", b"{}"))
+                    self.assertEqual(before["redirect.json"][0], "link")
+                    self.assertEqual(before["redirect.json"][1][-1], os.readlink(link))
+                    self.assertEqual(self.tree_contents(root), before)
+                    remove_directory_link(link)
+                    directory_link(link, outside / "replacement")
+                    self.assertNotEqual(self.tree_contents(root), before)
+                finally:
+                    remove_directory_link(link)
+                with self.assertRaises(FileNotFoundError):
+                    os.lstat(link)
+                self.assertEqual(sentinel.read_bytes(), b"outside")
+
+    def test_tree_contents_records_reparse_identity_without_target_io(self):
+        # Metadata controls run everywhere; only directory_link tests exercise
+        # native junctions on Windows. The stand-in directory must not be walked.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            link = root / "redirect.json"
+            link.mkdir()
+            (link / "unvisited.json").write_bytes(b"outside")
+            fields = dict(st_mode=stat.S_IFDIR, st_dev=1, st_ino=2, st_nlink=1,
+                          st_size=0, st_mtime_ns=3, st_ctime_ns=4,
+                          st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                          st_reparse_tag=0xA0000003)
+            def capture(metadata, target="missing"):
+                with mock.patch.object(os, "name", "nt"), \
+                        mock.patch.object(os, "lstat", return_value=types.SimpleNamespace(**metadata)) as status, \
+                        mock.patch.object(os, "readlink", return_value=target) as read, \
+                        mock.patch.object(Path, "open", side_effect=AssertionError("target opened")):
+                    result = self.tree_contents(root)
+                status.assert_called_once_with(link)
+                read.assert_called_once_with(link)
+                self.assertEqual(set(result), {"redirect.json"})
+                self.assertEqual(result["redirect.json"][0], "link")
+                self.assertEqual(result["redirect.json"][1][-1], target)
+                return result
+
+            before = capture(fields)
+            for field in fields:
+                changed = {**fields, field: fields[field] + 1}
+                if field == "st_mode":
+                    changed[field] = stat.S_IFREG
+                elif field == "st_file_attributes":
+                    changed[field] |= stat.FILE_ATTRIBUTE_DIRECTORY
+                elif field == "st_reparse_tag":
+                    changed[field] = 0xA000000C
+                with self.subTest(field=field):
+                    self.assertNotEqual(capture(changed), before)
+            self.assertNotEqual(capture(fields, "different"), before)
+
+    def test_tree_contents_reparse_failures_are_not_omitted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            link = root / "redirect.json"
+            link.mkdir()
+            metadata = dict(st_mode=stat.S_IFDIR, st_dev=1, st_ino=2, st_nlink=1,
+                            st_size=0, st_mtime_ns=3, st_ctime_ns=4,
+                            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                            st_reparse_tag=0xA0000003)
+            for failure in (PermissionError("denied"), OSError("partial reparse data")):
+                with self.subTest(failure=failure), mock.patch.object(os, "name", "nt"), \
+                        mock.patch.object(os, "lstat", return_value=types.SimpleNamespace(**metadata)), \
+                        mock.patch.object(os, "readlink", side_effect=failure), \
+                        self.assertRaises(type(failure)):
+                    self.tree_contents(root)
+            for tag in (0, 0x80000001):
+                with self.subTest(tag=tag), mock.patch.object(os, "name", "nt"), \
+                        mock.patch.object(os, "lstat", return_value=types.SimpleNamespace(
+                            **{**metadata, "st_reparse_tag": tag})), \
+                        mock.patch.object(os, "readlink", side_effect=AssertionError("unknown tag opened")), \
+                        self.assertRaisesRegex(ValueError, "unsupported.*reparse tag"):
+                    self.tree_contents(root)
+            for field in ("st_ino", "st_file_attributes", "st_reparse_tag"):
+                partial = {key: value for key, value in metadata.items() if key != field}
+                with self.subTest(missing=field), mock.patch.object(os, "name", "nt"), \
+                        mock.patch.object(os, "lstat", return_value=types.SimpleNamespace(**partial)), \
+                        mock.patch.object(os, "readlink", return_value="missing"), \
+                        self.assertRaises(AttributeError):
+                    self.tree_contents(root)
+
+    def test_tree_contents_uses_native_platform_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "empty").mkdir()
+            # Windows-only fields are not reparse evidence on POSIX.
+            metadata = types.SimpleNamespace(st_mode=stat.S_IFDIR,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT, st_reparse_tag=0)
+            with mock.patch.object(os, "name", "posix"), \
+                    mock.patch.object(os, "lstat", return_value=metadata), \
+                    mock.patch.object(os, "readlink", side_effect=AssertionError("not a native reparse")):
+                self.assertEqual(self.tree_contents(root), {"empty": ("directory", None)})
+            self.assertEqual(self.tree_contents(root / "empty"), {})
+
+    def test_tree_contents_metadata_and_file_read_errors_are_not_omitted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "ordinary.json"
+            path.write_bytes(b"{}")
+            for failure in (PermissionError("denied"), OSError("partial metadata"), FileNotFoundError("gone")):
+                with self.subTest(failure=failure), \
+                        mock.patch.object(os, "lstat", side_effect=failure), self.assertRaises(type(failure)):
+                    self.tree_contents(root)
+                with self.subTest(read_failure=failure), \
+                        mock.patch.object(Path, "open", side_effect=failure), self.assertRaises(type(failure)):
+                    self.tree_contents(root)
+            for content in (b"{", b"{} "):
+                with self.subTest(content=content), \
+                        mock.patch.object(Path, "open", return_value=io.BytesIO(content)), \
+                        self.assertRaisesRegex(ValueError, "file size changed"):
+                    self.tree_contents(root)
+
+    def test_tree_contents_refuses_nonregular_entries_without_open(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "entry").touch()
+            for mode in (0, stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK):
+                with self.subTest(mode=mode), \
+                        mock.patch.object(os, "lstat", return_value=types.SimpleNamespace(
+                            st_mode=mode, st_file_attributes=0, st_reparse_tag=0)), \
+                        mock.patch.object(Path, "open", side_effect=AssertionError("nonregular opened")), \
+                        self.assertRaisesRegex(ValueError, "unsupported.*entry type"):
+                    self.tree_contents(root)
+
+    def test_tree_contents_enforces_entry_and_byte_budgets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = root / "first.json"
+            first.write_bytes(b"12")
+            (root / "second.json").write_bytes(b"34")
+            with mock.patch.dict(globals(), SNAPSHOT_MAX_ENTRIES=2, SNAPSHOT_MAX_BYTES=4):
+                self.assertEqual(len(self.tree_contents(root)), 2)
+            for limits, message in ((dict(SNAPSHOT_MAX_ENTRIES=1), "entry limit"),
+                                    (dict(SNAPSHOT_MAX_BYTES=3), "byte limit")):
+                with self.subTest(limits=limits), mock.patch.dict(globals(), limits), \
+                        self.assertRaisesRegex(ValueError, message):
+                    self.tree_contents(root)
+            (root / "second.json").unlink()
+            with mock.patch.dict(globals(), SNAPSHOT_MAX_BYTES=2), \
+                    mock.patch.object(Path, "open", return_value=io.BytesIO(b"123")), \
+                    self.assertRaisesRegex(ValueError, "byte limit"):
+                self.tree_contents(root)
+
+    def test_tree_contents_bounds_link_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            link = root / "redirect.json"
+            directory_link(link, root / "missing")
+            try:
+                with mock.patch.dict(globals(), SNAPSHOT_MAX_LINK_CHARS=3), \
+                        mock.patch.object(os, "readlink", return_value="abc"):
+                    self.assertEqual(self.tree_contents(root)["redirect.json"][1][-1], "abc")
+                with mock.patch.dict(globals(), SNAPSHOT_MAX_LINK_CHARS=3), \
+                        mock.patch.object(os, "readlink", return_value="abcd"), \
+                        self.assertRaisesRegex(ValueError, "link text limit"):
+                    self.tree_contents(root)
+            finally:
+                remove_directory_link(link)
+
+    def test_preparation_preserves_missing_optional_placement_identity(self):
+        identities = []
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                common = base / "data/common"
+                pool = common / "structures/cairn"
+                pool.mkdir(parents=True)
+                (pool / "cairn.json").write_text('{"weight":1}')
+                placement = pool / ("PLACEMENT.JSON" if os.name == "nt" else "placement.json")
+                expected = comparison.fixture_hash(common, scope="headless-server")
+                if dangling:
+                    directory_link(placement, pool / "missing.json")
+                try:
+                    self.assertEqual(comparison.fixture_hash(common, scope="headless-server"), expected)
+                    receipt = parent / "receipt.json"
+                    comparison.prepare(base, head, receipt)
+                    records = json.loads(receipt.read_text())["runs"]
+                    prepared = []
+                    for checkout, record in zip((base, head), records):
+                        root = checkout / "perf-common"
+                        self.assertFalse((root / "data/common/structures/cairn/placement.json").exists())
+                        self.assertFalse((root / "data/common/structures/cairn/placement.json").is_symlink())
+                        with self.assertRaises(FileNotFoundError):
+                            os.lstat(root / "data/common/structures/cairn/placement.json")
+                        self.assertEqual((root / "data/common/structures/cairn/cairn.json").read_bytes(),
+                                         (pool / "cairn.json").read_bytes())
+                        prepared.append(comparison.identity(root))
+                        self.assertEqual(record["fixture_hash"], prepared[-1])
+                    self.assertEqual(prepared[0], prepared[1])
+                    identities.append(prepared[0])
+                finally:
+                    if dangling:
+                        remove_directory_link(placement)
+        self.assertEqual(identities[0], identities[1])
+
+    def test_preparation_copies_authored_optional_placement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            pool = base / "data/common/structures/cairn"
+            pool.mkdir(parents=True)
+            (pool / "cairn.json").write_text('{"weight":1}')
+            placement = pool / "placement.json"
+            placement.write_text('{"spacing":96,"salt":101}')
+            comparison.prepare(base, head, parent / "receipt.json")
+            for checkout in (base, head):
+                root = checkout / "perf-common"
+                copied = root / "data/common/structures/cairn/placement.json"
+                self.assertEqual(copied.read_bytes(), placement.read_bytes())
+                before = comparison.identity(root)
+                copied.write_text('{"spacing":97,"salt":101}')
+                self.assertNotEqual(comparison.identity(root), before)
+
+    def test_preparation_refuses_missing_required_piece_and_outside_placement_before_copy(self):
+        for name, outside in (("cairn.json", False), ("placement.json", True)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                pool = base / "data/common/structures/cairn"
+                pool.mkdir(parents=True)
+                target = parent / "outside-missing.json" if outside else pool / "missing.json"
+                link = pool / name
+                directory_link(link, target)
+                try:
+                    before = [self.tree_contents(checkout) for checkout in (base, head)]
+                    receipt = parent / "receipt.json"
+                    with self.assertRaises((ValueError, FileNotFoundError)):
+                        comparison.prepare(base, head, receipt)
+                    self.assertEqual([self.tree_contents(checkout) for checkout in (base, head)], before)
+                    self.assertFalse(receipt.exists())
+                finally:
+                    remove_directory_link(link)
+
+    def test_preparation_uses_one_data_root_for_links_and_caller_aliases(self):
+        for linked_data in (False, True):
+            for caller_alias in (False, True):
+                with self.subTest(linked_data=linked_data, caller_alias=caller_alias), \
+                        tempfile.TemporaryDirectory() as temp:
+                    parent = Path(temp).resolve()
+                    base, head = self.comparison_checkouts(parent)
+                    data_before = self.tree_contents(base / "data")
+                    presets_before = self.tree_contents(base / "worlds/atlas/presets")
+                    sources = {checkout: (checkout / "src/luminumbra_server/ServerWorldRunner.cpp").read_bytes()
+                               for checkout in (base, head)}
+                    links = []
+                    try:
+                        if linked_data:
+                            (base / "data").rename(base / "assets")
+                            directory_link(base / "data", base / "assets")
+                            links.append(base / "data")
+                        selected = []
+                        for checkout in (base, head):
+                            alias = parent / (checkout.name + "-selected")
+                            if caller_alias:
+                                directory_link(alias, checkout)
+                                links.append(alias)
+                            selected.append(alias if caller_alias else checkout)
+                        receipt = parent / "receipt.json"
+                        comparison.prepare(*selected, receipt)
+                        record = json.loads(receipt.read_text())
+                        self.assertEqual(record["schema"], "luminumbra.server_comparison_fixture.v1")
+                        self.assertEqual(len(record["runs"]), 2)
+                        identities = []
+                        for checkout, requested, run in zip((base, head), selected, record["runs"]):
+                            root = requested / "perf-common"
+                            identities.append(comparison.identity(root))
+                            self.assertEqual(run["checkout"], str(requested))
+                            self.assertEqual(run["fixture_hash"], identities[-1])
+                            self.assertEqual(run["source"], "src/luminumbra_server/ServerWorldRunner.cpp".replace("/", os.sep))
+                            source = checkout / run["source"]
+                            self.assertEqual(run["source_before_sha256"], hashlib.sha256(sources[checkout]).hexdigest())
+                            self.assertEqual(run["source_after_sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+                            self.assertNotEqual(run["source_before_sha256"], run["source_after_sha256"])
+                            for gate in comparison.GATES:
+                                self.assertIn(f"Set{gate}Enabled(false)", source.read_text())
+                            self.assertIn("SetWaterHydrology(false, 0, 0)", source.read_text())
+                            self.assertIn(comparison.MARKER, source.read_text())
+                            for name, (kind, content) in data_before.items():
+                                copied = root / "data" / name
+                                if kind == "file" and name != "common/systems.json":
+                                    self.assertEqual(copied.read_bytes(), content)
+                            self.assertFalse((root / "data/extra/missing.json").exists())
+                            self.assertEqual(self.tree_contents(root / "worlds/atlas/presets"), presets_before)
+                            systems = json.loads((root / "data/common/systems.json").read_text())
+                            self.assertFalse(systems["sim"]["active_regions"]["enabled"])
+                            configuration = json.loads((root / comparison.MARKER).read_text())
+                            self.assertEqual(configuration["schema"], "luminumbra.controlled_server.v1")
+                            self.assertFalse(configuration["gates"])
+                            self.assertFalse(configuration["finite_hydrology"])
+                            self.assertEqual(configuration["autosave_ticks"], 0)
+                            # Identity must also accept the selected data directory as a link.
+                            (root / "data").rename(root / "assets")
+                            directory_link(root / "data", root / "assets")
+                            links.append(root / "data")
+                            self.assertEqual(comparison.identity(root), identities[-1])
+                            leaf = root / "data/extra/leaf.json"
+                            leaf.write_text('{"biomes":[3]}')
+                            self.assertNotEqual(comparison.identity(root), identities[-1])
+                        self.assertEqual(identities[0], identities[1])
+                        self.assertEqual(self.tree_contents(base / "data"), data_before)
+                        self.assertEqual(self.tree_contents(base / "worlds/atlas/presets"), presets_before)
+                    finally:
+                        for link in reversed(links):
+                            remove_directory_link(link)
+
+    def test_data_root_alias_refuses_dependencies_outside_data_before_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            (base / "data").rename(base / "assets")
+            directory_link(base / "data", base / "assets")
+            try:
+                outside = base / "outside-data"
+                outside.mkdir()
+                (outside / "biomes.json").write_text('{"biomes":[]}')
+                directory_link(base / "assets/escape", outside)
+                try:
+                    preset = base / "worlds/atlas/presets/default.json"
+                    preset.write_text(json.dumps({"generation_params": {
+                        "biomes": {"table": "escape/biomes.json"}}}))
+                    before = [self.tree_contents(checkout) for checkout in (base, head)]
+                    receipt = parent / "receipt.json"
+                    with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                        comparison.prepare(base, head, receipt)
+                    self.assertEqual([self.tree_contents(checkout) for checkout in (base, head)], before)
+                    self.assertFalse((base / "perf-common").exists())
+                    self.assertFalse((head / "perf-common").exists())
+                    self.assertFalse(receipt.exists())
+                finally:
+                    remove_directory_link(base / "assets/escape")
+            finally:
+                remove_directory_link(base / "data")
+
     def test_inputs_match_and_saves_do_not_change_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             base, head = Path(temp) / "base", Path(temp) / "head"
@@ -22,7 +817,11 @@ class ComparisonFixtureTest(unittest.TestCase):
             (common / "systems.json").write_text('{"sim":{"erosion":{"enabled":true}}}')
             presets = base / "worlds/atlas/presets"
             presets.mkdir(parents=True)
-            (presets / "default.json").write_text('{"schema_rev":6}')
+            (presets / "default.json").write_text(json.dumps({"schema_rev": 6,
+                "generation_params": {"biomes": {"table": "extra/biomes.json"}}}))
+            extra = base / "data/extra"
+            extra.mkdir()
+            (extra / "biomes.json").write_text('{"biomes":[]}')
             schema = head / "src/luminumbra_common/core/ConfigSchema.json"
             schema.parent.mkdir(parents=True)
             schema.write_text(json.dumps({"keys": [dict(section="sim", json_name="erosion"),
@@ -40,11 +839,16 @@ class ComparisonFixtureTest(unittest.TestCase):
                 flags = json.loads((root / "data/common/systems.json").read_text())
                 self.assertFalse(flags["sim"]["active_regions"]["enabled"])
                 self.assertFalse(flags["render"]["taau"]["enabled"])
+                self.assertEqual((root / "data/extra/biomes.json").read_bytes(),
+                                 (extra / "biomes.json").read_bytes())
                 before = comparison.identity(root)
                 saves = root / "worlds/saves"
                 saves.mkdir()
                 (saves / "generated.json").write_text('{"tick":30}')
                 self.assertEqual(before, comparison.identity(root))
+                (root / "data/extra/biomes.json").write_text('{"biomes":[1]}')
+                self.assertNotEqual(before, comparison.identity(root))
+                before = comparison.identity(root)
                 (root / "worlds/atlas/presets/default.json").write_text('{"schema_rev":7}')
                 self.assertNotEqual(before, comparison.identity(root))
                 source = (checkout / "src/luminumbra_server/ServerWorldRunner.cpp").read_text()

@@ -277,7 +277,7 @@ void UpdateCodexObjectivesFarmHud(ClientAppContext& app,
                 // Optional species name (reverse-map the stable id; default
                 // "crop").
                 std::string sname = "crop";
-                if (app.hud.farmSpeciesLoaded) {
+                if (app.hud.farmSpecies.loaded()) {
                     for (const auto& t : app.hud.farmSpecies.all())
                         if (luminumbra::foliage::SpeciesId16(t.id) == g.species_id) {
                             sname = t.id;
@@ -292,7 +292,7 @@ void UpdateCodexObjectivesFarmHud(ClientAppContext& app,
             // Selected planting species (V cycles it) shown so the player knows
             // what F plants.
             std::string selName = "wheat";
-            if (app.hud.farmSpeciesLoaded && !app.hud.farmSpecies.all().empty())
+            if (app.hud.farmSpecies.loaded() && !app.hud.farmSpecies.all().empty())
                 selName = app.hud.farmSpecies
                               .all()[static_cast<std::size_t>(app.hud.farmSelectedSpecies) %
                                      app.hud.farmSpecies.all().size()]
@@ -1106,9 +1106,11 @@ void DrawSettingsContents(ClientAppContext& app,
             console.SetOpen(true);
     }
     if (ImGui::Button("Save settings")) {
-        const std::string path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();
+        const auto path = luminumbra::core::SystemConfig::DefaultUserOverlayPath().u8string();
         const bool ok = console.SavePreferences();
-        LUMINUMBRA_CORE_INFO("Settings {} ({})", ok ? "saved" : "save FAILED", path);
+        LUMINUMBRA_CORE_INFO("Settings {} ({})",
+                             ok ? "saved" : "save FAILED",
+                             std::string(path.begin(), path.end()));
     }
     ImGui::TextDisabled("user.* — client-only, never hashed");
     bool perf = console.Widgets().Visible("perf.hud");

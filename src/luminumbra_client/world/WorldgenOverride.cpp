@@ -3,6 +3,12 @@
 #include <charconv>
 #include <cmath>
 #include <cstddef>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <ios>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -10,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 
@@ -29,26 +36,72 @@ bool ParseFloat(const std::string& s, float& out) {
     const char* begin = s.c_str();
     const char* end = begin + s.size();
     auto [ptr, ec] = std::from_chars(begin, end, out);
-    return ec == std::errc();
+    return ec == std::errc() && ptr == end && std::isfinite(out);
 }
 
 bool ParseInt(const std::string& s, long long& out) {
-    // Range inputs can report "6.000000"; accept an integral prefix.
+    // Range inputs can report "6.000000". Parse the integer exactly, then
+    // accept only a zero fractional suffix, without a float-to-integer cast.
     const char* begin = s.c_str();
     const char* end = begin + s.size();
     auto [ptr, ec] = std::from_chars(begin, end, out);
-    if (ec == std::errc())
+    if (ec != std::errc())
+        return false;
+    if (ptr == end)
         return true;
-    // Fall back through a float parse for "6.000000"-style strings.
-    float f = 0.0f;
-    if (ParseFloat(s, f)) {
-        out = static_cast<long long>(f);
-        return true;
+    if (*ptr != '.' || ++ptr == end)
+        return false;
+    // Work is bounded by this one form value's length.
+    for (; ptr != end; ++ptr) {
+        if (*ptr != '0')
+            return false;
     }
-    return false;
+    return true;
+}
+
+bool IntegerMatches(const nlohmann::json& base, long long value) {
+    if (base.is_number_unsigned()) {
+        return value >= 0 &&
+               base.get<unsigned long long>() == static_cast<unsigned long long>(value);
+    }
+    if (base.is_number_integer())
+        return base.get<long long>() == value;
+    if (!base.is_number_float())
+        return false;
+    const double number = base.get<double>();
+    // The upper exclusive bound is exact even where double rounds LLONG_MAX up.
+    const double lower = static_cast<double>(std::numeric_limits<long long>::lowest());
+    return number >= lower && number < -lower && std::trunc(number) == number &&
+           static_cast<long long>(number) == value;
 }
 
 } // namespace
+
+bool RenameUserPreset(const std::filesystem::path& source,
+                      const std::filesystem::path& destination,
+                      const std::string& display_name) {
+    try {
+        std::string original;
+        {
+            std::ifstream input(source, std::ios::binary);
+            if (!input)
+                return false;
+            std::ostringstream contents;
+            contents << input.rdbuf();
+            if (input.bad() || contents.bad())
+                return false;
+            original = contents.str();
+        }
+        auto preset = nlohmann::json::parse(original);
+        if (!preset.is_object())
+            return false;
+        preset["name"] = display_name.empty() ? std::string("Custom") : display_name;
+        return Persistence::WorldSaveService::rename_file_durably(
+            source, destination, original, preset.dump(2));
+    } catch (const std::exception&) {
+        return false;
+    }
+}
 
 CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                                      const std::vector<WorldGenParam>& params) {
@@ -103,10 +156,7 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                 ++result.skipped;
                 continue;
             }
-            const long long base_v = base_has && resolved_base.at(jp).is_number()
-                                         ? resolved_base.at(jp).get<long long>()
-                                         : v + 1;
-            if (!base_has || base_v != v) {
+            if (!base_has || !IntegerMatches(resolved_base.at(jp), v)) {
                 result.json[jp] = v;
                 result.changed = true;
                 ++result.applied;
@@ -117,10 +167,10 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                 ++result.skipped;
                 continue;
             }
-            const double base_v = base_has && resolved_base.at(jp).is_number()
-                                      ? resolved_base.at(jp).get<double>()
-                                      : v + 1.0;
-            if (!base_has || std::fabs(base_v - static_cast<double>(v)) > 1e-6) {
+            const bool matches =
+                base_has && resolved_base.at(jp).is_number() &&
+                std::fabs(resolved_base.at(jp).get<double>() - static_cast<double>(v)) <= 1e-6;
+            if (!matches) {
                 result.json[jp] = v;
                 result.changed = true;
                 ++result.applied;
@@ -149,10 +199,8 @@ KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
             if (!KnobFromId(id, k))
                 continue;
             float v = 0.5f;
-            {
-                const char* b = p.value.c_str();
-                std::from_chars(b, b + p.value.size(), v);
-            }
+            if (!ParseFloat(p.value, v))
+                continue;
             if (v < 0.0f)
                 v = 0.0f;
             if (v > 1.0f)

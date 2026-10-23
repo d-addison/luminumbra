@@ -3,6 +3,8 @@
 
 import importlib.util
 import json
+import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -20,14 +22,19 @@ SPEC.loader.exec_module(shards)
 
 
 def test(name, **properties):
-    return {"name": name, "properties": [{"name": key, "value": value} for key, value in properties.items()]}
+    return {"name": name, "command": ["test-binary", name], "properties": [{"name": key, "value": value} for key, value in properties.items()]}
 
 
 def aggregate_inventory_arguments():
     workflow = Path(__file__).resolve().parents[2] / ".github/workflows/asan.yml"
     command = next(line for line in workflow.read_text(encoding="utf-8").splitlines()
                    if line.strip().startswith("python3 tools/ci/check_ctest_junit.py "))
-    return shlex.split(command)[3:]
+    arguments = shlex.split(command)[3:]
+    floor = re.search(r"(?m)^          minimum_tests=([0-9]+)$", workflow.read_text(encoding="utf-8"))
+    assert arguments[:2] == ["--minimum-tests", "$minimum_tests"]
+    assert floor is not None
+    arguments[1] = floor.group(1)
+    return arguments
 
 
 class AsanShardTests(unittest.TestCase):
@@ -35,21 +42,79 @@ class AsanShardTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GITHUB_OUTPUT", None)
         self.names = ["ordinary", *(f"ActiveRegions/SimBudgetWorldParity.Replay/{n}" for n in range(4)), "last"]
         self.tests = [test(name) for name in self.names]
 
-    def test_stride_alternates_four_heavy_tests_and_covers_exactly_once(self):
-        result = shards.partition(self.tests, self.names)
-        self.assertEqual(result, [[self.names[n - 1] for n in part] for part in ([1, 2, 4], [3, 5, 6])])
-        # Heavy tests have their own alternating assignment regardless of start index.
-        self.assertEqual([sum("SimBudgetWorldParity." in name for name in part)
-                          for part in result], [2, 2])
-        self.assertEqual(sorted(sum(result, [])), sorted(self.names))
-        self.assertEqual(shards.partition(self.tests, self.names), result)
+    def test_synthetic_plans_do_not_publish_workflow_outputs(self):
+        self.assertNotIn("GITHUB_OUTPUT", os.environ)
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        output.write_bytes(sentinel)
+        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+            self.planned_selection(self.tests, self.tests)
+        self.assertEqual(output.read_bytes(), sentinel)
 
-    def test_current_two_parameters_split_one_each(self):
-        result = shards.partition(self.tests[:3], self.names[:3])
-        self.assertEqual(result, [self.names[:2], self.names[2:3]])
+    def test_three_shards_cover_exactly_once_and_colocate_required_suites(self):
+        self.tests += [test("AmbientDeterminismReceipt.First"), test("AmbientDeterminismReceipt.Second")]
+        names = [row["name"] for row in self.tests]
+        result = shards.partition(self.tests, names)
+        self.assertEqual(len(result), 3)
+        self.assertTrue(all(result))
+        self.assertEqual(sorted(sum(result, [])), sorted(names))
+        self.assertEqual(len(sum(result, [])), len(set(sum(result, []))))
+        for suite in ("SimBudgetWorldParity.", "AmbientDeterminismReceipt."):
+            self.assertEqual(sum(any(suite in name for name in part) for part in result), 1)
+        self.assertEqual(shards.partition(self.tests, names), result)
+
+    def test_current_two_parameters_share_one_shard(self):
+        tests = [self.tests[0], *self.tests[1:3], self.tests[-1]]
+        result = shards.partition(tests, [row["name"] for row in tests])
+        self.assertEqual(sorted(sum("SimBudgetWorldParity." in name for name in part)
+                                for part in result), [0, 0, 2])
+
+    def test_costs_and_observations_balance_groups_and_reject_invalid_inputs(self):
+        tests = [test("slow", COST=80), test("medium", COST=30), test("last", COST=0),
+                 test("SimBudgetWorldParity.First", COST=40),
+                 test("SimBudgetWorldParity.Second", COST=40)]
+        names = [row["name"] for row in tests]
+        result = shards.partition(tests, names)
+        self.assertEqual(result, [["SimBudgetWorldParity.First", "SimBudgetWorldParity.Second"],
+                                  ["slow"], ["medium", "last"]])
+        shared = shards._shared
+        for operation in (shared.partition, shared._partition_validated, shared._partition_projected):
+            with self.subTest(operation=operation.__name__):
+                self.assertEqual(operation(tests, names, "asan"), result)
+                observed = operation(tests, names, "asan", {"medium": 100})
+                self.assertEqual(observed[0], ["medium"])
+                self.assertEqual([set(part) for part in operation(list(reversed(tests)), list(reversed(names)), "asan")],
+                                 [set(part) for part in result])
+                for bad in (-1, True, "80", None, float("nan"), float("inf"), 10 ** 400):
+                    malformed = [test("slow", COST=bad), *tests[1:]]
+                    with self.subTest(cost=bad), self.assertRaisesRegex(ValueError, "invalid CTest COST"):
+                        operation(malformed, names, "asan")
+                for bad in (0, -1, True, "1", None, float("nan"), float("inf"), 10 ** 400):
+                    with self.subTest(timing=bad), self.assertRaisesRegex(ValueError, "invalid timings"):
+                        operation(tests, names, "asan", {"slow": bad})
+                with self.assertRaisesRegex(ValueError, "invalid group cost"):
+                    operation([test(name, COST=1e308) for name in names], names, "asan")
+
+    def test_invalid_costs_and_impossible_groups_preserve_existing_plan(self):
+        shared = shards._shared
+        self.planned_selection(self.tests, self.tests)
+        before = {name: (self.root / name).read_bytes() for name in
+                  ("ctest.partition.json", "ctest.shard-index.txt")}
+        for rows in ([test(row["name"], COST=-1) for row in self.tests],
+                     [test(row["name"], RESOURCE_LOCK=["shared"]) for row in self.tests]):
+            for filename in ("ctest.all.json", "ctest.inventory.json"):
+                (self.root / filename).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+            for shard in shared.shard_ids("asan"):
+                with self.subTest(shard=shard), self.assertRaises(ValueError):
+                    shards.plan(self.root, shard)
+                self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
 
     def test_fixture_setup_cleanup_and_transitive_consumers_stay_together(self):
         tests = self.tests + [test("setup", FIXTURES_SETUP=["art"]),
@@ -71,7 +136,7 @@ class AsanShardTests(unittest.TestCase):
         # Form A-B and C-D before the final B-C join in either registration order.
         chains = second + first if reverse_groups else first + second
         prefix = [] if conflicting_heavy else [test(self.names[1]), test("padding")]
-        return prefix + chains
+        return prefix + chains + [test("independent-first"), test("independent-last")]
 
     def test_three_chain_join_keeps_every_member_with_heavy_test_in_both_orders(self):
         for reverse_groups in (False, True):
@@ -80,29 +145,61 @@ class AsanShardTests(unittest.TestCase):
                 names = [row["name"] for row in tests]
                 selected = self.planned_selection(tests, tests)
                 group = {"setup", "consumer", "other-setup", self.names[2]}
-                # The early ordinary members would choose shard 0 by registration
-                # order; the second heavy test forces the entire joined group to 1.
-                self.assertEqual(selected, [[self.names[1]],
-                                            [name for name in names if name != self.names[1]]])
-                self.assertTrue(group <= set(selected[1]))
+                owners = [part for part in selected if self.names[2] in part]
+                self.assertEqual(len(owners), 1)
+                self.assertTrue(group <= set(owners[0]))
                 self.assertEqual(shards.partition(tests, names), selected)
 
-    def test_three_chain_join_refuses_conflicting_heavy_owners_before_writing(self):
+    def test_three_chain_join_keeps_shared_heavy_owners(self):
         for reverse_groups in (False, True):
-            for shard in (1, 2):
-                with self.subTest(reverse_groups=reverse_groups, shard=shard):
-                    tests = self.joined_fixture_chains(reverse_groups, conflicting_heavy=True)
-                    for filename in ("ctest.all.json", "ctest.inventory.json"):
-                        (self.root / filename).write_text(json.dumps({"tests": tests}), encoding="utf-8")
-                    selection = self.root / "ctest.shard-index.txt"
-                    selection.write_text("previous selection\n", encoding="utf-8")
-                    with self.assertRaisesRegex(ValueError, "prevents balanced"):
-                        shards.plan(self.root, shard)
-                    self.assertEqual(selection.read_text(encoding="utf-8"), "previous selection\n")
+            tests = self.joined_fixture_chains(reverse_groups, conflicting_heavy=True)
+            selected = self.planned_selection(tests, tests)
+            group = {"consumer", "other-setup", self.names[1], self.names[2]}
+            self.assertEqual(sum(group <= set(part) for part in selected), 1)
+
+    def test_plan_fixture_encodes_shared_inputs_once_without_retaining_mutations(self):
+        encode = json.dumps
+        for shared in (True, False):
+            with self.subTest(shared=shared):
+                all_tests = self.tests if shared else [dict(row) for row in self.tests]
+                expected = encode({"tests": self.tests}).encode()
+                with patch.object(json, "dumps", wraps=encode) as serialize:
+                    self.planned_selection(all_tests, self.tests)
+                calls = [call for call in serialize.call_args_list
+                         if isinstance(call.args[0], dict) and "tests" in call.args[0]
+                         and (call.args[0]["tests"] is self.tests or call.args[0]["tests"] is all_tests)]
+                self.assertEqual(len(calls), 1 if shared else 2)
+                self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+                self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+                self.assertEqual(encode({"tests": self.tests}).encode(), expected)
+                self.assertEqual(all_tests, self.tests)
+        self.tests[0]["command"].append("--changed")
+        expected = encode({"tests": self.tests}).encode()
+        with patch.object(json, "dumps", wraps=encode) as serialize:
+            self.planned_selection(self.tests, self.tests)
+        calls = [call for call in serialize.call_args_list
+                 if isinstance(call.args[0], dict) and call.args[0].get("tests") is self.tests]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        independent = json.loads(encode({"tests": self.tests}))["tests"]
+        independent[0]["command"].append("--independent")
+        with self.assertRaisesRegex(ValueError, "execution inventory differs"):
+            self.planned_selection(independent, self.tests)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(),
+                         encode({"tests": independent}).encode())
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        empty = []
+        with self.assertRaisesRegex(ValueError, "empty CTest inventory"):
+            self.planned_selection(empty, empty)
 
     def planned_selection(self, all_tests, eligible):
-        (self.root / "ctest.all.json").write_text(json.dumps({"tests": all_tests}))
-        (self.root / "ctest.inventory.json").write_text(json.dumps({"tests": eligible}))
+        # Reuse only this call's encoding when both fixture inputs are the same object.
+        # Both files and the real planner remain independent consumers.
+        all_text = json.dumps({"tests": all_tests})
+        (self.root / "ctest.all.json").write_text(all_text)
+        eligible_text = all_text if eligible is all_tests else json.dumps({"tests": eligible})
+        (self.root / "ctest.inventory.json").write_text(eligible_text)
         selected = []
         # Model CTest 3.28: apply -LE manual first, then interpret -I against
         # that filtered roster, preserving registration order.
@@ -110,7 +207,7 @@ class AsanShardTests(unittest.TestCase):
                     if not any(prop["name"] == "LABELS" and
                                any("manual" in label for label in prop["value"])
                                for prop in row.get("properties", []))]
-        for shard in (1, 2):
+        for shard in (1, 2, 3):
             shards.plan(self.root, shard)
             start, end, stride, *extra = map(int, (self.root / "ctest.shard-index.txt").read_text().split(","))
             indices = [*range(start, end + 1, stride), *extra]
@@ -131,7 +228,7 @@ class AsanShardTests(unittest.TestCase):
                 roster = [manual[0], manual[1], *self.tests[:2], manual[2], *self.tests[2:]]
                 selected = self.planned_selection(roster, self.tests)
                 self.assertEqual([sum("SimBudgetWorldParity." in name for name in part)
-                                  for part in selected], [heavy_count // 2] * 2)
+                                  for part in selected], [heavy_count, 0, 0])
                 self.reports(selected)
                 shards.merge(self.root, self.root / "merged.xml")
                 cases = list(ET.parse(self.root / "merged.xml").getroot().iter("testcase"))
@@ -163,7 +260,8 @@ class AsanShardTests(unittest.TestCase):
                                                capture_output=True, text=True, timeout=10)
                     self.assertEqual(discovery.returncode, 0, discovery.stdout + discovery.stderr)
                     (project / filename).write_text(discovery.stdout, encoding="utf-8")
-                expected = [[*heavy[::2], literal], ["ordinary", *heavy[1::2], "last"]]
+                expected = shards.partition([test(name) for name in names if not name.startswith("manual-")],
+                                            [name for name in names if not name.startswith("manual-")])
                 for shard, planned in enumerate(expected, 1):
                     shards.plan(project, shard)
                     report = project / f"shard-{shard}.xml"
@@ -224,22 +322,46 @@ class AsanShardTests(unittest.TestCase):
 
     def test_unchanged_roster_runs_in_the_same_ctest_context_and_preserves_status(self):
         self.planned_selection(self.tests, self.tests)
+        for shard in (1, 2, 3):
+            with self.subTest(shard=shard):
+                shards.plan(self.root, shard)
+                self.assert_execution_context(self.root)
+
+    def assert_execution_context(self, directory):
+        resolved = directory.resolve()
         for status in (0, 8):
             with self.subTest(status=status):
                 discovery = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
                 execution = subprocess.CompletedProcess([], status)
                 with patch.object(shards.subprocess, "run", side_effect=[discovery, execution]) as invoke:
-                    self.assertEqual(shards.run(self.root), status)
+                    self.assertEqual(shards.run(directory), status)
                 check, execute = invoke.call_args_list
-                common = ["ctest", "--preset", "debug-asan", "--test-dir", str(self.root), "-LE", "manual"]
+                common = ["ctest", "--preset", "debug-asan", "--test-dir", str(resolved), "-LE", "manual"]
                 self.assertEqual(check.args[0], [*common, "--show-only=json-v1"])
-                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True})
+                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
                 self.assertEqual(execute.args[0], [*common, "--no-tests=error", "-I",
-                                                 str(self.root / "ctest.shard-index.txt"),
+                                                 str(resolved / "ctest.shard-index.txt"),
                                                  "--parallel", "2", "--timeout", "300",
                                                  "--output-junit", "ctest.junit.xml"])
                 # Both calls inherit the wrapper's cwd and environment.
                 self.assertEqual(execute.kwargs, {})
+
+    def test_windows_short_alias_uses_exact_resolved_execution_context(self):
+        self.planned_selection(self.tests, self.tests)
+        resolved = self.root.resolve()
+
+        # Model the filesystem's short-name expansion without requiring Windows
+        # symlink privilege or enabled 8.3 names. All reads use real plan files.
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        self.assertNotEqual(str(alias), str(resolved))
+        for shard in (1, 2, 3):
+            with self.subTest(shard=shard):
+                shards.plan(self.root, shard)
+                self.assert_execution_context(alias)
 
     def test_failed_or_malformed_execution_discovery_never_launches_tests(self):
         self.planned_selection(self.tests, self.tests)
@@ -251,16 +373,16 @@ class AsanShardTests(unittest.TestCase):
                         shards.run(self.root)
                 invoke.assert_called_once()
 
-    def test_invalid_inventory_or_impossible_heavy_group_refuses(self):
+    def test_invalid_inventory_or_insufficient_groups_refuse(self):
         for tests, names in ((self.tests, []), (self.tests, ["unknown"]),
                              (self.tests, self.names + self.names[:1]),
                              (self.tests + self.tests[:1], self.names),
                              (self.tests[:2], self.names[:2])):
             with self.subTest(names=names), self.assertRaises(ValueError):
                 shards.partition(tests, names)
-        for row in self.tests[1:3]:
+        for row in self.tests:
             row["properties"] = [{"name": "FIXTURES_REQUIRED", "value": ["shared"]}]
-        with self.assertRaisesRegex(ValueError, "prevents balanced"):
+        with self.assertRaisesRegex(ValueError, "empty CTest shard"):
             shards.partition(self.tests, self.names)
 
     def reports(self, parts=None):
@@ -284,9 +406,29 @@ class AsanShardTests(unittest.TestCase):
         self.assertEqual(len(cases), len(self.names))
         self.assertTrue(all(case.findtext("system-out").startswith("receipt from ") for case in cases))
 
+    def test_merge_refuses_split_required_suites_and_missing_shards_without_replacing_output(self):
+        self.names += ["AmbientDeterminismReceipt.First", "AmbientDeterminismReceipt.Second"]
+        self.tests = [test(name) for name in self.names]
+        output = self.root / "merged.xml"
+        output.write_bytes(b"previous report")
+        for suite in ("SimBudgetWorldParity.", "AmbientDeterminismReceipt."):
+            members = [name for name in self.names if suite in name]
+            remaining = [name for name in self.names if name not in members]
+            parts = [[members[0], *remaining[:-1]], members[1:], remaining[-1:]]
+            self.reports(parts)
+            with self.subTest(suite=suite), self.assertRaisesRegex(ValueError, "required ASan suite split"):
+                shards.merge(self.root, output)
+            self.assertEqual(output.read_bytes(), b"previous report")
+        for shard in (1, 2, 3):
+            self.reports()
+            (self.root / f"shard-{shard}/ctest.junit.xml").unlink()
+            with self.subTest(shard=shard), self.assertRaises(OSError):
+                shards.merge(self.root, output)
+            self.assertEqual(output.read_bytes(), b"previous report")
+
     def test_merge_accepts_explicit_run_status(self):
         self.reports()
-        for shard in (1, 2):
+        for shard in (1, 2, 3):
             path = self.root / f"shard-{shard}/ctest.junit.xml"
             tree = ET.parse(path)
             for case in tree.getroot().iter("testcase"):
@@ -295,7 +437,7 @@ class AsanShardTests(unittest.TestCase):
         shards.merge(self.root, self.root / "merged.xml")
 
     def test_merge_rejects_unevaluated_status_without_skipped_child(self):
-        for shard in (1, 2):
+        for shard in (1, 2, 3):
             for status in ("disabled", "notrun", "", "unknown"):
                 with self.subTest(shard=shard, status=status):
                     self.reports()
@@ -309,7 +451,7 @@ class AsanShardTests(unittest.TestCase):
                     self.assertFalse(output.exists())
 
     def test_merge_result_metadata_matches_evidence_validators(self):
-        for shard in (1, 2):
+        for shard in (1, 2, 3):
             for result in ("completed", "suppressed", "skipped", "unknown", ""):
                 with self.subTest(shard=shard, result=result):
                     self.reports()
@@ -330,13 +472,13 @@ class AsanShardTests(unittest.TestCase):
         for change in ("append", "remove"):
             with self.subTest(change=change):
                 self.reports()
-                path = self.root / "shard-1/ctest.junit.xml"
+                path = next(path for path in self.root.glob("shard-*/ctest.junit.xml")
+                            if len(ET.parse(path).getroot()) > 1)
                 root = ET.parse(path).getroot()
                 if change == "append":
                     ET.SubElement(root, "testcase", name="appended")
                 else:
-                    # Remove an ordinary case, preserving the heavy-test balance.
-                    root.remove(next(case for case in root if case.get("name") == "ordinary"))
+                    root.remove(root[0])
                 ET.ElementTree(root).write(path)
                 with self.assertRaisesRegex(ValueError, "executed shard union differs from the planned filtered"):
                     shards.merge(self.root, self.root / "merged.xml")
@@ -351,7 +493,7 @@ class AsanShardTests(unittest.TestCase):
         self.names += [f"ordinary-{index}" for index in range(2320 - len(self.names))]
         self.tests = [test(name) for name in self.names]
         self.reports()
-        for shard in (1, 2):
+        for shard in (1, 2, 3):
             path = self.root / f"shard-{shard}/ctest.junit.xml"
             tree = ET.parse(path)
             for case in tree.getroot().iter("testcase"):
@@ -408,9 +550,9 @@ class AsanShardTests(unittest.TestCase):
         self.assertIn("evaluated 2319 tests, requires at least 2320", result.stderr)
 
     def test_empty_missing_duplicate_short_extra_and_unbalanced_shards_refuse(self):
-        for parts in (([], [1, 2, 3, 4, 5, 6]), ([1, 2, 4, 5], [3]),
-                      ([1, 2, 4, 5], [3, 3, 6]), ([1, 2, 4, 5], [1, 3, 6]),
-                      ([1, 2, 3, 4], [5, 6])):
+        for parts in (([], [1, 2, 3, 4, 5], [6]), ([1, 2, 4, 5], [3], [6]),
+                      ([1, 2, 4, 5], [3, 3], [6]), ([1, 2, 4, 5], [1, 3], [6]),
+                      ([1, 2, 3, 4], [5], [6])):
             with self.subTest(parts=parts), self.assertRaises(ValueError):
                 self.reports([[self.names[index - 1] for index in part] for part in parts])
                 shards.merge(self.root, self.root / "merged.xml")

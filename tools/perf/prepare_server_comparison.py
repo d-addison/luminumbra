@@ -12,8 +12,10 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import stat
 
-from fixture_hash import fixture_hash
+from fixture_hash import fixture_entries, fixture_hash
+from fixture_paths import contain_path, open_regular, path_exists, read_text, resolve_reference
 
 GATES = ("ActiveRegions", "WaterHighRes", "WeatherRain", "WeatherEvents", "AetherState")
 TUNINGS = ("Ecology", "WildlifeFoliage", "Thirst", "Scavenging", "Foraging", "Reproduction")
@@ -21,18 +23,50 @@ MARKER = ".perf-controlled"
 
 
 def identity(root: Path) -> str:
-    inputs = {"common": fixture_hash(root / "data/common", scope="headless-server"),
-              "presets": fixture_hash(root / "worlds/atlas/presets"),
-              "configuration": (root / MARKER).read_text(encoding="utf-8")}
+    data = resolve_reference(root, "data").resolve()
+    inputs = {"common": fixture_hash(resolve_reference(root, "data/common"), scope="headless-server"),
+              "presets": fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
+                                      reference_root=data),
+              "configuration": read_text(root.resolve(), resolve_reference(root, MARKER))}
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
+def copy_fixture_tree(source_root: Path, destination: Path, entries) -> None:
+    """Copy only a completed bounded preflight, preserving logical aliases.
+
+    Files use verified readers as before; directories (including empty ones)
+    retain copytree's metadata semantics. No second namespace scan can discover
+    additional work after destination creation.
+    """
+    destination.mkdir(parents=True)
+    for path, _, status in entries:
+        target = destination / path.relative_to(source_root)
+        if stat.S_ISDIR(status.st_mode):
+            target.mkdir()
+        else:
+            with open_regular(source_root, path) as stream, target.open("wb") as output:
+                shutil.copyfileobj(stream, output)
+    for path, _, status in reversed(entries):
+        if stat.S_ISDIR(status.st_mode):
+            shutil.copystat(path, destination / path.relative_to(source_root))
+    shutil.copystat(source_root, destination)
 
 
 def prepare(base: Path, head: Path, receipt: Path) -> None:
     # Take the base content once. The source adapters pin lower-layer defaults,
     # including finite hydrology, which systems.json alone cannot configure.
-    common = base / "data/common"
-    presets = base / "worlds/atlas/presets"
-    systems = json.loads((common / "systems.json").read_text(encoding="utf-8-sig"))
+    common = resolve_reference(base, "data/common")
+    presets = resolve_reference(base, "worlds/atlas/presets")
+    # Match the canonical authority used by dependency collection and reads.
+    data = resolve_reference(base, "data").resolve()
+    # Refuse unsafe source trees before copying files or adapters edit
+    # either checkout. Retain dependencies outside common in the copied fixture.
+    fixture_hash(common, scope="headless-server")
+    dependencies: dict[str, Path] = {}
+    fixture_hash(presets, reference_root=data, dependencies=dependencies)
+    common_entries = list(fixture_entries(common))
+    preset_entries = list(fixture_entries(presets))
+    systems = json.loads(read_text(common, common / "systems.json", encoding="utf-8-sig"))
     schema = json.loads((head / "src/luminumbra_common/core/ConfigSchema.json").read_text(encoding="utf-8-sig"))
     # Registry fields are authored in the schema; do not omit an absent base key.
     for key in schema["keys"]:
@@ -42,8 +76,19 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
         root = checkout / "perf-common"
         if root.exists():
             raise ValueError(f"refusing to replace existing fixture: {root}")
-        shutil.copytree(common, root / "data/common")
-        shutil.copytree(presets, root / "worlds/atlas/presets")
+        copy_fixture_tree(common, root / "data/common", common_entries)
+        copy_fixture_tree(presets, root / "worlds/atlas/presets", preset_entries)
+        for _, path in sorted(dependencies.items()):
+            # Dependencies already carry validated native paths. Reinterpreting
+            # their normalized names would treat literal POSIX backslashes as
+            # authored separators a second time.
+            destination_root = root / "data"
+            destination = contain_path(destination_root, destination_root /
+                                       path.relative_to(data))
+            if not path_exists(destination) and path_exists(path):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with open_regular(data, path) as stream, destination.open("wb") as output:
+                    shutil.copyfileobj(stream, output)
         (root / "data/common/systems.json").write_text(json.dumps(systems, indent=2) + "\n")
         (root / MARKER).write_text(json.dumps(dict(schema="luminumbra.controlled_server.v1",
             gates=False, finite_hydrology=False, autosave_ticks=0), sort_keys=True) + "\n")

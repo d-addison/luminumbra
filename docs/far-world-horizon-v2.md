@@ -10,8 +10,9 @@ and packaged `data/common/systems.json`. To opt out, set
 
 Merge this entry into the existing document. Missing configuration or an absent
 flag requests Ladder. The per-user `settings.json` overlay reads only `user.*`,
-so it cannot override this render flag; there is no far-mode environment or CLI
-override. Restart the client after changing the setting.
+so it cannot override this render flag. Use `--systems-config <path>` to load
+a systems document containing the render flag. There is no dedicated far-mode
+CLI flag or environment override. Restart the client after changing the setting.
 
 Requested mode and effective mode remain separate. Unsupported backends, invalid
 or mismatched cave policy, and missing immutable authority still refuse Ladder
