@@ -797,6 +797,27 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for filename in GUARDED
         }
 
+    def test_performance_apt_install_steps_have_bounded_updates_and_retries(self):
+        install_jobs = []
+        for job_id, job in jobs(self.workflows["performance.yml"]).items():
+            for step in steps(job):
+                script = value(step, "run", 8) or ""
+                if "apt-get install" not in script:
+                    continue
+                install_jobs.append(job_id)
+                with self.subTest(job=job_id):
+                    self.assertEqual(value(step, "timeout-minutes", 8), "25")
+                    self.assertIsNone(value(step, "continue-on-error", 8))
+                    self.assertEqual(script.count("apt-get"), 2)
+                    self.assertEqual(script.splitlines()[:2], [
+                        "sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 "
+                        "-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update",
+                        "sudo apt-get install -y --no-install-recommends \\",
+                    ])
+        self.assertCountEqual(install_jobs, [
+            "preview-frame", "server-smoke-comparison", "qualification-capture",
+        ])
+
     def test_fast_lane_runs_drafts_on_a_standard_runner_with_its_own_bound(self):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
         self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
