@@ -252,14 +252,14 @@ void write_csv_header(std::ostream& out) {
            "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_"
            "bytes,"
            "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-           "instance_capacity,generated_count,count_generation,dirty_columns,"
+           "instance_capacity,generated_count,count_generation,"
            "terrain_work_ms,terrain_overshoot_ms,terrain_attempts,terrain_adopted,terrain_work_"
            "bytes,"
            "terrain_byte_overshoot,terrain_pending,water_work_ms,water_overshoot_ms,water_attempts,"
            "water_adopted,water_work_bytes,water_byte_overshoot,water_pending";
     for (std::size_t index = 0; index < kPhaseCount; ++index)
         out << ',' << phase_name(static_cast<Phase>(index)) << "_ms";
-    out << '\n';
+    out << ",dirty_columns\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -292,7 +292,6 @@ bool write_csv_row(std::ostream& out,
     out << ',';
     if (count_known)
         out << count_generation;
-    out << ',' << foliage.dirty_columns;
     const auto append_uploads = [&](const Rendering::UploadWorkStats& work, std::size_t pending) {
         out << ',' << work.elapsed_ms << ',' << work.overshoot_ms << ',' << work.attempts << ','
             << work.adopted << ',' << work.bytes << ',' << work.byte_overshoot << ',' << pending;
@@ -301,7 +300,7 @@ bool write_csv_row(std::ostream& out,
     append_uploads(uploads.water, uploads.water_pending);
     for (const double value : phases.milliseconds())
         out << ',' << value;
-    out << '\n';
+    out << ',' << foliage.dirty_columns << '\n';
     return out.good();
 }
 bool finalize_csv(std::ofstream& out) {
