@@ -1,5 +1,6 @@
 #include "ShadowPass.h"
 #include "../FarWorldReplay.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "../RenderResourceRegistry.h"
@@ -204,6 +205,7 @@ void ShadowPass::reset_shader() {
 
 std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT>
 ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL ShadowPass.execute");
     (void)
         ctx; // Shadow reads no RenderContext fields; its inputs are m_shadow_map + ShadowPassInput.
     std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> cascade_stats{};

@@ -20,6 +20,7 @@
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "UploadBudget.h"
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
 #include "luminumbra_common/core/DeterministicMath.h"
@@ -3140,6 +3141,7 @@ void RenderPipeline::execute_stage_lighting(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL depth_blit_to_lighting");
     (void)camera;
     // 5. COPY DEPTH TO LIGHTING FBO SO SKYBOX AND WATER SHARE THE G-BUFFER OCCLUSION
     record_frame_stage("depth_blit_to_lighting");
@@ -3226,6 +3228,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_opaque_snapshot(const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL opaque_snapshot");
     (void)camera;
     // 7. SNAPSHOT THE LIT OPAQUE+SKY SCENE, THEN WATER PASS BLENDS OVER IT.
     // Water keeps depth writes off for transparency. Drawing the sky first prevents
@@ -3293,6 +3296,7 @@ void RenderPipeline::execute_stage_glass_oit_resolve(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL weather_opaque_snapshot");
     // Snapshot the resolved scene including rays and grass for the common weather grade.
     // The snapshot and overlay use the same frame-stable activation conditions.
     const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
@@ -3308,6 +3312,7 @@ void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera)
 }
 
 void RenderPipeline::execute_stage_god_rays_opaque_snapshot(const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL god_rays_opaque_snapshot");
     record_frame_stage("god_rays_opaque_snapshot");
     RenderContext ctx = make_god_rays_context(camera);
     // Reuse the existing color snapshot without framebuffer feedback or an additional

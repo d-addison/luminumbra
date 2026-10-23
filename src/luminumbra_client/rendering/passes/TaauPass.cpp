@@ -1,5 +1,6 @@
 #include "TaauPass.h"
 #include "../FarWorldReplay.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h"
@@ -94,6 +95,7 @@ void TaauPass::invalidate_history() {
 }
 
 void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen) {
+    LUMIN_PROFILE_ZONE_N("GL TaauPass.execute");
     ReplayRollback rollback([this,
                              replay = frozen != nullptr,
                              write = m_history_write,

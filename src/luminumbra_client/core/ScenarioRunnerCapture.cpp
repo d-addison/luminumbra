@@ -11,6 +11,7 @@
 #include "core/ScenarioRunnerImpl.h"
 
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -135,6 +136,8 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
         deps.render_and_read = [&, sweep_stream_frames](std::vector<unsigned char>& out_pixels,
                                                         int& w,
                                                         int& h) mutable -> bool {
+            LUMIN_PROFILE_FRAME_N("Client capture");
+            LUMIN_PROFILE_ZONE_N("Client capture frame");
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (sweep_stream_frames < 24) {
                 gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
@@ -174,7 +177,7 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             // glReadPixels itself synchronizes; no explicit glFinish needed.
             glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, out_pixels.data());
-            glfwSwapBuffers(window);
+            LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             glfwPollEvents();
             return true;
         };

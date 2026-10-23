@@ -3,6 +3,7 @@
 #include "ShaderSource.h"
 #include "app/FrameAttribution.h"
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "rendering/AttributedGl.h"
 #include <algorithm>
@@ -106,13 +107,19 @@ AttributedGl::Program Shader::buildProgram(const char* vertexPath, const char* f
     // Compile Vertex Shader
     GLuint vertex = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex, 1, &vShaderCode, nullptr);
-    glCompileShader(vertex);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(vertex);
+    }
     const bool vertex_ok = checkCompileErrors(vertex, "VERTEX");
 
     // Compile Fragment Shader
     GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fragment, 1, &fShaderCode, nullptr);
-    glCompileShader(fragment);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(fragment);
+    }
     const bool fragment_ok = checkCompileErrors(fragment, "FRAGMENT");
 
     if (!vertex_ok || !fragment_ok) {
@@ -132,7 +139,10 @@ AttributedGl::Program Shader::buildProgram(const char* vertexPath, const char* f
         glTransformFeedbackVaryings(
             program, static_cast<GLsizei>(names.size()), names.data(), GL_INTERLEAVED_ATTRIBS);
     }
-    glLinkProgram(program);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+        glLinkProgram(program);
+    }
     const bool program_ok = checkCompileErrors(program, "PROGRAM");
 
     // Delete the shaders as they're linked into our program now and no longer necessary
