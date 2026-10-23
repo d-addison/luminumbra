@@ -1950,6 +1950,11 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
+add_executable(upload_budget_test rendering/upload_budget_test.cpp)
+target_include_directories(upload_budget_test PRIVATE ../src)
+target_link_libraries(upload_budget_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(upload_budget_test)
+
 add_executable(menu_presentation_test rendering/menu_presentation_test.cpp
     ../src/luminumbra_client/app/FrameAttribution.cpp)
 target_include_directories(menu_presentation_test PRIVATE ../src)
@@ -1973,6 +1978,7 @@ add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    upload_budget_test
     jolt_startup_test
     frame_attribution_test
     menu_presentation_test
@@ -2188,6 +2194,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
+add_test(NAME UploadBudgetWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/rendering/test_upload_budget_wiring.py")
 set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
 if(MSVC)
     list(APPEND _common_isa_compiler_args --msvc)

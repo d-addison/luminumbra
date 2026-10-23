@@ -19,6 +19,7 @@
 #include "nlohmann/json.hpp"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
+#include "rendering/UploadBudget.h"
 #include "rendering/passes/WaterPass.h"
 
 #include <algorithm>
@@ -34,6 +35,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 // The moved code names the scenario-harness and app vocabulary unqualified,
@@ -148,6 +150,24 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                                         *g_camera,
                                         1.0f / 60.0f,
                                         g_app.overlay.wireframe_mode);
+            if (!Luminumbra::Rendering::settle_uploads(
+                    [&] {
+                        const auto& pending = renderPipeline.get_last_mesh_upload_stats();
+                        return std::pair{
+                            pending.terrain_uploads_deferred + pending.water_uploads_deferred,
+                            pending.terrain_budget.adopted + pending.water_budget.adopted};
+                    },
+                    [&] {
+                        // Adoption retries preserve the selected sun and cloud phase.
+                        renderPipeline.render_frame(
+                            gameSession->GetRegistry(),
+                            *gameSession->GetWorldSystem(),
+                            *g_camera,
+                            0.0f,
+                            g_app.overlay.wireframe_mode,
+                            Luminumbra::Rendering::UploadPresentation::Settled);
+                    }))
+                return false;
             glfwGetFramebufferSize(window, &w, &h);
             if (w <= 0 || h <= 0) {
                 return false;

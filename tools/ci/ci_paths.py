@@ -20,6 +20,7 @@ PYTHON_TESTS = (
     "tools/ci/test_audio_propagation_metrics.py",
     "test/tools/check_profiler_contract.py",
     "test/rendering/test_frame_attribution_wiring.py",
+    "test/rendering/test_upload_budget_wiring.py",
     "tools/ci/test_ci_paths.py",
     "tools/ci/test_asan_shards.py",
     "tools/ci/test_ctest_shards.py",

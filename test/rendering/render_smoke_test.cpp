@@ -5371,6 +5371,7 @@ private:
         glUniform1i(Location("u_farWorldLadder"), 0);
         glUniform1i(Location("u_useInstanceOrigin"), 1);
         glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);
+        pool_.mark_submitted(allocation.block_index);
         glBindVertexArray(0);
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
         pool_.free(handle);
