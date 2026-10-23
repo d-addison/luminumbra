@@ -1561,6 +1561,8 @@ TEST(WorldSaveService, CursorOnlySavesPreserveZeroAbsentAndUnknownMetadataBytes)
     const auto path = directory / "world_info.json";
     auto batch = WorldSaveService::SaveBatch::begin(directory);
     ASSERT_TRUE(batch.has_value());
+    if (!batch.has_value())
+        return;
     EXPECT_TRUE(batch->save_water_cursor(0));
     EXPECT_FALSE(std::filesystem::exists(directory));
     ASSERT_TRUE(batch->save_water_cursor(7));
@@ -1594,6 +1596,8 @@ TEST(WorldSaveService, CursorWriteFailurePoisonsBatchWithoutAcknowledgingMetadat
     std::ofstream(path, std::ios::binary) << before;
     auto batch = WorldSaveService::SaveBatch::begin(root.path());
     ASSERT_TRUE(batch.has_value());
+    if (!batch.has_value())
+        return;
     WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
     EXPECT_FALSE(batch->save_water_cursor(9));
     EXPECT_EQ(ReadFileBytes(path), before);
@@ -1601,10 +1605,14 @@ TEST(WorldSaveService, CursorWriteFailurePoisonsBatchWithoutAcknowledgingMetadat
     EXPECT_FALSE(batch->save_water_cursor(3));
     auto retry = WorldSaveService::SaveBatch::begin(root.path());
     ASSERT_TRUE(retry.has_value());
+    if (!retry.has_value())
+        return;
     EXPECT_TRUE(retry->save_water_cursor(9));
     for (const std::string invalid : {"partial", "[]", R"({"waterSimCursor":-1})"}) {
         auto invalid_batch = WorldSaveService::SaveBatch::begin(root.path());
         ASSERT_TRUE(invalid_batch.has_value());
+        if (!invalid_batch.has_value())
+            return;
         std::ofstream(path, std::ios::binary | std::ios::trunc) << invalid;
         std::vector<std::string> errors;
         EXPECT_FALSE(invalid_batch->save_water_cursor(8, &errors));
@@ -1616,6 +1624,8 @@ TEST(WorldSaveService, CursorWriteFailurePoisonsBatchWithoutAcknowledgingMetadat
     }
     auto unreadable = WorldSaveService::SaveBatch::begin(root.path());
     ASSERT_TRUE(unreadable.has_value());
+    if (!unreadable.has_value())
+        return;
     ASSERT_TRUE(std::filesystem::remove(path));
     ASSERT_TRUE(std::filesystem::create_directory(path));
     EXPECT_FALSE(unreadable->save_water_cursor(8));
