@@ -27,9 +27,13 @@ must each equal zero.
 
 Foliage counters count dirty columns sampled, individual surface samples,
 uploaded bytes, transfer operations, copied bytes, hashed bytes, deferred
-columns and positive backlog growth per step. GPU input uploads count four
-operations; a CPU mapped instance copy counts one nonempty transfer. Scratch
-allocation is already a separate attribution counter and is not an upload.
+columns and positive backlog growth per step. GPU input uploads count actual
+nonempty buffer transfers. Combined column/slot metadata and adjacent dirty-slot
+batches keep the nine-column workload within four operations per step; camera
+movement with unchanged inputs transfers only the draw command, and a one-column
+edit transfers its surface plus that command. A CPU mapped instance copy counts
+one nonempty transfer. Scratch allocation is already a separate attribution
+counter and is not an upload.
 Surface samples are accumulated once per complete candidate loop, avoiding
 additional per-candidate diagnostic calls. The byte ceilings cover at most
 nine times 8,192 packed 36-byte records, two CPU copies plus chunk metadata,

@@ -144,6 +144,7 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.copied_bytes += rebuild.copied_bytes;
     total.hashed_bytes += rebuild.hashed_bytes;
     total.uploaded_bytes += rebuild.uploaded_bytes;
+    total.dirty_columns += rebuild.dirty_columns;
     total.uploads += rebuild.uploads;
     total.stale_results += rebuild.stale_results;
     total.scratch_bytes += rebuild.scratch_bytes;
@@ -258,7 +259,7 @@ void write_csv_header(std::ostream& out) {
            "water_adopted,water_work_bytes,water_byte_overshoot,water_pending";
     for (std::size_t index = 0; index < kPhaseCount; ++index)
         out << ',' << phase_name(static_cast<Phase>(index)) << "_ms";
-    out << '\n';
+    out << ",dirty_columns\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -299,7 +300,7 @@ bool write_csv_row(std::ostream& out,
     append_uploads(uploads.water, uploads.water_pending);
     for (const double value : phases.milliseconds())
         out << ',' << value;
-    out << '\n';
+    out << ',' << foliage.dirty_columns << '\n';
     return out.good();
 }
 bool finalize_csv(std::ofstream& out) {

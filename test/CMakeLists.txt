@@ -517,6 +517,10 @@ add_executable(foliage_cache_prune_test
     rendering/foliage_cache_prune_test.cpp
 )
 
+add_executable(foliage_surface_slots_test rendering/foliage_surface_slots_test.cpp)
+target_include_directories(foliage_surface_slots_test PRIVATE ../src/luminumbra_client)
+target_link_libraries(foliage_surface_slots_test PRIVATE gtest_main)
+
 target_include_directories(foliage_cache_prune_test PRIVATE
 ../src
 ../src/luminumbra_client
@@ -674,7 +678,7 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
-    # Evidence reuse and column-local invalidation on both scatter backends.
+    # Evidence reuse, stable surface slots and column-local invalidation on both backends.
     rendering/foliage_rebuild_test.cpp
     # Includes deterministic CPU/compute work budgets, idle zero and stale results.
 )
@@ -2013,6 +2017,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test
+    foliage_surface_slots_test
     foliage_visual_contract_test
     render_view_test
     render_smoke_test
@@ -2194,6 +2199,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
+add_test(NAME ReplayWorkspacePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_replay_workspace.py")
 add_test(NAME UploadBudgetWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_upload_budget_wiring.py")
 set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")

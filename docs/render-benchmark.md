@@ -604,7 +604,23 @@ field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
 `other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
 remains rebuild time only.
 
-Issue #402 appends these CPU wall-time columns after `count_generation`, in order:
+The CSV has 63 fields. Existing fields retain their zero-based indices; only
+`dirty_columns` is appended, at index 62, after all terrain, water and phase fields.
+Within each range below, columns appear in the listed order:
+
+| Indices | Columns |
+|---|---|
+| 0–12 | `frame`, `frame_ms`, `sim_ms`, `stream_ms`, `render_ms`, `present_ms`, `foliage_ms`, `scatter_ms`, `rebake_ms`, `poll_ms`, `menu_ms`, `ui_ms`, `other_ms` |
+| 13–21 | `signature_ms`, `sort_ms`, `surface_ms`, `repack_ms`, `hash_ms`, `upload_ms`, `palette_scratch_ms`, `dispatch_ms`, `cpu_fallback_ms` |
+| 22–29 | `rebuild_calls`, `reason_mask`, `admitted_columns`, `surface_misses`, `deferred_columns`, `copied_bytes`, `hashed_bytes`, `uploaded_bytes` |
+| 30–36 | `scratch_bytes`, `backlog`, `path`, `fallback`, `instance_capacity`, `generated_count`, `count_generation` |
+| 37–43 | `terrain_work_ms`, `terrain_overshoot_ms`, `terrain_attempts`, `terrain_adopted`, `terrain_work_bytes`, `terrain_byte_overshoot`, `terrain_pending` |
+| 44–50 | `water_work_ms`, `water_overshoot_ms`, `water_attempts`, `water_adopted`, `water_work_bytes`, `water_byte_overshoot`, `water_pending` |
+| 51–61 | The phase columns below |
+| 62 | `dirty_columns` |
+
+Issue #402's CPU wall-time phase columns follow the terrain and water fields,
+at indices 51–61, in order:
 
 | Column | Work measured |
 |---|---|
@@ -646,15 +662,28 @@ Foliage stage times are CPU wall time, including GL submission calls, without
 GPU waits or new readbacks. `signature_ms` includes polling existing evidence
 and early-out handling. `surface_ms` covers complete uncached column builds
 (including CPU placement in fallback), never individual candidate timers.
-`repack_ms` covers aggregate GPU input assembly excluding surface builds.
+`repack_ms` covers GPU column ordering and slot preparation excluding surface builds.
 `cpu_fallback_ms` is inclusive of its surface builds and mapped uploads; do not
 add it to those sub-times. Palette/scratch time includes null-data storage
 allocation; `scratch_bytes` records that allocation separately from actual
-`uploaded_bytes`. Copy bytes include the sorted working copy, aggregate inputs,
-completed readback snapshots and CPU emitted/mapped records; hash bytes describe
+`uploaded_bytes`. The final `dirty_columns` field counts surface-slot uploads,
+including reconstruction after storage growth or compute-resource recreation.
+Unchanged columns transfer zero surface bytes. Copy bytes include the sorted
+working copy, column metadata, dirty-slot batch scratch, completed readback
+snapshots and CPU emitted/mapped records; hash bytes describe
 the unchanged evidence input hash. Frozen qualification rebuilds are identified
 as `frozen_gpu`; their submission time includes output clears and existing
 readback submission, including the first rebuild started by qualification.
+
+Surface storage uses deterministic free-list reuse and geometric growth up to
+512 slots (64 MiB). Exceeding the admitted-column cap uses the existing CPU
+fallback for that frame. Growth and compute-resource recreation rebuild slots
+from the CPU surface cache. Palette and scratch storage persist between builds;
+column and slot-order metadata share one bounded 18 KiB buffer and upload only
+when changed. Adjacent dirty runs of three or more slots share a transfer using
+bounded CPU scratch; runs of one or two keep direct per-slot transfers. Clean
+slots are never copied or transferred. Evidence hashes retain
+the logical full-build byte order independently of physical slot assignment.
 
 `reason_mask` combines: 1 initial build, 2 config (enabled, evidence phase,
 quantized gate wind, fade or density), 4 camera cell, 8 ground revision,

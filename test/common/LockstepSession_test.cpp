@@ -7,6 +7,7 @@
 // this one process, driven turn-by-turn so the loopback queues carry their frames.
 
 #include "../support/SystemConfigVariants.h"
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -33,14 +34,10 @@ namespace fs = std::filesystem;
 namespace {
 
 fs::path LockstepTempDir() {
-#ifdef LUMINUMBRA_TEST_ARTIFACT_DIR
-    fs::path dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "lockstep-unit";
-#else
-    fs::path dir = fs::temp_directory_path() / "luminumbra-lockstep-unit";
-#endif
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    return dir;
+    // CTest runs cases in separate processes. Reserve this process's namespace
+    // exclusively and retain it until all local sessions/recorders have closed.
+    static const Luminumbra::TestSupport::ScopedTempFile workspace("lockstep_", ".unused");
+    return workspace.Path().parent_path();
 }
 
 // A deterministic per-peer fake "world": the hash is a function of (tick, a per-peer
@@ -458,6 +455,8 @@ TEST(LockstepSessionTest, ClosureAcrossReceiveBatchesPreservesQueuedLateDesync) 
 TEST(LockstepSessionTest, LateDesyncAfterSendRefusalSurvivesAnExhaustedReceiveBudget) {
     for (const auto refusal : {net::MessageType::Input, net::MessageType::Hash}) {
         for (const std::uint64_t divergence : {1u, 2u}) {
+            SCOPED_TRACE(static_cast<int>(refusal));
+            SCOPED_TRACE(divergence);
             auto [local, peer] = net::MakeLoopbackPair();
             RejectingTransport rejecting(*local);
             ReplenishingTransport transport(rejecting);
