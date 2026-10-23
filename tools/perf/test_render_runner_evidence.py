@@ -106,6 +106,78 @@ class RenderRunnerRefusalInputsTests(unittest.TestCase):
         self.check_texture_inputs('test_parent_relative_texture_refusal')
 
 
+class RenderRunnerLogPathsTests(unittest.TestCase):
+    def check_case(self, method, data, script=None):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = Path(directory)
+            # Two instances of the same entry share an artifact directory.
+            # Each reader must use its own writer's runtime token.
+            for runtime_name in ('first-runtime', 'second-runtime'):
+                runtime = artifacts / runtime_name
+                runtime.mkdir()
+                case = runner.RenderRunnerTests(method)
+                case.root = runtime
+                case.environment = os.environ.copy()
+                case.script = script
+                calls = []
+                def process(command, *, log, artifact, expected_exit, **kwargs):
+                    name = artifact.stem
+                    calls.append(name)
+                    self.assertEqual(log, artifacts / f'{method}-{runtime_name}-{name}.log')
+                    if expected_exit:
+                        output = ('Traversal owns the measured duration; '
+                                  'omit --render-benchmark-frames')
+                    else:
+                        artifact.write_text(json.dumps(data), encoding='utf-8')
+                        output = ('Static-model textures registered (3 models).\n' +
+                                  '\n'.join(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)"
+                                            for part in ('trunk', 'branches', 'leaves')) +
+                                  '\nFar world: requested=ladder effective=legacy '
+                                  'refusal=ImmutableAuthorityUnavailable\n'
+                                  'suppressed=true submission_refusal=IsolationSuppressed')
+                    log.write_text(output, encoding='utf-8')
+                    return subprocess.CompletedProcess(command, expected_exit), []
+                with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
+                        client=Path(sys.executable), artifacts=artifacts), create=True), \
+                        mock.patch.object(runner, '_run_process', side_effect=process):
+                    getattr(case, method)()
+                self.assertEqual(calls, ['first', 'second', 'traversal-frames-separate',
+                                         'traversal-frames-assigned']
+                                 if script else ['isolated'])
+
+    def test_traversal_readers_use_unique_writer_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'short.traversal'
+            text = (contract_fixtures.FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8')
+            text = text.replace('duration_seconds 60', 'duration_seconds 0.13333333333333333')
+            text = text.replace('expected_ticks 1800', 'expected_ticks 4')
+            script.write_bytes(text.encode('utf-8'))
+            manifest = runner.contract.traversal_manifest(text)
+            data = contract_fixtures.artifact()
+            data['workload'].update({key: value for key, value in manifest.items() if key != 'path'})
+            data['workload'].update(kind='traversal', actual_ticks=4,
+                                    measured_duration_seconds=0.01, script=text,
+                                    script_path=str(script), camera_samples=[
+                                        runner.contract.camera_sample(manifest, tick)
+                                        for tick in (1, 2, 3, 4)])
+            data['world_content_identity'] = data['workload']['content_identity']
+            data['far_world'] = contract_fixtures.far_capture()['far_world']
+            for row in data['far_world']['frames']:
+                row.update(effective_mode='legacy', refusal='ImmutableAuthorityUnavailable')
+            contract_fixtures.update_far_summary(data)
+            self.check_case('test_traversal_twice', data, script)
+
+    def test_isolation_reader_uses_unique_writer_path(self):
+        data = contract_fixtures.artifact()
+        data['far_world'] = contract_fixtures.far_capture()['far_world']
+        override = {'cli:--isolation-layers': 'foliage'}
+        data['debug_overrides'] = {'active': override, 'declared': dict(override)}
+        for row in data['far_world']['frames']:
+            row.update(suppressed=True, submission_refusal='IsolationSuppressed')
+        contract_fixtures.update_far_summary(data)
+        self.check_case('test_isolation_submission_reporting', data)
+
+
 class RenderRunnerEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

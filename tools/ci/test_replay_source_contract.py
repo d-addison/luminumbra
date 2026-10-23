@@ -534,7 +534,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("return m_worldOpenError;", header)
         reset = self.function(source, "ResetWorldSystems")
         self.assertIn("m_worldUsable = false;", reset)
-        for name in ("CreateWorldInternal", "LoadWorld"):
+        for name in ("CreateWorldInternal", "LoadWorld", "LoadWorldFrom"):
             body = self.function(source, name)
             preparation, adoption = body.split("ResetWorldSystems();", 1)
             self.assertNotIn("m_worldUsable", preparation)
@@ -549,6 +549,19 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         adoption_failure = opening.split("if (!LoadWorldState())", 1)[1]
         self.assertLess(adoption_failure.index("m_worldUsable = false;"),
                         adoption_failure.index("return false;"))
+
+        body = self.function(source, "LoadWorldFrom")
+        preparation, adoption = body.split("ResetWorldSystems();", 1)
+        self.assertNotIn("m_worldUsable", preparation)
+        self.assertIn("m_worldOpenError =", preparation)
+        self.assertIn("Persistence::InspectSavedWorld(save_root, RuntimeRoot(m_rootPath), worldId)",
+                      preparation)
+        self.assertIn('const auto worldPath = save_root / "worlds/saves" / worldId;', preparation)
+        self.assertNotIn("m_saveRootPath =", body)
+        self.assertLess(adoption.index("m_speciesTable ="),
+                        adoption.index("m_worldUsable = true;"))
+        failure = adoption.split("if (!LoadWorldStateFrom(worldPath))", 1)[1]
+        self.assertLess(failure.index("m_worldUsable = false;"), failure.index("return false;"))
 
     def test_persistence_uses_session_state_and_fatal_snapshot_refusals_latch_it(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")

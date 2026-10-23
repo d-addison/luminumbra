@@ -192,10 +192,13 @@ class RenderRunnerTests(unittest.TestCase):
         text = text.replace('expected_ticks 1800', 'expected_ticks 4')
         self.script.write_bytes(text.encode('utf-8'))
 
+    def log_path(self, name):
+        return OPTIONS.artifacts / (self._testMethodName + '-' + self.root.name + '-' + name + '.log')
+
     def run_client(self, name, extra=(), environment=None, expected_exit=0, schema='v3',
                    audio=False):
         artifact = self.root / (name + '.json')
-        log = OPTIONS.artifacts / (self._testMethodName + '-' + self.root.name + '-' + name + '.log')
+        log = self.log_path(name)
         command = [str(OPTIONS.client), *([] if audio else ['--no-audio']), '--no-menu-backdrop',
                    '--render-benchmark', str(artifact), '--render-benchmark-schema', schema,
                    '--capture-size', '160x90', '--perf-profile', 'quality',
@@ -237,7 +240,7 @@ class RenderRunnerTests(unittest.TestCase):
         self.assertEqual(first['workload']['camera_samples'], second['workload']['camera_samples'])
         self.assertEqual(first['workload']['actual_ticks'], second['workload']['actual_ticks'])
         for name in ('first', 'second'):
-            output = (OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')).read_text(
+            output = self.log_path(name).read_text(
                 errors='replace', encoding='utf-8')
             self.assertIn('Far world: requested=ladder effective=legacy refusal=ImmutableAuthorityUnavailable', output)
         for name, option in (('separate', ['--render-benchmark-frames', '4']),
@@ -417,7 +420,7 @@ class RenderRunnerTests(unittest.TestCase):
         for row in data['far_world']['frames']:
             self.assertTrue(row['suppressed'])
             self.assertEqual(row['submission_refusal'], 'IsolationSuppressed')
-        output = (OPTIONS.artifacts / (self._testMethodName + '-isolated.log')).read_text(
+        output = self.log_path('isolated').read_text(
             errors='replace', encoding='utf-8')
         self.assertIn('suppressed=true submission_refusal=IsolationSuppressed', output)
 

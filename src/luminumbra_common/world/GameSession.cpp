@@ -1380,7 +1380,136 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
-    return LoadWorldFrom(worldId, GetSaveRootPath());
+    if (!IsSimulationTickBoundary())
+        return false;
+    m_lastLoadedChunkCount = 0;
+    const auto saved =
+        Persistence::InspectSavedWorld(GetSaveRootPath(), RuntimeRoot(m_rootPath), worldId);
+    m_worldOpenError = saved.error;
+    if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
+        m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
+    if (!m_worldOpenError.empty()) {
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+        return false;
+    }
+    if (!m_jobSystem) {
+        m_worldOpenError = "JobSystem not set before loading world.";
+        return false;
+    }
+    for (const auto& asset : m_requiredClientAssets) {
+        if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
+            m_worldOpenError = "Missing required runtime asset: " + asset.string();
+            return false;
+        }
+    }
+    const auto worldPath = GetSaveRootPath() / "worlds/saves" / worldId;
+    // Generate from the same canonical bytes whose saved identity was verified.
+    const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
+        nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
+    if (!preset.ok) {
+        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
+        for (const std::string& error : preset.errors) {
+            LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
+        }
+        return false;
+    }
+    // Saved-world adoption also keeps the loader's inputs through generation.
+    TerrainGenParams params = preset.params;
+    ClampTerrainParams(params);
+
+    ResetWorldSystems();
+    m_presetContentHash = preset.preset_content_hash;
+    m_savedPresetJson = saved.preset_json;
+    m_metadata = saved.metadata;
+    if (m_activeRegionsEnabled) {
+        m_worldClock = saved.clock;
+        m_simulationClock.reset(m_worldClock.tick());
+    }
+    m_transientWorld = false;
+    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
+
+    // Initialize Physics System after config and preset validation passes.
+    m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
+    m_physicsSystem->startup();
+
+    m_worldSystem =
+        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    // Worldgen seam for audio-raycast surface materials (non-owning; physics
+    // is destroyed before the world system by member order, so the pointer
+    // cannot dangle).
+    m_physicsSystem->set_world_system(m_worldSystem.get());
+    m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
+    m_worldSystem->SetWaterSystem(m_waterSystem.get());
+    m_worldSystem->SetWaterHydrology(m_finiteHydrologyEnabled, 0, 0);
+
+    // sim.water_high_res: raise the solver to High BEFORE any chunk is adopted
+    // or seeded (explicit OFF = selected Medium = byte-identical). A loaded save
+    // at another resolution migrates in LoadWorldStateFrom's boot pass.
+    ApplyWaterResolutionWiring();
+
+    // The legacy path starts at zero. Active-region clocks restore the ambient
+    // fields at the saved absolute tick in LoadWorldStateFrom, before any tick.
+    m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
+    m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
+    m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+
+    // unlike the re-derivable trio above, the stateful
+    // energy layer is AUTHORITATIVE state — when enabled, a persisted record
+    // restores it (epoch-rebased onto the session clock); an absent
+    // record is all-zeros by contract. OFF -> null -> byte-identical.
+    InitializeEnergyFieldState();
+    if (m_energyFieldState) {
+        const auto recordPath = worldPath / "aether_state.efs";
+        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+        std::ifstream recordFile;
+        recordFile.open(recordPath);
+        if (recordFile) {
+            std::ostringstream recordBytes;
+            recordBytes << recordFile.rdbuf();
+            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
+                                                      GetSimulationTickCount())) {
+                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
+                                     m_energyFieldState->page_count());
+            } else {
+                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
+                                     recordPath.string());
+            }
+        }
+    }
+
+    // Legacy saves without a persisted spawnPoint: derive it from terrain
+    // height exactly like CreateWorld does (pure function of seed/params).
+    if (!saved.has_spawn_point) {
+        const float spawn_x = 8.0f;
+        const float spawn_z = 8.0f;
+        const float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
+        m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
+    }
+    InitializeScentField(m_metadata.spawnPoint);
+
+    // Saved worlds adopt the same captured session content as new worlds.
+    m_speciesTable = preset.params.worldgen_dependencies->species_table;
+
+    // restore the rotating water sim-window cursor so the loaded session
+    // resimulates the exact windows the original would from the same water state.
+    if (m_worldSystem) {
+        m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
+    }
+
+    // same weather-rain wiring as CreateWorld (explicit OFF = no-op).
+    ApplyWeatherRainWiring();
+
+    m_worldOpenError.clear();
+    AttachRegionEditObserver();
+    // The snapshot loader needs initialized systems. Any incomplete adoption
+    // remains unsaveable, including a refusal without a fatal-load diagnostic.
+    m_worldUsable = true;
+    if (!LoadWorldState()) {
+        m_worldUsable = false;
+        return false;
+    }
+    LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
+    return true;
 }
 
 bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save_root) {
