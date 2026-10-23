@@ -2186,8 +2186,9 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
     }
 }
 
-std::string WorldSaveService::world_hash(const WorldStreamingState& state) const {
-    return ComputeWorldStreamingStateHash(state);
+std::string WorldSaveService::world_hash(const WorldStreamingState& state,
+                                         std::uint64_t water_sim_cursor) const {
+    return ComputeWorldStreamingStateHash(state, water_sim_cursor);
 }
 
 WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& state,

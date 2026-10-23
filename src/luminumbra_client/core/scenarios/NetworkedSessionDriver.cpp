@@ -166,7 +166,7 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
         state.insert_chunk(chunk);
     }
     const Luminumbra::Persistence::WorldSaveService service;
-    out.world_hash = service.world_hash(state);
+    out.world_hash = service.world_hash(state, world_system->GetWaterSimWindowCursor());
 
     // Terrain/water authority only here (no streamed game entities), so the
     // entities sub-hash is the stable checksum of the EMPTY canonical ECS
@@ -175,7 +175,8 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
     const Luminumbra::Persistence::WorldStreamingStateSubHashes sub =
-        Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+        Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(
+            state, empty_entities, world_system->GetWaterSimWindowCursor());
     out.terrain = sub.terrain;
     out.water = sub.water;
     out.entities = sub.entities;

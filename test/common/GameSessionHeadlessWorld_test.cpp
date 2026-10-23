@@ -2463,7 +2463,9 @@ nlohmann::json SessionWorldSubHashes(GameSession& session) {
     const auto energy = session.ComputeAetherStateSubHash();
     if (!energy.empty())
         aether = P::StableChecksum(aether + "|state:" + energy);
-    return {{"chunk", P::ComputeWorldStreamingStateHash(state)},
+    return {{"chunk",
+             P::ComputeWorldStreamingStateHash(
+                 state, session.GetWorldSystem()->GetWaterSimWindowCursor())},
             {"wind", session.GetWindFieldSystem()->ComputeWindSubHash()},
             {"weather", session.GetWeatherSystem()->ComputeWeatherSubHash()},
             {"aether", aether},

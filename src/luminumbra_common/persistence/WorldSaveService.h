@@ -287,7 +287,10 @@ public:
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format
     // independent: computed over the in-memory snapshot, never file bytes.
-    std::string world_hash(const WorldStreamingState& state) const;
+    // Supply the live cursor or the validated cursor restored from world metadata.
+    // Chunk-only legacy fixtures use the zero default.
+    std::string world_hash(const WorldStreamingState& state,
+                           std::uint64_t water_sim_cursor = 0) const;
 
     // Incremental writes: only region files containing
     // at least one dirty chunk are rewritten (all in-memory chunks of those

@@ -734,6 +734,50 @@ TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettl
     EXPECT_EQ(DiskBytes(save), expected);
 }
 
+TEST_F(WorldOpenRefusal, ServerWaterCursorBindsEveryHashCaptureAndSurvivesReload) {
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    auto* world_system = runner.Session()->GetWorldSystem();
+    world_system->SetWaterSimWindowCursor(0);
+    const auto legacy_hash = runner.ComputeWorldHash();
+    const auto legacy_sub = runner.ComputeWorldSubHashes();
+    std::string saved_hash;
+    Persistence::WorldStreamingStateSubHashes saved_sub;
+    for (const std::size_t cursor : {std::size_t{0}, std::size_t{65}, std::size_t{66}}) {
+        SCOPED_TRACE(cursor);
+        world_system->SetWaterSimWindowCursor(cursor);
+        runner.ComputeWorldHashAndSubHashes(saved_hash, saved_sub);
+        EXPECT_EQ(saved_hash, runner.ComputeWorldHash());
+        EXPECT_EQ(saved_sub.water, runner.ComputeWorldSubHashes().water);
+        EXPECT_EQ(saved_sub.terrain, legacy_sub.terrain);
+        EXPECT_EQ(saved_sub.entities, legacy_sub.entities);
+        if (cursor == 0) {
+            EXPECT_EQ(saved_hash, legacy_hash);
+            EXPECT_EQ(saved_sub.water, legacy_sub.water);
+        } else {
+            EXPECT_NE(saved_hash, legacy_hash);
+            EXPECT_NE(saved_sub.water, legacy_sub.water);
+            EXPECT_EQ(WaterHashDifferenceSection(saved_sub.water, legacy_sub.water),
+                      "water/cursor");
+        }
+    }
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    runner.Shutdown();
+    Server::ServerWorldRunner restored(config);
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    EXPECT_EQ(restored.Session()->GetWorldSystem()->GetWaterSimWindowCursor(), 66u);
+    EXPECT_EQ(restored.ComputeWorldHash(), saved_hash);
+    EXPECT_EQ(restored.ComputeWorldSubHashes().water, saved_sub.water);
+    restored.Shutdown();
+}
+
 TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting) {
     const auto before = DiskBytes(root);
     const auto catalog = Persistence::EnumerateSavedWorlds(root);
