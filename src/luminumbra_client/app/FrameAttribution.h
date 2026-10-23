@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../rendering/UploadBudget.h"
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -8,6 +10,7 @@
 #include <fstream>
 #include <iosfwd>
 #include <optional>
+#include <ratio>
 
 namespace Luminumbra::Client::Attribution {
 
@@ -79,6 +82,7 @@ struct FoliageRebuild {
     std::uint64_t copied_bytes = 0;
     std::uint64_t hashed_bytes = 0;
     std::uint64_t uploaded_bytes = 0;
+    std::uint64_t dirty_columns = 0;
     std::uint64_t uploads = 0;
     std::uint64_t stale_results = 0;
     // Storage allocated with null glBufferData, separate from transferred bytes.
@@ -88,9 +92,16 @@ struct FoliageRebuild {
     FallbackReason fallback = FallbackReason::None;
 };
 
-// Every rebuild on the render thread contributes, including preview and QA
-// callers. Storage is constant size; paths are Mixed when calls differ.
+struct RenderUploads {
+    Rendering::UploadWorkStats terrain{};
+    Rendering::UploadWorkStats water{};
+    std::size_t terrain_pending = 0;
+    std::size_t water_pending = 0;
+};
+// Every rebuild and render integration on the render thread contributes,
+// including preview and QA callers. Storage is constant size.
 struct FoliageFrame {
+    RenderUploads uploads{};
     FoliageRebuild rebuild{};
     double rebuild_ms = 0;
     std::uint64_t capacity = 0;
@@ -109,11 +120,12 @@ public:
     }
 
 private:
-    // The registered collector updates observations even when the scope token is const.
+    // Rebuilds update the owned storage even when the RAII guard is const.
     mutable FoliageFrame m_frame{};
     FoliageFrame* m_previous = nullptr;
 };
 bool foliage_frame_active();
+void record_render_uploads(const Rendering::UploadWorkStats& work, bool water, std::size_t pending);
 void record_foliage_rebuild(const FoliageRebuild& rebuild,
                             double milliseconds,
                             std::uint64_t capacity,
@@ -151,6 +163,90 @@ private:
 // Remove nested foliage rebuild time from a timed render/menu scope.
 double exclusive_parent_ms(double parent_ms, double nested_before_ms, double nested_after_ms);
 
+// CPU wall time only. Nested phases are exclusive, including synchronous work
+// dispatched by the window-system event pump. No GL waits are introduced.
+enum class Phase : std::uint8_t {
+    UiUpdate,
+    UiRender,
+    UiFilters,
+    MenuScene,
+    PreviewAdoption,
+    DocumentLoad,
+    TextureLoad,
+    ShaderLoad,
+    ShaderFirstUse,
+    WorldCreateCallback,
+    WorldLoadCallback,
+    Count
+};
+constexpr std::size_t kPhaseCount = static_cast<std::size_t>(Phase::Count);
+const char* phase_name(Phase phase);
+class PhaseTotals {
+public:
+    const std::array<double, kPhaseCount>& milliseconds() const {
+        return m_ms;
+    }
+    double sum() const;
+    // Const runtime diagnostic: completed scopes, independent of clock precision.
+    std::uint64_t completed_scopes(Phase phase) const {
+        return m_scopes.at(static_cast<std::size_t>(phase));
+    }
+    // Const diagnostic for checking inclusive/exclusive phase conservation.
+    double inclusive_milliseconds(Phase phase) const {
+        return m_inclusive_ms.at(static_cast<std::size_t>(phase));
+    }
+    // Child scopes include their foliage in child_ms. Remove only foliage
+    // belonging directly to this phase, preserving the existing foliage split.
+    void add(Phase phase, double inclusive_ms, double child_ms, double direct_foliage_ms);
+
+private:
+    std::array<double, kPhaseCount> m_ms{};
+    std::array<std::uint64_t, kPhaseCount> m_scopes{};
+    std::array<double, kPhaseCount> m_inclusive_ms{};
+};
+class PhaseFrameScope {
+public:
+    explicit PhaseFrameScope(bool enabled = false);
+    ~PhaseFrameScope();
+    PhaseFrameScope(const PhaseFrameScope&) = delete;
+    PhaseFrameScope& operator=(const PhaseFrameScope&) = delete;
+    const PhaseTotals& snapshot() const {
+        return m_totals;
+    }
+    // Const diagnostic for nested collector ownership on the calling thread.
+    bool is_current() const;
+
+private:
+    // Completed phases update the owned storage even when the RAII guard is const.
+    mutable PhaseTotals m_totals{};
+    PhaseTotals* m_previous = nullptr;
+};
+// The client and static-preview host each have one owning render thread/context.
+// This flag is written by that thread's frame collector only. Keep the GL fast
+// path independent of TLS initialization and phase-stack access.
+inline constinit bool shader_first_use_collection_enabled = false;
+// Completed exclusive phases, also usable inside an open enclosing phase.
+double phase_total_ms();
+class PhaseScope {
+public:
+    explicit PhaseScope(Phase phase, bool enabled = true);
+    ~PhaseScope();
+    PhaseScope(const PhaseScope&) = delete;
+    PhaseScope& operator=(const PhaseScope&) = delete;
+    // Const diagnostic for the active phase stack on the calling thread.
+    bool is_current() const;
+
+private:
+    Phase m_phase;
+    PhaseTotals* m_totals = nullptr;
+    const PhaseScope* m_parent = nullptr;
+    std::chrono::steady_clock::time_point m_start{};
+    // Nested scopes update these even when the enclosing RAII guard is const.
+    mutable double m_children_ms = 0;
+    mutable double m_child_foliage_ms = 0;
+    double m_foliage_before = 0;
+};
+
 struct FrameBuckets {
     double sim = 0;
     double stream = 0;
@@ -164,8 +260,8 @@ struct FrameBuckets {
     double ui = 0;
     double sum() const;
     // All supplied scopes must be disjoint and inside the measured frame.
-    double other(double frame_ms) const {
-        return frame_ms - sum();
+    double other(double frame_ms, const PhaseTotals& phases = {}) const {
+        return frame_ms - sum() - phases.sum();
     }
 };
 
@@ -180,7 +276,9 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t capacity,
                    bool count_known,
                    std::uint64_t generated_count,
-                   std::uint64_t count_generation);
+                   std::uint64_t count_generation,
+                   const PhaseTotals& phases = {},
+                   const RenderUploads& uploads = {});
 
 // Flush and close an open CSV file, preserving write, flush, and close failures.
 // Uses the default non-throwing stream exception mask, as do the CSV writers.
@@ -202,7 +300,9 @@ public:
                 std::uint64_t capacity,
                 bool count_known,
                 std::uint64_t generated_count,
-                std::uint64_t count_generation);
+                std::uint64_t count_generation,
+                const PhaseTotals& phases = {},
+                const RenderUploads& uploads = {});
 
 private:
     // Fixed 64 KiB stream buffer; frames stream to disk without a retained history.

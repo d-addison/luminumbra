@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luminumbra/core/Types.h"
+#include "luminumbra_client/rendering/FoliageSurfaceSlots.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_common/world/Chunk.h"
 
@@ -121,6 +122,7 @@ protected:
                   gpu ? Attribution::FoliagePath::ReusedGpu : Attribution::FoliagePath::ReusedCpu);
         EXPECT_EQ(rebuild.surface_misses, 0u);
         EXPECT_EQ(rebuild.uploaded_bytes, 0u);
+        EXPECT_EQ(rebuild.dirty_columns, 0u);
         EXPECT_EQ(rebuild.hashed_bytes, 0u);
         EXPECT_FALSE(rebuild.backlog);
     }
@@ -187,22 +189,54 @@ protected:
     }
     // Independent copy of the pre-optimization recipe, using actual uploaded
     // bytes rather than the implementation's retained CPU scratch.
-    static std::uint64_t LegacyUploadedHash(const FoliagePass& pass) {
+    static std::uint64_t LegacyUploadedHash(const FoliagePass& pass,
+                                            std::size_t count,
+                                            const glm::vec3& camera = kCamera) {
         std::uint64_t hash = 1469598103934665603ull;
-        for (const GLuint binding : {0u, 1u, 4u}) {
+        // The fixtures supply the admitted logical count (at most three), since
+        // retained buffer capacity includes unused slots and dispatch unbinds
+        // the compute program before returning.
+        EXPECT_GT(count, 0u);
+        EXPECT_LE(count, 3u);
+        if (count == 0 || count > 3)
+            return 0;
+        const auto storage_bytes = [](GLuint binding) {
             GLint64 size = 0;
-            const auto buffer = Binding(binding);
-            glGetNamedBufferParameteri64v(buffer, GL_BUFFER_SIZE, &size);
-            // These fixtures have <= 3 columns and <= 6 archetypes.
-            EXPECT_GT(size, 0);
-            EXPECT_LE(size, 3LL * 8192 * 16);
-            if (size <= 0 || size > 3LL * 8192 * 16) {
+            glGetNamedBufferParameteri64v(Binding(binding), GL_BUFFER_SIZE, &size);
+            return size;
+        };
+        EXPECT_EQ(storage_bytes(0), GLint64{512} * (8 * static_cast<GLint64>(sizeof(float)) + 4));
+        EXPECT_EQ(storage_bytes(7), storage_bytes(0));
+        EXPECT_GT(storage_bytes(1), 0);
+        EXPECT_LE(storage_bytes(1), 4 * 8192 * static_cast<GLint64>(sizeof(glm::vec4)));
+        EXPECT_GT(pass.archetype_count(), 0u);
+        EXPECT_LE(pass.archetype_count(), 6u);
+        EXPECT_EQ(storage_bytes(4),
+                  static_cast<GLint64>(pass.archetype_count() * 8 * sizeof(float)));
+        std::vector<unsigned char> params(count * 8 * sizeof(float));
+        glGetNamedBufferSubData(
+            Binding(0), 0, static_cast<GLsizeiptr>(params.size()), params.data());
+        hash = Fnv(params.data(), params.size(), hash);
+        std::vector<std::uint32_t> slots(count);
+        glGetNamedBufferSubData(Binding(7),
+                                std::size_t{512} * 8 * sizeof(float),
+                                static_cast<GLsizeiptr>(count * sizeof(slots[0])),
+                                slots.data());
+        std::vector<unsigned char> surface(FoliagePass::kMaxCandidatesPerChunk * sizeof(glm::vec4));
+        for (const auto slot : slots) {
+            EXPECT_LT(slot, Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity);
+            if (slot >= Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity)
                 return 0;
-            }
-            std::vector<unsigned char> bytes(static_cast<std::size_t>(size));
-            glGetNamedBufferSubData(buffer, 0, static_cast<GLsizeiptr>(size), bytes.data());
-            hash = Fnv(bytes.data(), bytes.size(), hash);
+            glGetNamedBufferSubData(Binding(1),
+                                    static_cast<GLintptr>(slot * surface.size()),
+                                    static_cast<GLsizeiptr>(surface.size()),
+                                    surface.data());
+            hash = Fnv(surface.data(), surface.size(), hash);
         }
+        std::vector<float> palette(pass.archetype_count() * 8);
+        glGetNamedBufferSubData(
+            Binding(4), 0, static_cast<GLsizeiptr>(palette.size() * sizeof(float)), palette.data());
+        hash = Fnv(palette.data(), palette.size() * sizeof(float), hash);
         float total_weight = 0;
         for (std::size_t index = 0; index < pass.archetype_count(); ++index) {
             total_weight += pass.archetype(index).density_weight;
@@ -211,7 +245,7 @@ protected:
             total_weight = 1;
         }
         for (const float value :
-             {kCamera.x, kCamera.z, pass.density_scale(), pass.fade_end_m(), total_weight}) {
+             {camera.x, camera.z, pass.density_scale(), pass.fade_end_m(), total_weight}) {
             hash = Fnv(&value, sizeof(value), hash);
         }
         return hash;

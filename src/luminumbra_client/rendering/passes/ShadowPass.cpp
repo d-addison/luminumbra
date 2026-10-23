@@ -1,5 +1,7 @@
 #include "ShadowPass.h"
 #include "../FarWorldReplay.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../RenderResourceRegistry.h"
 #include "PassGlHelpers.h"
@@ -203,6 +205,7 @@ void ShadowPass::reset_shader() {
 
 std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT>
 ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL ShadowPass.execute");
     (void)
         ctx; // Shadow reads no RenderContext fields; its inputs are m_shadow_map + ShadowPassInput.
     std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> cascade_stats{};
@@ -253,15 +256,17 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
         // Reset each selected layer. Clearing before the loop only resets the
         // previous frame's final attachment and leaves stale depth in the others.
         glClear(GL_DEPTH_BUFFER_BIT);
-        m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
+        m_shadow_shader->setMat4("u_lightSpaceMatrix",
+                                 light_space_matrices[static_cast<std::size_t>(i)]);
 
         glm::vec4 cascade_planes[6];
-        PassGl::ExtractFrustumPlanes(
-            light_space_matrices[i], cascade_planes, PassGl::ClipDepth::NegativeOneToOne);
+        PassGl::ExtractFrustumPlanes(light_space_matrices[static_cast<std::size_t>(i)],
+                                     cascade_planes,
+                                     PassGl::ClipDepth::NegativeOneToOne);
         // ONE submit per cascade via the shared callback
         // (reproduces CullHierarchical + draw_chunks_mdi exactly). Returns the
         // per-cascade counts; the call site folds them into stats with =/+=.
-        cascade_stats[i] = input.submit_terrain(cascade_planes);
+        cascade_stats[static_cast<std::size_t>(i)] = input.submit_terrain(cascade_planes);
     }
     glCullFace(GL_BACK);
 
@@ -299,13 +304,14 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
             glEnable(GL_BLEND);
             if (!have_glass)
                 continue;
-            m_tint_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
+            m_tint_shader->setMat4("u_lightSpaceMatrix",
+                                   light_space_matrices[static_cast<std::size_t>(i)]);
             glBindVertexArray(input.glass_vao);
             for (const GlassPaneItem& pane : *input.glass_items) {
                 m_tint_shader->setMat4("u_model", pane.model);
                 m_tint_shader->setVec3("u_tint", pane.tint);
                 m_tint_shader->setFloat("u_thickness", pane.thickness);
-                glDrawArrays(GL_TRIANGLES, 0, 6);
+                Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 6);
             }
             glBindVertexArray(0);
         }

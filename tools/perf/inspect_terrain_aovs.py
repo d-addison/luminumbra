@@ -6,12 +6,16 @@ conventions are never inferred from pixel values. Raw packet validation does not
 establish executable/input provenance, performance acceptance or visual approval.
 """
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
+
+from fixture_paths import contain_path, decode_text, open_regular, read_text
 
 LEGACY_DEPTH_DESCRIPTION = 'float32 OpenGL window depth [0,1], clear=1; bottom-up'
 DEPTH_DESCRIPTION = ('float32 reversed-Z OpenGL window depth [0,1], '
@@ -74,68 +78,88 @@ def coverage_mask(depth, convention):
     return depth < 1 if convention['direction'] == 'forward' else depth > 0
 
 
-def plane(path, dims, magic, channels):
+def plane(path, dims, magic, channels, stream):
     require(isinstance(dims, list) and len(dims) == 2 and
             all(type(v) is int and v > 0 for v in dims), 'Invalid plane dimensions')
     require(dims[0] * dims[1] <= 16 * 1024 * 1024, 'Plane exceeds producer bound')
-    with path.open('rb') as stream:
-        require(stream.readline(4096) == magic + b'\n', 'Unexpected plane magic: ' + path.name)
-        require(tuple(map(int, stream.readline(4096).split())) == tuple(dims),
-                'Plane dimensions disagree with manifest: ' + path.name)
-        encoding = stream.readline(4096).strip()
-        if magic in (b'PF', b'Pf'):
-            require(encoding in (b'-1.0', b'1.0'), 'Unexpected PFM scale')
-            dtype = np.dtype('<f4' if encoding == b'-1.0' else '>f4')
-        else:
-            require(encoding == b'255', 'Unexpected byte-plane maximum')
-            dtype = np.dtype('u1')
-        offset = stream.tell()
+    require(stream.readline(4096) == magic + b'\n', 'Unexpected plane magic: ' + path.name)
+    require(tuple(map(int, stream.readline(4096).split())) == tuple(dims),
+            'Plane dimensions disagree with manifest: ' + path.name)
+    encoding = stream.readline(4096).strip()
+    if magic in (b'PF', b'Pf'):
+        require(encoding in (b'-1.0', b'1.0'), 'Unexpected PFM scale')
+        dtype = np.dtype('<f4' if encoding == b'-1.0' else '>f4')
+    else:
+        require(encoding == b'255', 'Unexpected byte-plane maximum')
+        dtype = np.dtype('u1')
+    offset = stream.tell()
     width, height = dims
-    require(path.stat().st_size == offset + width * height * channels * dtype.itemsize,
+    require(os.fstat(stream.fileno()).st_size == offset + width * height * channels * dtype.itemsize,
             'Truncated or trailing plane payload: ' + path.name)
-    data = np.memmap(path, mode='r', offset=offset, dtype=dtype, shape=(height, width, channels))
+    data = np.memmap(stream, mode='r', offset=offset, dtype=dtype, shape=(height, width, channels))
     if magic in (b'PF', b'Pf'):
         require(np.isfinite(data).all(), 'Non-finite plane: ' + path.name)
         data = data[::-1]
     return data
 
 
+def stream_digest(stream):
+    stream.seek(0)
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def inspect(directory, legacy_forward=False):
+    # These fixed native names are checked by open_regular. Preserve the chosen
+    # directory spelling through its metadata check, including selected aliases.
     manifest_path = directory / 'manifest.json'
-    require(manifest_path.stat().st_size <= 16 * 1024 * 1024, 'Oversized AOV manifest')
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    require(manifest['schema'] == 'luminumbra.terrain_coverage_capture.v1' and
-            manifest['complete'] is True and manifest['enabled'] is True, 'Incomplete AOV capture')
-    require(manifest['matrix_layout'] == 'column_major', 'Unknown matrix layout')
-    require(manifest['capture_phase'] ==
-            'same_rendered_frame_after_postprocessing_before_present_unmeasured', 'Unknown capture phase')
-    require(type(manifest['render_frame']) is int and manifest['render_frame'] >= 0, 'Invalid render frame')
-    for name in ('view', 'gbuffer_projection'):
-        values = np.asarray(manifest[name], dtype=float)
-        require(values.shape == (16,) and np.isfinite(values).all(), 'Invalid matrix: ' + name)
-    convention = depth_convention(manifest, legacy_forward)
-    arrays = {}
-    for name, magic, channels in [('color.ppm', b'P6', 3), ('depth.pfm', b'Pf', 1),
-                                  ('position.pfm', b'PF', 3), ('normal.pfm', b'PF', 3),
-                                  ('albedo.pfm', b'PF', 3), ('material.pgm', b'P5', 1)]:
-        dims = manifest['color_dimensions'] if name == 'color.ppm' else manifest['gbuffer_dimensions']
-        arrays[name] = plane(directory / name, dims, magic, channels)
-    require(set(manifest['attachments']) == set(arrays), 'Incomplete attachment declarations')
-    solid = coverage_mask(arrays['depth.pfm'][:, :, 0], convention)
-    require(((arrays['albedo.pfm'] >= 0) & (arrays['albedo.pfm'] <= 1)).all(), 'Invalid albedo range')
-    normals = arrays['normal.pfm'][solid]
-    require(not len(normals) or np.max(np.abs(np.linalg.norm(normals, axis=1) - 1)) < 1e-4,
-            'Covered-pixel normals are not normalized')
-    far = manifest['far']
-    require(far['wanted'] == far['resident_wanted'] + far['missing_after_eviction'],
-            'Far residency accounting mismatch')
-    report = dict(render_frame=manifest['render_frame'], depth_convention=convention,
-                  manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-                  coverage_fraction=float(solid.mean()), covered_pixels=int(solid.sum()),
-                  clear_depth_pixels=int((~solid).sum()),
-                  attachments={name: dict(bytes=(directory / name).stat().st_size,
-                      sha256=hashlib.sha256((directory / name).read_bytes()).hexdigest()) for name in arrays})
-    return manifest, arrays, report
+    attachments = {name: directory / name for name in
+                   ('color.ppm', 'depth.pfm', 'position.pfm', 'normal.pfm', 'albedo.pfm', 'material.pgm')}
+    for path in (manifest_path, *attachments.values()):
+        contain_path(directory, path)
+    with ExitStack() as stack:
+        streams = {name: stack.enter_context(open_regular(directory, path))
+                   for name, path in {'manifest.json': manifest_path, **attachments}.items()}
+        # The manifest is bounded to 16 MiB, including concurrent file growth.
+        require(os.fstat(streams['manifest.json'].fileno()).st_size <= 16 * 1024 * 1024,
+                'Oversized AOV manifest')
+        manifest_raw = streams['manifest.json'].read(16 * 1024 * 1024 + 1)
+        require(len(manifest_raw) <= 16 * 1024 * 1024, 'Oversized AOV manifest')
+        manifest = json.loads(decode_text(manifest_raw))
+        require(manifest['schema'] == 'luminumbra.terrain_coverage_capture.v1' and
+                manifest['complete'] is True and manifest['enabled'] is True, 'Incomplete AOV capture')
+        require(manifest['matrix_layout'] == 'column_major', 'Unknown matrix layout')
+        require(manifest['capture_phase'] ==
+                'same_rendered_frame_after_postprocessing_before_present_unmeasured', 'Unknown capture phase')
+        require(type(manifest['render_frame']) is int and manifest['render_frame'] >= 0, 'Invalid render frame')
+        for name in ('view', 'gbuffer_projection'):
+            values = np.asarray(manifest[name], dtype=float)
+            require(values.shape == (16,) and np.isfinite(values).all(), 'Invalid matrix: ' + name)
+        convention = depth_convention(manifest, legacy_forward)
+        arrays = {}
+        for name, magic, channels in [('color.ppm', b'P6', 3), ('depth.pfm', b'Pf', 1),
+                                      ('position.pfm', b'PF', 3), ('normal.pfm', b'PF', 3),
+                                      ('albedo.pfm', b'PF', 3), ('material.pgm', b'P5', 1)]:
+            dims = manifest['color_dimensions'] if name == 'color.ppm' else manifest['gbuffer_dimensions']
+            arrays[name] = plane(attachments[name], dims, magic, channels, streams[name])
+        require(set(manifest['attachments']) == set(arrays), 'Incomplete attachment declarations')
+        solid = coverage_mask(arrays['depth.pfm'][:, :, 0], convention)
+        require(((arrays['albedo.pfm'] >= 0) & (arrays['albedo.pfm'] <= 1)).all(), 'Invalid albedo range')
+        normals = arrays['normal.pfm'][solid]
+        require(not len(normals) or np.max(np.abs(np.linalg.norm(normals, axis=1) - 1)) < 1e-4,
+                'Covered-pixel normals are not normalized')
+        far = manifest['far']
+        require(far['wanted'] == far['resident_wanted'] + far['missing_after_eviction'],
+                'Far residency accounting mismatch')
+        report = dict(render_frame=manifest['render_frame'], depth_convention=convention,
+                      manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
+                      coverage_fraction=float(solid.mean()), covered_pixels=int(solid.sum()),
+                      clear_depth_pixels=int((~solid).sum()),
+                      attachments={name: dict(bytes=os.fstat(streams[name].fileno()).st_size,
+                          sha256=stream_digest(streams[name])) for name in arrays})
+        return manifest, arrays, report
 
 
 def validate_benchmark(manifest, benchmark):
@@ -184,7 +208,7 @@ def main(argv=None):
         first = inspect(args.aov_directory, args.legacy_forward_depth)
         report = dict(verdict='PASS', first=first[2])
         if args.benchmark:
-            report['benchmark_join'] = validate_benchmark(first[0], json.loads(args.benchmark.read_text(encoding="utf-8")))
+            report['benchmark_join'] = validate_benchmark(first[0], json.loads(read_text(args.benchmark.parent, args.benchmark)))
         if args.compare:
             second = inspect(args.compare, args.legacy_forward_depth)
             report.update(second=second[2], comparison=compare(first, second))

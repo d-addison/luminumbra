@@ -7,16 +7,22 @@ import contextlib
 import copy
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any
 import unittest
+from unittest import mock
 
 import capture_sim_budget as capture
 import check_sim_budgets
 import propose_sim_budgets
 import sim_budget_compare
 import sim_budget_io
+from test_fixture_hash import (
+    ROOTED_REFERENCES, ESCAPING_REFERENCES, directory_link, remove_directory_link, symlink_or_skip,
+)
 
 
 PRESETS = capture.PRESETS
@@ -94,6 +100,41 @@ def read_budgets(path: Path) -> dict[str, Any]:
 
 
 class SimBudgetGateTests(unittest.TestCase):
+    def test_preset_identity_is_preserved_and_enforced(self):
+        before = self.capture_dir("preset-before", overrides={"preset_hash": FIXTURE_HASH})
+        after = self.capture_dir("preset-after", overrides={"preset_hash": ZERO_HASH})
+        budgets = self.root / "preset-budgets.json"
+        emit_budgets(before, budgets)
+        self.assertEqual(read_budgets(budgets)["identity"]["preset_hash"], FIXTURE_HASH)
+        code, output, error = run_tool(propose_sim_budgets, [str(before)])
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(output)["identity"]["preset_hash"], FIXTURE_HASH)
+        for module, argv in ((check_sim_budgets, [str(after), str(budgets)]),
+                             (sim_budget_compare, [str(before), str(after)])):
+            code, output, error = run_tool(module, argv)
+            self.assertEqual((code, output), (2, ""))
+            self.assertIn("preset_hash", error)
+        historical = self.capture_dir("historical-preset")
+        code, _, error = run_tool(sim_budget_compare, [str(before), str(historical)])
+        self.assertEqual(code, 2)
+        self.assertIn("preset_hash", error)
+
+    def test_invalid_preset_hash_is_refused(self):
+        budgets = self.root / "preset-format-budgets.json"
+        emit_budgets(self.capture_dir("preset-format-base"), budgets)
+        data = read_budgets(budgets)
+        for index, value in enumerate((None, 3, True, "a" * 63, "A" * 64, "")):
+            directory = self.capture_dir(f"bad-preset-{index}", overrides={"preset_hash": value})
+            with self.assertRaisesRegex(ValueError, "preset_hash"):
+                sim_budget_io.load_capture(directory)
+            data["identity"]["preset_hash"] = value
+            budgets.write_text(json.dumps(data), encoding="utf-8")
+            if value is None:
+                self.assertIsNone(check_sim_budgets.load_budgets(budgets)["identity"]["preset_hash"])
+            else:
+                with self.assertRaisesRegex(ValueError, "preset_hash"):
+                    check_sim_budgets.load_budgets(budgets)
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -101,6 +142,114 @@ class SimBudgetGateTests(unittest.TestCase):
 
     def capture_dir(self, name: str, **kwargs: Any) -> Path:
         return write_capture(self.root / name, **kwargs)
+
+    def test_every_budget_tool_refuses_external_artifact_references(self):
+        reference = self.capture_dir("reference")
+        budgets = self.root / "budgets.json"
+        emit_budgets(reference, budgets)
+        directory = self.capture_dir("unsafe")
+        manifest_path = directory / "capture.json"
+        manifest = read_budgets(manifest_path)
+        for artifact in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+            manifest["runs"][0]["artifact"] = artifact
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.subTest(artifact=artifact):
+                with self.assertRaisesRegex(ValueError, "fixture reference"):
+                    sim_budget_io.load_capture(directory)
+                for module, argv in (
+                        (propose_sim_budgets, [str(directory)]),
+                        (check_sim_budgets, [str(directory), str(budgets)]),
+                        (sim_budget_compare, [str(reference), str(directory)])):
+                    code, out, err = run_tool(module, argv)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn("fixture reference", err)
+
+    def test_artifact_links_cannot_leave_capture_directory(self):
+        directory = self.capture_dir("linked")
+        target = self.root / "outside.json"
+        artifact = directory / "default.json"
+        artifact.rename(target)
+        symlink_or_skip(self, artifact, target)
+        with self.assertRaisesRegex(ValueError, "resolves outside root"):
+            sim_budget_io.load_capture(directory)
+
+    def test_manifest_and_run_require_regular_files_before_read(self):
+        directory = self.capture_dir("non-regular")
+        original_stat = Path.stat
+        original_read = Path.read_text
+        for name in ("capture.json", "default.json"):
+            for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                def status(path, *args, **kwargs):
+                    if path == directory / name:
+                        return os.stat_result((mode,) + (0,) * 9)
+                    return original_stat(path, *args, **kwargs)
+
+                def read(path, *args, **kwargs):
+                    if path == directory / name:
+                        raise AssertionError("unchecked read")
+                    return original_read(path, *args, **kwargs)
+
+                with self.subTest(name=name, mode=mode), \
+                        mock.patch.object(Path, "stat", status), \
+                        mock.patch.object(Path, "read_text", read), \
+                        self.assertRaisesRegex(ValueError, "not a regular file"):
+                    sim_budget_io.load_capture(directory)
+
+    def test_selected_capture_directory_alias_keeps_metadata_checks(self):
+        actual = self.capture_dir("actual")
+        directory = self.root / "alias"
+        directory_link(directory, actual.resolve())
+        original_stat = Path.stat
+        try:
+            sim_budget_io.load_capture(directory)
+            for name in ("capture.json", "default.json"):
+                for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                    def status(path, *args, **kwargs):
+                        if path == directory / name:
+                            return os.stat_result((mode,) + (0,) * 9)
+                        return original_stat(path, *args, **kwargs)
+
+                    with self.subTest(name=name, mode=mode), \
+                            mock.patch.object(Path, "stat", status), \
+                            self.assertRaisesRegex(ValueError, "not a regular file"):
+                        sim_budget_io.load_capture(directory)
+        finally:
+            remove_directory_link(directory)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
+    def test_fifo_manifest_and_run_are_refused_without_reading(self):
+        directory = self.capture_dir("fifo")
+        original_read = Path.read_text
+        for name in ("capture.json", "default.json"):
+            path = directory / name
+            content = path.read_bytes()
+            path.unlink()
+            os.mkfifo(path)
+
+            def read(candidate, *args, **kwargs):
+                if candidate == path:
+                    raise AssertionError("unchecked read")
+                return original_read(candidate, *args, **kwargs)
+
+            try:
+                with self.subTest(name=name), mock.patch.object(Path, "read_text", read), \
+                        self.assertRaisesRegex(ValueError, "not a regular file"):
+                    sim_budget_io.load_capture(directory)
+            finally:
+                path.unlink()
+                path.write_bytes(content)
+
+    def test_normalized_nested_artifact_reference_stays_valid(self):
+        directory = self.capture_dir("nested")
+        (directory / "nested").mkdir()
+        (directory / "default.json").rename(directory / "nested/default.json")
+        (directory / "nested\\default.json").write_bytes((directory / "nested/default.json").read_bytes())
+        manifest_path = directory / "capture.json"
+        manifest = read_budgets(manifest_path)
+        for artifact in ("nested/./unused/../default.json", "nested\\default.json"):
+            manifest["runs"][0]["artifact"] = artifact
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(list(sim_budget_io.load_capture(directory)["presets"]), list(PRESETS))
 
     def assert_workload_acceptance(self, directory: Path, reference: Path, budgets: Path,
                                    key: str, accepted: bool) -> None:

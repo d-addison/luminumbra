@@ -27,6 +27,7 @@
 // Hermetic: every stream is written to a unique temp file and removed; no real
 // sockets (LoopbackTransport only).
 
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -45,19 +46,10 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// ----------------------------------------------------------------------------
-// Hermetic temp dir (common_tests does NOT define LUMINUMBRA_TEST_ARTIFACT_DIR,
-// so fall back to the system temp dir -- matches the sibling suites' fallback).
-// ----------------------------------------------------------------------------
 fs::path HardeningTempDir() {
-#ifdef LUMINUMBRA_TEST_ARTIFACT_DIR
-    fs::path dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "lockstep-replay-hardening";
-#else
-    fs::path dir = fs::temp_directory_path() / "luminumbra-lockstep-replay-hardening";
-#endif
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    return dir;
+    // Keep the same exclusive ownership and shutdown lifetime as the sibling suites.
+    static const Luminumbra::TestSupport::ScopedTempFile workspace("replay_harden_", ".unused");
+    return workspace.Path().parent_path();
 }
 
 fs::path UniquePath(const std::string& stem) {
@@ -267,7 +259,7 @@ TEST(LockstepCodecHardening, InputRoundtripMaxTickAndAllByteValues) {
     in.tick = 0xFFFFFFFFFFFFFFFFULL; // max u64 tick
     in.client_id = 0xFFFFFFFFu;
     in.inputs.resize(256);
-    for (int i = 0; i < 256; ++i)
+    for (std::size_t i = 0; i < 256; ++i)
         in.inputs[i] = static_cast<std::uint8_t>(i);
     net::InputMsg out;
     ASSERT_TRUE(net::DecodeInput(net::EncodeInput(in), out));

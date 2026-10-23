@@ -2082,7 +2082,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
             ++total_columns;
             if (influence > 0.0f) {
                 ++river_columns;
-                river_cell[static_cast<std::size_t>(zi) * side + xi] = 1;
+                river_cell[static_cast<std::size_t>(zi) * side + static_cast<std::size_t>(xi)] = 1;
                 // The carve only sinks columns that started above the channel
                 // floor; the channel center (influence ~1) must reach water.
                 if (height < SEA_LEVEL) {
@@ -2104,7 +2104,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
     for (int zi = 0; zi < side; ++zi) {
         int run = 0;
         for (int xi = 0; xi < side; ++xi) {
-            if (river_cell[static_cast<std::size_t>(zi) * side + xi]) {
+            if (river_cell[static_cast<std::size_t>(zi) * side + static_cast<std::size_t>(xi)]) {
                 ++run;
                 longest_run = std::max(longest_run, run);
             } else {
@@ -2286,15 +2286,15 @@ SlopeHistogramMetrics ComputeSlopeHistogram(const std::string& preset_name,
 
     metrics.samples = slopes.size();
     const double count = static_cast<double>(metrics.samples);
-    metrics.flat_fraction = flat / count;
-    metrics.normal_slope_fraction = normal_slope / count;
-    metrics.walkable_fraction = walkable / count;
-    metrics.steep_fraction = steep / count;
-    metrics.cliff_fraction = cliff / count;
-    metrics.normal_land_fraction = normal_land / count;
+    metrics.flat_fraction = static_cast<double>(flat) / count;
+    metrics.normal_slope_fraction = static_cast<double>(normal_slope) / count;
+    metrics.walkable_fraction = static_cast<double>(walkable) / count;
+    metrics.steep_fraction = static_cast<double>(steep) / count;
+    metrics.cliff_fraction = static_cast<double>(cliff) / count;
+    metrics.normal_land_fraction = static_cast<double>(normal_land) / count;
 
     metrics.land_samples = land;
-    metrics.land_fraction = land / count;
+    metrics.land_fraction = static_cast<double>(land) / count;
     if (land > 0) {
         metrics.land_walkable_fraction =
             static_cast<double>(land_walkable) / static_cast<double>(land);
@@ -2592,48 +2592,64 @@ double SpectralBeta(const std::vector<float>& field, int grid) {
         return 0.0; // require power of two
 
     // Mean-remove + separable Hann window.
-    std::vector<double> win(n);
+    std::vector<double> win(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
-        win[i] = 0.5 * (1.0 - std::cos(2.0 * kPi * i / (n - 1)));
+        win[static_cast<std::size_t>(i)] = 0.5 * (1.0 - std::cos(2.0 * kPi * i / (n - 1)));
     }
     double mean = 0.0;
     for (float v : field)
         mean += static_cast<double>(v);
     mean /= static_cast<double>(field.size());
 
-    std::vector<double> re(static_cast<std::size_t>(n) * n);
-    std::vector<double> im(static_cast<std::size_t>(n) * n, 0.0);
+    std::vector<double> re(static_cast<std::size_t>(n) * static_cast<std::size_t>(n));
+    std::vector<double> im(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < n; ++i) {
-            re[static_cast<std::size_t>(j) * n + i] =
-                (static_cast<double>(field[static_cast<std::size_t>(j) * n + i]) - mean) * win[i] *
-                win[j];
+            re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] =
+                (static_cast<double>(
+                     field[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                           static_cast<std::size_t>(i)]) -
+                 mean) *
+                win[static_cast<std::size_t>(i)] * win[static_cast<std::size_t>(j)];
         }
     }
 
     // FFT rows, then columns.
-    std::vector<double> rr(n), ri(n);
+    std::vector<double> rr(static_cast<std::size_t>(n)), ri(static_cast<std::size_t>(n));
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < n; ++i) {
-            rr[i] = re[static_cast<std::size_t>(j) * n + i];
-            ri[i] = im[static_cast<std::size_t>(j) * n + i];
+            rr[static_cast<std::size_t>(i)] =
+                re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
+            ri[static_cast<std::size_t>(i)] =
+                im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
         }
         Fft1D(rr, ri);
         for (int i = 0; i < n; ++i) {
-            re[static_cast<std::size_t>(j) * n + i] = rr[i];
-            im[static_cast<std::size_t>(j) * n + i] = ri[i];
+            re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = rr[static_cast<std::size_t>(i)];
+            im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = ri[static_cast<std::size_t>(i)];
         }
     }
-    std::vector<double> cr(n), ci(n);
+    std::vector<double> cr(static_cast<std::size_t>(n)), ci(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j) {
-            cr[j] = re[static_cast<std::size_t>(j) * n + i];
-            ci[j] = im[static_cast<std::size_t>(j) * n + i];
+            cr[static_cast<std::size_t>(j)] =
+                re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
+            ci[static_cast<std::size_t>(j)] =
+                im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
         }
         Fft1D(cr, ci);
         for (int j = 0; j < n; ++j) {
-            re[static_cast<std::size_t>(j) * n + i] = cr[j];
-            im[static_cast<std::size_t>(j) * n + i] = ci[j];
+            re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = cr[static_cast<std::size_t>(j)];
+            im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = ci[static_cast<std::size_t>(j)];
         }
     }
 
@@ -2645,9 +2661,14 @@ double SpectralBeta(const std::vector<float>& field, int grid) {
         const int kv = (j <= half) ? j : j - n;
         for (int i = 0; i < n; ++i) {
             const int ku = (i <= half) ? i : i - n;
-            const double p =
-                re[static_cast<std::size_t>(j) * n + i] * re[static_cast<std::size_t>(j) * n + i] +
-                im[static_cast<std::size_t>(j) * n + i] * im[static_cast<std::size_t>(j) * n + i];
+            const double p = re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                static_cast<std::size_t>(i)] *
+                                 re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                    static_cast<std::size_t>(i)] +
+                             im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                static_cast<std::size_t>(i)] *
+                                 im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                    static_cast<std::size_t>(i)];
             const int r = static_cast<int>(std::lround(
                 std::sqrt(static_cast<double>(ku) * ku + static_cast<double>(kv) * kv)));
             if (r >= 0 && r <= half) {
@@ -2703,7 +2724,8 @@ RealismMetrics ComputeRealismMetrics(const std::string& preset_name,
         for (int i = 0; i < lattice; ++i) {
             const float x = origin + static_cast<float>(i) * spacing;
             const float z = origin + static_cast<float>(j) * spacing;
-            heights[static_cast<std::size_t>(j) * lattice + i] = world.GetTerrainHeightAt(x, z);
+            heights[static_cast<std::size_t>(j) * lattice + static_cast<std::size_t>(i)] =
+                world.GetTerrainHeightAt(x, z);
         }
     }
 
@@ -2715,7 +2737,7 @@ RealismMetrics ComputeRealismMetrics(const std::string& preset_name,
     float hmin = std::numeric_limits<float>::max();
     float hmax = std::numeric_limits<float>::lowest();
     const auto at = [&](int ii, int jj) {
-        return heights[static_cast<std::size_t>(jj) * lattice + ii];
+        return heights[static_cast<std::size_t>(jj) * lattice + static_cast<std::size_t>(ii)];
     };
     for (int j = 1; j <= kRealismGrid; ++j) {
         for (int i = 1; i <= kRealismGrid; ++i) {
@@ -2742,10 +2764,10 @@ RealismMetrics ComputeRealismMetrics(const std::string& preset_name,
     }
 
     const double count = static_cast<double>(slopes.size());
-    m.frac_lt5 = lt5 / count;
-    m.frac_lt15 = lt15 / count;
-    m.frac_lt25 = lt25 / count;
-    m.frac_gt35 = gt35 / count;
+    m.frac_lt5 = static_cast<double>(lt5) / count;
+    m.frac_lt15 = static_cast<double>(lt15) / count;
+    m.frac_lt25 = static_cast<double>(lt25) / count;
+    m.frac_gt35 = static_cast<double>(gt35) / count;
     std::sort(slopes.begin(), slopes.end());
     m.slope_p50 = PercentileOfSorted(slopes, 0.50);
     m.slope_p95 = PercentileOfSorted(slopes, 0.95);
@@ -2839,11 +2861,12 @@ void WriteRealismReliefPpm(const RealismMetrics& m, const fs::path& path) {
     if (static_cast<int>(m.relief_field.size()) != n * n)
         return;
     const float range = std::max(0.001f, m.relief_max - m.relief_min);
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(n) * n * 3u);
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(n) * static_cast<std::size_t>(n) *
+                                      3u);
     const auto at = [&](int x, int z) {
         const int cx = std::clamp(x, 0, n - 1);
         const int cz = std::clamp(z, 0, n - 1);
-        return m.relief_field[static_cast<std::size_t>(cz) * n + cx];
+        return m.relief_field[static_cast<std::size_t>(cz) * n + static_cast<std::size_t>(cx)];
     };
     for (int z = 0; z < n; ++z) {
         for (int x = 0; x < n; ++x) {
@@ -2876,7 +2899,8 @@ void WriteRealismReliefPpm(const RealismMetrics& m, const fs::path& path) {
             const float dzdy = at(x, z + 1) - at(x, z - 1);
             float shade = 0.5f + 0.5f * std::clamp((-dzdx - dzdy) * 0.15f, -1.0f, 1.0f);
             shade = 0.55f + 0.45f * shade;
-            const std::size_t p = (static_cast<std::size_t>(z) * n + x) * 3u;
+            const std::size_t p =
+                (static_cast<std::size_t>(z) * n + static_cast<std::size_t>(x)) * 3u;
             pixels[p] = ToByte(std::clamp(r * shade, 0.0f, 1.0f) * 255.0f);
             pixels[p + 1] = ToByte(std::clamp(g * shade, 0.0f, 1.0f) * 255.0f);
             pixels[p + 2] = ToByte(std::clamp(b * shade, 0.0f, 1.0f) * 255.0f);

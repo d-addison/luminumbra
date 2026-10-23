@@ -185,8 +185,9 @@ inline std::vector<std::pair<std::string, std::string>> EffectiveIdentityMismatc
     --reproduction.maturity_ticks;
     session.SetReproductionTuning(reproduction);
     variants.emplace_back("u32 adjacent setter", session.SystemConfigIdentity());
-    for (const auto& [name, changed] : variants)
+    for (const auto& [name, changed] : variants) {
         EXPECT_NE(changed, identity) << "identity omitted applied input: " << name;
+    }
     return variants;
 }
 

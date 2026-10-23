@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -44,6 +45,18 @@ struct RegionDigestInputs {
 // Obsolete disk formats are refused; migration is not supported.
 class WorldSaveService {
 public:
+    // Compose multiple persistence operations under the same process ownership.
+    // Acquire only after quiescing jobs: a job may itself need a persistence writer.
+    // Recursive acquisition lets the ordinary writers retain their own guards.
+    // Caller-owned session inputs must remain stable until the sequence returns.
+    class SaveOwnership {
+    public:
+        SaveOwnership();
+
+    private:
+        std::unique_lock<std::recursive_mutex> m_lock;
+    };
+
     // Also recorded in world_info.json, including before the first chunk save.
     static constexpr std::uint16_t kContainerVersion = 2;
     static constexpr const char* kObsoleteWorldMessage =
@@ -121,8 +134,8 @@ public:
                               std::vector<std::string>* errors = nullptr);
     // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
     // between replacements, including when an explicit snapshot rewinds the clock.
-    // Host-thread-only, synchronous and non-reentrant across sessions. Production
-    // callers own one save destination; debug builds assert if pair saves overlap.
+    // Writes are serialized within the process, including nested pair saves and
+    // region merges. Callers keep their input objects stable until return.
     static bool save_metadata_and_active_regions(const std::string& bytes,
                                                  world::ActiveRegionLedger& ledger,
                                                  const std::filesystem::path& save_dir,
@@ -177,6 +190,13 @@ public:
                                          const std::vector<ContainerRecord>& records,
                                          std::vector<std::string>* errors = nullptr);
 
+    // Read-only diagnostic of the staging filename base used by region/manifest
+    // writers, before the unique temporary suffix. Region members stage in the
+    // save root outside strict scans when the original suffix is chunks/region.
+    // Other spellings retain standalone behavior. Recognition performs no filesystem
+    // I/O; relocation preserves symlinks followed by parent components in that prefix.
+    static std::filesystem::path region_staging_path(const std::filesystem::path& destination);
+
     // Deterministic test seam for failure-atomic LMR1 rewrites. When armed,
     // the next region write stops after its unique temporary file has been
     // durably flushed, immediately before the atomic replacement of the live
@@ -187,8 +207,8 @@ public:
 
     // Test seam for POSIX directory flushes: the next flush after `flushes_to_skip`
     // successful ones fails once, then the seam disarms. A negative value disarms it.
-    // Flushes covered are the ancestor-entry flushes of write_file_durably and the
-    // post-rename destination-directory flush of every region replacement; Windows
+    // Flushes covered include ancestor entries for every replacement, publication
+    // and removal directories (including already-absent files on retries); Windows
     // builds never consult it. Process-global; single-threaded persistence tests only.
     static void set_directory_flush_failure_for_testing(int flushes_to_skip);
 
@@ -201,15 +221,48 @@ public:
     // test seam above) removes the temporary file; the destination is then the
     // previous complete file, or on POSIX the new complete file when only the final
     // directory flush failed, never a partial file. Used for derived files that live
-    // beside the save, such as the far authority overlay.
+    // beside the save, such as the far authority overlay. Before every write,
+    // reclaim abandoned staging. All process writers serialize through cleanup
+    // and replacement, independent of destination spelling. Independently launched
+    // processes sharing a destination are outside this ownership contract.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
                                    std::vector<std::string>* errors = nullptr);
 
+    // Create a new file with checked, atomic no-replace publication. An occupied
+    // entry (including a dangling symlink) is refused without changing its bytes.
+    // All in-process writers share the same ownership and staging cleanup.
+    static bool create_file_durably(const std::filesystem::path& destination,
+                                    const std::string& bytes,
+                                    std::vector<std::string>* errors = nullptr);
+
+    // Rewrite and rename a parsed file under process save ownership. Refuse an
+    // occupied distinct destination; publication to a missing destination uses
+    // an atomic no-replace operation. Recheck expected source bytes before any
+    // publication. Same-file/case/path aliases and hard links are supported.
+    // Failed source removal rolls back a newly created destination when possible;
+    // alias replacement and post-unlink flush failures may leave the complete new
+    // file visible, as with write_file_durably's final-directory-flush failures.
+    static bool rename_file_durably(const std::filesystem::path& source,
+                                    const std::filesystem::path& destination,
+                                    const std::string& expected_bytes,
+                                    const std::string& bytes,
+                                    std::vector<std::string>* errors = nullptr);
+
+    // Retires a neutral optional record and reclaims abandoned staging without
+    // creating directories. POSIX flushes the parent even on an already-absent
+    // retry. Uses the same synchronization as durable writes.
+    static bool remove_file_and_staging(const std::filesystem::path& destination,
+                                        std::vector<std::string>* errors = nullptr);
+
+    // Const diagnostic: number of writers currently waiting for process save
+    // ownership. Includes all destinations; does not inspect or mutate the disk.
+    static std::size_t waiting_save_writers();
+
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
-    // to leave real crash debris. Single-threaded persistence tests only; nullptr
-    // disables the hook.
+    // to leave real crash debris. Install/clear while no writers are running.
+    // The hook runs while save ownership is held; nullptr disables it.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
     // Serializes the full streaming state into the save directory, creating
@@ -236,12 +289,15 @@ public:
     // at least one dirty chunk are rewritten (all in-memory chunks of those
     // regions are refreshed; records of chunks absent from memory and far-LOD
     // tile records are preserved verbatim). Dirty flags of the saved chunks
-    // are cleared after a successful write. With no dirty chunks nothing is
-    // written and saved stays false. Before writing, validation reads the whole
+    // are cleared after a successful write unless acknowledge_dirty is false;
+    // composite saves then acknowledge only after every sibling writer succeeds.
+    // With no dirty chunks nothing is written and saved stays false.
+    // Before writing, validation reads the whole
     // existing save to refuse obsolete, mixed-format, or corrupt durable data.
     WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors = nullptr) const;
+                                           std::vector<std::string>* errors = nullptr,
+                                           bool acknowledge_dirty = true) const;
 
 private:
     // The single v2 write seam: serializes the given chunks into LMR1 region

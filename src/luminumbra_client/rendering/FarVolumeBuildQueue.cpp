@@ -1,9 +1,27 @@
 #include "FarVolumeBuildQueue.h"
+#include "FarVolumeRenderMesh.h"
+#include "FarWorldWaterMesh.h"
+#include "core/JobSystem.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeRuntime.h"
+#include "world/FarVolumeTile.h"
+#include "world/FarWantedSet.h"
 
+#include <atomic>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <memory_resource>
+#include <new>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 namespace {
@@ -41,8 +59,9 @@ bool Successful(FarVolumeBuildStatus status) {
 bool Covers(const FarVolumeRenderMesh& mesh, const World::FarVolumeCoverageIntent& intent) {
     if (mesh.request.key != intent.key)
         return false;
-    return !intent.extra_span || (mesh.request.span.min_y <= double(intent.extra_span->min_y) &&
-                                  mesh.request.span.max_y >= double(intent.extra_span->max_y));
+    return !intent.extra_span ||
+           (static_cast<double>(mesh.request.span.min_y) <= double(intent.extra_span->min_y) &&
+            static_cast<double>(mesh.request.span.max_y) >= double(intent.extra_span->max_y));
 }
 } // namespace
 
@@ -95,7 +114,11 @@ FarVolumeBuildQueue::FarVolumeBuildQueue(JobSystem& jobs,
         slots_.emplace_back();
 }
 FarVolumeBuildQueue::~FarVolumeBuildQueue() {
-    CancelAndDrain();
+    try {
+        CancelAndDrain();
+    } catch (...) {
+        std::terminate();
+    }
 }
 void FarVolumeBuildQueue::CheckOwner() const {
     if (std::this_thread::get_id() != owner_)
@@ -219,11 +242,11 @@ void FarVolumeBuildQueue::Run(Slot* slot) noexcept {
                                                result.mesh_,
                                                &result.conversion_failure_))
                 result.status_ = FarVolumeBuildStatus::ConvertRefused;
-            else if (slot->cancelled.load(std::memory_order_acquire))
-                result.status_ = FarVolumeBuildStatus::Cancelled;
             else {
-                if (!request->water || !request->water_bound ||
-                    request->water->content_identity() != request->identity.content_hash) {
+                if (slot->cancelled.load(std::memory_order_acquire))
+                    result.status_ = FarVolumeBuildStatus::Cancelled;
+                else if (!request->water || !request->water_bound ||
+                         request->water->content_identity() != request->identity.content_hash) {
                     result.water_failure_ = FarWorldWaterError::Unavailable;
                     result.status_ = FarVolumeBuildStatus::WaterRefused;
                 } else {
@@ -270,6 +293,7 @@ void FarVolumeBuildQueue::ClearSlot(std::size_t index) {
     slot.request.reset();
     slot.handle = {};
     slot.occupied = false;
+    --occupied_results_;
     slot.ready = false;
     if (descriptor.forget) {
         descriptor.desired.reset();
@@ -306,12 +330,15 @@ void FarVolumeBuildQueue::Reap() {
     }
 }
 std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
-                                      std::span<const World::FarTileKey> order) {
+                                      std::span<const World::FarTileKey> order,
+                                      std::size_t retained_results) {
     CheckOwner();
     Reap();
     std::size_t dispatched = 0;
     const auto candidates = order.empty() ? descriptors_.size() : order.size();
-    for (std::size_t rank = 0; rank < candidates && dispatched < max_dispatches; ++rank) {
+    for (std::size_t rank = 0;
+         rank < candidates && dispatched < max_dispatches && ResultCapacity(retained_results) != 0;
+         ++rank) {
         const auto selected = order.empty() ? std::optional<std::size_t>(rank) : Find(order[rank]);
         if (!selected)
             continue;
@@ -347,6 +374,7 @@ std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
             // publishing that job. Everything after the return is nonthrowing.
             slot.handle = jobs_.dispatch_batch(batch, JobPriority::Normal);
             slot.occupied = true;
+            ++occupied_results_;
             descriptor.slot = slot_index;
             descriptor.pending = false;
             ++dispatched;
@@ -356,6 +384,7 @@ std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
             if (slot.result) {
                 slot.result->status_ = FarVolumeBuildStatus::Failed;
                 slot.occupied = true;
+                ++occupied_results_;
                 slot.ready = true;
                 descriptor.slot = slot_index;
                 descriptor.pending = false;
@@ -367,12 +396,23 @@ std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
     return dispatched;
 }
 
+std::size_t FarVolumeBuildQueue::ResultCapacity(std::size_t retained_results) const {
+    CheckOwner();
+    if (retained_results >= limits_.result_slots)
+        return 0;
+    const auto available = limits_.result_slots - retained_results;
+    return occupied_results_ >= available ? 0 : available - occupied_results_;
+}
+
 void FarVolumeBuildQueue::Cancel(const World::FarTileKey& key) {
     CheckOwner();
     const auto index = Find(key);
     if (!index)
         return;
-    auto& descriptor = descriptors_[*index];
+    CancelAt(*index);
+}
+void FarVolumeBuildQueue::CancelAt(std::size_t index) {
+    auto& descriptor = descriptors_[index];
     descriptor.pending = false;
     if (descriptor.slot) {
         auto& slot = slots_[*descriptor.slot];
@@ -386,11 +426,14 @@ void FarVolumeBuildQueue::Forget(const World::FarTileKey& key) {
     const auto index = Find(key);
     if (!index)
         return;
-    descriptors_[*index].forget = true;
-    Cancel(key);
-    if (!descriptors_[*index].slot) {
-        descriptors_[*index].desired.reset();
-        descriptors_[*index].forget = false;
+    ForgetAt(*index);
+}
+void FarVolumeBuildQueue::ForgetAt(std::size_t index) {
+    descriptors_[index].forget = true;
+    CancelAt(index);
+    if (!descriptors_[index].slot) {
+        descriptors_[index].desired.reset();
+        descriptors_[index].forget = false;
     }
 }
 bool FarVolumeBuildQueue::Retry(const World::FarTileKey& key) {
@@ -425,7 +468,7 @@ FarVolumeBuildQueue::TakeCompleted(const World::FarBuildIdentity& expected,
         ClearSlot(slot_index);
         return std::nullopt;
     }
-    std::optional<FarVolumeQueueCompletion> taken(std::move(*slot.result));
+    auto taken = std::move(slot.result);
     ClearSlot(slot_index);
     return taken;
 }

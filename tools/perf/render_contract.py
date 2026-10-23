@@ -4,6 +4,8 @@ import math
 import re
 import struct
 from pathlib import Path
+
+from fixture_paths import read_bytes
 import perf
 
 SCHEMA = 'luminumbra.render_benchmark.v3'
@@ -96,11 +98,13 @@ def float32(value):
     return struct.unpack('f', struct.pack('f', value))[0]
 
 
-def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None):
+def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None,
+             ladder_baseline=False):
     if data.get('schema') != SCHEMA:
         raise ValueError('unsupported render measurement schema')
     if data.get('gpu_timers_supported') is not True:
         raise ValueError('GPU timers unavailable')
+    perf.validate_far_world_reporting(data, ladder_baseline)
     count = integer(data['frames'], 'frames', 1)
     warmup = integer(data['warmup_frames'], 'warmup_frames', 1)
     adapter = data['adapter']
@@ -201,7 +205,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
             if observed.get(key) != value:
                 raise ValueError(f'workload manifest does not match: {key}')
     if observed['kind'] == 'traversal':
-        if traversal is None or observed['script'] != Path(traversal).read_bytes().decode('utf-8'):
+        if traversal is None or observed['script'] != read_bytes(Path(traversal).parent, Path(traversal)).decode('utf-8'):
             raise ValueError('traversal manifest does not match --traversal')
         manifest = traversal_manifest(observed['script'])
         for key in ('duration_seconds', 'tick_rate', 'speed_mps', 'seed', 'preset', 'preset_revision', 'preset_identity', 'content_identity', 'expected_ticks', 'cold_cache'):
