@@ -3806,65 +3806,6 @@ int main(int argc, char* argv[]) {
             glfwSetWindowShouldClose(window, true);
         }
     }
-    const auto settle_workload_reload = [&]() {
-        // Restream at the reload pose before advancing the script. All
-        // work remains inside this request frame's CPU/wall/GPU interval.
-        const auto pose = traversal->sample(traversal_target_tick);
-        g_camera->Position = glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
-        g_camera->Yaw = static_cast<float>(pose.yaw);
-        g_camera->Pitch = static_cast<float>(pose.pitch);
-        g_camera->updateCameraVectors();
-        auto* world = gameSession->GetWorldSystem();
-        const Measurement::ReloadWaterPause water_pause(*world);
-        Measurement::ReloadSettlingWatchdog watchdog;
-        for (;;) {
-            if (glfwWindowShouldClose(window) ||
-                Luminumbra::Filesystem::capture_content_paths.refused() ||
-                gameSession->GetRegionSchedulerFault() ||
-                reload_settling_passes == std::numeric_limits<std::uint64_t>::max())
-                return false;
-            ++reload_settling_passes;
-            world->update(
-                gameSession->GetRegistry(), g_camera->Position, gameSession->GetPhysicsSystem());
-            double scatter_ms = 0, foliage_ms = 0;
-            UpdateFoliageScatter(g_app,
-                                 root_dir,
-                                 scenario_config,
-                                 g_camera.get(),
-                                 gameSession.get(),
-                                 renderPipeline,
-                                 scatter_ms,
-                                 foliage_ms);
-            renderPipeline.render_frame(
-                gameSession->GetRegistry(), *world, *g_camera, 0.0f, g_app.overlay.wireframe_mode);
-            benchmark_queries->checkpoint_passes();
-            glfwPollEvents();
-            MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
-            const auto& streaming = world->get_streaming_telemetry_stats();
-            const auto& budget = world->get_last_streaming_budget_stats();
-            const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
-            const auto* foliage = renderPipeline.foliage();
-            const bool settled =
-                gameStateManager.GetCurrentState() == GameState::IN_GAME && scenario_ready &&
-                !scenario_failed &&
-                Measurement::reload_residency_observed(reload_settling_passes,
-                                                       budget.update_interval_frames) &&
-                streaming.quiescent() && uploads.terrain_upload_candidates == 0 &&
-                uploads.water_upload_candidates == 0 && (!foliage || !foliage->build_pending());
-            if (!watchdog.waiting(settled,
-                                  {budget.active_chunks_after,
-                                   budget.ready_chunks,
-                                   streaming.cumulative_scheduled_meshing,
-                                   foliage ? foliage->build_generation() : 0})) {
-                if (watchdog.failed()) {
-                    LUMINUMBRA_CORE_ERROR("Reload streaming made no progress");
-                    return false;
-                }
-                break;
-            }
-        }
-        return true;
-    };
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
         if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths.refused()) {
@@ -4806,6 +4747,69 @@ int main(int argc, char* argv[]) {
                 break;
         }
 
+        const auto settle_workload_reload = [&]() {
+            // Restream at the reload pose before advancing the script. All
+            // work remains inside this request frame's CPU/wall/GPU interval.
+            const auto pose = traversal->sample(traversal_target_tick);
+            g_camera->Position = glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
+            g_camera->Yaw = static_cast<float>(pose.yaw);
+            g_camera->Pitch = static_cast<float>(pose.pitch);
+            g_camera->updateCameraVectors();
+            auto* world = gameSession->GetWorldSystem();
+            const Measurement::ReloadWaterPause water_pause(*world);
+            Measurement::ReloadSettlingWatchdog watchdog;
+            for (;;) {
+                if (glfwWindowShouldClose(window) ||
+                    Luminumbra::Filesystem::capture_content_paths.refused() ||
+                    gameSession->GetRegionSchedulerFault() ||
+                    reload_settling_passes == std::numeric_limits<std::uint64_t>::max())
+                    return false;
+                ++reload_settling_passes;
+                world->update(gameSession->GetRegistry(),
+                              g_camera->Position,
+                              gameSession->GetPhysicsSystem());
+                double scatter_ms = 0, foliage_ms = 0;
+                UpdateFoliageScatter(g_app,
+                                     root_dir,
+                                     scenario_config,
+                                     g_camera.get(),
+                                     gameSession.get(),
+                                     renderPipeline,
+                                     scatter_ms,
+                                     foliage_ms);
+                renderPipeline.render_frame(gameSession->GetRegistry(),
+                                            *world,
+                                            *g_camera,
+                                            0.0f,
+                                            g_app.overlay.wireframe_mode);
+                benchmark_queries->checkpoint_passes();
+                glfwPollEvents();
+                MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+                const auto& streaming = world->get_streaming_telemetry_stats();
+                const auto& budget = world->get_last_streaming_budget_stats();
+                const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
+                const auto* foliage = renderPipeline.foliage();
+                const bool settled =
+                    gameStateManager.GetCurrentState() == GameState::IN_GAME && scenario_ready &&
+                    !scenario_failed &&
+                    Measurement::reload_residency_observed(reload_settling_passes,
+                                                           budget.update_interval_frames) &&
+                    streaming.quiescent() && uploads.terrain_upload_candidates == 0 &&
+                    uploads.water_upload_candidates == 0 && (!foliage || !foliage->build_pending());
+                if (!watchdog.waiting(settled,
+                                      {budget.active_chunks_after,
+                                       budget.ready_chunks,
+                                       streaming.cumulative_scheduled_meshing,
+                                       foliage ? foliage->build_generation() : 0})) {
+                    if (watchdog.failed()) {
+                        LUMINUMBRA_CORE_ERROR("Reload streaming made no progress");
+                        return false;
+                    }
+                    break;
+                }
+            }
+            return true;
+        };
         if (reload_settling_pending) {
             reload_settling_pending = false;
             if (!settle_workload_reload()) {

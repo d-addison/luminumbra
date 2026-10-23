@@ -184,6 +184,20 @@ class FrameAttributionWiring(unittest.TestCase):
         cls.header = read(CLIENT / "app/FrameAttribution.h")
         cls.collector = read(CLIENT / "app/FrameAttribution.cpp")
 
+    def test_preview_restore_precedes_reload_and_gameplay_foliage(self):
+        restore = self.main.index("if (worldgenPreview->active() &&")
+        reload = self.main.index("const auto settle_workload_reload =")
+        scatter = [match.start() for match in re.finditer(
+            re.escape("UpdateFoliageScatter(g_app,"), self.main)]
+        self.assertEqual(len(scatter), 2)
+        self.assertLess(restore, reload)
+        for position in scatter:
+            self.assertLess(restore, position)
+        self.assertLess(restore, self.main.index("RenderMenuScreens(g_app,"))
+        self.assertIn("UpdateFoliageScatter(g_app,", block(self.main,
+                      "const auto settle_workload_reload ="))
+        self.assertLess(reload, self.main.index("if (!settle_workload_reload())"))
+
     def test_render_bucket_receives_exclusive_time_and_feeds_outputs(self):
         main = compact(self.main)
         self.assertIn("rb_render_bucket_ms = Attribution::exclusive_parent_ms("

@@ -211,6 +211,13 @@ TEST(AudioPhysicsBinding, FailedFileLoadsReleaseAllocationsAndLeaveNoWindNode) {
         EXPECT_TRUE(initialized);
         if (initialized) {
             EXPECT_TRUE(manager.LoadBank(temp.Path().filename().generic_string()));
+            // Engine init may return before the resource worker frees its thread-start
+            // proxy. A successful stream and ordered stop synchronize that startup
+            // before capturing the steady-state baseline on Windows and POSIX.
+            const auto startup_allocations = AudioAllocations().load();
+            manager.PlayMusic("valid");
+            EXPECT_GT(AudioAllocations().load(), startup_allocations);
+            manager.StopMusic();
             const auto baseline = AudioAllocations().load();
             // Reuse the same paths after refusal, including the streamed music path.
             // Every failed load must release its own resources before returning.
