@@ -798,6 +798,35 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for filename in GUARDED
         }
 
+    def test_profile_source_checker_requires_complete_ordered_configuration(self):
+        spec = importlib.util.spec_from_file_location(
+            "profile_contract", ROOT / "test/tools/check_profiler_contract.py")
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        contract.check_enabled_compile()
+        original_read = contract.read
+        workflow = self.workflows["ci.yml"]
+        init = "          python3 -I -B tools/ci/rmlui_source.py init --root build/gns-probe\n"
+        binding = "\"-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')\""
+        flags = "-DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON"
+        mutations = [
+            workflow.replace(init, ""),
+            workflow.replace(init, "").replace(flags + "\n", flags + "\n" + init),
+            workflow.replace(init, init.replace("gns-probe", "wrong-root")),
+            workflow.replace(binding, ""),
+            workflow.replace(binding, binding.replace("python3 -I -B -c", "python3 -c")),
+            workflow.replace("-DBUILD_TESTING=ON", "-DBUILD_TESTING=OFF"),
+            workflow.replace("-DBUILD_TESTING=ON", ""),
+            workflow.replace("-DLUMINUMBRA_ENABLE_GNS=ON", ""),
+        ]
+        for index, mutated in enumerate(mutations):
+            with self.subTest(mutation=index):
+                self.assertNotEqual(mutated, workflow)
+                with patch.object(contract, "read", side_effect=lambda path:
+                                  mutated if path == ".github/workflows/ci.yml" else original_read(path)):
+                    with self.assertRaisesRegex(AssertionError, "CI must configure the enabled profile preset"):
+                        contract.check_enabled_compile()
+
     def test_performance_apt_install_steps_have_bounded_updates_and_retries(self):
         install_jobs = []
         for job_id, job in jobs(self.workflows["performance.yml"]).items():
@@ -891,18 +920,18 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         expected = {
             "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
             # Require all three offline-dependency partitions in local-check evidence.
-            "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
-            "gns-compile-probe": "7c0b1c6387113510ed76ffc66108cbf9efc3fa01617a68ca79b112fc3998a642",
-            "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
+            "linux": "449d5b0b5082349470a9e065221f45694d7bfdc473cd476e0ff07bb13ef8e170",
+            "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
+            "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin Python 3.14.8 across consumers and require partitioned local-check evidence.
-            "windows-msvc": "763218a207e024d39c82df14c933c89ac1d090342d7f4a794baa046a7a8d10f5",
+            "windows-msvc": "9781f83df3988b745d264d642d358fdaf8e378f3fdcff9f9c114f7a857e426af",
             # Pin Python 3.14.8 and pass the selected runtime to UCRT64 configuration.
-            "windows-ucrt64": "00890b97a7e49d22c50d046972b2f272fe0a63ca8ff90fb132f99fb410797eb1",
+            "windows-ucrt64": "1dd384445fa2c92b0f7919abb0caea239f4eee437c271882d32a39fa2fbe7c9b",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
-            "tidy-shard": "522c626dce80dc98e1f474bea381d9eaac93eb17979a2d5389e2d4358ca2ded6",
+            "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
             "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
             "public-tree": "f9f59910f6674d861330ee21b21acdf61043b00dfee998939f8c59564cdd58e2",
         }
@@ -2684,10 +2713,11 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
                      *self.input_paths, "tools/CMakeLists.txt", "test/CMakeLists.txt", "new-tool"):
             with self.subTest(path=path):
                 self.assertTrue(ci_paths.needs_cpp(path))
-        for path in ("docs/development.md", "README.md", "docs/diagram.svg"):
+        for path, python_lane in (("docs/development.md", True), ("README.md", True),
+                                  ("docs/diagram.svg", False)):
             with self.subTest(path=path):
                 self.assertFalse(ci_paths.needs_cpp(path))
-                self.assertFalse(ci_paths.needs_python(path))
+                self.assertEqual(ci_paths.needs_python(path), python_lane)
         # Covered performance modules can skip native work but must retain the
         # runner's Python contract coverage on every OS.
         self.assertFalse(ci_paths.needs_cpp("tools/perf/render_budget.py"))

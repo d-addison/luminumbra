@@ -168,7 +168,7 @@ jobs:
         env:
           LOCAL_CHECK_JUNIT: ${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml
         run: |
-          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja
+          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
           ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
           ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
           python3 -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2
@@ -212,11 +212,14 @@ jobs:
           restore-keys: |
             linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
             linux-x64-gcc-ccache-
+      - name: Prepare fresh RmlUi build root
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        run: python3 -I -B tools/ci/rmlui_source.py init --root build/release
       - name: Configure
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: configure
         run: >-
-          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
       - name: Reset compiler cache statistics
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true)) }}
@@ -314,9 +317,11 @@ jobs:
       - name: Validate dormant and enabled Linux packaging
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.ref_name == 'main' || github.base_ref == 'main') }}
         run: |
-          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          python3 -I -B tools/ci/rmlui_source.py init --root build/package-off
+          cmake -S . -B build/package-off "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
           test ! -e build/package-off/CPackConfig.cmake
-          cmake -S . -B build/package-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          python3 -I -B tools/ci/rmlui_source.py init --root build/package-linux
+          cmake -S . -B build/package-linux "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-linux --target package --parallel 4
 
@@ -356,7 +361,8 @@ jobs:
             protobuf-compiler python3-numpy python3-pil wayland-protocols xorg-dev
       - name: Configure GNS and Tracy profile compile check
         run: |
-          cmake --preset profile -B build/gns-probe \
+          python3 -I -B tools/ci/rmlui_source.py init --root build/gns-probe
+          cmake --preset profile -B build/gns-probe "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" \
             -DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON
       - name: Build production applications against GNS and pinned Tracy
         run: |
@@ -424,7 +430,8 @@ jobs:
             diligent-rhi-linux-x64-gcc-ccache-
       - name: Configure with Diligent RHI
         run: |
-          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          python3 -I -B tools/ci/rmlui_source.py init --root build/release
+          cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLUMINUMBRA_ENABLE_DILIGENT=ON
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
@@ -691,6 +698,8 @@ jobs:
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
           }
+          python -I -B tools/ci/rmlui_source.py init --root build/release
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
@@ -806,8 +815,13 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Set-Alias -Name python -Value $pythonExecutable
+          python -I -B tools/ci/rmlui_source.py init --root build/package-off
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"
           if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
+          python -I -B tools/ci/rmlui_source.py init --root build/package-windows
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-windows --target package --parallel 4
@@ -936,6 +950,11 @@ jobs:
               throw "Mesa3D archive is missing x64/$dll"
             }
           }
+      - name: Prepare fresh RmlUi build root
+        shell: msys2 {0}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: '"$(cygpath -u "$CI_PYTHON_EXECUTABLE")" -I -B tools/ci/rmlui_source.py init --root build/release'
       - name: Configure
         id: configure
         shell: msys2 {0}
@@ -1379,13 +1398,15 @@ jobs:
       - name: Configure GCC and Clang databases and generate headers
         if: steps.route.outputs.native != 'false'
         run: |
-          cmake -S . -B build/fast-gcc -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          python3 -I -B tools/ci/rmlui_source.py init --root build/fast-gcc
+          cmake -S . -B build/fast-gcc -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           cmake --build build/fast-gcc --target glad --parallel 2
-          cmake -S . -B build/fast-clang -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          python3 -I -B tools/ci/rmlui_source.py init --root build/fast-clang
+          cmake -S . -B build/fast-clang -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
@@ -1446,7 +1467,8 @@ jobs:
             wayland-protocols xorg-dev
       - name: Configure compile database
         run: |
-          cmake -S . -B build/tidy -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          python3 -I -B tools/ci/rmlui_source.py init --root build/tidy
+          cmake -S . -B build/tidy "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=OFF \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++

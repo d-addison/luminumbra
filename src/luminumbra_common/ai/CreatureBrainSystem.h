@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-#include <entt/entt.hpp>
+#include <entt/entity/registry.hpp>
 
 namespace luminumbra::ai {
 

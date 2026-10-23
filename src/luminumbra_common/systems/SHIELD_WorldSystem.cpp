@@ -7,7 +7,7 @@
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
 #include "core/Profiler.h"
-#include "entt/entt.hpp"
+#include "entt/entity/fwd.hpp"
 #include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
 #include "world/SurfaceWorkBudget.h"

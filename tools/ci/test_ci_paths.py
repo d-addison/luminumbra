@@ -37,6 +37,20 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_rmlui_manifest_requires_python_and_native_lanes(self):
+        manifest = "vendor/rmlui/rmlui-6.1-source.json"
+        for paths in ([manifest], ["docs/dependency-source.md", manifest],
+                      ["cmake/patches/rmlui-6.1-source.json", manifest]):
+            with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
+                self.assertTrue(gate.needs_python(manifest))
+                self.assertTrue(gate.needs_cpp(manifest))
+                self.assertEqual(self.classify_lanes(ROOT, "pull_request", "base", "head",
+                                               "owner/repo", "owner/repo"), (True, True))
+        for path in ("vendor/rmlui/other.json", "vendor/other/rmlui-6.1-source.json"):
+            with self.subTest(path=path):
+                self.assertFalse(gate.needs_python(path))
+                self.assertTrue(gate.needs_cpp(path))
+
     def classify_lanes(self, root, event, base, head, repository, head_repository):
         return gate.classify(root, event, base, head, repository, head_repository, "devel")[:2]
 
@@ -130,7 +144,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_pr_classification_and_mixed_changes(self):
         for paths, expected in (
-            (["docs/development.md"], (False, False)),
+            (["docs/development.md"], (False, True)),
             (["tools/audio/bank_validate.py"], (True, True)),
             (["tools/ci/check_docs.py"], (True, True)),
             (["src/main.cpp"], (True, False)),
@@ -386,7 +400,7 @@ class PathGateTests(unittest.TestCase):
                 "--head-repository", "owner/repo", "--output", str(output),
             ]):
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=false\nneeds_heavy=false\nheavy_reason=reviewed_presentation_or_docs\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=true\nneeds_heavy=false\nheavy_reason=reviewed_presentation_or_docs\n")
 
     def test_cli_uses_hosted_base_ref_for_older_workflow_callers(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(gate, "changed_paths", return_value=["README.md"]):
@@ -507,6 +521,11 @@ class PathGateTests(unittest.TestCase):
     def test_standalone_plan_covers_ctest_python_contracts_without_native_runner(self):
         commands = gate.python_test_commands(ROOT)
         for test in (
+            "test/rendering/test_upload_budget_wiring.py",
+            "test/tools/test_runtime_config_contract.py", "test/tools/check_profiler_contract.py",
+            "test/tools/check_audio_shutdown_contract.py", "tools/ci/test_audio_propagation_metrics.py",
+            "tools/ci/test_jolt_startup.py", "tools/gates/test_common_library_isa.py",
+            "tools/ci/test_rmlui_source.py", "tools/ci/test_local_rmlui_recipe.py",
             "tools/ci/test_ci_paths.py", "tools/ci/test_qualification_capture.py",
             "tools/ci/test_check_acceptance_matrix.py",
             "tools/ci/test_asan_shards.py", "tools/ci/test_ctest_shards.py",
