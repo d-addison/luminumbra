@@ -2284,7 +2284,7 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
     ASSERT_TRUE(source.LoadWorld(source.GetMetadata().worldId)) << source.GetWorldOpenError();
     EXPECT_EQ(source.GetWorldSystem()->GetWaterSimWindowCursor(), saved_cursor);
 
-    const auto snapshot = root.path() / "water-cursor-snapshot";
+    const auto snapshot = Root().path() / "water-cursor-snapshot";
     for (const bool with_chunks : {false, true}) {
         SCOPED_TRACE(with_chunks);
         fs::remove_all(snapshot);
@@ -2318,7 +2318,7 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
     }
     reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
-    ASSERT_TRUE(reader.LoadWorldStateFrom(root.path() / "missing-water-snapshot"));
+    ASSERT_TRUE(reader.LoadWorldStateFrom(Root().path() / "missing-water-snapshot"));
     EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
 }
 
@@ -2343,7 +2343,8 @@ TEST_P(SavedWorldPresetTest, InvalidWaterCursorRefusesCatalogAndSnapshotWithoutC
         EXPECT_FALSE(reader.LoadWorldStateFrom(save));
         EXPECT_NE(reader.GetWorldOpenError().find("water simulation cursor"), std::string::npos);
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
-        EXPECT_FALSE(P::InspectSavedWorld(root.path(), source.GetMetadata().worldId).error.empty());
+        EXPECT_FALSE(
+            P::InspectSavedWorld(Root().path(), source.GetMetadata().worldId).error.empty());
         EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
     }
 }
