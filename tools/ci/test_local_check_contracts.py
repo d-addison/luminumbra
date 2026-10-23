@@ -48,10 +48,14 @@ class RegistrationTests(unittest.TestCase):
                 'every_changed_file_preserves_operations_defaults_and_enum_declarations',
                 'files_mixed_missing_extra_and_partial_refuse_untouched',
                 'git_pin_index_modes_flags_alternates_and_config_refusals',
-                'interruption_at_each_publication_boundary_never_marks_incomplete_ready',
                 'mode_and_unreadable_refuse',
                 'nonordinary_files_and_links',
                 'operation_assertions_use_strict_utf8_with_a_cp1252_default'))
+            expected.update("RmlUiSourceInterruption_" + boundary for boundary in
+                            ("check", "apply", "postverify", "rename", "receipt", "admission"))
+            expected.update("LocalRmlUiRecipe_" + recipe for recipe in (
+                "worker_configures_both_owned_disconnected_sources",
+                "worker_refuses_invalid_gcc_receipts", "worker_refuses_invalid_tidy_receipts"))
             expected.update("RmlUiSourceRecovery_" + recovery for recovery in (
                 "borrowed_archive_without_git_returns_its_original_metadata",
                 "borrowed_recovery_refuses_unknown_partial_and_changed_metadata",

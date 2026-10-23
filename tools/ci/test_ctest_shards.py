@@ -581,9 +581,13 @@ class CTestShardTests(unittest.TestCase):
                 "every_changed_file_preserves_operations_defaults_and_enum_declarations",
                 "files_mixed_missing_extra_and_partial_refuse_untouched",
                 "git_pin_index_modes_flags_alternates_and_config_refusals",
-                "interruption_at_each_publication_boundary_never_marks_incomplete_ready",
                 "mode_and_unreadable_refuse", "nonordinary_files_and_links",
                 "operation_assertions_use_strict_utf8_with_a_cp1252_default")},
+            *{"RmlUiSourceInterruption_" + name for name in
+              ("check", "apply", "postverify", "rename", "receipt", "admission")},
+            *{"LocalRmlUiRecipe_" + name for name in (
+                "worker_configures_both_owned_disconnected_sources",
+                "worker_refuses_invalid_gcc_receipts", "worker_refuses_invalid_tidy_receipts")},
             *{"RmlUiSourceRecovery_" + name for name in (
                 "borrowed_archive_without_git_returns_its_original_metadata",
                 "borrowed_recovery_refuses_unknown_partial_and_changed_metadata",
@@ -624,7 +628,7 @@ class CTestShardTests(unittest.TestCase):
                             self.assertNotIn("PROCESSORS", props)
                             self.assertNotIn("COST", props)
                 self.assertTrue(local_names <= set(selected))
-                self.assertEqual(len(selected), 4 if standalone else 48 if windows else 50)
+                self.assertEqual(len(selected), 4 if standalone else 56 if windows else 58)
                 if not standalone:
                     self.assertTrue(borrowed_input_names <= set(selected))
                 names = [row["name"] for row in rows]

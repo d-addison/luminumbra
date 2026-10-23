@@ -28,9 +28,18 @@ class LocalSourceRecipe(unittest.TestCase):
     tearDownClass = classmethod(source.SourceFiles.tearDownClass.__func__)
 
     def test_documented_local_recipe_requires_both_owned_disconnected_sources(self):
-        self.exercise_recipe()
+        self.exercise_recipe(phase="enrollment")
 
-    def exercise_recipe(self, failure=None):
+    def test_worker_configures_both_owned_disconnected_sources(self):
+        self.exercise_recipe(phase="configure")
+
+    def test_worker_refuses_invalid_gcc_receipts(self):
+        self.exercise_recipe(phase="gcc_receipts")
+
+    def test_worker_refuses_invalid_tidy_receipts(self):
+        self.exercise_recipe(phase="tidy_receipts")
+
+    def exercise_recipe(self, failure=None, phase="configure"):
         docs = (ROOT / "docs/ci/local-checks.md").read_text(encoding="utf-8")
         owner_section, worker_section = docs.split("## Worker recipe\n", 1)
         owner = owner_section.split("```bash\n")[-1].split("\n```", 1)[0]
@@ -171,33 +180,36 @@ cmake() { "$FIXTURE_PYTHON" -I -B boundary.py configure "$@"; }
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("injected " + failure, result.stderr)
                 raise RuntimeError("injected publication " + failure)
-            # Preparation must finish before enrollment, including its fresh
-            # stage/init checks. An occupied init path cannot leave an owner.
-            initial = directory / "scratch/offline-init.cmake"
-            initial.parent.mkdir()
-            initial.write_bytes(b"retained initial cache")
-            self.assertNotEqual(run(owner).returncode, 0)
-            self.assertFalse(first.root.exists())
-            self.assertFalse(second.root.exists())
-            self.assertEqual(initial.read_bytes(), b"retained initial cache")
-            initial.unlink()
-            # Unowned empty/nonempty roots are never enrolled by the recipe.
-            first.root.mkdir()
-            for occupied in (False, True):
-                if occupied:
-                    (first.root / "retained").write_bytes(b"unknown state")
-                result = run(owner)
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertFalse(first.owner_path.exists())
+            if phase == "enrollment":
+                # Preparation must finish before enrollment, including its fresh
+                # stage/init checks. An occupied init path cannot leave an owner.
+                initial = directory / "scratch/offline-init.cmake"
+                initial.parent.mkdir()
+                initial.write_bytes(b"retained initial cache")
+                self.assertNotEqual(run(owner).returncode, 0)
+                self.assertFalse(first.root.exists())
                 self.assertFalse(second.root.exists())
-                if occupied:
-                    self.assertEqual((first.root / "retained").read_bytes(), b"unknown state")
-            (first.root / "retained").unlink()
-            first.root.rmdir()
-            self.assertNotEqual(run(worker_boundary).returncode, 0)
+                self.assertEqual(initial.read_bytes(), b"retained initial cache")
+                initial.unlink()
+                # Unowned empty/nonempty roots are never enrolled by the recipe.
+                first.root.mkdir()
+                for occupied in (False, True):
+                    if occupied:
+                        (first.root / "retained").write_bytes(b"unknown state")
+                    result = run(owner)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertFalse(first.owner_path.exists())
+                    self.assertFalse(second.root.exists())
+                    if occupied:
+                        self.assertEqual((first.root / "retained").read_bytes(), b"unknown state")
+                (first.root / "retained").unlink()
+                first.root.rmdir()
+                self.assertNotEqual(run(worker_boundary).returncode, 0)
+                return
             result = run(owner)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            for workspace in (first, second):
+            if phase.endswith("_receipts"):
+                workspace = first if phase == "gcc_receipts" else second
                 workspace.verify()
                 receipt = workspace.receipt.read_bytes()
                 for invalid in (None, b"partial", M.encoded({})):
@@ -207,6 +219,7 @@ cmake() { "$FIXTURE_PYTHON" -I -B boundary.py configure "$@"; }
                     result = run(worker_boundary)
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     workspace.receipt.write_bytes(receipt)
+                return
             result = run(worker_boundary)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             calls = [json.loads(line) for line in (directory / "calls.jsonl").read_text(encoding="utf-8").splitlines()]

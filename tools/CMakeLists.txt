@@ -2001,7 +2001,6 @@ if(BUILD_TESTING)
             every_changed_file_preserves_operations_defaults_and_enum_declarations
             files_mixed_missing_extra_and_partial_refuse_untouched
             git_pin_index_modes_flags_alternates_and_config_refusals
-            interruption_at_each_publication_boundary_never_marks_incomplete_ready
             mode_and_unreadable_refuse
             nonordinary_files_and_links
             operation_assertions_use_strict_utf8_with_a_cp1252_default
@@ -2013,6 +2012,15 @@ if(BUILD_TESTING)
         set_tests_properties(RmlUiSourceFixture_${fixture}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
         list(APPEND _rmlui_source_contracts RmlUiSourceFixture_${fixture})
+    endforeach()
+    foreach(boundary IN ITEMS check apply postverify rename receipt admission)
+        add_test(
+            NAME RmlUiSourceInterruption_${boundary}
+            COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
+                    SourceFiles.test_interruption_at_${boundary}_never_marks_incomplete_ready)
+        set_tests_properties(RmlUiSourceInterruption_${boundary}
+            PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts RmlUiSourceInterruption_${boundary})
     endforeach()
     add_test(
         NAME RmlUiSourceCommandContract
@@ -2038,9 +2046,21 @@ if(BUILD_TESTING)
     add_test(
         NAME LocalRmlUiRecipeContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_rmlui_recipe.py"
-                LocalSourceRecipe)
+                LocalSourceRecipe.test_documented_local_recipe_requires_both_owned_disconnected_sources)
     set_tests_properties(LocalRmlUiRecipeContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+    foreach(recipe IN ITEMS
+            worker_configures_both_owned_disconnected_sources
+            worker_refuses_invalid_gcc_receipts
+            worker_refuses_invalid_tidy_receipts)
+        add_test(
+            NAME LocalRmlUiRecipe_${recipe}
+            COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_rmlui_recipe.py"
+                    LocalSourceRecipe.test_${recipe})
+        set_tests_properties(LocalRmlUiRecipe_${recipe}
+            PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts LocalRmlUiRecipe_${recipe})
+    endforeach()
     foreach(boundary IN ITEMS beforepatch afterpatch beforerename afterrename receipt configure)
         add_test(
             NAME LocalRmlUiRecovery_${boundary}

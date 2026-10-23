@@ -387,57 +387,73 @@ class SourceFiles(unittest.TestCase):
         with mock.patch.object(Path, "read_text", cp1252):
             self.test_every_changed_file_preserves_operations_defaults_and_enum_declarations()
 
-    def test_interruption_at_each_publication_boundary_never_marks_incomplete_ready(self):
+    def assert_interrupted_publication(self, boundary):
         w = self.workspace
         real_git, real_rename, real_write = M.git, M.os.rename, M.write_exclusive
         real_unlink = Path.unlink
-        for boundary in ("check", "apply", "postverify", "rename", "receipt", "admission"):
-            with self.subTest(boundary=boundary):
-                M.write_exclusive(w.admission, b"controlled admission\n")
-                owner = w.owner()
-                borrowed = BorrowedSource(w.stage, self.spec)
-                def command(source, *args, **kwargs):
-                    if args[0] == "apply" and ((boundary == "check" and "--check" in args)
-                                               or (boundary == "apply" and "--check" not in args)):
-                        raise KeyboardInterrupt(boundary)
-                    return real_git(source, *args, **kwargs)
-                calls = 0
-                real_verify = self.spec.verify_files
-                def verify(source, patched):
-                    nonlocal calls
-                    calls += 1
-                    if boundary == "postverify" and patched:
-                        raise KeyboardInterrupt(boundary)
-                    real_verify(source, patched)
-                def rename(source, destination):
-                    self.assertFalse(w.receipt.exists())
-                    if boundary == "rename":
-                        raise KeyboardInterrupt(boundary)
-                    real_rename(source, destination)
-                def write(path, data):
-                    self.assertFalse(w.stage.exists())
-                    self.assertTrue(w.source.exists())
-                    if boundary == "receipt":
-                        real_write(path, b"{partial")
-                        raise KeyboardInterrupt(boundary)
-                    real_write(path, data)
-                def unlink(path, *args, **kwargs):
-                    if boundary == "admission" and path == w.admission:
-                        raise KeyboardInterrupt(boundary)
-                    return real_unlink(path, *args, **kwargs)
-                try:
-                    with mock.patch.object(M, "git", side_effect=command), mock.patch.object(M.os, "rename", side_effect=rename), mock.patch.object(M, "write_exclusive", side_effect=write), mock.patch.object(self.spec, "verify_files", side_effect=verify), mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink):
-                        with self.assertRaises(KeyboardInterrupt):
-                            w.publish(owner)
-                    with self.assertRaises((ValueError, OSError)):
-                        w.preflight(False)
-                    self.assertTrue(w.admission.exists())
-                finally:
-                    borrowed.restore(w.source)
-                    if w.receipt.exists():
-                        w.receipt.unlink()
-                    w.admission.unlink()
-                self.spec.verify_files(w.stage, False)
+        M.write_exclusive(w.admission, b"controlled admission\n")
+        owner = w.owner()
+        borrowed = BorrowedSource(w.stage, self.spec)
+        def command(source, *args, **kwargs):
+            if args[0] == "apply" and ((boundary == "check" and "--check" in args)
+                                       or (boundary == "apply" and "--check" not in args)):
+                raise KeyboardInterrupt(boundary)
+            return real_git(source, *args, **kwargs)
+        calls = 0
+        real_verify = self.spec.verify_files
+        def verify(source, patched):
+            nonlocal calls
+            calls += 1
+            if boundary == "postverify" and patched:
+                raise KeyboardInterrupt(boundary)
+            real_verify(source, patched)
+        def rename(source, destination):
+            self.assertFalse(w.receipt.exists())
+            if boundary == "rename":
+                raise KeyboardInterrupt(boundary)
+            real_rename(source, destination)
+        def write(path, data):
+            self.assertFalse(w.stage.exists())
+            self.assertTrue(w.source.exists())
+            if boundary == "receipt":
+                real_write(path, b"{partial")
+                raise KeyboardInterrupt(boundary)
+            real_write(path, data)
+        def unlink(path, *args, **kwargs):
+            if boundary == "admission" and path == w.admission:
+                raise KeyboardInterrupt(boundary)
+            return real_unlink(path, *args, **kwargs)
+        try:
+            with mock.patch.object(M, "git", side_effect=command), mock.patch.object(M.os, "rename", side_effect=rename), mock.patch.object(M, "write_exclusive", side_effect=write), mock.patch.object(self.spec, "verify_files", side_effect=verify), mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink):
+                with self.assertRaises(KeyboardInterrupt):
+                    w.publish(owner)
+            with self.assertRaises((ValueError, OSError)):
+                w.preflight(False)
+            self.assertTrue(w.admission.exists())
+        finally:
+            borrowed.restore(w.source)
+            if w.receipt.exists():
+                w.receipt.unlink()
+            w.admission.unlink()
+        self.spec.verify_files(w.stage, False)
+
+    def test_interruption_at_check_never_marks_incomplete_ready(self):
+        self.assert_interrupted_publication("check")
+
+    def test_interruption_at_apply_never_marks_incomplete_ready(self):
+        self.assert_interrupted_publication("apply")
+
+    def test_interruption_at_postverify_never_marks_incomplete_ready(self):
+        self.assert_interrupted_publication("postverify")
+
+    def test_interruption_at_rename_never_marks_incomplete_ready(self):
+        self.assert_interrupted_publication("rename")
+
+    def test_interruption_at_receipt_never_marks_incomplete_ready(self):
+        self.assert_interrupted_publication("receipt")
+
+    def test_interruption_at_admission_never_marks_incomplete_ready(self):
+        self.assert_interrupted_publication("admission")
 
     def test_files_mixed_missing_extra_and_partial_refuse_untouched(self):
         source = self.workspace.stage
@@ -1805,9 +1821,7 @@ class OwnedCommandLifetime(unittest.TestCase):
                 with (root / "work").open("ab", buffering=0) as work:
                     if mode == "storage":
                         entries = root / "entries"
-                        entries.mkdir()
-                        for i in range(8193):
-                            (entries / str(i)).touch()
+                        (entries / "8192").touch()
                         (root / "entries-complete").touch()
                     while True:
                         work.write(b"x")
@@ -1977,6 +1991,15 @@ class OwnedCommandLifetime(unittest.TestCase):
         return details
 
     def command(self, mode, input_bytes=None):
+        if mode == "storage":
+            # The real 8192-entry limit stays unchanged. Prepare the fixed bulk
+            # input before timing shutdown; the live descendant adds the last
+            # entry and retains stdout before the first production scan.
+            entries = self.root / "entries"
+            entries.mkdir()
+            for index in range(8192):
+                (entries / str(index)).touch()
+        ready = threading.Event()
         def launch(argv, **kwargs):
             actual = [sys.executable, "-I", "-B", str(self.script), str(self.root), mode]
             if "--contained-git" in argv:
@@ -1998,6 +2021,13 @@ class OwnedCommandLifetime(unittest.TestCase):
                     if time.monotonic() > deadline:
                         raise AssertionError("input closure not reached")
                     time.sleep(0.005)
+            if mode == "storage":
+                deadline = time.monotonic() + 3
+                while not (self.root / "entries-complete").exists():
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("storage descendant did not become ready")
+                    time.sleep(0.005)
+            ready.set()
             return result
         result, errors = [], []
         def run():
@@ -2006,17 +2036,21 @@ class OwnedCommandLifetime(unittest.TestCase):
                     result.append(M.git(self.root, "--version", input_bytes=input_bytes))
             except BaseException as error:
                 errors.append(error)
+            finally:
+                # Launch refusals also release the caller to inspect errors.
+                ready.set()
         thread = threading.Thread(target=run, daemon=True)
         self.command_threads.append(thread)
-        started = time.monotonic()
         thread.start()
-        thread.join(4)
         try:
+            launched = ready.wait(3)
+            if launched:
+                thread.join(4)
             if thread.is_alive():
                 print("owned command deadline: " + json.dumps(self.command_diagnostics(thread),
                                                               sort_keys=True), file=sys.stderr)
+            self.assertTrue(launched, "owned command launch did not become ready")
             self.assertFalse(thread.is_alive(), "owned command did not return within four seconds")
-            self.assertLess(time.monotonic() - started, 4)
             if errors:
                 raise errors[0]
             return result[0]
@@ -2327,6 +2361,78 @@ class OwnedCommandLifetime(unittest.TestCase):
         with self.assertRaisesRegex(M.Refusal, "entry bound"):
             self.command("storage")
         self.assert_child_stopped()
+
+    def test_storage_setup_precedes_command_wait_and_descendant_is_ready(self):
+        real_start, real_join = threading.Thread.start, threading.Thread.join
+        observations = []
+        def start(thread):
+            entries = self.root / "entries"
+            count = len(list(entries.iterdir())) if entries.exists() else 0
+            observations.append((count, (self.root / "entries-complete").exists()))
+            return real_start(thread)
+        def join(thread, timeout=None):
+            if timeout == 4:
+                observations.append(((self.root / "entries-complete").exists(),
+                                     (self.root / "child.pid").exists()))
+            return real_join(thread, timeout)
+        with mock.patch.object(threading.Thread, "start", start), \
+                mock.patch.object(threading.Thread, "join", join):
+            with self.assertRaisesRegex(M.Refusal, "entry bound"):
+                self.command("storage")
+        self.assertEqual(observations, [(8192, False), (True, True)])
+        self.assert_child_stopped()
+
+    def test_command_launch_refusal_releases_readiness_and_preserves_error(self):
+        with mock.patch.object(self, "process", side_effect=OSError("fixture launch refused")):
+            with self.assertRaisesRegex(OSError, "fixture launch refused"):
+                self.command("success")
+        self.assertTrue(all(not thread.is_alive() for thread in self.command_threads))
+        self.assertEqual(self.launched, [])
+
+    def test_storage_readiness_expiry_releases_waiter_and_retires_the_process(self):
+        self.script.write_text("import time; time.sleep(20)\n", encoding="utf-8")
+        with mock.patch.object(M.time, "monotonic", side_effect=itertools.count(0, 121)):
+            with self.assertRaisesRegex(AssertionError, "storage descendant did not become ready"):
+                self.command("storage")
+        self.stop_sessions()
+        self.assertTrue(all(not thread.is_alive() for thread in self.command_threads))
+        self.assertTrue(all(process.returncode is not None for process, kill, wait in self.test_processes))
+
+    def test_launch_readiness_deadline_reports_stack_and_joins_the_command(self):
+        entered, release, ready = threading.Event(), threading.Event(), threading.Event()
+        real_event, real_join = threading.Event, threading.Thread.join
+        first = True
+        def event():
+            nonlocal first
+            if first:
+                first = False
+                return ready
+            return real_event()
+        def wait(timeout):
+            self.assertEqual(timeout, 3)
+            self.assertTrue(entered.wait(3))
+            return False
+        def held_git(*args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("launch diagnostic barrier deadline exceeded")
+            raise M.Refusal("controlled launch refusal")
+        def join(thread, timeout=None):
+            release.set()
+            return real_join(thread, timeout)
+        output = io.StringIO()
+        try:
+            with mock.patch.object(threading, "Event", side_effect=event), \
+                    mock.patch.object(ready, "wait", side_effect=wait), \
+                    mock.patch.object(M, "git", side_effect=held_git), \
+                    mock.patch.object(threading.Thread, "join", join), contextlib.redirect_stderr(output):
+                with self.assertRaisesRegex(AssertionError, "launch did not become ready"):
+                    self.command("success")
+        finally:
+            release.set()
+        details = json.loads(output.getvalue().split("owned command deadline: ", 1)[1])
+        self.assertIn("held_git", [frame["function"] for frame in details["stack"]])
+        self.assertTrue(all(not thread.is_alive() for thread in self.command_threads))
 
     def test_output_refusal_stops_actual_descendant_and_held_pipe(self):
         with self.assertRaisesRegex(M.Refusal, "output bound"):
