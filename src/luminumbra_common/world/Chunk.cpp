@@ -1,5 +1,6 @@
 #include "Chunk.h"
 #include "../core/Log.h"
+#include "core/Profiler.h"
 #include <algorithm>
 #include <cmath>
 
@@ -109,7 +110,7 @@ bool Chunk::is_valid_state_transition(ChunkState from, ChunkState to) {
 }
 
 bool Chunk::try_set_state(ChunkState expected_state, ChunkState new_state) {
-    std::lock_guard<std::mutex> lock(m_state_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
     if (m_state != expected_state || !is_valid_state_transition(m_state, new_state)) {
         return false;
     }

@@ -1,6 +1,7 @@
 #include "FrameScan.h"
 
 #include "GBuffer.h"
+#include "PixelIo.h"
 #include "RenderPipeline.h"
 #include "core/Log.h"
 #include "luminumbra/core/Types.h"
@@ -65,15 +66,15 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
                           int framebuffer_height,
                           const std::filesystem::path& materials_json) {
     FrameScanReport report;
-    if (framebuffer_width <= 0 || framebuffer_height <= 0) {
+    std::size_t rgba_bytes = 0;
+    if (!CapturePixelBytes(framebuffer_width, framebuffer_height, 4, rgba_bytes)) {
         LUMINUMBRA_CORE_ERROR(
             "FrameScan: invalid framebuffer size {}x{}", framebuffer_width, framebuffer_height);
         return report;
     }
     report.width = framebuffer_width;
     report.height = framebuffer_height;
-    const std::size_t pixel_count =
-        static_cast<std::size_t>(framebuffer_width) * static_cast<std::size_t>(framebuffer_height);
+    const std::size_t pixel_count = rgba_bytes / 4;
     report.total_pixels = pixel_count;
 
     // --- 1. Read the back color buffer (final tonemapped sRGB) ----------------
@@ -94,22 +95,37 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
     const GBuffer& gb = pipeline.gbuffer();
     std::vector<unsigned char> id_rgba;
     bool have_ids = false;
-    if (gb.normal_texture != 0 && pipeline.screen_width() == static_cast<u32>(framebuffer_width) &&
-        pipeline.screen_height() == static_cast<u32>(framebuffer_height)) {
+    if (gb.normal_texture != 0 &&
+        pipeline.internal_width() == static_cast<u32>(framebuffer_width) &&
+        pipeline.internal_height() == static_cast<u32>(framebuffer_height)) {
         id_rgba.resize(pixel_count * 4u);
         glBindTexture(GL_TEXTURE_2D, gb.normal_texture);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, id_rgba.data());
+        glGetTextureSubImage(gb.normal_texture,
+                             0,
+                             0,
+                             0,
+                             0,
+                             framebuffer_width,
+                             framebuffer_height,
+                             1,
+                             GL_RGBA,
+                             GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(rgba_bytes),
+                             id_rgba.data());
         glBindTexture(GL_TEXTURE_2D, 0);
         have_ids = true;
     } else if (gb.normal_texture != 0) {
         LUMINUMBRA_CORE_WARN(
             "FrameScan: G-buffer ({}x{}) != back buffer ({}x{}); reporting back-buffer luma only",
-            pipeline.screen_width(),
-            pipeline.screen_height(),
+            pipeline.internal_width(),
+            pipeline.internal_height(),
             framebuffer_width,
             framebuffer_height);
     }
+
+    if (glGetError() != GL_NO_ERROR)
+        return report;
 
     // --- 3. Accumulate per-material pixel count + summed luminance ------------
     // 256 possible 8-bit ids. Material 0 (Air) means "no opaque geometry wrote
@@ -201,6 +217,10 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
 }
 
 bool WriteFrameScanReport(const FrameScanReport& report, const std::filesystem::path& out_path) {
+    std::size_t bytes = 0;
+    if (!report.ok || !CapturePixelBytes(report.width, report.height, 3, bytes) ||
+        report.total_pixels != bytes / 3)
+        return false;
     nlohmann::json j;
     j["schema"] = "luminumbra.frame_scan.v2";
     j["width"] = report.width;
@@ -234,16 +254,7 @@ bool WriteFrameScanReport(const FrameScanReport& report, const std::filesystem::
     foliage["instance_capacity"] = report.foliage_instance_capacity;
     j["foliage"] = std::move(foliage);
 
-    std::error_code ec;
-    if (out_path.has_parent_path())
-        std::filesystem::create_directories(out_path.parent_path(), ec);
-    std::ofstream out(out_path);
-    if (!out) {
-        LUMINUMBRA_CORE_ERROR("FrameScan: cannot write report -> {}", out_path.string());
-        return false;
-    }
-    out << j.dump(2) << "\n";
-    return true;
+    return WriteCaptureText(out_path, j.dump(2) + "\n");
 }
 
 } // namespace Luminumbra::Rendering

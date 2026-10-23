@@ -5,10 +5,11 @@
 // header roundtrip, record append/read identity (including the empty-input
 // compact case), truncation detection, checkpoint encode/decode, and the
 // versioning gate. They are hermetic -- every stream is written to a unique temp
-// file under the test artifact dir and removed afterward, so the suite never
+// file in a reserved temporary directory and removed afterward, so the suite never
 // touches the committed gate fixtures.
 
 #include "../support/SystemConfigVariants.h"
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
 #include <array>
@@ -35,18 +36,11 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// Unique temp path under the test artifact dir (hermetic; auto-removed by the
-// fixture). LUMINUMBRA_TEST_ARTIFACT_DIR is provided by the build for some
-// targets; fall back to the temp dir so the test is portable.
 fs::path ReplayTempDir() {
-#ifdef LUMINUMBRA_TEST_ARTIFACT_DIR
-    fs::path dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "replay-unit";
-#else
-    fs::path dir = fs::temp_directory_path() / "luminumbra-replay-unit";
-#endif
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    return dir;
+    // CTest runs cases in separate processes. Reserve this process's namespace
+    // exclusively and retain it until all local sessions/recorders have closed.
+    static const Luminumbra::TestSupport::ScopedTempFile workspace("replay_", ".unused");
+    return workspace.Path().parent_path();
 }
 
 class ReplayStreamTest : public ::testing::Test {
@@ -368,6 +362,90 @@ TEST_F(ReplayStreamTest, QueuedShutdownDrainsBeforeRemovingAllWorkingFiles) {
     EXPECT_EQ(gate->ticks.back(), 128u);
     EXPECT_TRUE(fs::is_empty(directory));
     fs::remove(directory);
+}
+
+// A deterministic counterexample for the shared namespace: a file occupying the
+// next directory candidate makes setup fail, even with a valid replay header.
+// This does not identify which filesystem operation failed in a hosted run.
+TEST_F(ReplayStreamTest, OccupiedRecorderCandidateRefusesWithoutDeletingTheOtherOwner) {
+    const auto directory = fs::path(m_path + ".occupied");
+    ASSERT_TRUE(fs::create_directory(directory));
+    const auto destination = (directory / "dump.lrec1").string();
+    replay::BoundedReplayRecorder probe;
+    ASSERT_TRUE(probe.Configure(18, 0));
+    ASSERT_TRUE(probe.Open(destination, MakeHeader()));
+    std::string name;
+    {
+        const auto entry = fs::directory_iterator(directory);
+        ASSERT_NE(entry, fs::directory_iterator{});
+        name = entry->path().filename().string();
+    }
+    const std::string prefix = "lockstep-recording-";
+    ASSERT_EQ(name.find(prefix), 0u);
+    const auto next = std::stoull(name.substr(prefix.size())) + 1;
+    probe.Close();
+    ASSERT_TRUE(fs::is_empty(directory));
+    const auto occupied = directory / (prefix + std::to_string(next));
+    {
+        std::ofstream blocker(occupied, std::ios::binary);
+        ASSERT_TRUE(blocker.is_open());
+        blocker << "other owner";
+        ASSERT_TRUE(blocker.good());
+    }
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(18, 0));
+    EXPECT_FALSE(recorder.Open(destination, MakeHeader()));
+    EXPECT_EQ(recorder.RetainedBytes(), 0u);
+    EXPECT_EQ(recorder.SegmentCount(), 0u);
+    recorder.Close();
+    EXPECT_FALSE(fs::exists(destination));
+    {
+        std::ifstream blocker(occupied, std::ios::binary);
+        ASSERT_TRUE(blocker.is_open());
+        EXPECT_EQ(std::string(std::istreambuf_iterator<char>(blocker), {}), "other owner");
+    }
+    // A reserved sibling workspace has no dependence on the occupied candidate.
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.RecordTick(1, {0xab}, nullptr, 1));
+    ASSERT_TRUE(recorder.Finalize(m_path, 1, 1));
+    const auto contents = replay::ReadReplay(m_path);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents)
+        return;
+    EXPECT_FALSE(contents->truncated);
+    EXPECT_TRUE(contents->trailer_present);
+    ASSERT_EQ(contents->inputs.size(), 1u);
+    EXPECT_EQ(contents->inputs.front().inputs, (std::vector<std::uint8_t>{0xab}));
+    recorder.Close();
+    ASSERT_TRUE(fs::remove(occupied));
+    ASSERT_TRUE(fs::remove(directory));
+}
+
+TEST_F(ReplayStreamTest, ClosingOneRecorderPreservesTheOtherRecordersWorkingFiles) {
+    replay::BoundedReplayRecorder first;
+    replay::BoundedReplayRecorder second;
+    ASSERT_TRUE(first.Configure(18, 0));
+    ASSERT_TRUE(second.Configure(18, 0));
+    const auto other_path = m_path + ".peer";
+    ASSERT_TRUE(first.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(second.Open(other_path, MakeHeader()));
+    ASSERT_TRUE(first.RecordTick(1, {0xab}, nullptr, 1));
+    ASSERT_TRUE(second.RecordTick(1, {0xcd}, nullptr, 1));
+    ASSERT_TRUE(first.Finalize(m_path, 1, 1));
+    first.Close();
+    ASSERT_TRUE(second.RecordTick(2, {0xef}, nullptr, 2));
+    ASSERT_TRUE(second.Finalize(other_path, 2, 2));
+    second.Close();
+    const auto contents = replay::ReadReplay(other_path);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents)
+        return;
+    EXPECT_FALSE(contents->truncated);
+    EXPECT_TRUE(contents->trailer_present);
+    ASSERT_EQ(contents->inputs.size(), 2u);
+    EXPECT_EQ(contents->inputs.front().inputs, (std::vector<std::uint8_t>{0xcd}));
+    EXPECT_EQ(contents->inputs.back().inputs, (std::vector<std::uint8_t>{0xef}));
+    ASSERT_TRUE(fs::remove(other_path));
 }
 
 TEST_F(ReplayStreamTest, BoundedRecorderRejectsOverflowAndOversizedTicksBeforeWriting) {

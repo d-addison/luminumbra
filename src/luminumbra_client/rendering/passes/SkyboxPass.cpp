@@ -1,4 +1,5 @@
 #include "SkyboxPass.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -198,6 +199,7 @@ void SkyboxPass::reset_shader() {
 void SkyboxPass::execute(const RenderContext& ctx,
                          const Camera& camera,
                          bool draw_weather_overlay) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute");
     glDepthFunc(GL_GEQUAL);
     // The camera sits inside the skybox cube, so its upward faces wind
     // clockwise from the inside view and were backface-culled (black wedges
@@ -341,6 +343,7 @@ void SkyboxPass::execute(const RenderContext& ctx,
 }
 
 void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute_weather_overlay");
     if (ctx.weather_type == WeatherType::None || ctx.weather_intensity <= 0.0f) {
         return;
     }
@@ -355,6 +358,7 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera&
 void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
                                          const Camera& camera,
                                          const glm::mat4& projection) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute_weather_overlay");
     if (!m_weather_shader || !m_weather_shader->IsValid()) {
         return;
     }

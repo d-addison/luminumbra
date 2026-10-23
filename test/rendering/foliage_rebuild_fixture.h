@@ -1,0 +1,259 @@
+#pragma once
+
+#include "luminumbra/core/Types.h"
+#include "luminumbra_client/rendering/FoliageSurfaceSlots.h"
+#include "luminumbra_client/rendering/passes/FoliagePass.h"
+#include "luminumbra_common/world/Chunk.h"
+
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+#include <glad/glad.h>
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <span>
+#include <vector>
+
+namespace FoliageTest {
+using Luminumbra::Rendering::FoliagePass;
+namespace Attribution = Luminumbra::Client::Attribution;
+
+inline const glm::vec3 kCamera{16, 12, 16};
+inline constexpr float kColumnExtent = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+
+// All GL storage is released before the fixture releases its context, including
+// when an assertion aborts a test. No production test seams are required.
+class ScopedPass {
+public:
+    FoliagePass& pass() {
+        return m_pass;
+    }
+    ~ScopedPass() {
+        m_pass.destroy_compute();
+        m_pass.destroy_buffers();
+    }
+
+private:
+    FoliagePass m_pass;
+};
+
+class FoliageRebuildTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        initialized = glfwInit() == GLFW_TRUE;
+        ASSERT_TRUE(initialized);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        window = glfwCreateWindow(64, 64, "foliage_rebuild_test", nullptr, nullptr);
+        ASSERT_NE(window, nullptr);
+        glfwMakeContextCurrent(window);
+        ASSERT_NE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)), 0);
+    }
+    void TearDown() override {
+        if (window) {
+            if (glad_glGetError) {
+                EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+            }
+            glfwDestroyWindow(window);
+        }
+        if (initialized) {
+            glfwTerminate();
+        }
+    }
+    static void Initialize(FoliagePass& pass, bool gpu = true) {
+        pass.init_buffers();
+        pass.set_readback_enabled(false);
+        pass.set_fade_distances(48, 92);
+        pass.set_density_scale(1.6f);
+        pass.set_wind({0, 0});
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        if (gpu) {
+            pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+            ASSERT_TRUE(pass.gpu_scatter_active());
+        }
+    }
+    static std::vector<FoliagePass::ChunkScatter> Chunks(std::size_t count) {
+        // Fixtures use at most nine columns, below the fixed instance-pool capacity.
+        std::vector<FoliagePass::ChunkScatter> result;
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto x = static_cast<int>(index);
+            FoliagePass::ChunkScatter chunk;
+            chunk.chunk_xz = {x, 0};
+            chunk.origin = {static_cast<float>(x) * 32.0f, 0, 0};
+            chunk.biome_id = 1;
+            chunk.density = 0.5f;
+            result.push_back(chunk);
+        }
+        return result;
+    }
+    static void Rebuild(FoliagePass& pass,
+                        const std::vector<FoliagePass::ChunkScatter>& chunks,
+                        std::uint64_t frame,
+                        const glm::vec3& camera = kCamera) {
+        pass.set_evidence_frame(frame, 1);
+        pass.rebuild_instances(
+            chunks,
+            +[](void*, float x, float z) {
+                return FoliagePass::SurfaceSample{10.0f + x * 0.01f + z * 0.02f, 0.1f, 0.7f, true};
+            },
+            nullptr,
+            camera);
+    }
+    static Attribution::FoliageRebuild
+    RebuildAttributed(FoliagePass& pass,
+                      const std::vector<FoliagePass::ChunkScatter>& chunks,
+                      std::uint64_t frame_id,
+                      const glm::vec3& camera = kCamera) {
+        const Attribution::FoliageFrameScope frame(true);
+        Rebuild(pass, chunks, frame_id, camera);
+        return frame.snapshot().rebuild;
+    }
+    static void ExpectReused(const Attribution::FoliageRebuild& rebuild, bool gpu) {
+        EXPECT_EQ(rebuild.reasons, 0u);
+        EXPECT_EQ(rebuild.path,
+                  gpu ? Attribution::FoliagePath::ReusedGpu : Attribution::FoliagePath::ReusedCpu);
+        EXPECT_EQ(rebuild.surface_misses, 0u);
+        EXPECT_EQ(rebuild.uploaded_bytes, 0u);
+        EXPECT_EQ(rebuild.dirty_columns, 0u);
+        EXPECT_EQ(rebuild.hashed_bytes, 0u);
+        EXPECT_FALSE(rebuild.backlog);
+    }
+    static std::vector<Luminumbra::VoxelVertex> GroundVertices(float height = 8.0f) {
+        return {{{0, height, 0}, {0, 1, 0}, 3},
+                {{kColumnExtent, height + 1.6f, 0}, {0, 1, 0}, 3},
+                {{0, height + 1.6f, kColumnExtent}, {0, 1, 0}, 3},
+                {{kColumnExtent, height, kColumnExtent}, {0, 1, 0}, 3}};
+    }
+    static std::vector<FoliagePass::ChunkScatter> SupportedChunks(std::size_t count) {
+        auto result = Chunks(count);
+        for (auto& chunk : result) {
+            chunk.origin.x = static_cast<float>(chunk.chunk_xz.x) * kColumnExtent;
+            chunk.extent_m = kColumnExtent;
+        }
+        return result;
+    }
+    static void UploadGround(FoliagePass& pass,
+                             Luminumbra::ChunkID id,
+                             const glm::ivec3& coords,
+                             float height = 8.0f) {
+        pass.update_ground_mesh(id, coords, GroundVertices(height), {0, 2, 3, 0, 3, 1});
+    }
+    static std::vector<FoliagePass::InstanceRecord> Records(const FoliagePass& pass, bool gpu) {
+        return gpu ? GpuRecords() : pass.instances();
+    }
+    static GLuint Binding(GLuint index) {
+        GLint buffer = 0;
+        glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, index, &buffer);
+        return static_cast<GLuint>(buffer);
+    }
+    static std::vector<FoliagePass::InstanceRecord> GpuRecords() {
+        std::array<GLuint, 5> command{};
+        glGetNamedBufferSubData(Binding(3), 0, sizeof(command), command.data());
+        EXPECT_LE(command[2], FoliagePass::kMaxInstances);
+        // Bound before allocating even if a broken command exceeds the pool.
+        const auto count = std::min<std::size_t>(command[2], FoliagePass::kMaxInstances);
+        std::vector<FoliagePass::InstanceRecord> records(count);
+        if (!records.empty()) {
+            glGetNamedBufferSubData(Binding(2),
+                                    0,
+                                    static_cast<GLsizeiptr>(records.size() * sizeof(records[0])),
+                                    records.data());
+        }
+        return records;
+    }
+    static void ExpectSame(const std::vector<FoliagePass::InstanceRecord>& first,
+                           const std::vector<FoliagePass::InstanceRecord>& second) {
+        ASSERT_EQ(first.size(), second.size());
+        if (!first.empty()) {
+            EXPECT_EQ(std::memcmp(std::as_bytes(std::span(first)).data(),
+                                  std::as_bytes(std::span(second)).data(),
+                                  first.size() * sizeof(first[0])),
+                      0);
+        }
+    }
+    static std::uint64_t
+    Fnv(const void* data, std::size_t size, std::uint64_t hash = 1469598103934665603ull) {
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (std::size_t offset = 0; offset < size; ++offset) {
+            hash = (hash ^ bytes[offset]) * 1099511628211ull;
+        }
+        return hash;
+    }
+    // Independent copy of the pre-optimization recipe, using actual uploaded
+    // bytes rather than the implementation's retained CPU scratch.
+    static std::uint64_t LegacyUploadedHash(const FoliagePass& pass,
+                                            std::size_t count,
+                                            const glm::vec3& camera = kCamera) {
+        std::uint64_t hash = 1469598103934665603ull;
+        // The fixtures supply the admitted logical count (at most three), since
+        // retained buffer capacity includes unused slots and dispatch unbinds
+        // the compute program before returning.
+        EXPECT_GT(count, 0u);
+        EXPECT_LE(count, 3u);
+        if (count == 0 || count > 3)
+            return 0;
+        const auto storage_bytes = [](GLuint binding) {
+            GLint64 size = 0;
+            glGetNamedBufferParameteri64v(Binding(binding), GL_BUFFER_SIZE, &size);
+            return size;
+        };
+        EXPECT_EQ(storage_bytes(0), GLint64{512} * (8 * static_cast<GLint64>(sizeof(float)) + 4));
+        EXPECT_EQ(storage_bytes(7), storage_bytes(0));
+        EXPECT_GT(storage_bytes(1), 0);
+        EXPECT_LE(storage_bytes(1), 4 * 8192 * static_cast<GLint64>(sizeof(glm::vec4)));
+        EXPECT_GT(pass.archetype_count(), 0u);
+        EXPECT_LE(pass.archetype_count(), 6u);
+        EXPECT_EQ(storage_bytes(4),
+                  static_cast<GLint64>(pass.archetype_count() * 8 * sizeof(float)));
+        std::vector<unsigned char> params(count * 8 * sizeof(float));
+        glGetNamedBufferSubData(
+            Binding(0), 0, static_cast<GLsizeiptr>(params.size()), params.data());
+        hash = Fnv(params.data(), params.size(), hash);
+        std::vector<std::uint32_t> slots(count);
+        glGetNamedBufferSubData(Binding(7),
+                                std::size_t{512} * 8 * sizeof(float),
+                                static_cast<GLsizeiptr>(count * sizeof(slots[0])),
+                                slots.data());
+        std::vector<unsigned char> surface(FoliagePass::kMaxCandidatesPerChunk * sizeof(glm::vec4));
+        for (const auto slot : slots) {
+            EXPECT_LT(slot, Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity);
+            if (slot >= Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity)
+                return 0;
+            glGetNamedBufferSubData(Binding(1),
+                                    static_cast<GLintptr>(slot * surface.size()),
+                                    static_cast<GLsizeiptr>(surface.size()),
+                                    surface.data());
+            hash = Fnv(surface.data(), surface.size(), hash);
+        }
+        std::vector<float> palette(pass.archetype_count() * 8);
+        glGetNamedBufferSubData(
+            Binding(4), 0, static_cast<GLsizeiptr>(palette.size() * sizeof(float)), palette.data());
+        hash = Fnv(palette.data(), palette.size() * sizeof(float), hash);
+        float total_weight = 0;
+        for (std::size_t index = 0; index < pass.archetype_count(); ++index) {
+            total_weight += pass.archetype(index).density_weight;
+        }
+        if (total_weight <= 0) {
+            total_weight = 1;
+        }
+        for (const float value :
+             {camera.x, camera.z, pass.density_scale(), pass.fade_end_m(), total_weight}) {
+            hash = Fnv(&value, sizeof(value), hash);
+        }
+        return hash;
+    }
+
+private:
+    bool initialized = false;
+    GLFWwindow* window = nullptr;
+};
+
+} // namespace FoliageTest

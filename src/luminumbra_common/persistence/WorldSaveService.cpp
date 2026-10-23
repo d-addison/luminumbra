@@ -1,4 +1,5 @@
 #include "WorldSaveService.h"
+#include "core/Profiler.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "WorldPersistenceRoundtrip.h"
@@ -396,6 +397,7 @@ std::string WindowsErrorMessage(DWORD error) {
 }
 
 bool WriteRegionBytes(HANDLE file, std::string_view bytes, std::vector<std::string>* errors) {
+    LUMIN_PROFILE_ZONE_N("File save write");
     std::size_t offset = 0;
     while (offset < bytes.size()) {
         const std::size_t remaining = bytes.size() - offset;
@@ -493,6 +495,7 @@ bool FinishDurableRegionTemp(HANDLE file,
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
+    LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
     const DWORD attributes = ::GetFileAttributesW(destination.c_str());
@@ -539,6 +542,7 @@ std::string PosixErrorMessage(int error) {
 }
 
 bool WriteRegionBytes(int file, std::string_view bytes, std::vector<std::string>* errors) {
+    LUMIN_PROFILE_ZONE_N("File save write");
     std::size_t offset = 0;
     while (offset < bytes.size()) {
         const std::size_t remaining = bytes.size() - offset;
@@ -630,6 +634,7 @@ bool FinishDurableRegionTemp(int file,
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
+    LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
     // POSIX rename replaces an existing same-filesystem destination atomically.
@@ -1024,6 +1029,7 @@ bool ReadRegionIndex(const std::filesystem::path& path,
                      RegionIndex& index,
                      std::vector<std::string>* errors,
                      const std::stop_token& stop = {}) {
+    LUMIN_PROFILE_ZONE_N("File save read");
     index = {};
     index.path = path;
     index.input.open(path);
@@ -1549,6 +1555,7 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
                                            std::vector<std::string>* errors,
                                            std::optional<Vec3>* ambient_anchor,
                                            std::size_t* water_cursor) {
+    LUMIN_PROFILE_ZONE_N("File clock metadata load");
     clock = world::WorldClock{};
     requires_active_regions = false;
     if (ambient_anchor)
@@ -1614,6 +1621,7 @@ bool WorldSaveService::save_plants_validated(
     const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
     const std::filesystem::path& save_dir,
     std::vector<std::string>* errors) {
+    LUMIN_PROFILE_ZONE_N("File plant entities save");
     const std::filesystem::path path = plant_entities_path(save_dir);
     // Like ledger staging, abandoned plant copies must live outside the strict
     // region scan. Reclaim them even when the new roster is empty.
@@ -1638,6 +1646,7 @@ bool WorldSaveService::save_plants_validated(
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
+    LUMIN_PROFILE_ZONE_N("File plant entities load");
     out = Luminumbra::Ecs::EntityRegistrySnapshot{};
     const std::filesystem::path path = plant_entities_path(save_dir);
     std::error_code ec;
@@ -1669,6 +1678,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors,
                                            const world::WorldClock& absent_clock) {
+    LUMIN_PROFILE_ZONE_N("File active regions load");
     try {
         const auto path = active_regions_path(save_dir);
         if (!std::filesystem::exists(path)) {
@@ -2523,6 +2533,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   std::size_t max_resident_chunks,
                                   bool require_full_sdf_lattice,
                                   bool migrate_legacy_water) const {
+    LUMIN_PROFILE_ZONE_N("File world load");
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();
@@ -2793,6 +2804,7 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                                       std::size_t* regions_written,
                                       bool preserve_authority) const {
     const SaveGuard guard;
+    LUMIN_PROFILE_ZONE_N("File world save");
     try {
         // Group the chunks to persist by region (deterministic order).
         std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;

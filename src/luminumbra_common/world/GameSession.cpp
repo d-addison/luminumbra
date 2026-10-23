@@ -83,14 +83,12 @@
 #include "SurfaceWorkBudget.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
+#include "entt/entity/entity.hpp"
 #include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp" // For parsing JSON
-#include <cmath>             // std::floor (energy-layer anchor quantization)
-
-#include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
 #include <atomic>
 #include <charconv>
-#include <chrono>
+#include <cmath> // std::floor (energy-layer anchor quantization)
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
@@ -101,6 +99,9 @@
 #include <span>
 #include <string>
 #include <system_error>
+
+#include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
+#include <chrono>
 
 #include <filesystem>
 #include <fstream>
@@ -201,6 +202,7 @@ GameSession::~GameSession() {
 }
 
 void GameSession::ResetWorldSystems() {
+    m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
     // Registry component destructors can use world and physics services. Release
@@ -447,8 +449,10 @@ void GameSession::ApplyWaterResolutionWiring() {
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
-    if (m_activeRegionsEnabled && m_worldSystem && m_worldSystem->authority_fault())
-        LatchRegionFault(m_worldClock.tick(), *m_worldSystem->authority_fault());
+    if (m_activeRegionsEnabled && m_worldSystem) {
+        if (const auto& fault = m_worldSystem->authority_fault(); fault.has_value())
+            LatchRegionFault(m_worldClock.tick(), *fault);
+    }
     if (m_regionFault)
         return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
@@ -1292,7 +1296,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& requiredPresetContentHash) {
     m_worldOpenError.clear();
     if (!m_jobSystem) {
-        LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
+        m_worldOpenError = "JobSystem not set before creating world.";
+        LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
         return false;
     }
 
@@ -1461,7 +1466,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     // Save world metadata
     if (m_activeRegionsEnabled)
         RestoreWorldClock(m_worldClock);
+    // Systems, clock and identity are coherent; allow the initial metadata save.
+    m_worldUsable = true;
     if (!transient && !SaveWorld()) {
+        m_worldUsable = false;
         m_worldOpenError = "Could not save the new world's metadata.";
         LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
         return false;
@@ -1571,8 +1579,13 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     m_worldOpenError.clear();
     AttachRegionEditObserver();
-    if (!LoadWorldState())
+    // The snapshot loader needs initialized systems. Any incomplete adoption
+    // remains unsaveable, including a refusal without a fatal-load diagnostic.
+    m_worldUsable = true;
+    if (!LoadWorldState()) {
+        m_worldUsable = false;
         return false;
+    }
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
 }
@@ -1784,7 +1797,7 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
-        !m_worldOpenError.empty() || !SavedPresetCompatible(save_dir))
+        !m_worldUsable || !SavedPresetCompatible(save_dir))
         return false;
     auto batch = Persistence::WorldSaveService::SaveBatch::begin(save_dir);
     if (!batch.has_value())
@@ -1874,8 +1887,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     if (report) {
         *report = result;
     }
-    if (!IsSimulationTickBoundary() || !m_worldOpenError.empty() || !m_worldSystem ||
-        save_dir.empty() ||
+    if (!IsSimulationTickBoundary() || !m_worldUsable || !m_worldSystem || save_dir.empty() ||
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
     }
@@ -1980,7 +1992,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
 
 bool GameSession::LoadWorldState() {
     if (m_transientWorld)
-        return m_worldSystem && m_worldOpenError.empty();
+        return m_worldSystem && m_worldUsable;
     return LoadWorldStateFrom(GetWorldSaveDir());
 }
 
@@ -1988,7 +2000,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
+    if (!m_worldUsable || !m_worldSystem || save_dir.empty()) {
         return false;
     }
 
@@ -2027,6 +2039,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                            true,
                            m_activeRegionsEnabled);
     if (!snapshot_present && !errors.empty()) {
+        m_worldUsable = false;
         m_worldOpenError = errors.front();
         m_worldSystem->clear_world(m_physicsSystem.get());
         for (const std::string& error : errors) {
@@ -2042,6 +2055,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         if (!Persistence::WorldSaveService::load_active_regions(
                 ledger, save_dir, &clock_errors, saved_clock)) {
             m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldUsable = false;
             m_worldOpenError = clock_errors.empty()
                                    ? std::string(ActiveRegionLedger::kCorruptMessage)
                                    : clock_errors.front();
@@ -2050,6 +2064,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
         if (m_regionSchedulerOverride && ledger.config() != *m_regionSchedulerOverride) {
             m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldUsable = false;
             m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
                                "from explicit override.";
             m_worldSystem->clear_world(m_physicsSystem.get());
@@ -2077,6 +2092,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     for (const auto& chunk : loaded.snapshot_chunks()) {
         if (chunk && !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
+            m_worldUsable = false;
             m_worldOpenError = "corrupt world chunk SDF lattice";
             m_worldSystem->clear_world(m_physicsSystem.get());
             LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
@@ -2087,6 +2103,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // Refuse a damaged energy record before adopting chunks or plant entities.
     // A missing record resets this layer at the restored absolute tick.
     if (!LoadEnergyFieldRecord(save_dir)) {
+        m_worldUsable = false;
         m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
     }
@@ -2165,6 +2182,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         try {
             (void)m_worldSystem->compute_chunk_hashes();
         } catch (const std::exception& error) {
+            m_worldUsable = false;
             m_worldOpenError = error.what();
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
@@ -2364,7 +2382,7 @@ bool GameSession::LoadEnergyFieldRecord(const std::filesystem::path& save_dir) {
 }
 
 bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
-    if (!m_worldOpenError.empty())
+    if (!m_worldUsable)
         return false;
     if (!m_energyFieldState || save_dir.empty())
         return true;

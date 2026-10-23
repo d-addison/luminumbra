@@ -251,24 +251,26 @@ class ReplaySourceContract(unittest.TestCase):
                 primitive))
         for admission in admissions:
             self.assertIsNotNone(admission)
-        drains = list(re.finditer(r'wait_for_(?:generation|meshing|streaming)_jobs\(\);',
+        drains = list(re.finditer(r'wait_for_(?:generation|meshing|promotion|streaming)_jobs\(\);',
                                   primitive))
         self.assertEqual([drain[0] for drain in drains], [
             "wait_for_generation_jobs();", "wait_for_meshing_jobs();",
             "wait_for_streaming_jobs();"])
-        # The final synchronous wrapper settles both promotion stages and the
-        # finite descriptor suffix introduced by bounded snapshot admission.
-        admitted = source.split("void SHIELD_WorldSystem::wait_for_admitted_streaming_jobs()", 1)[1].split(
-            "void SHIELD_WorldSystem::wait_for_streaming_jobs()", 1)[0]
-        stages = list(re.finditer(r'wait_for_(?:generation|hydro_prefetch|meshing|promotion)_jobs\(\);', admitted))
-        self.assertEqual([stage[0] for stage in stages], [
+        # The full streaming barrier also settles deferred work. Pin both the
+        # direct lane drains and the finite deferred loop, not just its name.
+        admitted = source.split(
+            "void SHIELD_WorldSystem::wait_for_admitted_streaming_jobs() {", 1)[1].split(
+                "\n}", 1)[0]
+        self.assertEqual(re.findall(r'wait_for_\w+_jobs\(\);', admitted), [
             "wait_for_generation_jobs();", "wait_for_hydro_prefetch_jobs();",
-            "wait_for_meshing_jobs();", "wait_for_promotion_jobs();", "wait_for_meshing_jobs();"])
-        settled = source.split("void SHIELD_WorldSystem::wait_for_streaming_jobs()", 1)[1].split(
-            "SHIELD_WorldSystem::snapshot_streamed_chunks()", 1)[0]
-        self.assertIn("while (deferred_meshing_pending())", settled)
-        self.assertIn("dispatch_deferred_meshing();", settled)
-        self.assertEqual(settled.count("wait_for_admitted_streaming_jobs();"), 2)
+            "wait_for_meshing_jobs();", "wait_for_promotion_jobs();",
+            "wait_for_meshing_jobs();"])
+        streaming = source.split(
+            "void SHIELD_WorldSystem::wait_for_streaming_jobs() {", 1)[1].split(
+                "\n}", 1)[0]
+        self.assertRegex(streaming, r'wait_for_admitted_streaming_jobs\(\);\s*'
+                         r'(?:/[^\n]*\n\s*)*while \(deferred_meshing_pending\(\)\) \{\s*'
+                         r'dispatch_deferred_meshing\(\);\s*wait_for_admitted_streaming_jobs\(\);\s*\}')
         for admission in admissions:
             self.assertLess(admission.end(), drains[0].start())
         self.assertLess(primitive.index("JobWatchdogEnabled()"), drains[0].start())
@@ -537,6 +539,103 @@ class ReplaySourceContract(unittest.TestCase):
                          "EXPECT_FALSE(fs::exists(save_root));"):
             with self.subTest(helper=original), self.assertRaises(AssertionError):
                 self.assert_runtime_surface_owner(cmake, native.replace(original, "", 1))
+
+
+class SessionUsabilitySourceContract(unittest.TestCase):
+    @staticmethod
+    def function(source, name):
+        start = source.index("GameSession::" + name + "(")
+        opening = source.index("{", start)
+        # Ignore braces inside diagnostics and comments when locating the body.
+        tokens = re.finditer(r'"(?:\\.|[^"\\])*"|\{|\}', source[opening:])
+        depth = 0
+        for token in tokens:
+            if token[0] == "{":
+                depth += 1
+            elif token[0] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[start:opening + token.end()]
+        raise AssertionError("unterminated session function")
+
+    def test_operation_refusal_cannot_change_current_session_usability(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        header = read_source("src/luminumbra_common/world/GameSession.h")
+        self.assertIn("bool m_worldUsable = false;", header)
+        self.assertIn("return m_worldOpenError;", header)
+        reset = self.function(source, "ResetWorldSystems")
+        self.assertIn("m_worldUsable = false;", reset)
+        for name in ("CreateWorldInternal", "LoadWorld"):
+            body = self.function(source, name)
+            preparation, adoption = body.split("ResetWorldSystems();", 1)
+            self.assertNotIn("m_worldUsable", preparation)
+            self.assertIn("m_worldOpenError =", preparation)
+            self.assertLess(adoption.index("m_speciesTable ="),
+                            adoption.index("m_worldUsable = true;"))
+        creation = self.function(source, "CreateWorldInternal")
+        metadata_failure = creation.split("if (!transient && !SaveWorld())", 1)[1]
+        self.assertLess(metadata_failure.index("m_worldUsable = false;"),
+                        metadata_failure.index("return false;"))
+        opening = self.function(source, "LoadWorld")
+        adoption_failure = opening.split("if (!LoadWorldState())", 1)[1]
+        self.assertLess(adoption_failure.index("m_worldUsable = false;"),
+                        adoption_failure.index("return false;"))
+
+    def test_persistence_uses_session_state_and_fatal_snapshot_refusals_latch_it(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for name in ("SaveWorldMetadataTo", "SaveWorldStateToImpl", "SaveEnergyFieldRecord",
+                     "LoadWorldStateFrom"):
+            with self.subTest(consumer=name):
+                body = self.function(source, name)
+                admission = body[:body.index("return false;", body.index("!m_worldUsable"))]
+                self.assertIn("!m_worldUsable", admission)
+                self.assertNotIn("m_worldOpenError", admission)
+        wrapper = self.function(source, "SaveWorldStateTo")
+        self.assertIn("return SaveWorldStateToImpl(", wrapper)
+        readiness = self.function(source, "LoadWorldState")
+        self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
+        snapshot = self.function(source, "LoadWorldStateFrom")
+        # Clock metadata is validated before replacing residency. A refusal
+        # here preserves the usable live session and its authority.
+        preflight, replacement = snapshot.split("    Persistence::WorldSaveService service;", 1)
+        self.assertIn("read_clock_metadata(", preflight)
+        self.assertIn("&water_cursor", preflight)
+        self.assertNotIn("clear_world(", preflight)
+        self.assertNotIn("m_worldUsable = false;", preflight)
+        # Five inline fatal diagnostics and the delegated energy refusal must
+        # latch usability after replacement begins, before clearing live chunks.
+        failures = re.findall(r'm_worldUsable = false;\s*m_worldOpenError =.*?'
+                              r'm_worldSystem->clear_world\(m_physicsSystem.get\(\)\);',
+                              snapshot, re.DOTALL)
+        self.assertEqual(len(failures), 5)
+        self.assertEqual(replacement.count("m_worldUsable = false;"), 6)
+        self.assertRegex(replacement, r'if \(!LoadEnergyFieldRecord\(save_dir\)\) \{\s*'
+                         r'm_worldUsable = false;\s*'
+                         r'm_worldSystem->clear_world\(m_physicsSystem.get\(\)\);\s*return false;')
+        self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 7)
+        self.assertNotIn("m_worldUsable = true;", snapshot)
+        runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
+        full_snapshot = runner.split("ServerWorldRunner::SaveFullSnapshot()", 1)[1].split(
+            "ServerWorldRunner::StreamedChunkCount()", 1)[0]
+        self.assertNotIn("GetWorldOpenError()", full_snapshot)
+        self.assertIn("m_session->SaveWorldStateTo(", full_snapshot)
+
+    def test_normal_custom_validation_precedes_directory_and_uses_prepared_identity(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        creation = self.function(source, "CreateWorldInternal")
+        directory = creation.index("fs::create_directories(worldPath)")
+        for validation in ("nlohmann::json::parse(*customPresetJson)",
+                           "ResolveEffectivePreset(resolved, presetUse)",
+                           "LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath)",
+                           "if (!preset.ok)",
+                           "preset.preset_content_hash != requiredPresetContentHash"):
+            self.assertLess(creation.index(validation), directory)
+        self.assertIn('saved_preset_json = resolved.dump();', creation)
+        self.assertIn('saved_preset_json + "\\n"', creation)
+        adoption = creation.split("ResetWorldSystems();", 1)[1]
+        self.assertIn("m_presetContentHash = preset.preset_content_hash;", adoption)
+        self.assertIn("m_speciesTable = preset.params.worldgen_dependencies->species_table;", adoption)
+        self.assertNotIn("LoadTerrainPreset", adoption)
 
 
 class FarVolumeAdmissionSourceContract(unittest.TestCase):

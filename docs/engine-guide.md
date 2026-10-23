@@ -750,6 +750,17 @@ the scan before any reads. Resolver exceptions, including JSON serialization
 failures, return diagnostics without publishing an identity or dependency snapshot;
 failed create/load leaves the live world unchanged.
 
+The foliage `SpeciesRegistry::LoadFromDirectory` appends valid templates in UTF-8
+filename order and skips malformed names or JSON with diagnostics. It returns
+the appended count; scan or file I/O failure returns zero and rolls back every
+append from that attempt. The optional `io_failed` output is reset on entry and
+set only for those failures, distinguishing them from a successful empty load.
+The errors vector retains previous entries and appends new diagnostics. Callers
+stop retrying after success to avoid duplicate appends. The interactive farming
+cache retries I/O failures at five-second intervals using the existing frame
+clock, logs only changed failure diagnostics and recovery, and caches successful
+loads (including empty directories and valid neighbours of malformed JSON).
+
 Hello v4 carries negotiated lockstep admission limits; complete LREC1 streams use
 version 3 and elided diagnostic suffixes use version 4. Binding species does not
 change those layouts. A species mismatch refuses TCP admission, lockstep handshake

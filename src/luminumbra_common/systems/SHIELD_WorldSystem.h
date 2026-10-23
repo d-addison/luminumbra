@@ -9,6 +9,7 @@
 #include "../world/StructurePlacement.h"
 #include "../world/WorldgenDependencySnapshot.h"
 #include "FastNoise/FastNoise.h"
+#include "core/Profiler.h"
 #include "entt/entt.hpp"
 #include <array>
 #include <atomic>
@@ -867,6 +868,7 @@ public:
     // negligible. Sampling jobs never take the exclusive side, so there is no
     // ordering inversion.
     [[nodiscard]] std::shared_lock<std::shared_mutex> acquire_worldgen_sample_scope() const {
+        LUMIN_PROFILE_ZONE_N("Worldgen epoch lock wait");
         for (;;) {
             while (m_worldgen_writer_pending.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
