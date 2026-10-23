@@ -230,6 +230,13 @@ class RenderRunnerTests(unittest.TestCase):
             output = (OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')).read_text(
                 errors='replace', encoding='utf-8')
             self.assertIn('Far world: requested=ladder effective=legacy refusal=ImmutableAuthorityUnavailable', output)
+        for name, option in (('separate', ['--render-benchmark-frames', '4']),
+                             ('assigned', ['--render-benchmark-frames=4'])):
+            with self.subTest(frame_option=name):
+                log = self.run_client('traversal-frames-' + name,
+                                      ['--traversal', str(self.script), *option], expected_exit=2)
+                self.assertIn('Traversal owns the measured duration; '
+                              'omit --render-benchmark-frames', log)
 
     def test_implicit_creation_failure(self):
         log = self.run_client('missing', ['--world-preset', 'nonexistent_render_test_preset'], expected_exit=2)

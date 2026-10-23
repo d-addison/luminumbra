@@ -2071,13 +2071,13 @@ TEST_P(SavedWorldPresetTest, NormalCreationRefusalsRetainDirtySessionAndExitSave
             Luminumbra::Client::SaveSessionOnExit(
                 &session,
                 [&] {
-                    ExpectSnapshotReloaded(pending, *chunk, save, id);
-                    EXPECT_FALSE(chunk->is_voxel_data_dirty());
                     session.SetSpawnPoint(Luminumbra::Vec3(19, 23, -17));
                     spawn_updated = true;
                 },
                 [&] {
                     EXPECT_TRUE(spawn_updated);
+                    ExpectSnapshotReloaded(pending, *chunk, save, id);
+                    EXPECT_FALSE(chunk->is_voxel_data_dirty());
                     const auto info =
                         nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
                     EXPECT_EQ(info.at("spawnPoint").at("x"), 19);
@@ -2176,10 +2176,12 @@ TEST_P(SavedWorldPresetTest, FatalSnapshotAndFinalMetadataRefusalsCannotBeCleare
         EXPECT_FALSE(session.SaveWorldState());
         EXPECT_FALSE(session.SaveWorld());
         EXPECT_FALSE(session.LoadWorldState());
+        unsigned spawn_updates = 0;
         Luminumbra::Client::SaveSessionOnExit(
             &session,
-            [] { FAIL() << "Fatal session reached spawn update"; },
+            [&] { ++spawn_updates; },
             [] { FAIL() << "Fatal session reported save success"; });
+        EXPECT_EQ(spawn_updates, 1u);
         EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
         Configure(session);
         EXPECT_FALSE(session.LoadWorld("missing-world"));

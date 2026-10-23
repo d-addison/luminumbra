@@ -1627,7 +1627,8 @@ int main(int argc, char* argv[]) {
     g_app.capture.render_benchmark_warmup =
         GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
     if (traversal) {
-        if (HasCommandLineFlag(argc, argv, "--render-benchmark-frames")) {
+        if (HasCommandLineFlag(argc, argv, "--render-benchmark-frames") ||
+            !GetCommandLineOption(argc, argv, "--render-benchmark-frames", "").empty()) {
             LUMINUMBRA_CORE_ERROR(
                 "Traversal owns the measured duration; omit --render-benchmark-frames");
             return 2;

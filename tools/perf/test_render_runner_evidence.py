@@ -587,6 +587,8 @@ class RenderRunnerRegistrationTests(unittest.TestCase):
         cases = {
             'RenderTraversalIntegrated': 'test_traversal_twice',
             'RenderBenchmarkImplicitCreationFailure': 'test_implicit_creation_failure',
+            'RenderBenchmarkMeasuredFrameBounds': 'test_v2_measured_frame_bounds',
+            'RenderBenchmarkIsolationSubmission': 'test_isolation_submission_reporting',
             'RenderBenchmarkOverrideCollection': 'test_gl_debug_override_collection',
             'RenderTraversalEmbeddedPresetRefusal': 'test_embedded_preset_refusal',
         }
