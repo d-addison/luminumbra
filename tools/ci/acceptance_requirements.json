@@ -1803,8 +1803,8 @@
     {
       "id": "ar.activation.028",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "The server's physics timer ends before anchor submission.",
-      "text": "The server's physics timer ends before anchor submission."
+      "quote": "The server publishes workload anchors and prepares collision before advancing physics;",
+      "text": "The server publishes workload anchors and prepares collision before advancing physics;"
     },
     {
       "id": "ar.activation.029",
@@ -2013,8 +2013,8 @@
     {
       "id": "ar.file.003",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization.",
-      "text": "ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization."
+      "quote": "ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, or FSD2 v3;",
+      "text": "ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, or FSD2 v3;"
     },
     {
       "id": "ar.file.004",
@@ -2535,8 +2535,8 @@
     {
       "id": "ar.file.090",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Frozen content is supplied at the transition by merging authoritative lod-0 chunks by id, with live chunks taking precedence over parked chunks, then durable region records carrying the sticky edited flag.",
-      "text": "Frozen content is supplied at the transition by merging authoritative lod-0 chunks by id, with live chunks taking precedence over parked chunks, then durable region records carrying the sticky edited flag."
+      "quote": "Frozen content is supplied at the transition by merging authoritative chunks by id, with complete resident authority taking precedence over durable region records carrying the sticky authority flag.",
+      "text": "Frozen content is supplied at the transition by merging authoritative chunks by id, with complete resident authority taking precedence over durable region records carrying the sticky authority flag."
     },
     {
       "id": "ar.file.091",
@@ -3285,14 +3285,14 @@
     {
       "id": "ar.activation.062",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "The host builds one set of pending work keys and all resident chunk region keys per tick, including pristine and `Loading` chunks.",
-      "text": "The host builds one set of pending work keys and all resident chunk region keys per tick, including pristine and `Loading` chunks."
+      "quote": "The host builds one set of current-tick work keys, lazily when a probe is needed.",
+      "text": "The host builds one set of current-tick work keys, lazily when a probe is needed."
     },
     {
       "id": "ar.activation.063",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "These residents protect scheduling history even when they contribute no frozen content.",
-      "text": "These residents protect scheduling history even when they contribute no frozen content."
+      "quote": "Camera position, render distance, chunk lifecycle and streamed residency cannot retain scheduling history.",
+      "text": "Camera position, render distance, chunk lifecycle and streamed residency cannot retain scheduling history."
     },
     {
       "id": "ar.activation.064",
@@ -3417,14 +3417,14 @@
     {
       "id": "ar.file.114",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Live and parked inputs must have `LoadedOrEdited` provenance and must not be in `Loading` state;",
-      "text": "Live and parked inputs must have `LoadedOrEdited` provenance and must not be in `Loading` state;"
+      "quote": "Generic incomplete live/parked inputs still exclude `Loading` chunks.",
+      "text": "Generic incomplete live/parked inputs still exclude `Loading` chunks."
     },
     {
       "id": "ar.file.115",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "exclusions apply before merging, so these inputs cannot shadow authoritative content.",
-      "text": "exclusions apply before merging, so these inputs cannot shadow authoritative content."
+      "quote": "All inputs exclude generated caches before merging.",
+      "text": "All inputs exclude generated caches before merging."
     },
     {
       "id": "ar.file.116",
@@ -3519,8 +3519,8 @@
     {
       "id": "ar.scope.007",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1.",
-      "text": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1."
+      "quote": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1.",
+      "text": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1."
     },
     {
       "id": "ar.scope.008",
@@ -3553,16 +3553,568 @@
       "text": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback."
     },
     {
-      "id": "dw.persistence.061",
-      "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix.",
-      "text": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix."
+      "id": "ar.activation.065",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "its physics timer includes that preparation.",
+      "text": "its physics timer includes that preparation."
     },
     {
-      "id": "dw.persistence.062",
-      "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "Both replay versions bind effective configuration plus resolved preset/dependency content;",
-      "text": "Both replay versions bind effective configuration plus resolved preset/dependency content;"
+      "id": "ar.activation.066",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Anchor visits refresh `last_proximity` before retention, using the replicated simulation anchors or the saved walking anchor when no replicated list is supplied.",
+      "text": "Anchor visits refresh `last_proximity` before retention, using the replicated simulation anchors or the saved walking anchor when no replicated list is supplied."
+    },
+    {
+      "id": "ar.activation.067",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "An explicitly empty replicated list has no fallback.",
+      "text": "An explicitly empty replicated list has no fallback."
+    },
+    {
+      "id": "ar.activation.068",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Unpinned, unedited, unpopulated records with no water cursor or current work are evicted after 108,000 ticks without proximity.",
+      "text": "Unpinned, unedited, unpopulated records with no water cursor or current work are evicted after 108,000 ticks without proximity."
+    },
+    {
+      "id": "ar.activation.069",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Later consumers must extend the probe using simulation ownership.",
+      "text": "Later consumers must extend the probe using simulation ownership."
+    },
+    {
+      "id": "ar.activation.070",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Fallible collision/authority admission runs before committing the next world-clock tick.",
+      "text": "Fallible collision/authority admission runs before committing the next world-clock tick."
+    },
+    {
+      "id": "ar.activation.071",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "If it fails, no systems for that tick run, only completed ticks are counted, and both clocks and the fault retain the last completed tick.",
+      "text": "If it fails, no systems for that tick run, only completed ticks are counted, and both clocks and the fault retain the last completed tick."
+    },
+    {
+      "id": "ar.activation.072",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "A later scheduler failure still retains its faulting tick because that tick's systems already ran.",
+      "text": "A later scheduler failure still retains its faulting tick because that tick's systems already ran."
+    },
+    {
+      "id": "ar.file.120",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "With active regions enabled, render eviction atomically persists a complete chunk with edited terrain or simulated water authority through the existing LMR1 durable replacement path before releasing it.",
+      "text": "With active regions enabled, render eviction atomically persists a complete chunk with edited terrain or simulated water authority through the existing LMR1 durable replacement path before releasing it."
+    },
+    {
+      "id": "ar.file.121",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "This includes clean chunks whose dirty flags were acknowledged by an earlier save: later water state must also be durable.",
+      "text": "This includes clean chunks whose dirty flags were acknowledged by an earlier save: later water state must also be durable."
+    },
+    {
+      "id": "ar.file.122",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A failed replacement keeps the complete in-memory owner and latches the session's existing fail-stop fault at the next tick boundary.",
+      "text": "A failed replacement keeps the complete in-memory owner and latches the session's existing fail-stop fault at the next tick boundary."
+    },
+    {
+      "id": "ar.file.123",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Both streaming generation and synchronous surface loading restore that durable authority before considering generation.",
+      "text": "Both streaming generation and synchronous surface loading restore that durable authority before considering generation."
+    },
+    {
+      "id": "ar.file.124",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Transient replay and headless worlds use private temporary authority storage, removed at teardown.",
+      "text": "Transient replay and headless worlds use private temporary authority storage, removed at teardown."
+    },
+    {
+      "id": "ar.file.125",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Water initialization, depth, flux, wake/sleep state and threshold counters advance once per fixed session tick.",
+      "text": "Water initialization, depth, flux, wake/sleep state and threshold counters advance once per fixed session tick."
+    },
+    {
+      "id": "ar.file.126",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Natural water is admitted in a fixed 3x3 surface-column horizon around each simulation anchor, with one Y=0 water owner per column and a separate terrain-containing chunk sampled at the column centre.",
+      "text": "Natural water is admitted in a fixed 3x3 surface-column horizon around each simulation anchor, with one Y=0 water owner per column and a separate terrain-containing chunk sampled at the column centre."
+    },
+    {
+      "id": "ar.file.127",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The terrain chunk provides collision independently of the water owner, including when submerged.",
+      "text": "The terrain chunk provides collision independently of the water owner, including when submerged."
+    },
+    {
+      "id": "ar.file.128",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "This one-chunk ring is simulation policy, independent of camera, render radius, LOD and streaming completion.",
+      "text": "This one-chunk ring is simulation policy, independent of camera, render radius, LOD and streaming completion."
+    },
+    {
+      "id": "ar.file.129",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The set also includes all edited authority in regions intersecting the ledger's 512 metre activation disc, plus the Y=0 owners of explicit ECS water sources in those regions.",
+      "text": "The set also includes all edited authority in regions intersecting the ledger's 512 metre activation disc, plus the Y=0 owners of explicit ECS water sources in those regions."
+    },
+    {
+      "id": "ar.file.130",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Every member is admitted synchronously, restoring durable authority before considering canonical full generation.",
+      "text": "Every member is admitted synchronously, restoring durable authority before considering canonical full generation."
+    },
+    {
+      "id": "ar.file.131",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Newly simulated water owners become durable authority;",
+      "text": "Newly simulated water owners become durable authority;"
+    },
+    {
+      "id": "ar.file.132",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "while their region remains active they follow the same rule as edited chunks.",
+      "text": "while their region remains active they follow the same rule as edited chunks."
+    },
+    {
+      "id": "ar.file.133",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Replicated anchors take precedence over the saved walking anchor, including an explicitly empty list.",
+      "text": "Replicated anchors take precedence over the saved walking anchor, including an explicitly empty list."
+    },
+    {
+      "id": "ar.file.134",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Natural-water initialization is a pure function of seed, coordinates, generation and the fixed simulation resolution.",
+      "text": "Natural-water initialization is a pure function of seed, coordinates, generation and the fixed simulation resolution."
+    },
+    {
+      "id": "ar.file.135",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Pending edited-water initialization reuses the authoritative heightmap when its samples match the simulation cell centres, and otherwise samples canonical terrain.",
+      "text": "Pending edited-water initialization reuses the authoritative heightmap when its samples match the simulation cell centres, and otherwise samples canonical terrain."
+    },
+    {
+      "id": "ar.file.136",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Pristine Y=0 chunks streamed outside the simulation set receive that same generated initial water state for rendering, remain frozen, and never contribute to simulation hashes or freeze digests.",
+      "text": "Pristine Y=0 chunks streamed outside the simulation set receive that same generated initial water state for rendering, remain frozen, and never contribute to simulation hashes or freeze digests."
+    },
+    {
+      "id": "ar.file.137",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Both synchronous horizon meshing and asynchronous meshing render their local water grids.",
+      "text": "Both synchronous horizon meshing and asynchronous meshing render their local water grids."
+    },
+    {
+      "id": "ar.file.138",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Departing authority freezes without catch-up;",
+      "text": "Departing authority freezes without catch-up;"
+    },
+    {
+      "id": "ar.file.139",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "returning authority resumes from the exact durable integer water state.",
+      "text": "returning authority resumes from the exact durable integer water state."
+    },
+    {
+      "id": "ar.file.140",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "No distant water continuation is introduced.",
+      "text": "No distant water continuation is introduced."
+    },
+    {
+      "id": "ar.file.141",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Pending edited-water initialization and resolution changes select chunk ids in order.",
+      "text": "Pending edited-water initialization and resolution changes select chunk ids in order."
+    },
+    {
+      "id": "ar.file.142",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Snapshot loads preserve the simulation-window cursor and pending resizes, and discard derived activity scores.",
+      "text": "Snapshot loads preserve the simulation-window cursor and pending resizes, and discard derived activity scores."
+    },
+    {
+      "id": "ar.file.143",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Before creature or server-avatar physics and client entry readiness checks, the owner thread admits the simulation horizon around every advancing creature body as well as each simulation anchor, and installs terrain colliders synchronously for chunks with complete canonical heightmaps, in chunk-id order.",
+      "text": "Before creature or server-avatar physics and client entry readiness checks, the owner thread admits the simulation horizon around every advancing creature body as well as each simulation anchor, and installs terrain colliders synchronously for chunks with complete canonical heightmaps, in chunk-id order."
+    },
+    {
+      "id": "ar.file.144",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Partial heightmaps do not install terrain colliders.",
+      "text": "Partial heightmaps do not install terrain colliders."
+    },
+    {
+      "id": "ar.file.145",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Active-mode rendering never allocates terrain bodies, so body allocation and contacts follow only the simulation schedule.",
+      "text": "Active-mode rendering never allocates terrain bodies, so body allocation and contacts follow only the simulation schedule."
+    },
+    {
+      "id": "ar.file.146",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Admission replaces stale render colliders immediately;",
+      "text": "Admission replaces stale render colliders immediately;"
+    },
+    {
+      "id": "ar.file.147",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "render remeshing cannot invalidate simulation collision readiness.",
+      "text": "render remeshing cannot invalidate simulation collision readiness."
+    },
+    {
+      "id": "ar.file.148",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Before physics, the physics registry also removes every terrain body outside the deterministic simulation set, even if its renderer chunk has already been evicted.",
+      "text": "Before physics, the physics registry also removes every terrain body outside the deterministic simulation set, even if its renderer chunk has already been evicted."
+    },
+    {
+      "id": "ar.file.149",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Render-only colliders therefore cannot affect authoritative creatures beyond their admitted horizons.",
+      "text": "Render-only colliders therefore cannot affect authoritative creatures beyond their admitted horizons."
+    },
+    {
+      "id": "ar.file.150",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Water still advances in its existing fixed-tick slot after weather.",
+      "text": "Water still advances in its existing fixed-tick slot after weather."
+    },
+    {
+      "id": "ar.file.151",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The zero-avatar server runner publishes its spawn, moving or wet-walk workload anchor before physics and simulation;",
+      "text": "The zero-avatar server runner publishes its spawn, moving or wet-walk workload anchor before physics and simulation;"
+    },
+    {
+      "id": "ar.file.152",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "that anchor is a pure function of the workload tick.",
+      "text": "that anchor is a pure function of the workload tick."
+    },
+    {
+      "id": "ar.file.153",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "When active regions are disabled, water keeps the historical first-six pending initializations in map order and the rotating cursor over sorted pending resizes.",
+      "text": "When active regions are disabled, water keeps the historical first-six pending initializations in map order and the rotating cursor over sorted pending resizes."
+    },
+    {
+      "id": "ar.file.154",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Sorted initialization/admission and first-pending resize selection apply only to the deterministic authority path.",
+      "text": "Sorted initialization/admission and first-pending resize selection apply only to the deterministic authority path."
+    },
+    {
+      "id": "ar.file.155",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The legacy sleep bookkeeping is preserved too.",
+      "text": "The legacy sleep bookkeeping is preserved too."
+    },
+    {
+      "id": "ar.file.156",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Simulation and rendering share the existing 8,192 unique resident-chunk budget;",
+      "text": "Simulation and rendering share the existing 8,192 unique resident-chunk budget;"
+    },
+    {
+      "id": "ar.file.157",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "there is no unbounded parking map.",
+      "text": "there is no unbounded parking map."
+    },
+    {
+      "id": "ar.file.158",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Simulation ownership can displace a render cache, persisting authoritative content first.",
+      "text": "Simulation ownership can displace a render cache, persisting authoritative content first."
+    },
+    {
+      "id": "ar.file.159",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Rehydration decodes at most one additional chunk at a time, plus the existing bounded streaming job pipeline.",
+      "text": "Rehydration decodes at most one additional chunk at a time, plus the existing bounded streaming job pipeline."
+    },
+    {
+      "id": "ar.file.160",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Container replacement keeps only the bounded LMR1 manifest and streams one payload at a time;",
+      "text": "Container replacement keeps only the bounded LMR1 manifest and streams one payload at a time;"
+    },
+    {
+      "id": "ar.file.161",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Windows and POSIX use the same flush/close/replace contract.",
+      "text": "Windows and POSIX use the same flush/close/replace contract."
+    },
+    {
+      "id": "ar.file.162",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "All LMR1 readers, including far-LOD workers, hold immutable opened file images.",
+      "text": "All LMR1 readers, including far-LOD workers, hold immutable opened file images."
+    },
+    {
+      "id": "ar.file.163",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Windows handles share deletion;",
+      "text": "Windows handles share deletion;"
+    },
+    {
+      "id": "ar.file.164",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "POSIX descriptors retain the old inode.",
+      "text": "POSIX descriptors retain the old inode."
+    },
+    {
+      "id": "ar.file.165",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A reader can finish its old image while atomic replacement publishes the new one.",
+      "text": "A reader can finish its old image while atomic replacement publishes the new one."
+    },
+    {
+      "id": "ar.file.166",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Extents are measured from that opened image, never from a potentially replaced path.",
+      "text": "Extents are measured from that opened image, never from a potentially replaced path."
+    },
+    {
+      "id": "ar.file.167",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Freeze digests also decode one durable chunk at a time and incrementally hash the unchanged canonical JSON bytes.",
+      "text": "Freeze digests also decode one durable chunk at a time and incrementally hash the unchanged canonical JSON bytes."
+    },
+    {
+      "id": "ar.file.168",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "With active regions enabled, explicit snapshot loads retain at most the resident budget while validating every record;",
+      "text": "With active regions enabled, explicit snapshot loads retain at most the resident budget while validating every record;"
+    },
+    {
+      "id": "ar.file.169",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "overflow remains in the original durable records for restoration.",
+      "text": "overflow remains in the original durable records for restoration."
+    },
+    {
+      "id": "ar.file.170",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "With active regions disabled, the legacy load adopts every record without a cap.",
+      "text": "With active regions disabled, the legacy load adopts every record without a cap."
+    },
+    {
+      "id": "ar.file.171",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Required synchronous horizon loading protects the entire requested horizon and displaces non-required, non-simulation chunks in increasing chunk-id order through persist-before-release;",
+      "text": "Required synchronous horizon loading protects the entire requested horizon and displaces non-required, non-simulation chunks in increasing chunk-id order through persist-before-release;"
+    },
+    {
+      "id": "ar.file.172",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "changing the save destination transfers evicted authority before installing that destination.",
+      "text": "changing the save destination transfers evicted authority before installing that destination."
+    },
+    {
+      "id": "ar.file.173",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Before any copy, both metadata and full snapshot saves refuse destinations containing edited chunk ids absent from the current durable authority.",
+      "text": "Before any copy, both metadata and full snapshot saves refuse destinations containing edited chunk ids absent from the current durable authority."
+    },
+    {
+      "id": "ar.file.174",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "This includes extra siblings in the same region file and entire destination-only regions;",
+      "text": "This includes extra siblings in the same region file and entire destination-only regions;"
+    },
+    {
+      "id": "ar.file.175",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "a save cannot import another snapshot's edits into the live hash or later restoration.",
+      "text": "a save cannot import another snapshot's edits into the live hash or later restoration."
+    },
+    {
+      "id": "ar.file.176",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Exhausting the budget with simulation authority is a fail-stop capacity fault.",
+      "text": "Exhausting the budget with simulation authority is a fail-stop capacity fault."
+    },
+    {
+      "id": "ar.file.177",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The water activity cache is pruned to the same simulation set.",
+      "text": "The water activity cache is pruned to the same simulation set."
+    },
+    {
+      "id": "ar.file.178",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Simulation-owned chunks remain resident until their simulation ownership ends;",
+      "text": "Simulation-owned chunks remain resident until their simulation ownership ends;"
+    },
+    {
+      "id": "ar.file.179",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "camera movement cannot choose which chunks receive a water tick.",
+      "text": "camera movement cannot choose which chunks receive a water tick."
+    },
+    {
+      "id": "ar.file.180",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Render promotion cannot replace authoritative SDF/heightmap contents with newly generated terrain;",
+      "text": "Render promotion cannot replace authoritative SDF/heightmap contents with newly generated terrain;"
+    },
+    {
+      "id": "ar.file.181",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "an edited heightfield without full SDF keeps coarse rendering.",
+      "text": "an edited heightfield without full SDF keeps coarse rendering."
+    },
+    {
+      "id": "ar.file.182",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Loaded and newly edited chunks use the same rule.",
+      "text": "Loaded and newly edited chunks use the same rule."
+    },
+    {
+      "id": "ar.file.183",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The server's three production hash captures and the client's lockstep chunk capture use a shared authority oracle with active regions enabled.",
+      "text": "The server's three production hash captures and the client's lockstep chunk capture use a shared authority oracle with active regions enabled."
+    },
+    {
+      "id": "ar.file.184",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "It merges complete resident authority over durable terrain and water authority using per-chunk terrain and water contributions.",
+      "text": "It merges complete resident authority over durable terrain and water authority using per-chunk terrain and water contributions."
+    },
+    {
+      "id": "ar.file.185",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A cold scan decodes one durable chunk at a time and caches only its two integer contributions;",
+      "text": "A cold scan decodes one durable chunk at a time and caches only its two integer contributions;"
+    },
+    {
+      "id": "ar.file.186",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Render caches, meshes and lifecycle flags cannot affect this oracle.",
+      "text": "Render caches, meshes and lifecycle flags cannot affect this oracle."
+    },
+    {
+      "id": "ar.file.187",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The server availability digest likewise uses sorted fixed-tick simulation participants in this mode.",
+      "text": "The server availability digest likewise uses sorted fixed-tick simulation participants in this mode."
+    },
+    {
+      "id": "ar.file.188",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The negotiated system configuration identity includes authority-rules revision 4 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch.",
+      "text": "The negotiated system configuration identity includes authority-rules revision 4 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch."
+    },
+    {
+      "id": "ar.file.189",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "This does not change the Hello protocol version.",
+      "text": "This does not change the Hello protocol version."
+    },
+    {
+      "id": "ar.file.190",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Legacy active-region primitives retain explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes beneath the revision-4 scheduler envelope.",
+      "text": "Legacy active-region primitives retain explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes beneath the revision-4 scheduler envelope."
+    },
+    {
+      "id": "ar.file.191",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The water scope includes chunk identity, integer bed/depth/flux, initialization, resolution, sleep and threshold fields.",
+      "text": "The water scope includes chunk identity, integer bed/depth/flux, initialization, resolution, sleep and threshold fields."
+    },
+    {
+      "id": "ar.file.192",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Explicit legacy snapshot projections remain byte-exact with active regions disabled, while current live captures add the scheduler envelope.",
+      "text": "Explicit legacy snapshot projections remain byte-exact with active regions disabled, while current live captures add the scheduler envelope."
+    },
+    {
+      "id": "ar.file.193",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "LMR1 stores complete content, not these oracle values, and retains its container format;",
+      "text": "LMR1 stores complete content, not these oracle values, and retains its container format;"
+    },
+    {
+      "id": "ar.file.194",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Replay headers/checkpoints do store oracle values;",
+      "text": "Replay headers/checkpoints do store oracle values;"
+    },
+    {
+      "id": "ar.file.195",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "older authority-profile captures remain parseable and are refused by configuration identity before current playback can advance a tick.",
+      "text": "older authority-profile captures remain parseable and are refused by configuration identity before current playback can advance a tick."
+    },
+    {
+      "id": "ar.file.196",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Captures made under the new scopes must be compared with captures under those same scopes.",
+      "text": "Captures made under the new scopes must be compared with captures under those same scopes."
+    },
+    {
+      "id": "ar.file.197",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Plants, creatures and living-world consumers run over authoritative ECS participants on fixed session ticks, independently of the streamed chunk map.",
+      "text": "Plants, creatures and living-world consumers run over authoritative ECS participants on fixed session ticks, independently of the streamed chunk map."
+    },
+    {
+      "id": "ar.file.198",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Procedural vegetation is a rendering derivative, and ground-object continuation is not installed.",
+      "text": "Procedural vegetation is a rendering derivative, and ground-object continuation is not installed."
+    },
+    {
+      "id": "ar.file.199",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "None contributes a streamed-only per-chunk field to the content projection.",
+      "text": "None contributes a streamed-only per-chunk field to the content projection."
+    },
+    {
+      "id": "ar.file.200",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The scheduler captures only the requested region's complete resident authority, so renderer residency cannot remove edits or expose a stale durable copy.",
+      "text": "The scheduler captures only the requested region's complete resident authority, so renderer residency cannot remove edits or expose a stale durable copy."
+    },
+    {
+      "id": "ar.file.201",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "This content contributes even in `Loading` state during a render rebuild.",
+      "text": "This content contributes even in `Loading` state during a render rebuild."
+    },
+    {
+      "id": "ar.file.202",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "Optional `water_authority` snapshot metadata records generated or edited terrain provenance, and unknown values refuse loading.",
+      "quote": "Optional `water_authority` snapshot metadata records generated or edited terrain provenance, and unknown values refuse loading."
+    },
+    {
+      "id": "ar.file.203",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "later captures replace contributions from the bounded resident set without reading durable records.",
+      "quote": "later captures replace contributions from the bounded resident set without reading durable records."
+    },
+    {
+      "id": "ar.file.204",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "Unsigned modular sums and the chunk count compose the same result as a full recompute, with chunk identity included in every contribution.",
+      "quote": "Unsigned modular sums and the chunk count compose the same result as a full recompute, with chunk identity included in every contribution."
+    },
+    {
+      "id": "ar.file.205",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "water ownership uses optional chunk metadata with legacy omission compatibility.",
+      "quote": "water ownership uses optional chunk metadata with legacy omission compatibility."
     },
     {
       "id": "dw.station.001",
@@ -4193,6 +4745,132 @@
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "quote": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs.",
       "text": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs."
+    },
+    {
+      "id": "ar.file.206",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "active-region chunk snapshots retain explicit terrain and water ownership in optional `authority` me",
+      "text": "active-region chunk snapshots retain explicit terrain and water ownership in optional `authority` metadata, while legacy snapshot bytes remain unchanged."
+    },
+    {
+      "id": "ar.file.207",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "One synchronous save operation validates the existing durable snapshot once, then writes chunk, plan",
+      "text": "One synchronous save operation validates the existing durable snapshot once, then writes chunk, plant and energy payloads before metadata and ledger acknowledgement."
+    },
+    {
+      "id": "ar.file.208",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Standalone writers retain full validation.",
+      "text": "Standalone writers retain full validation."
+    },
+    {
+      "id": "ar.file.209",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A failed payload prevents later metadata publication in that operation.",
+      "text": "A failed payload prevents later metadata publication in that operation."
+    },
+    {
+      "id": "ar.file.210",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Explicit `authority` metadata also distinguishes regenerable initialized water from simulation owner",
+      "text": "Explicit `authority` metadata also distinguishes regenerable initialized water from simulation owners, preserves terrain-only ownership, and rejects malformed or contradictory ownership fields."
+    },
+    {
+      "id": "ar.file.211",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Loaded and rehydrated records start clean.",
+      "text": "Loaded and rehydrated records start clean."
+    },
+    {
+      "id": "ar.file.212",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Eviction reuses an unchanged durable owner only while its identity, array revision and water bookkee",
+      "text": "Eviction reuses an unchanged durable owner only while its identity, array revision and water bookkeeping match the saved stamp, with at most one stamp per resident chunk."
+    },
+    {
+      "id": "ar.file.213",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Each capture compares a fixed-size key for water initialization, resolution, sleep, quiet-tick count",
+      "text": "Each capture compares a fixed-size key for water initialization, resolution, sleep, quiet-tick count and maximum delta as well as the array revision, so bookkeeping changes cannot reuse stale contributions."
+    },
+    {
+      "id": "ar.file.214",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The server's explicit full snapshot uses the session save operation to persist clean resident chunks with their ownership, together with plants and energy, before metadata and the ledger.",
+      "text": "The server's explicit full snapshot uses the session save operation to persist clean resident chunks with their ownership, together with plants and energy, before metadata and the ledger."
+    },
+    {
+      "id": "ar.file.215",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A failed payload prevents metadata acknowledgement.",
+      "text": "A failed payload prevents metadata acknowledgement."
+    },
+    {
+      "id": "ar.file.216",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Before horizon or edit admission, initialized authoritative water at nonzero Y migrates to the Y=0 column owner with its complete integer depth, bed, flux and solver bookkeeping.",
+      "text": "Before horizon or edit admission, initialized authoritative water at nonzero Y migrates to the Y=0 column owner with its complete integer depth, bed, flux and solver bookkeeping."
+    },
+    {
+      "id": "ar.file.217",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Live same-id authority takes precedence over durable records;",
+      "text": "Live same-id authority takes precedence over durable records;"
+    },
+    {
+      "id": "ar.file.218",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The destination and cleared source water records commit in one atomic region replacement before live ownership changes;",
+      "text": "The destination and cleared source water records commit in one atomic region replacement before live ownership changes;"
+    },
+    {
+      "id": "ar.file.219",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Pristine terrain leaves the simulation set when it leaves the required horizon, even while its region remains active, so reload restores the same participants and colliders.",
+      "text": "Pristine terrain leaves the simulation set when it leaves the required horizon, even while its region remains active, so reload restores the same participants and colliders."
+    },
+    {
+      "id": "ar.file.220",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Eviction candidates are scanned and sorted only when a missing admission needs space at the 8,192-chunk resident cap, with one prepared list reused within the admission batch.",
+      "text": "Eviction candidates are scanned and sorted only when a missing admission needs space at the 8,192-chunk resident cap, with one prepared list reused within the admission batch."
+    },
+    {
+      "id": "ar.file.221",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "different Y layers have no historical precedence, so equal simulation states coalesce without summing water and conflicting or incomplete states refuse admission.",
+      "text": "different Y layers have no historical precedence, so equal simulation states coalesce without summing water and conflicting or incomplete states refuse admission."
+    },
+    {
+      "id": "ar.file.222",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "source terrain authority remains independent.",
+      "text": "source terrain authority remains independent."
+    },
+    {
+      "id": "dw.persistence.061",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix.",
+      "text": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix."
+    },
+    {
+      "id": "dw.persistence.062",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "Both replay versions bind effective configuration plus resolved preset/dependency content;",
+      "text": "Both replay versions bind effective configuration plus resolved preset/dependency content;"
+    },
+    {
+      "id": "ar.file.scheduler.001",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Live revision-4 captures bind the raw persisted water cursor as u64 little endian to both the water projection and chunk authority outside chunk caches in both active-region flag modes while terrain, mesh and frozen region digests retain their existing bytes.",
+      "text": "Live revision-4 captures bind the raw persisted water cursor as u64 little endian to both the water projection and chunk authority outside chunk caches in both active-region flag modes while terrain, mesh and frozen region digests retain their existing bytes."
+    },
+    {
+      "id": "ar.file.scheduler.002",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Explicit legacy revision-3 identity and projection controls retain their original bytes, with incompatible current playback and peer admission refused before ticks without a legacy fallback.",
+      "text": "Explicit legacy revision-3 identity and projection controls retain their original bytes, with incompatible current playback and peer admission refused before ticks without a legacy fallback."
     }
   ],
   "exclusions": [

@@ -192,7 +192,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertLess(primitive.index("SurfaceRadiiSupported"),
                         primitive.index("wait_for_generation_jobs"))
         self.assertRegex(primitive, r'if \(!World::AddSurfaceColumnChunks\('
-                         r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;')
+                         r'\s*span.min_y, span.max_y, surface_capacity, m_retainRegionAuthority\)\)\s*return false;')
         self.assertLess(primitive.index("AddSurfaceColumnChunks"),
                         primitive.index("chunks_to_build.reserve(surface_capacity)"))
         self.assertLess(primitive.index("AddSurfaceColumnChunks"),
@@ -208,7 +208,7 @@ class ReplaySourceContract(unittest.TestCase):
                          r'radius_m > max_edit_radius\)\s*return 0;')
         self.assertLess(edit.index("std::isfinite(radius_m)"), edit.index("world_to_chunk_coords"))
         self.assertRegex(edit, r'if \(!World::AddSurfaceColumnChunks\('
-                         r'span.min_y, span.max_y, remesh_chunks\)\)\s*return 0;')
+                         r'\s*span.min_y, span.max_y, remesh_chunks, m_retainRegionAuthority\)\)\s*return 0;')
         self.assertLess(edit.index("AddSurfaceColumnChunks"), edit.index("chunk->sdf_data[idx] ="))
         budget = read_source("src/luminumbra_common/world/SurfaceWorkBudget.h")
         for check in ("kMaxSurfaceRadius = 12", "kMaxSurfaceColumns = 625",
@@ -216,6 +216,25 @@ class ReplaySourceContract(unittest.TestCase):
                       "diameter > max_size / diameter",
                       "count > kMaxSurfaceChunks - total"):
             self.assertIn(check, budget)
+
+    def test_water_owner_union_is_admitted_once_before_drains_and_edits(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        primitive = source.split("bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1].split(
+            "\nfloat SHIELD_WorldSystem::GetTerrainHeightAt(", 1)[0]
+        self.assertEqual(primitive.count("column_surface_span("), 1)
+        self.assertLess(primitive.index("required.insert("), primitive.index("wait_for_generation_jobs"))
+        self.assertIn("const auto& span = surface_spans[surface_index++];", primitive)
+        self.assertIn("surface_capacity, m_retainRegionAuthority", primitive)
+        edit = source.split("int SHIELD_WorldSystem::EditTerrainVoxel(", 1)[1]
+        self.assertIn("remesh_chunks, m_retainRegionAuthority", edit)
+        budget = read_source("src/luminumbra_common/world/SurfaceWorkBudget.h")
+        self.assertIn("retain_water_owner && (min_y > 1 || max_y < -1)", budget)
+        self.assertIn("count > kMaxSurfaceChunks - total", budget)
+        native = read_source("test/common/SurfaceWorkBudget_test.cpp")
+        for name in ("WaterOwnerUnionUsesTheSameBudgetAndCheckedEndpoints",
+                     "WaterOwnerOverflowRetainsPendingGenerationBeforeAnyPublication",
+                     "LegalOffsetsAndNegativeRadiiKeepTerrainAndWaterOwners"):
+            self.assertIn("TEST(SurfaceWorkBudget, " + name + ")", native)
 
     def test_surface_exact_admission_precedes_all_publication_drains(self):
         source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
@@ -225,7 +244,7 @@ class ReplaySourceContract(unittest.TestCase):
         # searching the rest of the translation unit could accept a later call.
         admissions = [re.search(
             r'if \(!World::AddSurfaceColumnChunks\('
-            r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;', primitive)]
+            r'\s*span.min_y, span.max_y, surface_capacity, m_retainRegionAuthority\)\)\s*return false;', primitive)]
         for vector in ("chunks_to_build", "chunks_to_consider_for_collision"):
             admissions.append(re.search(
                 rf'if \(surface_capacity > {vector}\.max_size\(\)\)\s*return false;',
@@ -432,9 +451,21 @@ class ReplaySourceContract(unittest.TestCase):
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
         loading = main.split('"CONSTRUCTING WORLD GEOMETRY..."', 1)[1].split(
             '"World generation phase complete. Entering world."', 1)[0]
-        self.assertRegex(loading, r'if \(!gameSession->GetWorldSystem\(\)->'
-                         r'EnsureSurfaceReadyNear\([\s\S]*?\)\)\s*\{[\s\S]*'
-                         r'refuse_world_entry\([^;]*;\s*break;')
+        self.assertIn("const bool horizon_ready = gameSession->EnsureWorldEntryReady(12, 4);", loading)
+        self.assertRegex(loading, r'if \(!horizon_ready\)\s*\{[\s\S]*?'
+                         r'refuse_world_entry\([^;]*;[\s\S]*?break;')
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        ready = session.split("bool GameSession::EnsureWorldEntryReady(", 1)[1].split(
+            "std::string GameSession::SystemConfigIdentity()", 1)[0]
+        self.assertRegex(ready, r'if \(!World::SurfaceRadiiSupported\('
+                         r'horizon_radius, collision_radius\)[\s\S]*?return false;')
+        self.assertLess(ready.index("SurfaceRadiiSupported"),
+                        ready.index("PrepareSimulationCollisions();"))
+        self.assertRegex(ready, r'return !m_regionFault &&\s*'
+                         r'm_worldSystem->EnsureSurfaceReadyNear\(\s*'
+                         r'm_metadata.spawnPoint, m_physicsSystem.get\(\), '
+                         r'horizon_radius, collision_radius\);')
+        self.assertLess(loading.index("if (!horizon_ready)"), loading.index("break;"))
         self.assertIn('g_uiManager->RequestLoadDocument("main_menu.rml");', loading)
         backdrop = main.split('CreateTransientWorld("Menu Vista"', 1)[1].split(
             "int exit_code = 0;", 1)[0]
@@ -556,8 +587,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                      "LoadWorldStateFrom"):
             with self.subTest(consumer=name):
                 body = self.function(source, name)
-                admission = body[:body.index("const Persistence::WorldSaveService service;")] \
-                    if name == "LoadWorldStateFrom" else body[:body.index("return false;")]
+                admission = body[:body.index("return false;", body.index("!m_worldUsable"))]
                 self.assertIn("!m_worldUsable", admission)
                 self.assertNotIn("m_worldOpenError", admission)
         wrapper = self.function(source, "SaveWorldStateTo")
@@ -565,13 +595,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         readiness = self.function(source, "LoadWorldState")
         self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
         snapshot = self.function(source, "LoadWorldStateFrom")
-        # All five existing fatal branches must latch usability before clearing
-        # live chunks; their diagnostics remain available to existing callers.
+        # Clock metadata is validated before replacing residency. A refusal
+        # retains resident authority but disables saving until a coherent replacement.
+        preflight, replacement = snapshot.split("    Persistence::WorldSaveService service;", 1)
+        self.assertIn("read_clock_metadata(", preflight)
+        self.assertIn("&water_cursor", preflight)
+        self.assertNotIn("clear_world(", preflight)
+        clock_failure = preflight.split(
+            "(requires_active_regions && !m_activeRegionsEnabled)) {", 1)[1]
+        self.assertLess(clock_failure.index("m_worldUsable = false;"),
+                        clock_failure.index("return false;"))
+        # Five inline fatal diagnostics and the delegated energy refusal must
+        # latch usability after replacement begins, before clearing live chunks.
         failures = re.findall(r'm_worldUsable = false;\s*m_worldOpenError =.*?'
                               r'm_worldSystem->clear_world\(m_physicsSystem.get\(\)\);',
-                              snapshot, re.DOTALL)
+                              replacement, re.DOTALL)
         self.assertEqual(len(failures), 5)
-        self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 5)
+        self.assertEqual(replacement.count("m_worldUsable = false;"), 6)
+        self.assertRegex(replacement, r'if \(!LoadEnergyFieldRecord\(save_dir\)\) \{\s*'
+                         r'm_worldUsable = false;\s*'
+                         r'm_worldSystem->clear_world\(m_physicsSystem.get\(\)\);\s*return false;')
+        self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 7)
         self.assertNotIn("m_worldUsable = true;", snapshot)
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
         full_snapshot = runner.split("ServerWorldRunner::SaveFullSnapshot()", 1)[1].split(

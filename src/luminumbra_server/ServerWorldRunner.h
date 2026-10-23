@@ -207,11 +207,11 @@ public:
     // quiesce). Returns the per-run report. Requires Boot to have succeeded.
     ServerTickReport RunFixedTicks(std::uint64_t tick_count);
 
-    // Deterministic hash over the in-memory streamed-chunk snapshot
-    // (WorldSaveService::world_hash; format-independent persistence hash).
+    // Deterministic simulation oracle. Active regions merge complete resident
+    // and durable authority; legacy worlds retain the historical snapshot hash.
     std::string ComputeWorldHash();
 
-    // per-system sub-hashes over the SAME streamed-chunk snapshot, for
+    // Per-system sub-hashes over the same canonical authority, for
     // desync localization. The top-level ComputeWorldHash above is unchanged;
     // these are additive. entities hashes the deterministic avatar snapshot
     // (empty only when no avatars are configured). Creature ecology and plants
@@ -225,7 +225,8 @@ public:
     // minimal. out_world_hash and out_sub are filled together and are exactly the
     // values the separate calls would produce.
     void ComputeWorldHashAndSubHashes(std::string& out_world_hash,
-                                      Persistence::WorldStreamingStateSubHashes& out_sub);
+                                      Persistence::WorldStreamingStateSubHashes& out_sub,
+                                      std::uint64_t* water_scheduler_cursor = nullptr);
 
     //  heavy oracle support: persists the COMPLETE in-memory streamed-
     // chunk snapshot via WorldSaveService::save_world, regardless of the voxel

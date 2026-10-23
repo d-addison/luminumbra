@@ -114,6 +114,10 @@ enum class SysParam : std::uint8_t {
 // Values supplied to the canonical serializer. Session callers supply current effective
 // values, including tuning changed through public setters. No owner-based fallback here.
 struct SimulationIdentityValues {
+    // Bump whenever compiled authority membership/advancement rules change.
+    // Negotiated by every transport and recorded in replay admission identity.
+    static constexpr std::uint32_t kAuthorityRulesRevision = 4;
+    static constexpr std::uint32_t kLegacyAuthorityRulesRevision = 3;
     std::array<bool, static_cast<std::size_t>(SysKey::Count)> enabled{};
     std::array<double, static_cast<std::size_t>(SysParam::Count)> scalars{};
     std::array<glm::vec3, static_cast<std::size_t>(SysParam::Count)> vectors{};
@@ -126,6 +130,11 @@ struct SimulationIdentityValues {
 
     SimulationIdentityValues();
     [[nodiscard]] std::string ComputeIdentity() const;
+    // Frozen revision-3 encoder for explicit historical inspection, never live admission.
+    [[nodiscard]] std::string ComputeLegacyRevision3Identity() const;
+
+private:
+    [[nodiscard]] std::string ComputeIdentityForRevision(std::uint32_t revision) const;
 };
 
 class SystemConfig {

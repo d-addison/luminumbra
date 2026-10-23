@@ -54,11 +54,14 @@
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
+#include "../core/FilesystemPath.h"
+#include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SavedWorldCatalog.h"
-#include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
+// Persistence::StableChecksum (ComputeScentSubHash).
+#include "../persistence/WorldPersistenceRoundtrip.h"
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
 #include "../simulation/SimWorkCounters.h"
@@ -77,11 +80,14 @@
 #include "../systems/WeatherEventSystem.h" // Pure deterministic weather-event schedule.
 #include "../systems/WeatherSystem.h"
 #include "../systems/WindFieldSystem.h"
+#include "SurfaceWorkBudget.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 #include "entt/entity/entity.hpp"
+#include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <atomic>
+#include <charconv>
 #include <cmath> // std::floor (energy-layer anchor quantization)
 #include <cstddef>
 #include <cstdint>
@@ -101,12 +107,15 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator> // (GCC-15 vague-linkage: must be visible at the GrazeableComponent storage
-#include <memory>   //  instantiation point, else std::__advance/iter_move get externalized)
+#include <limits>
+#include <memory> //  instantiation point, else std::__advance/iter_move get externalized)
 #include <optional>
 #include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -187,25 +196,24 @@ GameSession::GameSession() {
 }
 
 GameSession::~GameSession() {
-    // Jobs can read world, water, weather and physics. Drain before member destruction.
-    if (m_worldSystem)
-        m_worldSystem->quiesce_streaming_jobs_for_save();
-    if (m_physicsSystem)
-        m_physicsSystem->set_world_system(nullptr);
-    m_worldSystem.reset();
+    // Tear down dependents explicitly while their world, registry and physics
+    // services still exist, including when entry fails before the first tick.
+    ResetWorldSystems();
 }
 
 void GameSession::ResetWorldSystems() {
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
-    // Keep all dependencies alive while the world destructor fences admitted work.
+    // Registry component destructors can use world and physics services. Release
+    // them after workers drain and before either service is destroyed.
+    m_registry.clear();
+    // Keep dependencies alive while the world destructor fences admitted work.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
     m_worldSystem.reset();
-    m_physicsSystem.reset();
     m_waterSystem.reset();
-    m_registry.clear();
+    m_physicsSystem.reset();
     m_soilGrid.reset();
     m_irrigationGrid.reset();
     m_simulationClock.reset();
@@ -286,7 +294,59 @@ std::map<std::string, bool> GameSession::EffectiveSimulationGates() const {
     return gates;
 }
 
+void GameSession::PrepareSimulationCollisions() {
+    if (m_activeRegionsEnabled && m_worldSystem) {
+        if (const auto& fault = m_worldSystem->authority_fault(); fault.has_value())
+            LatchRegionFault(m_worldClock.tick(), fault.value());
+    }
+    if (m_activeRegionsEnabled && m_worldSystem && !m_regionFault) {
+        std::set<std::pair<i32, i32>> simulation_regions;
+        std::vector<Vec3> simulation_anchors;
+        const auto include_anchor = [&](const Vec3& anchor) {
+            simulation_anchors.push_back(anchor);
+            for (const auto key : ActiveRegionLedger::activation_regions(anchor))
+                simulation_regions.emplace(key.x, key.z);
+        };
+        if (m_replicatedSimulationAnchors) {
+            for (const auto& anchor : *m_replicatedSimulationAnchors)
+                include_anchor(anchor);
+        } else if (const auto& local = m_activeRegionLedger.local_anchor(); local.has_value()) {
+            include_anchor(local.value());
+        }
+        try {
+            m_worldSystem->prepare_region_authority(
+                m_registry, simulation_regions, simulation_anchors, m_physicsSystem.get());
+        } catch (const std::exception& error) {
+            LatchRegionFault(m_worldClock.tick(), error.what());
+        }
+    }
+}
+
+bool GameSession::EnsureWorldEntryReady(int horizon_radius, int collision_radius) {
+    if (!World::SurfaceRadiiSupported(horizon_radius, collision_radius) || !m_worldSystem ||
+        !m_physicsSystem)
+        return false;
+    PrepareSimulationCollisions();
+    return !m_regionFault &&
+           m_worldSystem->EnsureSurfaceReadyNear(
+               m_metadata.spawnPoint, m_physicsSystem.get(), horizon_radius, collision_radius);
+}
+
 std::string GameSession::SystemConfigIdentity() const {
+    return EffectiveIdentityValues().ComputeIdentity();
+}
+
+std::string GameSession::LegacyRevision3SystemConfigIdentity() const {
+    return EffectiveIdentityValues().ComputeLegacyRevision3Identity();
+}
+
+Persistence::WorldAuthorityHashes GameSession::CaptureAuthorityHashes() const {
+    if (!m_worldSystem || m_simulationBatchInProgress || !IsSimulationTickBoundary())
+        throw std::logic_error("Authority capture requires a completed simulation boundary");
+    return m_worldSystem->compute_chunk_hashes();
+}
+
+luminumbra::core::SimulationIdentityValues GameSession::EffectiveIdentityValues() const {
     using luminumbra::core::SysKey;
     using luminumbra::core::SysParam;
     luminumbra::core::SimulationIdentityValues values;
@@ -370,7 +430,7 @@ std::string GameSession::SystemConfigIdentity() const {
     values.scalars[static_cast<std::size_t>(SysParam::ForagingGoalWeight)] =
         m_foragingTuning.goal_weight;
     values.scalars[static_cast<std::size_t>(SysParam::CircadianAmplitude)] = m_circadianAmplitude;
-    return values.ComputeIdentity();
+    return values;
 }
 
 // apply the session water-sim resolution when the owner opted in
@@ -389,6 +449,10 @@ void GameSession::ApplyWaterResolutionWiring() {
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
+    if (m_activeRegionsEnabled && m_worldSystem) {
+        if (const auto& fault = m_worldSystem->authority_fault(); fault.has_value())
+            LatchRegionFault(m_worldClock.tick(), *fault);
+    }
     if (m_regionFault)
         return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
@@ -396,10 +460,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         return 0;
     class BatchGuard {
     public:
-        BatchGuard(bool& value, bool enabled)
+        explicit BatchGuard(bool& value)
             : m_active(value)
             , m_previous(value) {
-            m_active = enabled;
+            m_active = true;
         }
         ~BatchGuard() {
             m_active = m_previous;
@@ -409,7 +473,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         bool& m_active;
         bool m_previous;
     };
-    const BatchGuard guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
+    const BatchGuard guard(m_simulationBatchInProgress);
+    auto completed_clock = m_simulationClock;
     std::uint32_t ticks_executed;
     if (m_activeRegionsEnabled) {
         auto advanced_clock = m_simulationClock;
@@ -433,6 +498,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         namespace TelemetryComp = Luminumbra::Components;
         luminumbra::simulation::SimBudgetTelemetry::TickScope budget(m_simBudgetTelemetry,
                                                                      current_tick);
+        PrepareSimulationCollisions();
+        if (m_regionFault) {
+            // Latching retains the completed world tick. Restore its full clock
+            // checkpoint too: refused admission must not consume fractional time
+            // or clear catch-up telemetry from earlier completed frames.
+            m_simulationClock = completed_clock;
+            return i; // Admission failed before any of this tick's systems ran.
+        }
         if (m_activeRegionsEnabled)
             m_worldClock.set_tick(current_tick);
 
@@ -1117,9 +1190,34 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // The v2 events stage measures only the ordered drain. Region scheduling
         // records its separate time-free work items after the timed stages.
         budget.Finish();
+        if (m_activeRegionsEnabled && m_worldSystem) {
+            std::set<std::pair<i32, i32>> simulation_regions;
+            std::vector<Vec3> simulation_anchors;
+            const auto include_anchor = [&](const Vec3& anchor) {
+                simulation_anchors.push_back(anchor);
+                for (const auto key : ActiveRegionLedger::activation_regions(anchor))
+                    simulation_regions.emplace(key.x, key.z);
+            };
+            if (m_replicatedSimulationAnchors) {
+                for (const auto& anchor : *m_replicatedSimulationAnchors)
+                    include_anchor(anchor);
+            } else if (const auto& local = m_activeRegionLedger.local_anchor(); local.has_value()) {
+                include_anchor(local.value());
+            }
+            try {
+                m_worldSystem->simulate_region_authority(
+                    m_registry, simulation_regions, simulation_anchors, m_physicsSystem.get());
+            } catch (const std::exception& error) {
+                LatchRegionFault(current_tick, error.what());
+            }
+        }
         RunRegionScheduler(current_tick);
-        if (m_regionFault)
+        if (m_activeRegionsEnabled)
+            completed_clock.advance(completed_clock.fixed_dt());
+        if (m_regionFault) {
+            m_simulationClock = completed_clock;
             return i + 1; // the faulting tick's systems ran; the clock was rewound to it
+        }
     }
     return ticks_executed;
 }
@@ -1294,8 +1392,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                          params.caves_enabled);
 
     // 1. Create the World System
-    m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(
+        m_jobSystem, nullptr, params, world_seed, m_activeRegionsEnabled);
     // Worldgen seam for audio-raycast surface materials (non-owning; physics
     // is destroyed before the world system by member order, so the pointer
     // cannot dangle).
@@ -1402,7 +1500,6 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             return false;
         }
     }
-    const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
     // Generate from the same canonical bytes whose saved identity was verified.
     const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
         nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
@@ -1432,8 +1529,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(
+        m_jobSystem, nullptr, params, world_seed, m_activeRegionsEnabled);
     // Worldgen seam for audio-raycast surface materials (non-owning; physics
     // is destroyed before the world system by member order, so the pointer
     // cannot dangle).
@@ -1458,25 +1555,6 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // restores it (epoch-rebased onto the session clock); an absent
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
-    if (m_energyFieldState) {
-        const std::string recordPath = worldPath + "/aether_state.efs";
-        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
-        std::ifstream recordFile;
-        recordFile.open(recordPath);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath);
-            }
-        }
-    }
-
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).
     if (!saved.has_spawn_point) {
@@ -1533,30 +1611,21 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                 anchors,
                 m_regionWork,
                 [this](RegionKey key) {
-                    const auto directory = m_regionDurableDirectory.empty()
-                                               ? GetWorldSaveDir()
-                                               : m_regionDurableDirectory;
                     return Persistence::WorldSaveService::region_simulation_digest(
-                        directory,
+                        m_worldSystem->authority_directory(),
                         key,
-                        Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                        {}});
+                        Persistence::RegionDigestInputs{
+                            m_worldSystem->snapshot_region_authority(key.x, key.z), {}, true});
                 },
-                // Later slices extend this probe with parked chunks, ground objects,
-                // pages, creatures, plants and water debt.
+                // Later slices extend this probe with deterministic ownership of
+                // parked chunks, ground objects, pages, creatures, plants and water debt.
                 [this, &owned_regions](RegionKey key) {
                     if (!owned_regions) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
-                        for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
-                            if (!chunk)
-                                continue;
-                            int rx = 0, rz = 0;
-                            Persistence::WorldSaveService::region_coords_for_chunk(
-                                chunk->get_coords(), rx, rz);
-                            owned_regions->insert(RegionKey{rx, rz});
-                        }
+                        // Anchor visits already refresh last_proximity before eviction.
+                        // Streaming residency must never retain hashed ledger history.
                     }
                     return owned_regions->contains(key);
                 });
@@ -1589,7 +1658,10 @@ void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     if (m_regionFault)
         return; // first fault wins
     m_regionFault = RegionSchedulerFault{tick, message};
-    m_simulationClock.reset(tick);
+    // Out-of-frame admission already has the completed tick. Keep its
+    // fractional accumulator and telemetry when no catch-up rewind is needed.
+    if (m_simulationClock.tick_count() != tick)
+        m_simulationClock.reset(tick);
     m_activeRegionLedger.acknowledge_world_clock(m_worldClock);
     m_regionWork.clear();
     LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}", tick, message);
@@ -1633,6 +1705,9 @@ void GameSession::RecordActiveRegionWork(RegionWork work) {
         m_regionWork.push_back(work);
 }
 void GameSession::AttachRegionEditObserver() {
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->set_authority_directory(
+            m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory);
     if (m_activeRegionsEnabled && m_worldSystem)
         m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
             int x = 0, z = 0;
@@ -1724,14 +1799,14 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
         !m_worldUsable || !SavedPresetCompatible(save_dir))
         return false;
-    if (m_activeRegionsEnabled) {
-        if (!Persistence::WorldSaveService::validate_save(save_dir))
-            return false;
-        std::error_code error;
-        fs::create_directories(save_dir, error);
-        if (error)
-            return false;
-    }
+    auto batch = Persistence::WorldSaveService::SaveBatch::begin(save_dir);
+    if (!batch.has_value())
+        return false;
+    return SaveWorldMetadata(batch.value());
+}
+
+bool GameSession::SaveWorldMetadata(Persistence::WorldSaveService::SaveBatch& batch) const {
+    const auto& save_dir = batch.directory();
     if (!PersistSavedPreset(save_dir, m_savedPresetJson))
         return false;
     // Using nlohmann::json for robust saving
@@ -1762,15 +1837,10 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
                                                {"z", m_ambientFieldAnchor.z}};
     }
     if (m_activeRegionsEnabled) {
-        // All production callers save synchronously on the host thread: client
-        // world creation/quit/shutdown and server autosave/snapshot/shutdown.
-        // The persistence service serializes the whole pair with other writers.
         auto ledger = m_activeRegionLedger;
-        if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
-                metadata_json.dump(4) + "\n", ledger, save_dir))
+        if (!batch.save_metadata_and_active_regions(metadata_json.dump(4) + "\n", ledger))
             return false;
-    } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
-                                                             save_dir)) {
+    } else if (!batch.save_metadata(metadata_json.dump(4) + "\n")) {
         return false;
     }
     return true;
@@ -1787,7 +1857,7 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
     return GetSaveRootPath() / "worlds/saves" / m_metadata.worldId;
 }
 
-bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
+bool GameSession::SaveWorldState(WorldStateSaveReport* report, bool full_snapshot) {
     if (report) {
         *report = {};
     }
@@ -1796,7 +1866,7 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
         // No active world session; nothing to persist.
         return false;
     }
-    return SaveWorldStateTo(save_dir, report);
+    return SaveWorldStateTo(save_dir, report, full_snapshot);
 }
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
@@ -1833,7 +1903,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
     WorldStreamingState state;
-    for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+    const auto live_chunks = m_worldSystem->snapshot_streamed_chunks();
+    for (const auto& chunk : live_chunks) {
         state.insert_chunk(chunk);
     }
     result.chunks_total = state.size();
@@ -1852,49 +1923,51 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // Jobs can need persistence ownership themselves. Quiesce and capture first,
     // then retain the shared recursive ownership from destination validation
     // through every payload, metadata publication and dirty acknowledgement.
-    const Persistence::WorldSaveService::SaveOwnership save_ownership;
-    if (!ClockConfigurationCompatible(save_dir) ||
-        !Persistence::WorldSaveService::validate_save(save_dir) || !SavedPresetCompatible(save_dir))
+    auto batch = Persistence::WorldSaveService::SaveBatch::begin(save_dir);
+    if (!batch.has_value())
+        return false;
+    auto& save_batch = batch.value();
+    if (!ClockConfigurationCompatible(save_dir) || !SavedPresetCompatible(save_dir))
         return false;
 
     std::vector<std::string> errors;
-    const Persistence::WorldSaveService service;
+    // Include durable-only evicted authority in exports without redirecting the
+    // live session away from its canonical destination.
+    if (m_activeRegionsEnabled && !Persistence::WorldSaveService::copy_chunk_authority(
+                                      m_worldSystem->authority_directory(), save_dir, live_chunks))
+        return false;
     bool ok = true;
     const bool write_chunks = full_snapshot || !dirty_ids.empty();
     if (write_chunks) {
         // Legacy plant-only saves already count as containers: their next save
         // writes only dirty regions, preserving the regions-disabled byte contract.
-        const bool has_snapshot = m_activeRegionsEnabled
-                                      ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
-                                      : Persistence::WorldSaveService::has_world_save(save_dir);
+        const bool has_snapshot =
+            m_activeRegionsEnabled ? save_batch.has_chunk_snapshot() : save_batch.has_world_save();
         if (full_snapshot || !has_snapshot)
-            ok = service.save_world(state, save_dir, &errors);
+            ok = save_batch.save_world(state, &errors, m_activeRegionsEnabled);
         else
-            ok = service
-                     .save_dirty_chunks(state,
-                                        save_dir,
-                                        &errors,
-                                        /*acknowledge_dirty=*/false)
-                     .saved;
+            ok = save_batch.save_dirty_chunks(state, &errors, m_activeRegionsEnabled).saved;
     }
     // A region replacement can succeed before a later writer fails. Invalidate
     // derived authority after every chunk attempt, including partial failures,
     // so an older worker result cannot integrate against newly persisted chunks.
     if (write_chunks) {
         for (const ChunkID id : dirty_ids) {
-            if (const auto chunk = state.find_chunk(id))
+            if (const auto chunk = state.find_chunk(id); chunk != nullptr)
                 m_worldSystem->notify_far_lod_authority_durable(chunk->get_coords());
         }
     }
     if (ok)
-        ok = Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors);
+        ok = save_batch.save_plant_entities(plant_snapshot, &errors);
     if (ok)
         ok = SaveEnergyFieldRecord(save_dir);
-    // Regions-disabled incremental saves preserve legacy metadata and file layout.
-    // Explicit complete saves publish metadata only after all required state.
+    // Publish scheduler state after all required payloads, including incremental
+    // saves without regions. Zero/absent cursors retain the legacy exact bytes.
     write_metadata = write_metadata && !m_transientWorld;
     if (ok && write_metadata)
-        ok = SaveWorldMetadataTo(save_dir);
+        ok = SaveWorldMetadata(save_batch);
+    else if (ok)
+        ok = save_batch.save_water_cursor(m_worldSystem->GetWaterSimWindowCursor(), &errors);
     for (const auto& error : errors)
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     if (!ok)
@@ -1903,12 +1976,13 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     if (write_metadata && canonical_save && m_activeRegionsEnabled) {
         m_activeRegionLedger.mark_saved(m_worldClock);
         m_regionDurableDirectory = save_dir;
+        m_worldSystem->set_authority_directory(save_dir);
     }
     // An export does not persist edits to the canonical save. Keep them pending
     // there, so the next autosave cannot advance its metadata beside stale chunks.
     if (m_transientWorld || canonical_save) {
         for (const ChunkID id : dirty_ids) {
-            if (const auto chunk = state.find_chunk(id))
+            if (const auto chunk = state.find_chunk(id); chunk != nullptr)
                 chunk->clear_voxel_data_dirty();
         }
     }
@@ -1933,10 +2007,41 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return false;
     }
 
-    const Persistence::WorldSaveService service;
+    WorldClock saved_clock;
+    std::optional<Vec3> ambient_anchor;
+    std::size_t water_cursor = 0;
+    bool requires_active_regions = false;
+    std::vector<std::string> clock_errors;
+    if (!Persistence::WorldSaveService::read_clock_metadata(save_dir,
+                                                            saved_clock,
+                                                            requires_active_regions,
+                                                            &clock_errors,
+                                                            &ambient_anchor,
+                                                            &water_cursor) ||
+        (requires_active_regions && !m_activeRegionsEnabled)) {
+        m_worldUsable = false;
+        m_worldOpenError =
+            clock_errors.empty()
+                ? "Incompatible configuration: this world requires sim.active_regions."
+                : clock_errors.front();
+        return false;
+    }
+
+    Persistence::WorldSaveService service;
+    // Explicit load replaces chunk residency. Release the old snapshot before
+    // decoding its bounded replacement; two full resident budgets cannot coexist.
+    m_worldSystem->clear_world(m_physicsSystem.get());
     WorldStreamingState loaded;
     std::vector<std::string> errors;
-    const bool snapshot_present = service.load_world(loaded, save_dir, errors);
+    const bool snapshot_present =
+        service.load_world(loaded,
+                           save_dir,
+                           errors,
+                           {},
+                           m_activeRegionsEnabled ? Systems::SHIELD_WorldSystem::kActiveChunkBudget
+                                                  : std::numeric_limits<std::size_t>::max(),
+                           true,
+                           m_activeRegionsEnabled);
     if (!snapshot_present && !errors.empty()) {
         m_worldUsable = false;
         m_worldOpenError = errors.front();
@@ -1947,23 +2052,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return false;
     }
 
-    WorldClock saved_clock;
-    std::optional<Vec3> ambient_anchor;
-    bool requires_active_regions = false;
-    std::vector<std::string> clock_errors;
-    if (!Persistence::WorldSaveService::read_clock_metadata(
-            save_dir, saved_clock, requires_active_regions, &clock_errors, &ambient_anchor) ||
-        (requires_active_regions && !m_activeRegionsEnabled)) {
-        m_worldUsable = false;
-        m_worldOpenError =
-            clock_errors.empty()
-                ? "Incompatible configuration: this world requires sim.active_regions."
-                : clock_errors.front();
-        m_worldSystem->clear_world(m_physicsSystem.get());
-        return false;
-    }
-    if (!snapshot_present && !m_activeRegionsEnabled)
-        return true; // legacy fresh world
     if (m_activeRegionsEnabled) {
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
@@ -1994,6 +2082,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;
+        m_worldSystem->set_authority_directory(save_dir);
         m_regionSchedule = {};
         m_regionWork.clear();
         m_regionFault.reset();
@@ -2015,6 +2104,15 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
     }
 
+    // Refuse a damaged energy record before adopting chunks or plant entities.
+    // A missing record resets this layer at the restored absolute tick.
+    if (!LoadEnergyFieldRecord(save_dir)) {
+        m_worldUsable = false;
+        m_worldSystem->clear_world(m_physicsSystem.get());
+        return false;
+    }
+
+    m_worldSystem->SetWaterSimWindowCursor(water_cursor);
     std::size_t adopted = 0;
     for (const auto& chunk : loaded.snapshot_chunks()) {
         if (!chunk) {
@@ -2026,13 +2124,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         // exist here, so normalize them before the streaming systems see the
         // chunk. Voxel data (sdf/heightmap) and meshes are kept verbatim.
         chunk->has_collision.store(false, std::memory_order_release);
-        chunk->pending_mesh_ready.store(false, std::memory_order_release);
-        chunk->pending_mesh_failed.store(false, std::memory_order_release);
-        chunk->pending_lod.store(-1, std::memory_order_release);
-        chunk->pending_mesh_vertices.clear();
-        chunk->pending_mesh_indices.clear();
-        chunk->pending_water_mesh_vertices.clear();
-        chunk->pending_water_mesh_indices.clear();
+        chunk->reset_pending_jobs();
 
         // Chunks saved mid-transition (Loading/Meshing/Unloading) settle to a
         // stable state; Ready and Idle are restored verbatim (a Ready chunk
@@ -2043,12 +2135,15 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);
         }
 
-        if (m_worldSystem->adopt_streamed_chunk(chunk)) {
+        if (m_worldSystem->adopt_streamed_chunk(chunk, true)) {
             ++adopted;
         }
     }
 
-    // boot-time water-resolution migration: a save written at another
+    // Active-region water changes only on fixed ticks, including pending
+    // resolution changes. An eager load-only migration would diverge from a
+    // running peer that saved midway through the bounded resize queue.
+    // Legacy boot-time water-resolution migration: a save written at another
     // sim resolution (sim.water_high_res flipped between sessions) must converge
     // BEFORE the first live tick. Left to the live path it would resize at
     // MAX_WATER_RESIZES_PER_TICK=1 while the seam pass — which hard-gates on equal
@@ -2057,7 +2152,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // deterministic: each chunk's integer-bilinear mm resample is a pure function of
     // its loaded state + worldgen + the session resolution. Matching saves resize
     // nothing — the default path stays byte-identical.
-    {
+    if (!m_activeRegionsEnabled) {
         const std::size_t migrated = m_worldSystem->MigrateWaterSimResolution();
         if (migrated > 0) {
             LUMINUMBRA_CORE_INFO(
@@ -2082,33 +2177,21 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
     }
 
-    // restore the stateful energy layer's record (a
-    // missing file is a clean miss == all zeros by contract). Epoch-rebased
-    // onto the loaded session's tick stream (-4).
-    if (m_energyFieldState) {
-        const fs::path recordPath = save_dir / "aether_state.efs";
-        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
-        std::ifstream recordFile;
-        recordFile.open(recordPath);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
-            }
-        }
-    }
-
     m_lastLoadedChunkCount = adopted;
     LUMINUMBRA_CORE_INFO("World state loaded: {} chunks adopted ({} in snapshot) from {}",
                          adopted,
                          loaded.size(),
                          save_dir.string());
+    if (m_activeRegionsEnabled) {
+        try {
+            (void)m_worldSystem->compute_chunk_hashes();
+        } catch (const std::exception& error) {
+            m_worldUsable = false;
+            m_worldOpenError = error.what();
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+    }
     return true;
 }
 
@@ -2237,6 +2320,69 @@ void GameSession::InitializeEnergyFieldState() {
     m_energyFieldState = std::make_unique<luminumbra::fields::EnergyFieldState>(/*channels=*/2);
     m_scriptState->set_energy_field(m_energyFieldState.get());
     LUMINUMBRA_CORE_INFO("Energy field state layer initialized (sim.aether_state ON, 2 channels).");
+}
+
+bool GameSession::LoadEnergyFieldRecord(const std::filesystem::path& save_dir) {
+    if (!m_energyFieldState)
+        return true;
+    const auto refuse = [this] {
+        m_worldOpenError = "Corrupt or unreadable aether state record.";
+        return false;
+    };
+    try {
+        const auto path = save_dir / "aether_state.efs";
+        std::error_code error;
+        const auto status = fs::symlink_status(path, error);
+        if (error && error != std::errc::no_such_file_or_directory)
+            return refuse();
+        if (!fs::exists(status)) {
+            m_energyFieldState->ResetEmptyAtTick(GetSimulationTickCount());
+            return true;
+        }
+        Filesystem::ReplacementSafeInputFile input;
+        if (!input.open(path))
+            return refuse();
+        const auto length = input.size(error);
+        std::string record;
+        // Allocate exactly the opened regular file's extent, checked against
+        // the string's representable bound before conversion or allocation.
+        if (error || length > record.max_size())
+            return refuse();
+        record.resize(static_cast<std::size_t>(length));
+        if (!input.read(record.data(), record.size()))
+            return refuse();
+        // Inspect the channel layout without copying the record or allocating
+        // attacker-controlled page vectors. This session always owns its layout.
+        std::string_view header(record);
+        const auto next_token = [&header] {
+            constexpr std::string_view whitespace = " \t\r\n\v\f";
+            const auto begin = header.find_first_not_of(whitespace);
+            if (begin == std::string_view::npos)
+                return std::string_view{};
+            header.remove_prefix(begin);
+            const auto end = header.find_first_of(whitespace);
+            const auto token = header.substr(0, end);
+            header.remove_prefix(end == std::string_view::npos ? header.size() : end);
+            return token;
+        };
+        const auto magic = next_token();
+        auto layout = next_token();
+        if (!layout.empty() && layout.front() == '+')
+            layout.remove_prefix(1);
+        if (layout.empty())
+            return refuse();
+        int channels = 0;
+        const auto parsed = std::from_chars(layout.data(), layout.data() + layout.size(), channels);
+        if (magic != "EFS1" || parsed.ec != std::errc{} ||
+            parsed.ptr != layout.data() + layout.size() ||
+            channels != m_energyFieldState->channels())
+            return refuse();
+        if (!m_energyFieldState->DeserializeRecord(record, GetSimulationTickCount()))
+            return refuse();
+        return true;
+    } catch (const std::exception&) {
+        return refuse();
+    }
 }
 
 bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {

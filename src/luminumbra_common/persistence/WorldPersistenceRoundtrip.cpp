@@ -3,17 +3,25 @@
 #include "../core/Log.h"
 #include "../core/ResidencyContract.h" // the hash scope derives from the contract
 #include "ecs/EntitySnapshot.h"
+#include "nlohmann/detail/exceptions.hpp"
+#include "nlohmann/detail/input/input_adapters.hpp"
 #include "nlohmann/json.hpp"
+#include "world/Chunk.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace Luminumbra::Persistence {
@@ -214,12 +222,18 @@ nlohmann::json WaterStateToJson(const Chunk& chunk) {
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks}};
 }
 
-nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
+nlohmann::json ChunkToJson(const Chunk& chunk,
+                           bool sim_only = false,
+                           bool omit_pending = false,
+                           bool preserve_authority = false) {
     // The v0.3.0 cave router produces more render geometry. Hashing must not
     // materialize that geometry only to discard it in the residency projection.
     // Keep every key for the coverage audit; skipped arrays are erased below.
     // Snapshot callers retain the complete canonical representation.
-    const auto array_field = [sim_only](const char* field, const auto& build) -> nlohmann::json {
+    const auto array_field = [sim_only, omit_pending](const char* field,
+                                                      const auto& build) -> nlohmann::json {
+        if (omit_pending && std::string_view(field).starts_with("pending_"))
+            return nlohmann::json::array();
         if (sim_only) {
             for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
                 if (std::string_view(field) == entry.field &&
@@ -231,7 +245,7 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         return build();
     };
     const ChunkState state = chunk.get_state();
-    return nlohmann::json{
+    nlohmann::json result{
         {"coords", IVec3ToJson(chunk.get_coords())},
         {"chunk_id", chunk.get_id()},
         {"state", ChunkStateName(state)},
@@ -303,12 +317,228 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         {"ticks_below_threshold", chunk.ticks_below_threshold},
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks},
         {"water_state", WaterStateToJson(chunk)}};
+    // Optional ownership metadata leaves legacy and pristine snapshot bytes intact.
+    if (chunk.has_water_authority())
+        result["water_authority"] =
+            chunk.sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams ? "generated"
+                                                                                 : "edited";
+    if (preserve_authority)
+        result["authority"] = {
+            {"terrain_edited", chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited},
+            {"water_owned", chunk.has_water_authority()}};
+    return result;
 }
 
-void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
+void ValidateAuthorityMetadata(const nlohmann::json& value) {
+    if (const auto ownership = value.find("authority"); ownership != value.end()) {
+        if (!ownership->is_object() || ownership->size() != 2 ||
+            !ownership->contains("terrain_edited") ||
+            !ownership->at("terrain_edited").is_boolean() || !ownership->contains("water_owned") ||
+            !ownership->at("water_owned").is_boolean())
+            throw std::invalid_argument("Invalid chunk authority metadata");
+        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
+        const bool water_owned = ownership->at("water_owned").get<bool>();
+        if (value.contains("water_authority") &&
+            (!water_owned || (value.at("water_authority") == "edited") != terrain_edited))
+            throw std::invalid_argument("Inconsistent chunk authority metadata");
+    }
+}
+
+struct TerrainSampleArrays {
+    std::optional<std::vector<float>> sdf;
+    std::optional<std::vector<float>> heightmap;
+};
+
+// Keep the ordinary DOM for metadata and geometry, but deliver the two large
+// terrain arrays straight to their final native buffers. Save validation reads
+// every sample even when its caller retains zero chunks. Boxing those samples
+// and then converting them again adds work to every metadata save and shutdown.
+// SAX dispatch is statically typed; there is no per-sample erased callback.
+class SnapshotTerrainSax {
+public:
+    SnapshotTerrainSax(nlohmann::json& snapshot, std::vector<TerrainSampleArrays>& terrain)
+        : m_dom(snapshot, false)
+        , m_terrain(terrain) {}
+
+    bool null() {
+        return scalar_allowed() && m_dom.null();
+    }
+    bool boolean(bool value) {
+        return scalar_allowed() && m_dom.boolean(value);
+    }
+    bool string(std::string& value) {
+        return scalar_allowed() && m_dom.string(value);
+    }
+    bool binary(nlohmann::json::binary_t& value) {
+        return scalar_allowed() && m_dom.binary(value);
+    }
+    bool number_integer(nlohmann::json::number_integer_t value) {
+        return number(value);
+    }
+    bool number_unsigned(nlohmann::json::number_unsigned_t value) {
+        return number(value);
+    }
+    bool number_float(nlohmann::json::number_float_t value, const std::string&) {
+        return number(value);
+    }
+    bool start_object(std::size_t elements) {
+        if (m_samples)
+            return false;
+        Kind kind = Kind::Other;
+        if (m_stack.empty()) {
+            kind = Kind::Root;
+        } else if (m_stack.back().kind == Kind::Chunks) {
+            kind = Kind::Chunk;
+            m_terrain.emplace_back();
+        } else if (m_stack.back().kind == Kind::Root && m_stack.back().key == "chunks") {
+            return false;
+        }
+        m_stack.push_back({kind, {}, {}});
+        return m_dom.start_object(elements);
+    }
+    bool key(std::string& value) {
+        auto& frame = m_stack.back();
+        if (frame.kind == Kind::Root && value == "chunks") {
+            if (m_seenChunks)
+                return false;
+            m_seenChunks = true;
+        }
+        if (frame.kind == Kind::Chunk) {
+            const int field = terrain_field(value);
+            if (field >= 0) {
+                const auto index = static_cast<std::size_t>(field);
+                // The DOM's last-key-wins semantics also cover duplicate keys
+                // whose earlier value has an invalid type. Fall back intact.
+                if (frame.seen[index])
+                    return false;
+                frame.seen[index] = true;
+            }
+        }
+        frame.key = value;
+        return m_dom.key(value);
+    }
+    bool end_object() {
+        m_stack.pop_back();
+        return m_dom.end_object();
+    }
+    bool start_array(std::size_t elements) {
+        if (m_samples)
+            return false;
+        Kind kind = Kind::Other;
+        if (!m_stack.empty()) {
+            const auto& frame = m_stack.back();
+            if (frame.kind == Kind::Root && frame.key == "chunks") {
+                kind = Kind::Chunks;
+            } else if (frame.kind == Kind::Chunks) {
+                return false;
+            } else if (frame.kind == Kind::Chunk) {
+                const int field = terrain_field(frame.key);
+                if (field >= 0) {
+                    auto& captured = field == 0 ? m_terrain.back().sdf : m_terrain.back().heightmap;
+                    m_samples = &captured.emplace();
+                    kind = Kind::Samples;
+                }
+            }
+        }
+        m_stack.push_back({kind, {}, {}});
+        return m_dom.start_array(elements);
+    }
+    bool end_array() {
+        if (m_stack.back().kind == Kind::Samples)
+            m_samples = nullptr;
+        m_stack.pop_back();
+        return m_dom.end_array();
+    }
+    bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception&) {
+        return false;
+    }
+
+private:
+    enum class Kind : std::uint8_t {
+        Root,
+        Chunks,
+        Chunk,
+        Samples,
+        Other
+    };
+    struct Frame {
+        Kind kind;
+        std::string key;
+        std::array<bool, 2> seen;
+    };
+    static int terrain_field(const std::string& key) {
+        if (key == "sdf_data")
+            return 0;
+        return key == "heightmap_data" ? 1 : -1;
+    }
+    bool scalar_allowed() const {
+        return !m_samples && (m_stack.empty() || m_stack.back().kind != Kind::Chunks);
+    }
+    template<typename Number>
+    bool number(Number value) {
+        if (m_samples) {
+            // Only numeric SAX tokens reach here. Convert without boxing each
+            // float in a DOM value; fallback enforces the same numeric types.
+            // LMR1 bounds the input to 64 MiB; at most one float per input token.
+            m_samples->push_back(static_cast<float>(value));
+            return true;
+        }
+        if (!scalar_allowed())
+            return false;
+        if constexpr (std::is_same_v<Number, nlohmann::json::number_float_t>)
+            return m_dom.number_float(value, {});
+        else if constexpr (std::is_same_v<Number, nlohmann::json::number_integer_t>)
+            return m_dom.number_integer(value);
+        else
+            return m_dom.number_unsigned(value);
+    }
+
+    using TextInput = decltype(nlohmann::detail::input_adapter(std::declval<const std::string&>()));
+    nlohmann::detail::json_sax_dom_parser<nlohmann::json, TextInput> m_dom;
+    std::vector<TerrainSampleArrays>& m_terrain;
+    // One frame per opened JSON container, bounded by the input extent.
+    std::vector<Frame> m_stack;
+    std::vector<float>* m_samples = nullptr;
+    bool m_seenChunks = false;
+};
+
+std::vector<float> NumericSamplesFromJson(const nlohmann::json& value) {
+    if (!value.is_array())
+        throw std::invalid_argument("sample data must be an array");
+    std::vector<float> samples;
+    // At most one float per JSON input element; check before reserving storage.
+    if (value.size() > samples.max_size())
+        throw std::invalid_argument("sample array exceeds native capacity");
+    samples.reserve(value.size());
+    for (const auto& sample : value) {
+        // json::get<float>() also converts booleans. Saved samples must be
+        // numeric in both the canonical SAX path and the last-key-wins DOM path.
+        if (!sample.is_number())
+            throw std::invalid_argument("sample data must contain only numeric values");
+        samples.push_back(sample.get<float>());
+    }
+    return samples;
+}
+
+void ApplyChunkJson(const nlohmann::json& value,
+                    Chunk& chunk,
+                    ChunkAuthorityLoadPolicy policy,
+                    TerrainSampleArrays* terrain) {
+    if (value.contains("water_authority")) {
+        const auto ownership = value.at("water_authority").get<std::string>();
+        if (ownership != "generated" && ownership != "edited")
+            throw std::invalid_argument("Unknown water authority provenance");
+        chunk.mark_water_data_dirty();
+        chunk.clear_voxel_data_dirty();
+        if (ownership == "edited")
+            chunk.mark_sdf_loaded_or_edited();
+    }
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
-    chunk.sdf_data = value.at("sdf_data").get<std::vector<float>>();
-    chunk.heightmap_data = value.at("heightmap_data").get<std::vector<float>>();
+    chunk.sdf_data = terrain && terrain->sdf ? std::move(*terrain->sdf)
+                                             : NumericSamplesFromJson(value.at("sdf_data"));
+    chunk.heightmap_data = terrain && terrain->heightmap
+                               ? std::move(*terrain->heightmap)
+                               : NumericSamplesFromJson(value.at("heightmap_data"));
     // tolerant read (default empty) so old saves without the field still
     // load and the single-missing-field negative fixture is unaffected.
     chunk.material_data = value.value("material_data", std::vector<u8>{});
@@ -332,9 +562,9 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.mesh_version.store(value.at("mesh_version").get<u32>(), std::memory_order_release);
     chunk.water_mesh_version.store(value.at("water_mesh_version").get<u32>(),
                                    std::memory_order_release);
-    chunk.water_level_data = value.at("water_level_data").get<std::vector<float>>();
+    chunk.water_level_data = NumericSamplesFromJson(value.at("water_level_data"));
     chunk.water_flow_data = Vec2ArrayFromJson(value.at("water_flow_data"));
-    chunk.water_sim_terrain_height = value.at("water_sim_terrain_height").get<std::vector<float>>();
+    chunk.water_sim_terrain_height = NumericSamplesFromJson(value.at("water_sim_terrain_height"));
     // restore the authoritative fixed-point water state (absent in pre saves -> empty,
     // the sim re-seeds on the next tick).
     chunk.water_depth_mm = value.contains("water_depth_mm")
@@ -362,6 +592,29 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
     chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
+    // Old container records carry terrain ownership in their header. Initialized
+    // legacy water is durable input; explicit modern ownership keeps render caches
+    // regenerable across saves, cold hashes and rehydration.
+    if (const auto ownership = value.find("authority"); ownership != value.end()) {
+        ValidateAuthorityMetadata(value);
+        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
+        const bool water_owned = ownership->at("water_owned").get<bool>();
+        if (policy.validate_record_authority &&
+            policy.terrain_edited != (terrain_edited || water_owned))
+            throw std::invalid_argument("Chunk authority does not match its container header");
+        chunk.mark_sdf_generated_current_params();
+        if (terrain_edited)
+            chunk.mark_sdf_loaded_or_edited();
+        if (water_owned)
+            chunk.mark_water_data_dirty();
+    } else {
+        if (policy.terrain_edited && !chunk.has_water_authority())
+            chunk.mark_sdf_loaded_or_edited();
+        if (policy.migrate_legacy_water && chunk.has_water_sim.load(std::memory_order_acquire) &&
+            !chunk.has_water_authority())
+            chunk.mark_water_data_dirty();
+    }
+    chunk.clear_voxel_data_dirty();
 }
 
 std::string StableDump(const nlohmann::json& value) {
@@ -692,6 +945,12 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
         }
     }
     ValidateWaterStateObject(chunk, errors);
+    if (chunk.contains("water_authority") &&
+        (!chunk.at("water_authority").is_string() ||
+         (chunk.at("water_authority") != "generated" && chunk.at("water_authority") != "edited")))
+        errors.push_back("unknown water authority provenance");
+
+    ValidateAuthorityMetadata(chunk);
 
     if (coords_valid && chunk.contains("chunk_id") && IsJsonInteger(chunk.at("chunk_id"))) {
         const IVec3 coords = IVec3FromJson(chunk.at("coords"));
@@ -734,7 +993,8 @@ const char* EntitySnapshotArtifactSchema() {
     return kEntitySnapshotArtifactSchema;
 }
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     bool preserve_authority) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         if (!lhs || !rhs) {
@@ -746,7 +1006,7 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
     nlohmann::json chunk_array = nlohmann::json::array();
     for (const auto& chunk : chunks) {
         if (chunk) {
-            chunk_array.push_back(ChunkToJson(*chunk));
+            chunk_array.push_back(ChunkToJson(*chunk, false, false, preserve_authority));
         }
     }
 
@@ -758,11 +1018,62 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
     return StableDump(snapshot);
 }
 
-bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
+std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_water) {
+    auto contents = ChunkToJson(chunk, false, true, true);
+    if (omit_water) {
+        // A migration clears the old grid in the same atomic region image as
+        // its replacement. Use the ordinary empty-water encoding, without a new tag.
+        const auto empty = ChunkToJson(Chunk(chunk.get_coords()), false, true, true);
+        for (const char* field : {"water_level_data",
+                                  "water_flow_data",
+                                  "water_sim_terrain_height",
+                                  "water_depth_mm",
+                                  "water_bed_mm",
+                                  "water_edge_flux",
+                                  "water_mesh_vertices",
+                                  "water_mesh_indices",
+                                  "has_water_sim",
+                                  "water_mesh_generated",
+                                  "current_water_resolution",
+                                  "is_water_sleeping",
+                                  "max_water_delta_last_tick",
+                                  "ticks_below_threshold",
+                                  "water_mesh_dirty_ticks",
+                                  "water_state"})
+            contents[field] = empty.at(field);
+        contents.erase("water_authority");
+        contents["authority"]["water_owned"] = false;
+    }
+    const nlohmann::json snapshot = {{"schema", kSnapshotSchema},
+                                     {"order_contract", kOrderContract},
+                                     {"chunk_count", 1},
+                                     {"persisted_fields", PersistedFields()},
+                                     {"chunks", nlohmann::json::array({std::move(contents)})}};
+    return StableDump(snapshot);
+}
+
+bool WorldStreamingSnapshotDecoder::load(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors) {
+                                         std::vector<std::string>& errors,
+                                         ChunkAuthorityLoadPolicy authority) {
+    m_directTerrainSamples = 0;
+    out_state.clear();
     try {
-        const nlohmann::json snapshot = nlohmann::json::parse(json_text);
+        nlohmann::json snapshot;
+        std::vector<TerrainSampleArrays> terrain;
+        bool direct = false;
+        {
+            SnapshotTerrainSax sax(snapshot, terrain);
+            direct = nlohmann::json::sax_parse(json_text, &sax);
+        }
+        if (!direct) {
+            // Noncanonical shapes, duplicate terrain keys and invalid sample
+            // types use exactly the established decoder and its diagnostics.
+            // Release partial buffers first: never retain two parsed records.
+            terrain.clear();
+            snapshot = nullptr;
+            snapshot = nlohmann::json::parse(json_text);
+        }
         if (snapshot.at("schema").get<std::string>() != kSnapshotSchema) {
             errors.push_back("unexpected world snapshot schema");
             return false;
@@ -772,7 +1083,7 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             return false;
         }
 
-        out_state.clear();
+        WorldStreamingState staged;
         // A malformed/torn snapshot that fails partway through the chunk array (bad
         // chunk id, duplicate, or a parse error mid-stream) must not leave the caller
         // a partially-populated world it would mistake for real. Every hard-error exit
@@ -781,30 +1092,64 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             out_state.clear();
             return false;
         };
-        for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
+        const auto& chunks = snapshot.at("chunks");
+        // Keep serialized insertion order for legacy map-order water consumers.
+        // At most one shared owner per input chunk; validate before reserving.
+        std::vector<std::shared_ptr<Chunk>> staged_chunks;
+        if (chunks.size() > staged_chunks.max_size()) {
+            errors.push_back("snapshot chunk count exceeds native capacity");
+            return reject();
+        }
+        staged_chunks.reserve(chunks.size());
+        const bool captured = direct && chunks.is_array() && terrain.size() == chunks.size();
+        std::size_t chunk_index = 0;
+        std::size_t direct_samples = 0;
+        for (const nlohmann::json& chunk_json : chunks) {
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
-            ApplyChunkJson(chunk_json, *chunk);
+            auto* samples = captured ? &terrain[chunk_index] : nullptr;
+            ApplyChunkJson(chunk_json, *chunk, authority, samples);
+            if (samples) {
+                if (samples->sdf)
+                    direct_samples += chunk->sdf_data.size();
+                if (samples->heightmap)
+                    direct_samples += chunk->heightmap_data.size();
+            }
+            ++chunk_index;
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
             }
-            if (!out_state.insert_chunk(chunk)) {
+            if (!staged.insert_chunk(chunk)) {
                 errors.push_back("duplicate chunk id in world snapshot");
                 return reject();
             }
+            staged_chunks.push_back(std::move(chunk));
         }
 
-        if (out_state.size() != snapshot.at("chunk_count").get<std::size_t>()) {
+        if (staged.size() != snapshot.at("chunk_count").get<std::size_t>()) {
             errors.push_back("loaded chunk count does not match snapshot chunk_count");
             return reject();
         }
+        // No restored chunk is visible until the entire record, including
+        // fallback sample types, IDs and count, has passed validation.
+        for (const auto& chunk : staged_chunks)
+            out_state.insert_chunk(chunk);
+        m_directTerrainSamples = direct_samples;
         return true;
     } catch (const std::exception& e) {
         errors.push_back(std::string("failed to load world snapshot: ") + e.what());
         out_state.clear();
         return false;
     }
+}
+
+bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
+                                         WorldStreamingState& out_state,
+                                         std::vector<std::string>& errors,
+                                         ChunkAuthorityLoadPolicy authority) {
+    WorldStreamingSnapshotDecoder decoder;
+    return decoder.load(json_text, out_state, errors, authority);
 }
 
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
@@ -910,36 +1255,170 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
     return Checksum(SerializeWorldStreamingStateSimTruthForHash(state));
 }
 
+RegionContentHasher::RegionContentHasher() {
+    feed("{\n    \"chunks\": [");
+}
+
+void RegionContentHasher::feed(std::string_view bytes) {
+    for (const unsigned char byte : bytes) {
+        m_hash ^= static_cast<std::uint64_t>(byte);
+        m_hash *= 1099511628211ull;
+    }
+}
+
+namespace {
+nlohmann::json TerrainAuthorityJson(const Chunk& chunk) {
+    return {{"chunk_id", chunk.get_id()},
+            {"coords", IVec3ToJson(chunk.get_coords())},
+            {"sdf_data", chunk.sdf_data},
+            {"heightmap_data", chunk.heightmap_data},
+            {"material_data", chunk.material_data}};
+}
+nlohmann::json WaterAuthorityJson(const Chunk& chunk) {
+    return {{"chunk_id", chunk.get_id()},
+            {"water_depth_mm", chunk.water_depth_mm},
+            {"water_bed_mm", chunk.water_bed_mm},
+            {"water_edge_flux", chunk.water_edge_flux},
+            {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
+            {"current_water_resolution",
+             chunk.current_water_resolution.load(std::memory_order_acquire)},
+            {"is_water_sleeping", chunk.is_water_sleeping.load(std::memory_order_acquire)},
+            {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
+            {"ticks_below_threshold", chunk.ticks_below_threshold}};
+}
+void HashAuthorityBytes(std::uint64_t& hash, std::string_view bytes) {
+    for (const unsigned char byte : bytes) {
+        hash ^= static_cast<std::uint64_t>(byte);
+        hash *= 1099511628211ull;
+    }
+}
+void HashTerrainFields(std::uint64_t& hash, const nlohmann::json& terrain) {
+    for (const char* field :
+         {"chunk_id", "coords", "sdf_data", "heightmap_data", "material_data"}) {
+        HashAuthorityBytes(hash, terrain.at(field).dump());
+        HashAuthorityBytes(hash, "|");
+    }
+}
+} // namespace
+
+void RegionContentHasher::append(const Chunk& chunk) {
+    if (!chunk.has_simulation_authority())
+        return;
+    if (m_hasChunks && chunk.get_id() <= m_lastId)
+        throw std::invalid_argument("Region content chunks must have increasing ids");
+    feed(m_hasChunks ? ",\n" : "\n");
+    m_lastId = chunk.get_id();
+    m_hasChunks = true;
+    auto content = TerrainAuthorityJson(chunk);
+    const auto water = WaterAuthorityJson(chunk);
+    HashTerrainFields(m_terrainHash, content);
+    HashAuthorityBytes(m_waterHash, water.dump());
+    content.update(water);
+    // Match StableDump's four-space layout, at the array's eight-space depth.
+    // The byte protocol stays identical without retaining the whole region JSON.
+    const auto bytes = content.dump(4);
+    feed("        ");
+    std::size_t begin = 0;
+    for (;;) {
+        const auto end = bytes.find('\n', begin);
+        if (end == std::string::npos) {
+            feed(std::string_view(bytes).substr(begin));
+            break;
+        }
+        feed(std::string_view(bytes).substr(begin, end - begin + 1));
+        feed("        ");
+        begin = end + 1;
+    }
+}
+
+void AuthorityHashCache::erase(ChunkID id) {
+    const auto retired = m_chunks.find(id);
+    if (retired != m_chunks.end()) {
+        m_terrain -= retired->second.terrain;
+        m_water -= retired->second.water;
+        m_chunks.erase(retired);
+    }
+}
+
+void AuthorityHashCache::update(const std::shared_ptr<Chunk>& incoming) {
+    const auto chunk = incoming;
+    if (!chunk || !chunk->has_simulation_authority())
+        return;
+    const auto stamp = chunk->authority_stamp();
+    const auto found = m_chunks.find(chunk->get_id());
+    const auto owner = found != m_chunks.end() ? found->second.owner.lock() : nullptr;
+    const bool same_owner = owner && owner == chunk;
+    if (same_owner && found->second.stamp == stamp)
+        return;
+    const auto terrain_revision = chunk->voxel_revision();
+    std::uint64_t terrain = 14695981039346656037ull;
+    if (same_owner && found->second.terrain_revision == terrain_revision &&
+        terrain_revision != std::numeric_limits<u32>::max())
+        terrain = found->second.terrain;
+    else
+        HashTerrainFields(terrain, TerrainAuthorityJson(*chunk));
+    std::uint64_t water = 14695981039346656037ull;
+    HashAuthorityBytes(water, WaterAuthorityJson(*chunk).dump());
+    ++m_projections;
+    auto& previous = m_chunks[chunk->get_id()];
+    m_terrain -= previous.terrain;
+    m_water -= previous.water;
+    previous = {.owner = chunk,
+                .terrain_revision = terrain_revision,
+                .terrain = terrain,
+                .water = water,
+                .stamp = stamp};
+    m_terrain += previous.terrain;
+    m_water += previous.water;
+}
+
+WorldAuthorityHashes BindWaterScheduler(WorldAuthorityHashes hashes, std::uint64_t raw_cursor) {
+    // Fixed domain plus exactly eight unsigned little-endian bytes. Retain raw
+    // state even below budget: later activation can expose any cursor difference.
+    std::string schedule("water_schedule:v1:");
+    for (unsigned shift = 0; shift < 64; shift += 8)
+        schedule.push_back(
+            static_cast<char>(static_cast<unsigned char>((raw_cursor >> shift) & 0xffu)));
+    const auto scheduler_hash = StableChecksum(schedule);
+    hashes.sub.water = StableChecksum("simulation_water_v5|grids:" + hashes.sub.water +
+                                      "|schedule:" + scheduler_hash);
+    hashes.world = StableChecksum("simulation_authority_v5|base:" + hashes.world +
+                                  "|water:" + hashes.sub.water);
+    hashes.water_scheduler_cursor = raw_cursor;
+    return hashes;
+}
+
+WorldAuthorityHashes AuthorityHashCache::hashes() const {
+    const auto count = std::to_string(m_chunks.size());
+    WorldAuthorityHashes result;
+    result.sub.terrain =
+        StableChecksum("simulation_terrain_v4:" + count + ":" + std::to_string(m_terrain));
+    result.sub.water =
+        StableChecksum("simulation_water_v4:" + count + ":" + std::to_string(m_water));
+    result.sub.mesh = StableChecksum("simulation_mesh_excluded_v4");
+    result.world = StableChecksum("simulation_authority_v4|terrain:" + result.sub.terrain +
+                                  "|water:" + result.sub.water);
+    return result;
+}
+
+std::uint64_t RegionContentHasher::value() const {
+    auto finished = *this;
+    finished.feed(m_hasChunks ? "\n    ],\n" : "],\n");
+    finished.feed("    \"hash_scope\": \"region_content_v2\"\n}\n");
+    return finished.m_hash;
+}
+
 std::string ComputeRegionContentHash(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         return lhs->get_id() < rhs->get_id();
     });
-    nlohmann::json contents = nlohmann::json::array();
-    for (const auto& chunk : chunks) {
-        // The provider filters incomplete live/parked inputs before merging. Durable
-        // edited records may retain any lifecycle state, including Loading; this
-        // content projection must not filter them again by residency bookkeeping.
-        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
-            continue;
-        contents.push_back(
-            {{"chunk_id", chunk->get_id()},
-             {"coords", IVec3ToJson(chunk->get_coords())},
-             {"sdf_data", chunk->sdf_data},
-             {"heightmap_data", chunk->heightmap_data},
-             {"material_data", chunk->material_data},
-             {"water_depth_mm", chunk->water_depth_mm},
-             {"water_bed_mm", chunk->water_bed_mm},
-             {"water_edge_flux", chunk->water_edge_flux},
-             {"has_water_sim", chunk->has_water_sim.load(std::memory_order_acquire)},
-             {"current_water_resolution",
-              chunk->current_water_resolution.load(std::memory_order_acquire)},
-             {"is_water_sleeping", chunk->is_water_sleeping.load(std::memory_order_acquire)},
-             {"max_water_delta_last_tick", chunk->max_water_delta_last_tick},
-             {"ticks_below_threshold", chunk->ticks_below_threshold}});
-    }
-    return Checksum(StableDump(
-        nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", std::move(contents)}}));
+    RegionContentHasher hasher;
+    for (const auto& chunk : chunks)
+        hasher.append(*chunk);
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+    return stream.str();
 }
 
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {

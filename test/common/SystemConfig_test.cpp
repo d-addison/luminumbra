@@ -6,24 +6,34 @@
 #include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
+#include <array>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
 
-#include <glm/glm.hpp>
+#include <glm/ext/vector_float3.hpp>
 #include <iomanip>
 
+#include "luminumbra_client/rendering/FarWorldCaveSelection.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/FramePacing.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/core/SystemConfigRegistry.gen.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/world/FarVolume.h"
+#include "luminumbra_common/world/GameSession.h"
 
 using luminumbra::core::SysKey;
 using luminumbra::core::SysParam;
@@ -227,13 +237,179 @@ std::string ConfigIdentity(const SystemConfig& config) {
 TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
     // Exact little-endian scalar serialization, independently computed with stdlib Python.
     // See docs/development/system-config-identity.md for the complete computation.
-    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "60ab3c242d54ce89");
+    EXPECT_EQ(Luminumbra::world::GameSession{}.LegacyRevision3SystemConfigIdentity(),
+              "60ab3c242d54ce89");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "2a0d6f2dc4028dda");
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
                       "data/common/systems.json";
     ASSERT_TRUE(std::filesystem::exists(path));
-    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "60ab3c242d54ce89");
+    Luminumbra::world::GameSession legacy;
+    legacy.ApplySystemConfig(SystemConfig::LoadFromFile(path));
+    EXPECT_EQ(legacy.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "2a0d6f2dc4028dda");
     EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
               ConfigIdentity(SystemConfig::Defaults()));
+}
+
+TEST(SystemConfig, FrozenHistoricalIdentityVectorsCoverEveryAppliedSetting) {
+    // Fixed reference digests from the frozen 297-byte revision-3 projection and
+    // independent 301-byte revision-4 encoding, for both active-region modes.
+    struct Vector {
+        const char* name;
+        std::array<const char*, 4> hashes;
+    };
+    constexpr Vector vectors[]{
+        {"hydrology_weather",
+         {"b1975c398a0d70f1", "8fd023c18661d6f2", "23be26e2546a0e7a", "6a93bb2c664e6749"}},
+        {"weather_events",
+         {"979cacb197b79b45", "ddc11ac9ab2edbd6", "455e323c2d5080de", "e0b183a9c7fc50bd"}},
+        {"aether_state",
+         {"4da37f266978b979", "ec9bff5a8c96f20a", "a9f11c36b15d4702", "bdc521f40205bf21"}},
+        {"water_high_res",
+         {"f19ddc19ff363221", "fee6c60cfcf39382", "77bc1aa8d3d992aa", "a1571bc82dd99e19"}},
+        {"active_regions",
+         {"0820e02bb23ece12", "8830afa562b7cab1", "60ab3c242d54ce89", "2a0d6f2dc4028dda"}},
+        {"mutation_rate",
+         {"685d3dd6e3bacd77", "684927e833c5681c", "87c6f0914eb60e88", "424a8ca0f34125f3"}},
+        {"energy_drain_per_second",
+         {"f308a2a1a5d112a9", "af52df8cd63da97e", "2049da7218c8c4b2", "78a3c2cb5b3b5365"}},
+        {"energy_rest_recover",
+         {"f316851aa23f4334", "cda65360f3475aef", "5c667288b978f003", "0dc7b04327ac77c8"}},
+        {"energy_sleep_recover",
+         {"07d7dc3b1cb8e286", "5cd57480deb4afbd", "10afe978edc705ad", "59e50ba0c1e73ad6"}},
+        {"hunger_growth_per_second",
+         {"789f49bc80b89f48", "7963c2863f5ac077", "fcded29c6381fc37", "87672226cd92f2b0"}},
+        {"hunger_graze_sate",
+         {"e0c54945f81bebd2", "aeea71a54a4ca1f1", "bfa151bde98c6f49", "48f086841169c71a"}},
+        {"stamina_rest_recover",
+         {"1d8582c805590483", "5f379c8b3df1fcbc", "7fbbf8d5d02193b4", "56068c71f5173b93"}},
+        {"stamina_move_drain",
+         {"32e3f58cad39f794", "71ae70081ff22dfb", "3670057f1b14c3e3", "cebc65e5f742b224"}},
+        {"herd_weight",
+         {"01da4d6dacc5ce11", "76894f289f28e346", "0cd5ce25eea4171a", "aa2159dc16318ead"}},
+        {"alignment_weight",
+         {"8548338bfa873dd2", "a06be1d753771f71", "64243c03ebf7c149", "0cbcfbbf21ba589a"}},
+        {"catch_radius",
+         {"9c9a064a0d815352", "17852f563d00ff71", "77592945e93dc0c9", "83d6493e0b44389a"}},
+        {"catch_satiation",
+         {"ff92cc970fa81e81", "dd94ee14295a1ace", "f4b51fb6cf0e578a", "3e23f4671550de35"}},
+        {"flock_neighbor_radius",
+         {"66d35a8ed48e9382", "1c81880e19ed58e1", "57846f6b4646eff9", "04b9f9272dc1aaca"}},
+        {"flock_separation_radius",
+         {"f36052321e998752", "ac7e9431e63dbef1", "ce1f752dfa55f4c9", "4684a910ad5ae41a"}},
+        {"flock_cohesion_weight",
+         {"35799529611c3ef7", "8435306e6b28e434", "6419052d9ac49008", "d6be819bce9149cb"}},
+        {"flock_separation_weight",
+         {"fc70e688455b7206", "7931bb1b786ca2ed", "7b895025fac53f2d", "6def33c8b1d87786"}},
+        {"graze_radius",
+         {"43327ef3839a8cd2", "cec85584da2403f1", "220e876b750b1049", "68ce6a63a141291a"}},
+        {"graze_per_creature",
+         {"fc072684a572ed4b", "562e828facfd8680", "4821155bbaf8af5c", "5ebd891abaa80547"}},
+        {"regrow_per_tick",
+         {"8829887f8c91cf3d", "80c679a6475c751a", "a26425a9c07e3cd6", "e6c064c7803f4ff1"}},
+        {"feed_per_graze",
+         {"6a01bedb4fea3e78", "8186704e10a399ff", "4b8920bf3f9be767", "a7d1804df46a8418"}},
+        {"rise_rate_per_second",
+         {"d58e9289ead43be3", "af9c0aa590a96294", "d20282977cf96f94", "c81de6be959c8cab"}},
+        {"drink_rate_per_second",
+         {"23959a73c2d11e52", "2f77044abf8faef1", "fe54bd6f9e8d8bc9", "c97d192986acd41a"}},
+        {"seek_threshold",
+         {"a4818c84cd83cc33", "9160b6e06e512d04", "77c086e95acb7d64", "14a1fe492a77fb5b"}},
+        {"hunger_threshold",
+         {"187dca69ca9a513b", "d6dfc7dbf4472664", "0e2a413a6b9f490c", "3be4cb8f2427293b"}},
+        {"feed_radius",
+         {"23cb6d3f5fd7e78b", "f722bbd9153302ec", "3262959885cf209c", "d9997ca0adf1f543"}},
+        {"feed_rate_per_tick",
+         {"2634683024d49a3b", "4f8e682b60a6a6d8", "1be0df00c5d9920c", "d75fac61c38823bf"}},
+        {"maturity_ticks",
+         {"aa5addef1bd017a3", "e67957a136a0bb10", "8da2c96e50024954", "bddd4f0445a96e57"}},
+        {"cooldown_ticks",
+         {"9855901802c6298b", "b87b2cc98534e930", "a6ecb87128bd629c", "01998aec0a50b2f7"}},
+        {"healthy_stamina",
+         {"6f47172c8a7d2fd2", "2fd2fbb8c7729f71", "4e231fa47bedb349", "9c2415a095b5d89a"}},
+        {"mate_seek_radius",
+         {"f2dc3640d6074196", "9570975264c968ad", "ea4ca76611a910fd", "61d88c9eedc0bd46"}},
+        {"courtship_radius",
+         {"75bdd1c6e3c940d2", "c0feb311fb69d4f1", "5499da3ed539c449", "5b04c7f0c286fa1a"}},
+        {"courtship_ticks",
+         {"bdf689fe074c9c27", "bc31f7cafa93815c", "1c0427bf58fe8038", "3ddc984123f9a033"}},
+        {"spawn_radius",
+         {"9d31f8449f67230e", "d6d54968861ec191", "cfe1b76e5757ddb5", "ecee797a474fec3a"}},
+        {"deposit",
+         {"7568296522c4fe1b", "1b323d26a7cb735c", "2857e1634040ad6c", "9cdcdd9cd1319233"}},
+        {"trail_weight",
+         {"5f470b8621134834", "82fa208bcdc9543f", "c896f8f4384cf503", "4134653f795e2b58"}},
+        {"goal_weight",
+         {"39b325ecef65bad3", "9f53c23606c499b4", "05629935822ec304", "5c1d04bbcbe3294b"}},
+        {"amplitude",
+         {"a01007e699175c93", "63e8ca7f33e1d9c4", "fdcc2987aac02fdc", "80bbdb54812b1793"}},
+    };
+    const auto variants = Luminumbra::TestSupport::SimulationConfigVariants();
+    ASSERT_EQ(variants.size(), std::size(vectors));
+    for (std::size_t i = 0; i < variants.size(); ++i) {
+        ASSERT_EQ(variants[i].first, vectors[i].name);
+        for (const bool regions : {false, true}) {
+            SCOPED_TRACE(variants[i].first + (regions ? " regions on" : " regions off"));
+            Luminumbra::world::GameSession session;
+            session.ApplySystemConfig(variants[i].second);
+            session.SetActiveRegionsEnabled(regions);
+            const std::size_t offset = regions ? 2u : 0u;
+            EXPECT_EQ(session.LegacyRevision3SystemConfigIdentity(), vectors[i].hashes[offset]);
+            EXPECT_EQ(session.SystemConfigIdentity(), vectors[i].hashes[offset + 1]);
+        }
+    }
+}
+
+TEST(SystemConfig, FrozenIdentitySessionOptionsCoverBothRegionProfiles) {
+    constexpr std::array<const char*, 2> expected[]{
+        {"6940021d07bb62cf", "35e66f9ff9909b7c"},
+        {"dc39d8a56618c7ff", "af9c68017d02d168"},
+        {"0017f78957d1631d", "0d4c1ac65f32c5ee"},
+        {"c66b76418c25cab5", "7db3826a535894e6"},
+        {"fb71ff0134ef6715", "02129ef0ae61d086"},
+        {"0820df2bb23ecc5f", "62240625eac98b88"},
+        {"973a17daa4bfe1cc", "58fd791b596366af"},
+        {"e49a4f3da30a6690", "a91cf301396b179f"},
+        {"8426406d0826954e", "c123fc31bd99c6ad"},
+        {"acd293f874d98fe6", "751bb18f901f06b5"},
+        {"6d5a1d4eaaa43586", "afd64067dbb45115"},
+        {"60ab39242d54c970", "1d33ec45f86107ff"},
+    };
+    std::size_t index = 0;
+    for (const bool regions : {false, true}) {
+        for (int option = 0; option < 6; ++option) {
+            Luminumbra::world::GameSession session;
+            session.SetActiveRegionsEnabled(regions);
+            auto scheduler = Luminumbra::world::RegionSchedulerConfig{};
+            switch (option) {
+                case 0:
+                    session.SetFiniteHydrologyEnabled(false);
+                    break;
+                case 1:
+                    session.SetWeatherRainEnabled(true, 26);
+                    break;
+                case 2:
+                    session.SetWeatherRainEnabled(true, std::numeric_limits<std::int32_t>::min());
+                    break;
+                case 3:
+                    --scheduler.work_limit;
+                    session.SetRegionSchedulerConfig(scheduler);
+                    break;
+                case 4:
+                    ++scheduler.hold_ticks;
+                    session.SetRegionSchedulerConfig(scheduler);
+                    break;
+                case 5:
+                    ++scheduler.reduced_shift;
+                    session.SetRegionSchedulerConfig(scheduler);
+                    break;
+            }
+            EXPECT_EQ(session.LegacyRevision3SystemConfigIdentity(), expected[index][0]);
+            EXPECT_EQ(session.SystemConfigIdentity(), expected[index][1]);
+            ++index;
+        }
+    }
+    EXPECT_EQ(index, std::size(expected));
 }
 
 TEST(SystemConfig, SimulationIdentityCoversEveryAppliedInput) {
@@ -314,7 +490,7 @@ TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
     EXPECT_TRUE(error.empty());
 #define EXPECT_HISTORICAL_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
     if (std::string(JSON_SECTION) == "sim") {                                                      \
-        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;                                   \
+        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << (JSON_NAME);                                 \
     }
     LUMIN_CONFIG_KEY_TABLE(EXPECT_HISTORICAL_KEY)
 #undef EXPECT_HISTORICAL_KEY
@@ -685,7 +861,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     std::filesystem::remove_all(dir, rm_ec); // non-throwing pre-clean
     const std::filesystem::path path = dir / "settings.json";
 
-    SystemConfig cfg = SystemConfig::FromJsonString(R"({
+    const SystemConfig cfg = SystemConfig::FromJsonString(R"({
       "sim": { "erosion": { "enabled": true } },
       "user": { "video": { "fov": 95.0, "window_mode": "windowed" },
                 "controls": { "Sprint": 340 } }
@@ -696,7 +872,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     // its handle is closed before cleanup (Windows can't delete an open file).
     std::string text;
     {
-        std::ifstream in(path);
+        const std::ifstream in(path);
         std::ostringstream ss;
         ss << in.rdbuf();
         text = ss.str();
@@ -747,7 +923,7 @@ TEST(SystemConfig, EnabledMissingTrueFalseAndMalformed) {
                               "{\"enabled\":null}",
                               "false"}) {
         auto json = nlohmann::json::parse(entry);
-        nlohmann::json document = {{"sim", {{"erosion", json}}}};
+        const nlohmann::json document = {{"sim", {{"erosion", json}}}};
         const auto cfg = SystemConfig::FromJsonString(document.dump());
         const bool expected = !(json.is_object() && json.contains("enabled") &&
                                 json["enabled"].is_boolean() && !json["enabled"].get<bool>());
@@ -764,7 +940,7 @@ TEST(SystemConfig, PackagedFlagsAgreeWithCompiledDefaults) {
 #define CHECK_PACKAGED_FLAG(name, section, json_section, json_name, residency)                     \
     EXPECT_EQ(document.at(json_section).at(json_name).at("enabled").get<bool>(),                   \
               SystemConfig::Defaults().enabled(SysKey::name))                                      \
-        << json_name;
+        << (json_name);
     LUMIN_CONFIG_KEY_TABLE(CHECK_PACKAGED_FLAG)
 #undef CHECK_PACKAGED_FLAG
     const auto packaged = SystemConfig::LoadFromFile(path);

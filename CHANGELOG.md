@@ -1,6 +1,9 @@
 # Changelog
 
+
 ## v0.3.1 — in preparation
+
+- Bind the persisted global water scheduler cursor into current water and world authority under rules revision 4, retaining explicit legacy encoders and projections without changing save or replay layouts (issue #533); native qualification remains pending.
 
 - Development continues on top of v0.3.0.
 

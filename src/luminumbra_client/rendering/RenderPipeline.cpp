@@ -2390,10 +2390,20 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
 
 void RenderPipeline::ensure_terrain_culling_hierarchy(
     const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
+    // Water-only owners do not enter terrain culling, but a retained GPU
+    // allocation stays drawable while its CPU replacement is unavailable.
+    const auto has_presented_terrain = [this](const ChunkMeshSnapshot& chunk) {
+        const auto found = m_chunk_render_data.find(chunk.id);
+        return chunk.has_terrain_mesh() ||
+               (found != m_chunk_render_data.end() &&
+                m_chunk_geometry_pool.valid_allocation(found->second.pool_handle,
+                                                       found->second.element_count));
+    };
     std::vector<ChunkID> sorted_chunk_ids;
     sorted_chunk_ids.reserve(renderable_chunks.size());
     for (const auto& chunk : renderable_chunks) {
-        sorted_chunk_ids.push_back(chunk.id);
+        if (has_presented_terrain(chunk))
+            sorted_chunk_ids.push_back(chunk.id);
     }
     std::sort(sorted_chunk_ids.begin(), sorted_chunk_ids.end());
 
@@ -2404,19 +2414,24 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
     }
 
     const bool needs_rebuild = !m_terrainCullingCache.valid ||
-                               m_terrainCullingCache.chunk_count != renderable_chunks.size() ||
+                               m_terrainCullingCache.chunk_count != sorted_chunk_ids.size() ||
                                m_terrainCullingCache.chunk_set_signature != signature;
     if (!needs_rebuild) {
         m_last_render_pass_stats.culling_hierarchy_chunks = m_terrainCullingCache.chunk_count;
         return;
     }
 
-    m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
+    std::vector<ChunkMeshSnapshot> terrain_chunks;
+    terrain_chunks.reserve(sorted_chunk_ids.size());
+    for (const auto& chunk : renderable_chunks)
+        if (has_presented_terrain(chunk))
+            terrain_chunks.push_back(chunk);
+    m_hierarchicalCuller.BuildHierarchy(terrain_chunks);
     m_terrainCullingCache.chunk_set_signature = signature;
-    m_terrainCullingCache.chunk_count = renderable_chunks.size();
+    m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();
     m_terrainCullingCache.valid = true;
     m_last_render_pass_stats.culling_hierarchy_rebuilds++;
-    m_last_render_pass_stats.culling_hierarchy_chunks = renderable_chunks.size();
+    m_last_render_pass_stats.culling_hierarchy_chunks = sorted_chunk_ids.size();
 }
 
 void RenderPipeline::render_frame(entt::registry& registry,
@@ -4387,7 +4402,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     std::unordered_set<ChunkID> active;
     active.reserve(chunks.size());
     for (const auto& chunk : chunks) {
-        active.insert(chunk.id);
+        if (Water || chunk.has_terrain_mesh())
+            active.insert(chunk.id);
     }
     std::vector<ChunkID> expired;
     for (auto& [id, data] : records) {

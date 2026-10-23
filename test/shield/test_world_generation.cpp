@@ -4,8 +4,10 @@
 #include <functional>
 #include <future>
 #include <iostream> // For printing benchmark results
-#include <memory>   // For std::unique_ptr
-#include <numeric>  // For std::accumulate
+#include <limits>
+#include <memory>  // For std::unique_ptr
+#include <numeric> // For std::accumulate
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -144,6 +146,36 @@ TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
     EXPECT_EQ(world_system.get_last_streaming_budget_stats().scheduled_meshing, 0u);
 }
 
+TEST_F(WorldGenerationTest, SimulationPreparationDoesNotDrainUnrelatedGeneration) {
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(&jobs, nullptr, params_guaranteed_surface, 1337, true);
+    world.set_authority_directory({});
+    entt::registry registry;
+    std::promise<void> release;
+    const auto released = release.get_future().share();
+    std::promise<void> started;
+    const auto blocker = jobs.dispatch_batch({[&started, released] {
+        started.set_value();
+        released.wait();
+    }});
+    started.get_future().wait();
+    const auto generation = world.dispatch_generation_jobs(std::vector<IVec3>{{200, 0, 200}});
+    auto preparation = std::async(
+        std::launch::async, [&] { world.prepare_region_authority(registry, {}, {}, nullptr); });
+    // Bounded failure cleanup releases the worker even if preparation wrongly
+    // waits for the render generation lane. No timing enters simulation state.
+    const auto completed = preparation.wait_for(std::chrono::seconds(5));
+    const bool queued = generation.counter && generation.counter->load() > 0;
+    release.set_value();
+    preparation.get();
+    jobs.wait(blocker);
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(completed, std::future_status::ready);
+    EXPECT_TRUE(queued);
+    EXPECT_EQ(world.simulation_chunk_count(), 0u);
+}
+
 TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {
     SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
     Chunk chunk({0, 0, 0});
@@ -181,6 +213,118 @@ TEST_F(WorldGenerationTest, UnderwaterRequiresWaterAboveItsBedInsteadOfAHeightCu
         << "drained live water must immediately become dry";
     chunk->water_bed_mm.assign(4, -10000);
     EXPECT_FALSE(land.IsUnderwater({-8, -5, -8})) << "dry live basins below sea level stay dry";
+}
+
+TEST_F(WorldGenerationTest, AuthoritativeColumnOverridesWetRenderLayers) {
+    SHIELD_WorldSystem world(nullptr, nullptr, params_guaranteed_surface, 1337);
+    const auto make_grid = [](const IVec3& coords, int depth) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->current_water_resolution.store(2);
+        chunk->water_bed_mm.assign(4, 10000);
+        chunk->water_depth_mm.assign(4, depth);
+        chunk->has_water_sim.store(true);
+        return chunk;
+    };
+    auto cache = make_grid({-1, 2, -1}, 4000);
+    ASSERT_TRUE(world.adopt_streamed_chunk(cache));
+    EXPECT_TRUE(world.IsUnderwater({-8, 12, -8}));
+    auto owner = make_grid({-1, 0, -1}, 0);
+    owner->mark_water_data_dirty();
+    ASSERT_TRUE(world.adopt_streamed_chunk(owner));
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->water_depth_mm.assign(4, 4000);
+    EXPECT_TRUE(world.IsUnderwater({-8, 12, -8}));
+    // Incomplete authority cannot allow an unrelated frozen cache to win.
+    owner->water_depth_mm.pop_back();
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->water_bed_mm.clear();
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->current_water_resolution.store(std::numeric_limits<int>::max());
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->current_water_resolution.store(0);
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->has_water_sim.store(false);
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+}
+
+TEST_F(WorldGenerationTest, UnderwaterRejectsUnrepresentableColumnsAndHandlesExtremeHeights) {
+    SHIELD_WorldSystem world(nullptr, nullptr, params_underwater_world, 1337);
+    const auto make_grid = [](const IVec3& coords) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->current_water_resolution.store(2);
+        chunk->water_bed_mm.assign(4, -1000);
+        chunk->water_depth_mm.assign(4, 2000);
+        chunk->has_water_sim.store(true);
+        chunk->mark_water_data_dirty();
+        return chunk;
+    };
+    for (const int x : {Chunk::kPackedMinXz, Chunk::kPackedMaxXz}) {
+        auto owner = make_grid({x, 0, 0});
+        ASSERT_TRUE(world.adopt_streamed_chunk(owner));
+        const float world_x = static_cast<float>(x) * CHUNK_SIZE_X;
+        EXPECT_TRUE(world.IsUnderwater({world_x, 0, 0}));
+    }
+    for (const float coordinate : {std::numeric_limits<float>::quiet_NaN(),
+                                   std::numeric_limits<float>::infinity(),
+                                   std::numeric_limits<float>::max(),
+                                   -std::numeric_limits<float>::max(),
+                                   16777216.0f,
+                                   -16777218.0f}) {
+        EXPECT_FALSE(world.IsUnderwater({coordinate, 0, 0}));
+        EXPECT_FALSE(world.IsUnderwater({0, 0, coordinate}));
+    }
+    for (const float height : {std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::infinity(),
+                               std::numeric_limits<float>::max(),
+                               -std::numeric_limits<float>::max()})
+        EXPECT_FALSE(world.IsUnderwater({0, height, 0}));
+}
+
+TEST_F(WorldGenerationTest, WaterColumnsConnectAcrossDifferentGroundLayers) {
+    auto params = params_guaranteed_surface;
+    params.height_offset = 17.0f;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337, true);
+    WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(true, 0, 0);
+    world.SetWaterSystem(&water);
+    entt::registry registry;
+    const std::set<std::pair<i32, i32>> regions{{0, 0}, {-1, 0}, {0, -1}, {-1, -1}};
+    const std::vector<Vec3> anchors{{8, 20, 8}};
+    world.prepare_region_authority(registry, regions, anchors, nullptr);
+    for (int z = -1; z <= 1; ++z) {
+        for (int x = -1; x <= 1; ++x) {
+            auto column = world.find_streamed_chunk({x, 0, z});
+            auto ground = world.find_streamed_chunk({x, 1, z});
+            ASSERT_NE(column, nullptr);
+            ASSERT_NE(ground, nullptr);
+            EXPECT_TRUE(column->has_water_sim.load());
+            EXPECT_FALSE(ground->has_water_sim.load());
+            column->water_bed_mm.assign(64, x == 0 ? 15000 : 17000);
+            column->water_depth_mm.assign(64, 4000);
+        }
+    }
+    world.simulate_region_authority(registry, regions, anchors, nullptr);
+    EXPECT_GT(world.debug_water_seam_wet_pairs(), 0);
+    auto column = world.find_streamed_chunk({0, 0, 0});
+    EXPECT_GT(column->water_depth_mm[4 * 8 + 7], 4000);
+    const auto depth_before = std::accumulate(
+        column->water_depth_mm.begin(), column->water_depth_mm.end(), std::int64_t{0});
+    water.apply_displacement({8, 17, 8}, 1.0f);
+    EXPECT_GT(std::accumulate(
+                  column->water_depth_mm.begin(), column->water_depth_mm.end(), std::int64_t{0}),
+              depth_before);
+    const auto before = world.water_epoch();
+    EXPECT_GT(world.EditTerrainBed({8, 17, 8}, -1000, 3.0f), 0);
+    EXPECT_GT(world.water_epoch(), before);
+    // The canonical water owner stays independent of the collider layer.
+    for (const auto& chunk : world.snapshot_streamed_chunks()) {
+        if (chunk->get_coords().y != 0) {
+            EXPECT_FALSE(chunk->has_water_authority());
+        }
+    }
+    world.clear_world(nullptr);
+    EXPECT_EQ(world.EditTerrainBed({8, 17, 8}, -1000, 3.0f), 0);
 }
 
 TEST_F(WorldGenerationTest, UndergroundStreamingFollowsTheAnchorAndBuildsCaveMeshes) {

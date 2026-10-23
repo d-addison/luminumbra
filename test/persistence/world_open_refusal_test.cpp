@@ -45,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stop_token>
 #include <string>
@@ -148,9 +149,9 @@ protected:
                  root / "worlds/atlas/presets-rev6",
                  fs::copy_options::recursive);
         save = root / "worlds/saves/fixture";
-        Write(
-            save / "world_info.json",
-            R"({"container_version":2,"name":"Fixture","seed":"1337","worldType":"default","creationTime":1,"spawnPoint":{"x":8,"y":18,"z":8}})");
+        Write(save / "world_info.json",
+              R"({"container_version":2,"name":"Fixture","seed":"1337","worldType":"default",)"
+              R"("creationTime":1,"spawnPoint":{"x":8,"y":18,"z":8}})");
         jobs.startup(1);
         WorldStreamingState state;
         auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
@@ -357,6 +358,13 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_FALSE(session.SaveWorldState());
         EXPECT_FALSE(session.SaveWorldStateTo(save));
         EXPECT_FALSE(session.LoadWorldStateFrom(save));
+        if (entry == 1) {
+            // A healthy destination must not hide a missing fatal-refusal latch.
+            EXPECT_FALSE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+            EXPECT_FALSE(session.SaveWorldStateTo(root / "refused-export", nullptr, true));
+            EXPECT_FALSE(session.SaveWorld());
+            EXPECT_FALSE(session.SaveWorldState());
+        }
     }
     ASSERT_FALSE(error.empty());
     if (obsolete) {
@@ -1662,7 +1670,7 @@ public:
     SiblingWriteFailure(const SiblingWriteFailure&) = delete;
     SiblingWriteFailure& operator=(const SiblingWriteFailure&) = delete;
 
-    void Arm(const fs::path& destination, bool energy) {
+    void Arm([[maybe_unused]] GameSession& session, const fs::path& destination, bool energy) {
 #if defined(_WIN32)
         const auto path = energy ? destination / "aether_state.efs"
                                  : WorldSaveService::plant_entities_path(destination);
@@ -1675,22 +1683,35 @@ public:
                                nullptr);
         ASSERT_NE(handle, INVALID_HANDLE_VALUE);
 #else
-        // One resident region and its manifest each flush all ancestor entries
-        // and then their own directory before the selected sibling writer.
-        int flushes = 2;
-        for (auto ancestor = WorldSaveService::region_directory(destination);
-             !ancestor.empty() && ancestor != ancestor.root_path();
-             ancestor = ancestor.parent_path())
-            flushes += 2;
-        if (energy) {
-            const auto plants = WorldSaveService::plant_entities_path(destination);
-            // The plant writer flushes every ancestor entry and its replacement.
-            for (auto ancestor = plants.parent_path();
-                 !ancestor.empty() && ancestor != ancestor.root_path();
-                 ancestor = ancestor.parent_path())
-                ++flushes;
-            ++flushes;
+        // Follow the payload sequence in SaveWorldStateToImpl: exported durable
+        // authority, live regions + manifest, then plants before energy. Each
+        // replacement flushes its ancestors and its final parent exactly once.
+        int flushes = 0;
+        const auto source = session.GetWorldSystem()->authority_directory();
+        if (session.ActiveRegionsEnabled() && source != destination &&
+            !fs::equivalent(source, destination)) {
+            for (const auto& entry :
+                 fs::directory_iterator(WorldSaveService::region_directory(source))) {
+                if (entry.path().extension() != ".lmr")
+                    continue;
+                WorldSaveService::AuthorityReader reader;
+                ASSERT_TRUE(reader.open(entry.path()));
+                if (reader.next_id().has_value())
+                    flushes += ReplacementFlushes(WorldSaveService::region_directory(destination) /
+                                                  entry.path().filename());
+            }
         }
+        std::set<fs::path> regions;
+        for (const auto& resident : session.GetWorldSystem()->snapshot_streamed_chunks()) {
+            int rx = 0, rz = 0;
+            WorldSaveService::region_coords_for_chunk(resident->get_coords(), rx, rz);
+            regions.insert(WorldSaveService::region_file_path(destination, rx, rz));
+        }
+        for (const auto& region : regions)
+            flushes += ReplacementFlushes(region);
+        flushes += ReplacementFlushes(WorldSaveService::world_manifest_path(destination));
+        if (energy)
+            flushes += ReplacementFlushes(WorldSaveService::plant_entities_path(destination));
         WorldSaveService::set_directory_flush_failure_for_testing(flushes);
 #endif
     }
@@ -1707,6 +1728,18 @@ public:
     }
 
 private:
+#if !defined(_WIN32)
+    static int ReplacementFlushes(const fs::path& payload) {
+        // One post-rename parent flush, plus one per non-root ancestor.
+        // Path depth bounds this count; the fixture owns every component.
+        int flushes = 1;
+        for (auto ancestor = payload.parent_path();
+             !ancestor.empty() && ancestor != ancestor.root_path();
+             ancestor = ancestor.parent_path())
+            ++flushes;
+        return flushes;
+    }
+#endif
 #if defined(_WIN32)
     HANDLE handle = INVALID_HANDLE_VALUE;
 #endif
@@ -1880,7 +1913,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     // Declare after the runner so even a fatal assertion releases the obstruction
     // before its destructor attempts a shutdown save.
     SiblingWriteFailure failure;
-    ASSERT_NO_FATAL_FAILURE(failure.Arm(destination, energy_failure));
+    ASSERT_NO_FATAL_FAILURE(failure.Arm(*session, destination, energy_failure));
     world::WorldStateSaveReport report;
     if (save_path == 0)
         EXPECT_FALSE(session->SaveWorldState(&report));
@@ -1947,6 +1980,53 @@ INSTANTIATE_TEST_SUITE_P(RegionModesWritersAndSavePaths,
                          CompleteSaveFailure,
                          testing::Combine(testing::Values(0, 1), testing::Range(0, 14)));
 
+void ExpectExportRetainsPendingChunks(const fs::path& destination,
+                                      const WorldStreamingState& expected,
+                                      const std::vector<ChunkID>& pending_ids) {
+    WorldStreamingState exported;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.load_world(exported, destination, errors));
+    EXPECT_TRUE(errors.empty());
+    // A fixed tick can admit the simulation water horizon independently of
+    // rendering. A complete export must retain every captured resident.
+    ASSERT_EQ(exported.size(), expected.size());
+    for (const auto id : pending_ids) {
+        const auto resident = expected.find_chunk(id);
+        ASSERT_NE(resident, nullptr);
+        EXPECT_TRUE(resident->is_voxel_data_dirty());
+    }
+    for (const auto& resident : expected.snapshot_chunks()) {
+        SCOPED_TRACE(resident->get_id());
+        const auto saved = exported.find_chunk(resident->get_id());
+        ASSERT_NE(saved, nullptr);
+        EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
+        EXPECT_EQ(saved->sdf_data, resident->sdf_data);
+        EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
+    }
+}
+
+void ExpectCanonicalPersistsPendingChunks(const fs::path& canonical,
+                                          const WorldStreamingState& expected,
+                                          const std::vector<ChunkID>& pending_ids) {
+    std::vector<std::string> errors;
+    WorldStreamingState persisted;
+    ASSERT_TRUE(WorldSaveService{}.load_world(persisted, canonical, errors));
+    EXPECT_TRUE(errors.empty());
+    // Incremental canonical saves may omit regenerable clean residents,
+    // but must acknowledge and persist every edit left pending by export.
+    for (const auto id : pending_ids) {
+        SCOPED_TRACE(id);
+        const auto resident = expected.find_chunk(id);
+        const auto saved = persisted.find_chunk(id);
+        ASSERT_NE(resident, nullptr);
+        ASSERT_NE(saved, nullptr);
+        EXPECT_FALSE(resident->is_voxel_data_dirty());
+        EXPECT_EQ(saved->heightmap_data, resident->heightmap_data);
+        EXPECT_EQ(saved->sdf_data, resident->sdf_data);
+        EXPECT_EQ(saved->water_depth_mm, resident->water_depth_mm);
+    }
+}
+
 TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits) {
     for (const bool regions : {false, true}) {
         SCOPED_TRACE(regions);
@@ -1961,7 +2041,14 @@ TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits
         const auto before_chunks = Read(WorldSaveService::region_file_path(canonical, 0, 0));
         if (regions) {
             ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault().has_value());
         }
+        WorldStreamingState expected;
+        for (const auto& resident : session->GetWorldSystem()->snapshot_streamed_chunks())
+            ASSERT_TRUE(expected.insert_chunk(resident));
+        ASSERT_EQ(expected.find_chunk(chunk->get_id()), chunk);
+        const auto pending_ids = expected.dirty_chunk_ids();
+        ASSERT_FALSE(pending_ids.empty());
         const auto ledger = session->GetActiveRegionLedger().encode();
         Write(canonical / "unrelated/retained.txt", "canonical member");
         const auto destination = root / (regions ? "enabled-export" : "legacy-export") / "";
@@ -1976,17 +2063,12 @@ TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits
         EXPECT_EQ(Read(canonical / "unrelated/retained.txt"), "canonical member");
         EXPECT_FALSE(fs::exists(destination / "unrelated"));
         EXPECT_TRUE(WorldSaveService::validate_save(destination));
-        WorldStreamingState exported;
-        std::vector<std::string> errors;
-        ASSERT_TRUE(WorldSaveService{}.load_world(exported, destination, errors));
-        EXPECT_TRUE(errors.empty());
-        ASSERT_EQ(exported.size(), 1u);
-        ASSERT_NE(exported.find_chunk(chunk->get_id()), nullptr);
-        EXPECT_EQ(exported.find_chunk(chunk->get_id())->heightmap_data, chunk->heightmap_data);
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectExportRetainsPendingChunks(destination, expected, pending_ids));
         ASSERT_TRUE(session->SaveWorldState());
         EXPECT_FALSE(chunk->is_voxel_data_dirty());
-        EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)),
-                  Read(WorldSaveService::region_file_path(destination, 0, 0)));
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectCanonicalPersistsPendingChunks(canonical, expected, pending_ids));
         runner.Shutdown();
     }
 }
@@ -2156,6 +2238,88 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             runner.Shutdown();
         }
     }
+}
+
+TEST_F(WorldOpenRefusal, FailedPlantPayloadDoesNotWritePendingEnergy) {
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(active_regions);
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("Failed plant payload", "1337", "default"));
+        std::shared_ptr<Chunk> chunk;
+        PreparePendingSnapshot(session, chunk, false);
+        ASSERT_FALSE(HasFatalFailure());
+        chunk->clear_voxel_data_dirty();
+        const SnapshotDestinationBytes before(root);
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+        const bool saved = session.SaveWorldState();
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        EXPECT_FALSE(saved);
+        before.ExpectUnchanged();
+        EXPECT_FALSE(fs::exists(session.GetWorldSaveDir() / "aether_state.efs"));
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_TRUE(fs::is_regular_file(session.GetWorldSaveDir() / "aether_state.efs"));
+        EXPECT_TRUE(
+            fs::is_regular_file(WorldSaveService::plant_entities_path(session.GetWorldSaveDir())));
+    }
+}
+
+TEST_F(WorldOpenRefusal, ActiveFullSnapshotPreservesCleanOwnershipAndRefusesFailedPayload) {
+    const auto config = SnapshotRunnerConfig(RootString(), true);
+    Server::ServerWorldRunner runner(config);
+    BootSnapshotRunner(runner, true);
+    ASSERT_FALSE(HasFatalFailure());
+    auto* session = runner.Session();
+    const auto destination = session->GetWorldSaveDir();
+    auto* energy = session->GetEnergyFieldState();
+    ASSERT_NE(energy, nullptr);
+    energy->SetAnchorCell(0, 0);
+    energy->QueueDeposit(1, 0, 0, 0, 60000);
+    energy->Tick(0);
+    for (const int x : {1280, 1312}) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, -1280));
+        chunk->set_state(ChunkState::Idle);
+        chunk->heightmap_data = {42.0f};
+        chunk->has_water_sim.store(true);
+        chunk->current_water_resolution.store(2);
+        chunk->water_depth_mm.assign(4, 1000);
+        chunk->water_bed_mm.assign(4, 42000);
+        chunk->water_edge_flux.assign(8, 0);
+        if (x == 1280)
+            chunk->mark_voxel_data_dirty();
+        chunk->clear_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    const auto expected = session->GetWorldSystem()->compute_chunk_hashes().world;
+    const SnapshotDestinationBytes before(root);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const auto failed_count = runner.SaveFullSnapshot();
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_EQ(failed_count, 0u);
+    before.ExpectUnchanged();
+    ASSERT_EQ(runner.SaveFullSnapshot(), 2u);
+    GameSession loaded;
+    loaded.SetRootPath(config.root_path);
+    loaded.SetJobSystem(&jobs);
+    ASSERT_TRUE(config.systems_config_override.has_value());
+    if (!config.systems_config_override.has_value())
+        return;
+    loaded.ApplySystemConfig(*config.systems_config_override);
+    ASSERT_TRUE(loaded.LoadWorld(session->GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetWorldSystem()->compute_chunk_hashes().world, expected);
+    const auto authority = loaded.GetWorldSystem()->find_streamed_chunk({1280, 0, -1280});
+    const auto generated = loaded.GetWorldSystem()->find_streamed_chunk({1312, 0, -1280});
+    ASSERT_NE(authority, nullptr);
+    ASSERT_NE(generated, nullptr);
+    EXPECT_TRUE(authority->has_simulation_authority());
+    EXPECT_FALSE(generated->has_simulation_authority());
+    EXPECT_FALSE(authority->is_voxel_data_dirty());
+    EXPECT_FALSE(generated->is_voxel_data_dirty());
+    EXPECT_TRUE(generated->has_water_sim.load());
+    runner.Shutdown();
 }
 
 void WorldOpenRefusal::CheckLegacyFullSnapshotRefusalAndRecovery() {
@@ -2351,4 +2515,320 @@ TEST_F(WorldOpenRefusal, DirectoryWatchWildcardAndMissingDirectoryRemainSafe) {
     EXPECT_NO_THROW(reload.Update());
 }
 
+// 8,193 edited records exercise both sides of the runtime resident boundary.
+// Empty SDF is a supported edited heightfield; each record has a unique marker.
+void WriteLargeEditedSnapshot(const fs::path& directory) {
+    WorldStreamingState state;
+    constexpr std::size_t count = Systems::SHIELD_WorldSystem::kActiveChunkBudget + 1;
+    for (std::size_t index = 0; index < count; ++index) {
+        auto chunk = state.get_or_create_chunk(IVec3(32768 + static_cast<int>(index), 0, 0));
+        chunk->heightmap_data.assign(std::size_t{17} * 17, static_cast<float>(index) + 0.25f);
+        chunk->mark_sdf_loaded_or_edited();
+        chunk->set_state(ChunkState::Idle);
+    }
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, directory));
+}
+
+TEST_F(WorldOpenRefusal, LegacySnapshotLoadsEveryEditedRecordBeyondActiveBudget) {
+    fs::remove_all(save / "chunks");
+    ASSERT_NO_FATAL_FAILURE(WriteLargeEditedSnapshot(save));
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    constexpr auto count = Systems::SHIELD_WorldSystem::kActiveChunkBudget + 1;
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), count);
+    EXPECT_EQ(session.GetWorldSystem()->snapshot_streamed_chunks().size(), count);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto chunk = session.GetWorldSystem()->find_streamed_chunk(
+            IVec3(32768 + static_cast<int>(index), 0, 0));
+        ASSERT_NE(chunk, nullptr) << index;
+        ASSERT_FALSE(chunk->heightmap_data.empty());
+        EXPECT_EQ(chunk->heightmap_data.front(), static_cast<float>(index) + 0.25f);
+    }
+}
+
+TEST_F(WorldOpenRefusal, ActiveSnapshotKeepsOverflowDurableAndRestoresSavedContents) {
+    fs::remove_all(save / "chunks");
+    ASSERT_NO_FATAL_FAILURE(WriteLargeEditedSnapshot(save));
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    session.SetReplicatedSimulationAnchors({});
+    auto* world = session.GetWorldSystem();
+    constexpr auto budget = Systems::SHIELD_WorldSystem::kActiveChunkBudget;
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), budget);
+    EXPECT_EQ(world->snapshot_streamed_chunks().size(), budget);
+    const IVec3 overflow(32768 + static_cast<int>(budget), 0, 0);
+    EXPECT_EQ(world->find_streamed_chunk(overflow), nullptr);
+    // Activating each saved area restores its durable records even when the
+    // resident prefix filled the budget. Only displaced records are rewritten.
+    for (const auto index : {std::size_t{0}, budget / 2, budget}) {
+        const IVec3 coords(32768 + static_cast<int>(index), 0, 0);
+        session.SetReplicatedSimulationAnchors(
+            {Vec3(static_cast<float>(coords.x) * CHUNK_SIZE_X + 8, 8, 8)});
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto chunk = world->find_streamed_chunk(coords);
+        ASSERT_NE(chunk, nullptr) << index;
+        ASSERT_FALSE(chunk->heightmap_data.empty());
+        EXPECT_EQ(chunk->heightmap_data.front(), static_cast<float>(index) + 0.25f);
+        EXPECT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+        EXPECT_LE(world->snapshot_streamed_chunks().size(), budget);
+    }
+}
+
+TEST_F(WorldOpenRefusal, RequiredSpawnHorizonDisplacesFullRetainedSnapshot) {
+    fs::remove_all(save / "chunks");
+    ASSERT_NO_FATAL_FAILURE(WriteLargeEditedSnapshot(save));
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    auto* world = runner.Session()->GetWorldSystem();
+    EXPECT_EQ(runner.Session()->GetLastLoadedChunkCount(),
+              Systems::SHIELD_WorldSystem::kActiveChunkBudget);
+    EXPECT_LE(world->snapshot_streamed_chunks().size(),
+              Systems::SHIELD_WorldSystem::kActiveChunkBudget);
+    EXPECT_FALSE(world->authority_fault());
+    // The saved prefix was far from spawn. Its first deterministic victim
+    // remains durable after synchronous loading and subsequent boot streaming.
+    WorldSaveService::AuthorityReader reader;
+    ASSERT_TRUE(WorldSaveService::open_region_authority(
+        WorldSaveService::region_file_path(save, 1024, 0), reader));
+    auto first = WorldSaveService::read_next_authority(reader);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->get_coords(), IVec3(32768, 0, 0));
+    EXPECT_EQ(first->heightmap_data.front(), 0.25f);
+}
+
+TEST_F(WorldOpenRefusal, ProductionChunkOracleIgnoresCameraAndDurableWaterResidency) {
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.availability_trace = true;
+    config.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunner resident(config), evicted(config);
+    ASSERT_TRUE(resident.Boot()) << resident.GetBootError();
+    ASSERT_TRUE(evicted.Boot()) << evicted.GetBootError();
+    const IVec3 coords(4096, 0, 4096);
+    for (auto* runner : {&resident, &evicted}) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->heightmap_data.assign(std::size_t{17} * 17, -2.0f);
+        chunk->has_water_sim.store(true);
+        chunk->current_water_resolution.store(16);
+        chunk->water_depth_mm.assign(256, 2000);
+        chunk->water_bed_mm.assign(256, -2000);
+        chunk->water_edge_flux.assign(512, 7);
+        chunk->water_level_data.assign(256, 0.0f);
+        chunk->water_sim_terrain_height.assign(256, -2.0f);
+        chunk->water_flow_data.assign(256, Vec2(0.0f));
+        chunk->water_rest_level.assign(256, 0.0f);
+        chunk->is_water_sleeping.store(false);
+        chunk->ticks_below_threshold = 17;
+        chunk->mark_sdf_loaded_or_edited();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(runner->Session()->GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    auto* moving_world = evicted.Session()->GetWorldSystem();
+    const auto content_before = moving_world->compute_chunk_hashes();
+    auto changed_water = moving_world->find_streamed_chunk(coords);
+    ++changed_water->ticks_below_threshold;
+    const auto content_after = moving_world->compute_chunk_hashes();
+    EXPECT_NE(content_before.sub.water, content_after.sub.water);
+    EXPECT_NE(content_before.world, content_after.world);
+    EXPECT_EQ(content_before.sub.terrain, content_after.sub.terrain);
+    --changed_water->ticks_below_threshold;
+    changed_water.reset();
+    const auto before = evicted.ComputeWorldHash();
+    const auto water_before = evicted.ComputeWorldSubHashes().water;
+    EXPECT_EQ(resident.ComputeWorldHash(), before);
+    for (int frame = 0; frame < 4; ++frame) {
+        moving_world->update(evicted.Session()->GetRegistry(), Vec3(-4096, 8, -4096), nullptr);
+        moving_world->wait_for_streaming_jobs();
+    }
+    ASSERT_EQ(moving_world->find_streamed_chunk(coords), nullptr);
+    ASSERT_NE(resident.Session()->GetWorldSystem()->find_streamed_chunk(coords), nullptr);
+    EXPECT_EQ(evicted.ComputeWorldHash(), before);
+    EXPECT_EQ(evicted.ComputeWorldSubHashes().water, water_before);
+    EXPECT_EQ(resident.ComputeWorldSubHashes().water, water_before);
+    std::string combined;
+    Persistence::WorldStreamingStateSubHashes sub;
+    evicted.ComputeWorldHashAndSubHashes(combined, sub);
+    EXPECT_EQ(combined, before);
+    EXPECT_EQ(sub.water, water_before);
+    // Restoring through the public generation request preserves the same oracle.
+    moving_world->dispatch_generation_jobs(std::vector<IVec3>{coords});
+    moving_world->wait_for_streaming_jobs();
+    ASSERT_NE(moving_world->find_streamed_chunk(coords), nullptr);
+    EXPECT_EQ(evicted.ComputeWorldHash(), before);
+    EXPECT_EQ(evicted.ComputeWorldSubHashes().water, water_before);
+    // The recorded availability oracle uses simulation participants too, even
+    // while the peers retain different render caches from the preceding frames.
+    ASSERT_EQ(resident.RunFixedTicks(1).ticks_executed, 1u);
+    ASSERT_EQ(evicted.RunFixedTicks(1).ticks_executed, 1u);
+    ASSERT_EQ(resident.AvailabilityTrace().size(), 1u);
+    ASSERT_EQ(evicted.AvailabilityTrace().size(), 1u);
+    EXPECT_EQ(resident.AvailabilityTrace(), evicted.AvailabilityTrace());
+}
+
+TEST_F(WorldOpenRefusal, RegionReplacementPreservesIndependentReaderImage) {
+    const IVec3 coords(0, 0, 0);
+    auto original = std::make_shared<Chunk>(coords);
+    original->heightmap_data.assign(std::size_t{17} * 17, 3.0f);
+    original->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(save, original));
+    const auto path = WorldSaveService::region_file_path(save, 0, 0);
+    // Simulate a far-LOD worker retaining its own open reader across eviction.
+    // It must finish the old image while a new reader observes the replacement.
+    WorldSaveService::AuthorityReader independent_reader;
+    ASSERT_TRUE(WorldSaveService::open_region_authority(path, independent_reader));
+    auto replacement = std::make_shared<Chunk>(coords);
+    replacement->heightmap_data.assign(std::size_t{17} * 17, 7.0f);
+    replacement->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(save, replacement));
+    auto old_image = WorldSaveService::read_next_authority(independent_reader);
+    ASSERT_NE(old_image, nullptr);
+    EXPECT_EQ(old_image->heightmap_data, original->heightmap_data);
+    WorldSaveService::AuthorityReader new_reader;
+    ASSERT_TRUE(WorldSaveService::open_region_authority(path, new_reader));
+    auto new_image = WorldSaveService::read_next_authority(new_reader);
+    ASSERT_NE(new_image, nullptr);
+    EXPECT_EQ(new_image->heightmap_data, replacement->heightmap_data);
+}
+
+TEST_F(WorldOpenRefusal, ActiveRegionWaterSmokePublishesZeroAvatarWorkloadAnchor) {
+    // A submerged world guarantees both wet cells and adjacent wet seams.
+    const auto preset_path = root / "worlds/atlas/presets/default.json";
+    auto preset = nlohmann::json::parse(Read(preset_path));
+    preset["generation_params"]["terrain"]["height_offset"] = -256.0;
+    Write(preset_path, preset.dump());
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_name = "Water workload";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.water_smoke = true;
+    config.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_TRUE(runner.Session()->ActiveRegionsEnabled());
+    const auto report = runner.RunFixedTicks(4);
+    ASSERT_FALSE(report.region_fault) << report.region_fault_message;
+    ASSERT_EQ(report.ticks_executed, 4u);
+    EXPECT_TRUE(report.water.enabled);
+    EXPECT_GT(report.water.cells_simmed_total, 0u);
+    EXPECT_GT(report.water.seam_wet_pairs_max, 0);
+    EXPECT_TRUE(report.water.mass_ok);
+    EXPECT_GT(runner.Session()->GetWorldSystem()->simulation_chunk_count(), 0u);
+    // Workload anchors use the absolute simulation tick, including across calls.
+    Server::ServerWorldRunner split(config);
+    ASSERT_TRUE(split.Boot()) << split.GetBootError();
+    for (int batch = 0; batch < 2; ++batch) {
+        const auto partial = split.RunFixedTicks(2);
+        ASSERT_FALSE(partial.region_fault) << partial.region_fault_message;
+        ASSERT_EQ(partial.ticks_executed, 2u);
+    }
+    EXPECT_EQ(runner.ComputeWorldHash(), split.ComputeWorldHash());
+    EXPECT_EQ(runner.Session()->GetActiveRegionLedger().canonical_bytes(),
+              split.Session()->GetActiveRegionLedger().canonical_bytes());
+}
+
+TEST_F(WorldOpenRefusal, PartialAuthorityHasNoSimulationCollisionSurface) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Partial surface", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({Vec3(8, 100, 8)});
+    auto chunk = std::make_shared<Chunk>(IVec3(4, 0, 4));
+    chunk->heightmap_data = {8.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_FALSE(chunk->has_collision.load());
+}
+
 } // namespace
+
+#include "../support/WaterSchedulerFixture.h"
+
+TEST_F(WorldOpenRefusal, SchedulerCursorBindsAllThreeServerCapturesAndSharedClientAuthority) {
+    for (const bool regions : {false, true}) {
+        for (const bool high : {false, true}) {
+            Server::ServerWorldRunnerConfig config;
+            config.root_path = RootString();
+            config.world_id = "fixture";
+            config.surface_radius = 0;
+            config.collision_radius = 0;
+            config.test_streaming_radius_cap = 1;
+            config.systems_config_override =
+                luminumbra::core::SystemConfig::FromJsonString(nlohmann::json{
+                    {"sim",
+                     {{"active_regions", {{"enabled", regions}}},
+                      {"water_high_res", {{"enabled", high}}},
+                      {"hydrology_weather",
+                       {{"enabled", false}}}}}}.dump());
+            Server::ServerWorldRunner first(config), second(config);
+            ASSERT_TRUE(first.Boot()) << first.GetBootError();
+            ASSERT_TRUE(second.Boot()) << second.GetBootError();
+            const auto count = high ? std::size_t{17} : std::size_t{65};
+            auto first_chunks =
+                TestSupport::InstallSchedulerChunks(*first.Session(), high ? 16 : 8, count);
+            auto second_chunks =
+                TestSupport::InstallSchedulerChunks(*second.Session(), high ? 16 : 8, count);
+            second.Session()->GetWorldSystem()->SetWaterSimWindowCursor(count - 1);
+            EXPECT_EQ(first.Session()->GetWorldClock().canonical_bytes(),
+                      second.Session()->GetWorldClock().canonical_bytes());
+            EXPECT_EQ(first.Session()->GetActiveRegionLedger().canonical_bytes(),
+                      second.Session()->GetActiveRegionLedger().canonical_bytes());
+            EXPECT_EQ(first.Session()->SystemConfigIdentity(),
+                      second.Session()->SystemConfigIdentity());
+            EXPECT_EQ(first.Session()->PresetContentHash(), second.Session()->PresetContentHash());
+            const auto first_hash = first.ComputeWorldHash();
+            const auto second_hash = second.ComputeWorldHash();
+            const auto first_sub = first.ComputeWorldSubHashes();
+            const auto second_sub = second.ComputeWorldSubHashes();
+            EXPECT_NE(first_hash, second_hash);
+            EXPECT_NE(first_sub.water, second_sub.water);
+            EXPECT_EQ(first_sub.terrain, second_sub.terrain);
+            for (auto* runner : {&first, &second}) {
+                std::string combined;
+                Persistence::WorldStreamingStateSubHashes sub;
+                runner->ComputeWorldHashAndSubHashes(combined, sub);
+                EXPECT_EQ(combined, runner->ComputeWorldHash());
+                EXPECT_EQ(sub.water, runner->ComputeWorldSubHashes().water);
+                // This immutable session value is also the client driver's production input.
+                const auto shared = runner->Session()->CaptureAuthorityHashes();
+                EXPECT_EQ(shared.sub.water, sub.water);
+                EXPECT_EQ(shared.sub.terrain, sub.terrain);
+                EXPECT_EQ(shared.world,
+                          runner->Session()->GetWorldSystem()->compute_chunk_hashes().world);
+            }
+            first.Session()->GetWaterSystem()->update(
+                first.Session()->GetRegistry(), first_chunks, regions);
+            second.Session()->GetWaterSystem()->update(
+                second.Session()->GetRegistry(), second_chunks, regions);
+            std::size_t different = 0;
+            for (const auto& [id, chunk] : first_chunks)
+                different += chunk->water_depth_mm != second_chunks.at(id)->water_depth_mm;
+            EXPECT_GT(different, 0u);
+        }
+    }
+}

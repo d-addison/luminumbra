@@ -4,6 +4,7 @@
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -74,15 +75,60 @@ public:
                !m_voxel_revision.compare_exchange_weak(
                    revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         m_voxel_data_dirty.store(true, std::memory_order_release);
     }
     void clear_voxel_data_dirty() {
         m_voxel_data_dirty.store(false, std::memory_order_release);
     }
+    // Water shares the durable chunk record but does not change voxel geometry
+    // or invalidate SDF/render revisions. Water ownership is sticky after saving.
+    void mark_water_data_dirty() {
+        m_water_authority.store(true, std::memory_order_release);
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
+        m_voxel_data_dirty.store(true, std::memory_order_release);
+    }
+    // Changes to authoritative voxel or water fields must mark the corresponding dirty data.
+    u64 authority_hash_revision() const {
+        return m_hash_revision.load(std::memory_order_acquire);
+    }
+    // Owner-thread identity of mutable authority. Array writers advance revision;
+    // public solver bookkeeping is compared directly without scanning cell data.
+    struct AuthorityStamp {
+        u64 revision = 0;
+        bool water_initialized = false;
+        bool water_sleeping = false;
+        int water_resolution = 0;
+        int quiet_ticks = 0;
+        u32 max_delta_bits = 0;
+        bool operator==(const AuthorityStamp&) const = default;
+    };
+    AuthorityStamp authority_stamp() const {
+        return {.revision = authority_hash_revision(),
+                .water_initialized = has_water_sim.load(std::memory_order_acquire),
+                .water_sleeping = is_water_sleeping.load(std::memory_order_acquire),
+                .water_resolution = current_water_resolution.load(std::memory_order_acquire),
+                .quiet_ticks = ticks_below_threshold,
+                .max_delta_bits = std::bit_cast<u32>(max_water_delta_last_tick)};
+    }
+    // Bounded migration validation and exact comparison of evolution-relevant
+    // water state, including persisted mirrors consumed by queries and sources.
+    bool has_complete_water_state() const;
+    bool same_water_state(const Chunk& other) const;
+    // Owner-thread retirement after a column migration is durably committed.
+    // Terrain ownership and geometry are preserved independently.
+    void clear_water_data();
+    bool has_water_authority() const {
+        return m_water_authority.load(std::memory_order_acquire);
+    }
+    bool has_simulation_authority() const {
+        return has_water_authority() || sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited;
+    }
     bool is_voxel_data_dirty() const {
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }
     void mark_sdf_generated_current_params() {
+        m_water_authority.store(false, std::memory_order_release);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
                                std::memory_order_release);
         m_voxel_revision.store(0u, std::memory_order_release);
@@ -100,6 +146,25 @@ public:
     }
     u32 voxel_revision() const {
         return m_voxel_revision.load(std::memory_order_acquire);
+    }
+
+    // Call only after workers have drained, when adopting persisted authority.
+    // Serialized staging flags cannot represent a job in the current process.
+    void reset_pending_jobs() {
+        pending_lod.store(-1, std::memory_order_release);
+        pending_mesh_ready.store(false, std::memory_order_release);
+        pending_water_mesh_generated.store(false, std::memory_order_release);
+        pending_mesh_failed.store(false, std::memory_order_release);
+        pending_promotion_ready.store(false, std::memory_order_release);
+        pending_promotion_failed.store(false, std::memory_order_release);
+        pending_generation_ready.store(false, std::memory_order_release);
+        pending_mesh_vertices.clear();
+        pending_mesh_indices.clear();
+        pending_water_mesh_vertices.clear();
+        pending_water_mesh_indices.clear();
+        pending_sdf_data.clear();
+        pending_heightmap_data.clear();
+        pending_material_data.clear();
     }
 
     // --- Voxel & SDF Data ---
@@ -152,6 +217,7 @@ public:
     // LOD seam cracks) without scanning mesh vertices per frame.
     std::atomic<u8> applied_transition_faces{0};
     std::atomic<bool> pending_mesh_ready{false};
+    std::atomic<bool> pending_water_mesh_generated{false};
     std::atomic<bool> pending_mesh_failed{false};
     //  ( step 1): completion signals for the sim-truth
     // PROMOTION lane. A promotion generation job stages the full LOD0 voxel
@@ -221,7 +287,9 @@ private:
     mutable std::mutex m_state_mutex; // mutable for use in const getter
     std::atomic<bool> m_voxel_data_dirty{false};
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
+    std::atomic<u64> m_hash_revision{0};
     std::atomic<u32> m_voxel_revision{0};
+    std::atomic<bool> m_water_authority{false};
 };
 
 } // namespace Luminumbra

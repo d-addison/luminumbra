@@ -848,3 +848,5 @@ Existing saves without an embedded preset use the frozen copy. The game
 repository's cave-dense qualification fixture and identity sidecar must select
 the intended revision: retaining the old fixture matches the frozen bytes;
 using shipping revision 8 requires updating both the fixture and its pins.
+
+Current live sessions use authority-rules revision 4 with active regions enabled or disabled, binding the persisted raw water scheduler cursor to water and world hashes while retaining explicit legacy projections and refusing mixed-profile admission before ticks.

@@ -31,6 +31,11 @@
 #include <utility>
 #include <vector>
 
+namespace Luminumbra::Persistence {
+struct WorldAuthorityHashes;
+class AuthorityHashCache;
+} // namespace Luminumbra::Persistence
+
 namespace Luminumbra::Systems {
 
 class PhysicsSystem;
@@ -282,6 +287,7 @@ class WaterSystem;
 
 class SHIELD_WorldSystem {
 public:
+    static constexpr std::size_t kActiveChunkBudget = 8192;
     struct StreamingBudgetFrameStats {
         int update_interval_frames = 0;
         int requested_render_radius = 0;
@@ -416,7 +422,8 @@ public:
     SHIELD_WorldSystem(JobSystem* job_system,
                        WaterSystem* water_system,
                        const TerrainGenParams& params,
-                       int seed);
+                       int seed,
+                       bool retain_region_authority = false);
     ~SHIELD_WorldSystem();
 
     // Generates voxel data for a chunk. target_step is the meshing step this
@@ -924,6 +931,35 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    // Resident terrain/water authority, including simulation owners outside
+    // rendering's wanted set. Persistence merges durable-only records separately.
+    // Pristine generated caches are excluded; lifecycle is render bookkeeping.
+    std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_region_authority(i32 rx,
+                                                                                i32 rz) const;
+    // Const diagnostic: simulation ownership aliases the shared resident budget.
+    std::size_t simulation_chunk_count() const {
+        return m_simulationChunks.size();
+    }
+    void set_authority_directory(const std::filesystem::path& directory);
+    // Save-as keeps evicted authority when installing a new durable destination.
+    bool relocate_authority_directory(const std::filesystem::path& directory);
+    const std::filesystem::path& authority_directory() const {
+        return m_authorityDirectory;
+    }
+    const std::optional<std::string>& authority_fault() const {
+        return m_authorityFault;
+    }
+    // Owner-thread admission and synchronous collision preparation, before physics.
+    // Does not advance water; repeat calls with the same inputs are idempotent.
+    void prepare_region_authority(entt::registry& registry,
+                                  const std::set<std::pair<i32, i32>>& regions,
+                                  const std::vector<Vec3>& anchors,
+                                  PhysicsSystem* physics_system);
+    // Fixed-tick consumer; regions and advancing bodies determine the horizons.
+    void simulate_region_authority(entt::registry& registry,
+                                   const std::set<std::pair<i32, i32>>& regions,
+                                   const std::vector<Vec3>& anchors,
+                                   PhysicsSystem* physics_system);
     // Lifetime count of pointer entries copied by streamed/renderable snapshots.
     // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
     [[nodiscard]] std::uint64_t snapshot_copies() const {
@@ -932,6 +968,16 @@ public:
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices are copied into the immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
+    // Cached authority projection; scans durable records once per load, then only
+    // bounded resident authority. Water and voxel mutation are observed exactly.
+    // Owner-thread observation after simulation and streaming complete. Capture
+    // global scheduler state once alongside the cached resident/durable authority.
+    Persistence::WorldAuthorityHashes compute_chunk_hashes() const;
+    // Frozen revision-3 chunk projection for historical diagnostics only.
+    Persistence::WorldAuthorityHashes compute_legacy_chunk_hashes() const;
+    // Const diagnostic: sorted fixed-tick participants, independent of render lifecycle.
+    std::vector<ChunkID> simulation_chunk_ids() const;
+
     // Eviction does not stale a copied snapshot; changed SDF authority or
     // worldgen parameters do.
     bool is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const;
@@ -945,10 +991,69 @@ public:
     // read the pre-commit LMR1 image is rejected at owner-thread integration.
     void notify_far_lod_authority_durable(const IVec3& chunk_coords);
     std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
-    // Adopts an externally loaded chunk when its slot is empty. Returns false
+    // Adopts an externally loaded chunk when its slot is empty. Active regions
+    // enforce the shared resident budget; legacy snapshot loads remain uncapped. Returns false
     // (without clobbering the streamed chunk) when a chunk with the same id
     // is already active.
-    bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
+    // durable is reserved for records decoded from the installed authority directory.
+    bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk,
+                              bool durable = false);
+
+private:
+    const bool m_retainRegionAuthority;
+    // All aliases share the existing 8,192 resident chunk budget.
+    // Rehydration holds at most one additional decoded chunk before admission.
+    std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> m_simulationChunks;
+    // Y=0 aliases only, bounded by the shared resident chunk budget. Water
+    // queries and edits use this set independently of terrain collider layers.
+    std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> m_simulationWaterChunks;
+    std::set<std::pair<i32, i32>> m_simulationRegions;
+    std::filesystem::path m_authorityDirectory;
+    std::filesystem::path m_temporaryAuthorityDirectory;
+    std::optional<std::string> m_authorityFault;
+    mutable std::unique_ptr<Persistence::AuthorityHashCache> m_authorityHashCache;
+    // Prepared only under admission pressure; at most 8,192 ids, consumed from the back.
+    std::vector<ChunkID> m_authorityEvictionCandidates;
+    std::size_t resident_chunk_count() const;
+    void prepare_authority_eviction(const std::set<ChunkID>& required);
+    bool make_authority_room(const std::set<ChunkID>& required,
+                             bool& eviction_prepared,
+                             PhysicsSystem* physics_system = nullptr);
+    struct AuthorityRestoreBatch;
+    void restore_simulation_regions(const std::set<std::pair<i32, i32>>& regions,
+                                    const std::set<ChunkID>& required,
+                                    AuthorityRestoreBatch& batch,
+                                    bool& eviction_prepared,
+                                    PhysicsSystem* physics_system);
+    void migrate_simulation_water(const std::set<std::pair<i32, i32>>& regions,
+                                  const std::set<ChunkID>& required,
+                                  AuthorityRestoreBatch& batch,
+                                  bool& eviction_prepared,
+                                  PhysicsSystem* physics_system);
+    bool admit_water_edit(const Vec3& world_pos, float radius_m);
+    struct DurableAuthorityOwner {
+        std::weak_ptr<Chunk> owner;
+        Chunk::AuthorityStamp stamp;
+    };
+    // At most one small stamp per resident chunk; erase alongside residency.
+    std::unordered_map<ChunkID, DurableAuthorityOwner> m_durableAuthorityOwners;
+    void remember_durable_authority(const std::shared_ptr<Chunk>& incoming);
+    bool persist_authority(const std::shared_ptr<::Luminumbra::Chunk>& incoming);
+    std::shared_ptr<::Luminumbra::Chunk> restore_authority(const IVec3& coords,
+                                                           AuthorityRestoreBatch& batch);
+    std::size_t m_authorityRegionIndexReads = 0;
+    std::size_t m_authorityEvictionPreparations = 0;
+
+public:
+    // Const diagnostic: actual pressure-driven candidate scans and sorts.
+    std::size_t authority_eviction_preparations() const {
+        return m_authorityEvictionPreparations;
+    }
+    // Cumulative region-index opens for authority restoration, including misses.
+    // Measures batch reuse without exposing mutable persistence internals.
+    std::size_t authority_region_index_reads() const {
+        return m_authorityRegionIndexReads;
+    }
 
 private:
     struct StreamingState {
@@ -978,6 +1083,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> scratch;
             u32 mesh_version = 0;
             u32 water_mesh_version = 0;
+            u64 authority_revision = 0;
             u32 voxel_revision = 0;
         };
         struct MeshingBatch {
@@ -1426,6 +1532,7 @@ private:
     // so const-correctness is preserved (no world_hash-affecting state changes).
     mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
     mutable std::mutex m_hydro_prefetch_mutex;
+    // One owned prefetch batch; drained before world services are destroyed.
     // One prefetch batch owns all queued/running hydro callbacks. Serializing
     // admission and fences keeps handle storage O(1); workers use the other mutex.
     mutable std::mutex m_hydro_prefetch_dispatch_mutex;

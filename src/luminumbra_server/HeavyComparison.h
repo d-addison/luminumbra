@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <span>
 #include <string>
 
@@ -16,6 +17,7 @@ struct HeavyHashes {
     bool active_regions = false;
     std::string clock_bytes;
     std::string ledger_bytes;
+    std::uint64_t water_scheduler_cursor = 0;
 };
 
 // One row per field of HeavyHashes. `compared` rows must match across the
@@ -43,7 +45,7 @@ struct HeavySubsystem {
 };
 
 inline std::span<const HeavySubsystem> HeavySubsystemTable() {
-    static const std::array<HeavySubsystem, 13> kTable{{
+    static const std::array<HeavySubsystem, 14> kTable{{
         {"terrain",
          true,
          false,
@@ -57,6 +59,13 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
          nullptr,
          [](HeavyHashes& h) {
              h.sub.water += "x";
+         }},
+        {"water_scheduler_cursor",
+         true,
+         false,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.water_scheduler_cursor ^= 1u;
          }},
         {"entities",
          true,
@@ -153,8 +162,8 @@ inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) 
             return false;
         }
     }
-    return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&
-           a.sub.entities == b.sub.entities;
+    return a.water_scheduler_cursor == b.water_scheduler_cursor && a.sub.terrain == b.sub.terrain &&
+           a.sub.water == b.sub.water && a.sub.entities == b.sub.entities;
 }
 
 inline bool MeshEqual(const HeavyHashes& a, const HeavyHashes& b) {
