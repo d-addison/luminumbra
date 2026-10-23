@@ -596,17 +596,20 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
         snapshot = self.function(source, "LoadWorldStateFrom")
         # Clock metadata is validated before replacing residency. A refusal
-        # here preserves the usable live session and its authority.
+        # retains resident authority but disables saving until a coherent replacement.
         preflight, replacement = snapshot.split("    Persistence::WorldSaveService service;", 1)
         self.assertIn("read_clock_metadata(", preflight)
         self.assertIn("&water_cursor", preflight)
         self.assertNotIn("clear_world(", preflight)
-        self.assertNotIn("m_worldUsable = false;", preflight)
+        clock_failure = preflight.split(
+            "(requires_active_regions && !m_activeRegionsEnabled)) {", 1)[1]
+        self.assertLess(clock_failure.index("m_worldUsable = false;"),
+                        clock_failure.index("return false;"))
         # Five inline fatal diagnostics and the delegated energy refusal must
         # latch usability after replacement begins, before clearing live chunks.
         failures = re.findall(r'm_worldUsable = false;\s*m_worldOpenError =.*?'
                               r'm_worldSystem->clear_world\(m_physicsSystem.get\(\)\);',
-                              snapshot, re.DOTALL)
+                              replacement, re.DOTALL)
         self.assertEqual(len(failures), 5)
         self.assertEqual(replacement.count("m_worldUsable = false;"), 6)
         self.assertRegex(replacement, r'if \(!LoadEnergyFieldRecord\(save_dir\)\) \{\s*'

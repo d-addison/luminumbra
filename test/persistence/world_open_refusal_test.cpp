@@ -358,6 +358,13 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_FALSE(session.SaveWorldState());
         EXPECT_FALSE(session.SaveWorldStateTo(save));
         EXPECT_FALSE(session.LoadWorldStateFrom(save));
+        if (entry == 1) {
+            // A healthy destination must not hide a missing fatal-refusal latch.
+            EXPECT_FALSE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+            EXPECT_FALSE(session.SaveWorldStateTo(root / "refused-export", nullptr, true));
+            EXPECT_FALSE(session.SaveWorld());
+            EXPECT_FALSE(session.SaveWorldState());
+        }
     }
     ASSERT_FALSE(error.empty());
     if (obsolete) {

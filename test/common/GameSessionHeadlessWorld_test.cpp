@@ -1753,11 +1753,20 @@ void PreparePendingSnapshot(GameSession& session,
                             std::shared_ptr<Luminumbra::Chunk>& chunk,
                             bool existing_snapshot) {
     SCOPED_TRACE("prepare pending snapshot");
-    chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
-    chunk->set_state(Luminumbra::ChunkState::Idle);
+    const Luminumbra::IVec3 coords(0, 0, 0);
+    // Fixed ticks can already have admitted this owner through the simulation horizon.
+    chunk = session.GetWorldSystem()->find_streamed_chunk(coords);
+    const bool resident = chunk != nullptr;
+    if (!resident) {
+        chunk = std::make_shared<Luminumbra::Chunk>(coords);
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+    }
     chunk->heightmap_data = {8.0f, 9.0f, 10.0f};
     chunk->mark_voxel_data_dirty();
-    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    if (!resident) {
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    ASSERT_EQ(session.GetWorldSystem()->find_streamed_chunk(coords), chunk);
     auto& registry = session.GetRegistry();
     const auto plant = registry.create();
     registry.emplace<C::PlantTag>(plant);
@@ -2172,11 +2181,19 @@ TEST_P(SavedWorldPresetTest, FatalSnapshotAndFinalMetadataRefusalsCannotBeCleare
             ASSERT_FALSE(created);
             ASSERT_NE(session.GetWorldOpenError().find("metadata"), std::string::npos);
         } else {
+            session.SetAetherStateEnabled(true);
             ASSERT_TRUE(session.CreateWorld("Corrupt snapshot", "1337", "default"));
+            std::shared_ptr<Luminumbra::Chunk> chunk;
+            ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, false));
+            const PendingSnapshotState pending(session);
+            const RetainedCreationState retained(session);
             const auto corrupt = Root().path() / "corrupt-state";
             ASSERT_TRUE(P::WorldSaveService::write_file_durably(corrupt / "world_info.json", "{"));
             ASSERT_FALSE(session.LoadWorldStateFrom(corrupt));
             ASSERT_FALSE(session.GetWorldOpenError().empty());
+            pending.ExpectUnchanged(session, *chunk);
+            retained.ExpectUnchanged(session);
+            EXPECT_EQ(session.GetWorldSystem()->find_streamed_chunk(chunk->get_coords()), chunk);
         }
         ASSERT_NE(session.GetWorldSystem(), nullptr);
         const auto disk = SavedPresetTestDiskBytes(Root().path());

@@ -2016,6 +2016,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                                                             &ambient_anchor,
                                                             &water_cursor) ||
         (requires_active_regions && !m_activeRegionsEnabled)) {
+        m_worldUsable = false;
         m_worldOpenError =
             clock_errors.empty()
                 ? "Incompatible configuration: this world requires sim.active_regions."
