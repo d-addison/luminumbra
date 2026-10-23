@@ -22,6 +22,55 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_live_registration_has_one_shared_resident_pass_before_rehydration(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        prepare = function(source, "void SHIELD_WorldSystem::prepare_region_authority(")
+        restore = function(source, "void SHIELD_WorldSystem::restore_simulation_regions(")
+        # Preparation retains the collision cleanup pass. Live registration
+        # belongs to the shared restore path, including remote water edits.
+        self.assertEqual(prepare.count("m_streaming_state.chunks)"), 1)
+        self.assertEqual(restore.count("m_streaming_state.chunks)"), 1)
+        self.assertNotIn("m_simulationChunks.insert_or_assign(id, chunk)", prepare)
+        self.assertLess(restore.index("m_simulationChunks.insert_or_assign(id, chunk)"),
+                        restore.index("reader.open("))
+        self.assertIn("chunk->has_simulation_authority() && regions.contains({rx, rz})", restore)
+        self.assertIn("if (!m_simulationChunks.contains(id)) "
+                      "chunk->has_collision.store(false, std::memory_order_release);", restore)
+        for caller in ("void SHIELD_WorldSystem::prepare_region_authority(",
+                       "bool SHIELD_WorldSystem::admit_water_edit("):
+            self.assertEqual(function(source, caller).count("restore_simulation_regions("), 1)
+
+    def test_water_mesh_dirtiness_uses_existing_ready_chunk_gate_without_activation_invalidation(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        simulate = function(source, "void SHIELD_WorldSystem::simulate_region_authority(")
+        self.assertIn("m_water_system->update(registry, m_simulationWaterChunks, true);", simulate)
+        for redundant_work in ("for (", "m_dirty_generation", "->water_mesh_generated"):
+            self.assertNotIn(redundant_work, simulate)
+        update = function(source, "void SHIELD_WorldSystem::update(entt::registry& registry,\n"
+                          "                                const std::vector<Vec3>& anchor_positions,")
+        for gate in ("if (state == ChunkState::Ready) { water_meshing_dirty |=", "m_retainRegionAuthority ||",
+                     "chunk_ptr->has_water_sim.load(std::memory_order_acquire)",
+                     "!chunk_ptr->water_mesh_generated.load(std::memory_order_acquire)",
+                     "chunk_ptr->pending_lod.load(std::memory_order_acquire) < 0"):
+            self.assertIn(gate, update)
+        self.assertIn("activation_ran_this_tick || water_meshing_dirty || !m_last_pass_drained", update)
+        self.assertLess(update.index("water_meshing_dirty |="), update.index("if (streaming_dirty)"))
+
+    def test_incremental_save_publishes_cursor_after_payloads_without_zero_layout_changes(self):
+        source = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
+        save = function(source, "bool GameSession::SaveWorldStateToImpl(")
+        self.assertIn("else if (ok) ok = save_batch.save_water_cursor(", save)
+        self.assertLess(save.index("SaveEnergyFieldRecord(save_dir)"),
+                        save.index("save_batch.save_water_cursor("))
+        self.assertLess(save.index("save_batch.save_water_cursor("),
+                        save.index("chunk->clear_voxel_data_dirty()"))
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(encoding="utf-8")
+        cursor = function(service, "bool WorldSaveService::SaveBatch::save_water_cursor(")
+        for token in ("if (!m_valid)", "ReadWaterCursor(metadata, &previous, error)",
+                      "if (previous == cursor) return true;", "else if (cursor == 0)",
+                      'metadata["waterSimCursor"] = cursor;', "write_file_durably("):
+            self.assertIn(token, cursor)
+
     def test_scheduler_fold_is_unsigned_fixed_width_and_outside_chunk_cache(self):
         source = (ROOT / "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp").read_text(encoding="utf-8")
         fold = function(source, "WorldAuthorityHashes BindWaterScheduler(")

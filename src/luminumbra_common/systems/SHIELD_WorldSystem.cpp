@@ -6670,8 +6670,13 @@ void SHIELD_WorldSystem::restore_simulation_regions(const std::set<std::pair<i32
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         int rx = 0, rz = 0;
         Save::region_coords_for_chunk(chunk->get_coords(), rx, rz);
-        if (chunk->has_simulation_authority() && regions.contains({rx, rz}))
+        // Register live edits once, before rehydration, for both simulation
+        // preparation and remote edits. Durable images must not replace them.
+        if (chunk->has_simulation_authority() && regions.contains({rx, rz})) {
+            if (!m_simulationChunks.contains(id))
+                chunk->has_collision.store(false, std::memory_order_release);
             m_simulationChunks.insert_or_assign(id, chunk);
+        }
     }
     bool restored_any = false;
     for (const auto& [rx, rz] : regions) {
@@ -6794,15 +6799,6 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
         else
             ++it;
     }
-    // Register live edits before rehydration so durable images never overwrite
-    // newer authority. Regenerable render chunks are excluded on every path.
-    for (const auto& [id, chunk] : m_streaming_state.chunks) {
-        if (chunk->has_simulation_authority() && regions.contains(region_of(*chunk))) {
-            if (!m_simulationChunks.contains(id))
-                chunk->has_collision.store(false, std::memory_order_release);
-            m_simulationChunks.insert_or_assign(id, chunk);
-        }
-    }
     bool eviction_prepared = false;
     restore_simulation_regions(regions, required, restore_batch, eviction_prepared, physics_system);
     for (const auto id : required) {
@@ -6877,22 +6873,16 @@ void SHIELD_WorldSystem::simulate_region_authority(entt::registry& registry,
     prepare_region_authority(registry, regions, anchors, physics_system);
     if (!m_retainRegionAuthority || m_authorityFault)
         return;
-    bool render_changed = false;
     if (m_water_system) {
         // Boot settling is a render-loading concern. Fixed session ticks use
         // the same bounded solver path on new, loaded and headless peers.
         m_water_system->SetBootPaused(false);
         m_water_system->SetBootSettleMode(false);
         m_water_system->update(registry, m_simulationWaterChunks, true);
-        // Water writers advance their hash revisions, including initialization,
-        // flux, depth, wake/sleep state, resizing and out-of-tick edits.
-        for (const auto& [id, chunk] : m_simulationWaterChunks) {
-            (void)id;
-            render_changed |= !chunk->water_mesh_generated.load(std::memory_order_acquire);
-        }
+        // update() observes water_mesh_generated directly in its existing
+        // telemetry pass. Water changes neither terrain nor residency, so it
+        // must not reopen activation and terrain candidate scans every tick.
     }
-    if (render_changed)
-        ++m_dirty_generation;
 } catch (const std::exception& error) {
     if (!m_authorityFault)
         m_authorityFault = error.what();

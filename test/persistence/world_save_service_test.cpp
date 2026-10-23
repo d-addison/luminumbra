@@ -1555,6 +1555,104 @@ TEST(WorldSaveService, SaveBatchEmptyDirtySetAndMoveKeepMetadataOrdering) {
     EXPECT_TRUE(std::filesystem::exists(root.path() / "world_info.json"));
 }
 
+TEST(WorldSaveService, CursorOnlySavesPreserveZeroAbsentAndUnknownMetadataBytes) {
+    const TempSaveDir root("cursor-only");
+    const auto directory = root.path() / "new-save";
+    const auto path = directory / "world_info.json";
+    auto batch = WorldSaveService::SaveBatch::begin(directory);
+    ASSERT_TRUE(batch.has_value());
+    EXPECT_TRUE(batch->save_water_cursor(0));
+    EXPECT_FALSE(std::filesystem::exists(directory));
+    ASSERT_TRUE(batch->save_water_cursor(7));
+    EXPECT_EQ(nlohmann::json::parse(ReadFileBytes(path)),
+              (nlohmann::json{{"container_version", 2}, {"waterSimCursor", 7u}}));
+    // A matching value must not even normalize whitespace or line endings.
+    const std::string opaque =
+        "{\r\n\t\"container_version\": 2, \"waterSimCursor\": 7, \"extension\": [1,2]}\r\n";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << opaque;
+    ASSERT_TRUE(batch->save_water_cursor(7));
+    EXPECT_EQ(ReadFileBytes(path), opaque);
+    ASSERT_TRUE(batch->save_water_cursor(0));
+    EXPECT_EQ(nlohmann::json::parse(ReadFileBytes(path)).at("extension"),
+              nlohmann::json::array({1, 2}));
+    EXPECT_EQ(nlohmann::json::parse(ReadFileBytes(path)).at("waterSimCursor"), 0u);
+    const std::string absent = "{\"extension\":true, \"container_version\":2}\n";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << absent;
+    ASSERT_TRUE(batch->save_water_cursor(0));
+    EXPECT_EQ(ReadFileBytes(path), absent);
+    ASSERT_TRUE(batch->save_water_cursor(std::numeric_limits<std::size_t>::max()));
+    EXPECT_EQ(nlohmann::json::parse(ReadFileBytes(path)).at("waterSimCursor"),
+              std::numeric_limits<std::size_t>::max());
+    EXPECT_TRUE(WorldSaveService::validate_save(directory));
+}
+
+TEST(WorldSaveService, CursorWriteFailurePoisonsBatchWithoutAcknowledgingMetadata) {
+    const TempSaveDir root("cursor-failure");
+    const DirectoryFlushReset reset;
+    const auto path = root.path() / "world_info.json";
+    const std::string before = "{\"container_version\":2,\"waterSimCursor\":3}\n";
+    std::ofstream(path, std::ios::binary) << before;
+    auto batch = WorldSaveService::SaveBatch::begin(root.path());
+    ASSERT_TRUE(batch.has_value());
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(batch->save_water_cursor(9));
+    EXPECT_EQ(ReadFileBytes(path), before);
+    EXPECT_FALSE(batch->save_metadata(R"({"container_version":2})"));
+    EXPECT_FALSE(batch->save_water_cursor(3));
+    auto retry = WorldSaveService::SaveBatch::begin(root.path());
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_TRUE(retry->save_water_cursor(9));
+    for (const std::string invalid : {"partial", "[]", R"({"waterSimCursor":-1})"}) {
+        auto invalid_batch = WorldSaveService::SaveBatch::begin(root.path());
+        ASSERT_TRUE(invalid_batch.has_value());
+        std::ofstream(path, std::ios::binary | std::ios::trunc) << invalid;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(invalid_batch->save_water_cursor(8, &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(ReadFileBytes(path), invalid);
+        // A fresh operation also refuses malformed destination metadata.
+        EXPECT_FALSE(WorldSaveService::SaveBatch::begin(root.path()));
+        std::ofstream(path, std::ios::binary | std::ios::trunc) << before;
+    }
+    auto unreadable = WorldSaveService::SaveBatch::begin(root.path());
+    ASSERT_TRUE(unreadable.has_value());
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(std::filesystem::create_directory(path));
+    EXPECT_FALSE(unreadable->save_water_cursor(8));
+    EXPECT_TRUE(std::filesystem::is_directory(path));
+}
+
+TEST(WorldSaveService, AuthorityCopyAllowsOnlyLiveAuthoritativeDestinationIds) {
+    const TempSaveDir root("live-copy");
+    const auto source = root.path() / "source";
+    const auto destination = root.path() / "destination";
+    auto live = std::make_shared<Chunk>(IVec3(32, 0, 0));
+    live->heightmap_data = {12.0f};
+    live->mark_voxel_data_dirty();
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(destination, live));
+    const auto path = WorldSaveService::region_file_path(destination, 1, 0);
+    const auto before = ReadFileBytes(path);
+    EXPECT_FALSE(WorldSaveService::copy_chunk_authority(source, destination));
+    std::vector<std::shared_ptr<Chunk>> owners{nullptr};
+    EXPECT_FALSE(WorldSaveService::copy_chunk_authority(source, destination, owners));
+    owners.push_back(std::make_shared<Chunk>(live->get_coords()));
+    EXPECT_FALSE(WorldSaveService::copy_chunk_authority(source, destination, owners));
+    owners.push_back(live);
+    EXPECT_TRUE(WorldSaveService::copy_chunk_authority(source, destination, owners));
+    EXPECT_TRUE(WorldSaveService::copy_chunk_authority({}, destination, owners));
+    EXPECT_EQ(ReadFileBytes(path), before);
+    // An unreadable index cannot be authorized by a live id, on either side.
+    const auto source_path = WorldSaveService::region_file_path(source, 1, 0);
+    std::filesystem::create_directories(source_path.parent_path());
+    std::ofstream(source_path, std::ios::binary) << "partial";
+    EXPECT_FALSE(WorldSaveService::copy_chunk_authority(source, destination, owners));
+    EXPECT_EQ(ReadFileBytes(path), before);
+    std::filesystem::remove(source_path);
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << "partial";
+    EXPECT_FALSE(WorldSaveService::copy_chunk_authority(source, destination, owners));
+    EXPECT_EQ(ReadFileBytes(path), "partial");
+}
+
 TEST(WorldSaveService, AuthoritySavesRefuseRegenerableReplacementOfDurableOwners) {
     for (const bool incremental : {false, true}) {
         SCOPED_TRACE(incremental);

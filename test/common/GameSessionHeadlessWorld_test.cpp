@@ -5330,6 +5330,64 @@ TEST(GameSessionHeadlessWorldTest, SnapshotDestinationCannotImportDivergentAutho
     }
 }
 
+TEST(GameSessionHeadlessWorldTest, RepeatedExportIncludesUnsavedLiveAuthorityAndKeepsExactBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool water : {false, true}) {
+        for (const bool durable_sibling : {false, true}) {
+            SCOPED_TRACE(water);
+            SCOPED_TRACE(durable_sibling);
+            GameSession session;
+            session.SetRootPath(root.root_string());
+            session.SetJobSystem(&jobs);
+            session.SetActiveRegionsEnabled(true);
+            ASSERT_TRUE(session.CreateWorld("Repeated export", "1337", "default"));
+            session.SetReplicatedSimulationAnchors({});
+            auto* world = session.GetWorldSystem();
+            if (durable_sibling) {
+                ASSERT_TRUE(world->adopt_streamed_chunk(FlowingRegionChunk({0, 0, 0})));
+                ASSERT_TRUE(session.SaveWorldState());
+            }
+            auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(32, 0, 0));
+            if (water) {
+                live = FlowingRegionChunk({32, 0, 0});
+                live->mark_sdf_generated_current_params();
+                live->mark_water_data_dirty();
+            } else {
+                live->heightmap_data = {12.0f};
+                live->mark_voxel_data_dirty();
+            }
+            ASSERT_TRUE(world->adopt_streamed_chunk(live));
+            const auto source = world->authority_directory();
+            const auto canonical_bytes = SavedPresetTestDiskBytes(source);
+            const auto destination = root.path() / ("repeat-export-" + std::to_string(water) + "-" +
+                                                    std::to_string(durable_sibling));
+            ASSERT_TRUE(session.SaveWorldStateTo(destination));
+            const auto first = SavedPresetTestDiskBytes(destination);
+            ASSERT_TRUE(session.SaveWorldStateTo(destination));
+            EXPECT_EQ(SavedPresetTestDiskBytes(destination), first);
+            EXPECT_EQ(SavedPresetTestDiskBytes(source), canonical_bytes);
+            EXPECT_EQ(world->authority_directory(), source);
+            EXPECT_TRUE(live->is_voxel_data_dirty());
+            EXPECT_EQ(P::WorldSaveService::authority_hashes(destination, {}).world,
+                      P::WorldSaveService::authority_hashes(source, {live}).world);
+            // A matching live id cannot authorize a corrupt destination payload.
+            const auto region = P::WorldSaveService::region_file_path(destination, 1, 0);
+            std::vector<P::WorldSaveService::ContainerRecord> records;
+            ASSERT_TRUE(P::WorldSaveService::read_container_records(region, records));
+            ASSERT_EQ(records.size(), 1u);
+            records.front().payload = "partial";
+            ASSERT_TRUE(P::WorldSaveService::upsert_container_records(region, records));
+            const auto corrupt = SavedPresetTestDiskBytes(destination);
+            EXPECT_FALSE(session.SaveWorldStateTo(destination));
+            EXPECT_EQ(SavedPresetTestDiskBytes(destination), corrupt);
+            EXPECT_EQ(SavedPresetTestDiskBytes(source), canonical_bytes);
+            EXPECT_TRUE(live->is_voxel_data_dirty());
+        }
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, WalkingAnchorSurvivesNoclipAndReloadWithoutCameraInputs) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -7406,4 +7464,58 @@ TEST(GameSessionHeadlessWorldTest, NonzeroSchedulerRoundTripsBothLoadPathsAndCha
             EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(metadata_path)), metadata);
         }
     }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     DisabledRegionsIncrementalSaveRestoresSchedulerAndAuthorityHash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded;
+    for (auto* session : {&original, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+        session->SetWaterHighResEnabled(false);
+        session->SetWeatherRainEnabled(false);
+        session->SetWeatherEventsEnabled(false);
+        session->SetFiniteHydrologyEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Incremental scheduler", "1337", "default"));
+    auto chunks = Luminumbra::TestSupport::InstallSchedulerChunks(original, 8, 65);
+    ASSERT_TRUE(original.SaveWorldState(nullptr, true));
+    const auto save = original.GetWorldSaveDir();
+    const auto metadata_path = save / "world_info.json";
+    const auto old_metadata = nlohmann::json::parse(ReadClockTestFile(metadata_path));
+    ASSERT_EQ(old_metadata.at("waterSimCursor"), 0u);
+    original.GetWaterSystem()->SetBootPaused(false);
+    original.GetWaterSystem()->SetHydrology(true, 0, 0);
+    original.GetWaterSystem()->update(original.GetRegistry(), chunks, false);
+    const auto cursor = original.GetWorldSystem()->GetWaterSimWindowCursor();
+    ASSERT_NE(cursor, 0u);
+    const auto before = original.CaptureAuthorityHashes();
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(original.SaveWorldState(&report));
+    EXPECT_TRUE(report.saved);
+    EXPECT_GT(report.chunks_dirty, 0u);
+    auto expected_metadata = old_metadata;
+    expected_metadata["waterSimCursor"] = cursor;
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(metadata_path)), expected_metadata);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetWorldSystem()->GetWaterSimWindowCursor(), cursor);
+    EXPECT_EQ(loaded.CaptureAuthorityHashes().world, before.world);
+    EXPECT_EQ(loaded.CaptureAuthorityHashes().sub.water, before.sub.water);
+    original.GetWorldSystem()->SetWaterSimWindowCursor(0);
+    ASSERT_TRUE(original.LoadWorldStateFrom(save));
+    EXPECT_EQ(original.GetWorldSystem()->GetWaterSimWindowCursor(), cursor);
+    EXPECT_EQ(original.CaptureAuthorityHashes().world, before.world);
+    // A cursor-only change also survives a save with no dirty chunks, including
+    // a return to zero after the metadata previously held a nonzero cursor.
+    original.GetWorldSystem()->SetWaterSimWindowCursor(0);
+    const auto at_zero = original.CaptureAuthorityHashes();
+    ASSERT_TRUE(original.SaveWorldState(&report));
+    EXPECT_FALSE(report.saved);
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(save));
+    EXPECT_EQ(loaded.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+    EXPECT_EQ(loaded.CaptureAuthorityHashes().world, at_zero.world);
 }

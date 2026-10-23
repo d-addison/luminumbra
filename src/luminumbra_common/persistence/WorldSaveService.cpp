@@ -1917,6 +1917,41 @@ bool WorldSaveService::SaveBatch::save_metadata(const std::string& bytes,
     return m_valid;
 }
 
+bool WorldSaveService::SaveBatch::save_water_cursor(std::size_t cursor,
+                                                    std::vector<std::string>* errors) {
+    if (!m_valid)
+        return false;
+    try {
+        const auto path = m_directory / "world_info.json";
+        nlohmann::json metadata = {{"container_version", kContainerVersion}};
+        if (std::filesystem::exists(path)) {
+            std::ifstream input(path, std::ios::binary);
+            metadata = nlohmann::json::parse(input);
+            std::size_t previous = 0;
+            std::string error;
+            if (!metadata.is_object() || !ReadWaterCursor(metadata, &previous, error)) {
+                AddError(errors, "corrupt water scheduler metadata: " + error);
+                m_valid = false;
+                return false;
+            }
+            if (previous == cursor)
+                return true;
+        } else if (cursor == 0) {
+            return true;
+        }
+        metadata["waterSimCursor"] = cursor;
+        // The batch validated existing metadata before any payload. All fields
+        // except this size_t cursor remain intact, including clocks and unknown
+        // extensions. The durable writer also supports a new cursor-only root.
+        m_valid = write_file_durably(path, metadata.dump(4) + "\n", errors);
+        return m_valid;
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("cannot persist water scheduler: ") + error.what());
+        m_valid = false;
+        return false;
+    }
+}
+
 bool WorldSaveService::SaveBatch::save_metadata_and_active_regions(
     const std::string& bytes, world::ActiveRegionLedger& ledger, std::vector<std::string>* errors) {
     m_valid = m_valid && save_pair_validated(bytes, ledger, m_directory, errors);
@@ -2201,7 +2236,8 @@ bool WorldSaveService::persist_water_column_migration(
 }
 
 bool WorldSaveService::copy_chunk_authority(const std::filesystem::path& source,
-                                            const std::filesystem::path& destination) {
+                                            const std::filesystem::path& destination,
+                                            std::span<const std::shared_ptr<Chunk>> live_chunks) {
     const SaveGuard guard;
     if (source == destination)
         return true;
@@ -2216,6 +2252,12 @@ bool WorldSaveService::copy_chunk_authority(const std::filesystem::path& source,
         // Both manifests are bounded by LMR1's 65,535-record limit per region.
         const auto destination_regions = region_directory(destination);
         if (std::filesystem::exists(destination_regions)) {
+            // Runtime callers bound live owners by the shared resident budget.
+            std::set<ChunkID> live_ids;
+            for (const auto& chunk : live_chunks) {
+                if (chunk && chunk->has_simulation_authority())
+                    live_ids.insert(chunk->get_id());
+            }
             for (const auto& entry : std::filesystem::directory_iterator(destination_regions)) {
                 int rx = 0, rz = 0;
                 if (!entry.is_regular_file() || !ParseRegionFileName(entry.path(), rx, rz))
@@ -2225,13 +2267,17 @@ bool WorldSaveService::copy_chunk_authority(const std::filesystem::path& source,
                     (!source.empty() &&
                      !OpenAuthorityIndex(region_file_path(source, rx, rz), incoming)))
                     return false;
-                if (!std::includes(
+                for (const auto& record : previous.records) {
+                    const auto source_record = std::lower_bound(
                         incoming.records.begin(),
                         incoming.records.end(),
-                        previous.records.begin(),
-                        previous.records.end(),
-                        [](const auto& lhs, const auto& rhs) { return lhs.id < rhs.id; }))
-                    return false;
+                        record.id,
+                        [](const auto& candidate, ChunkID id) { return candidate.id < id; });
+                    if ((source_record == incoming.records.end() ||
+                         source_record->id != record.id) &&
+                        !live_ids.contains(record.id))
+                        return false;
+                }
             }
         }
         if (source.empty())

@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -214,9 +215,11 @@ public:
                                                const std::shared_ptr<Chunk>& destination,
                                                const std::vector<std::shared_ptr<Chunk>>& sources);
     // Transfer durable authority for an explicit snapshot destination. Refuses
-    // destination-only authority before writing; processes one region at a time.
+    // destination-only authority absent from both source and live owners before
+    // writing; processes one region at a time. Live owners must be saved afterwards.
     static bool copy_chunk_authority(const std::filesystem::path& source,
-                                     const std::filesystem::path& destination);
+                                     const std::filesystem::path& destination,
+                                     std::span<const std::shared_ptr<Chunk>> live_chunks = {});
     // Reads and decompresses every record of a region file. A missing file is
     // a clean miss: returns true with out_records empty.
     static bool read_container_records(const std::filesystem::path& region_file,
@@ -399,6 +402,9 @@ public:
         bool save_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
                                  std::vector<std::string>* errors = nullptr);
         bool save_metadata(const std::string& bytes, std::vector<std::string>* errors = nullptr);
+        // Update only scheduler state after payloads; preserve legacy bytes when
+        // the cursor is unchanged or both absent and zero.
+        bool save_water_cursor(std::size_t cursor, std::vector<std::string>* errors = nullptr);
         bool save_metadata_and_active_regions(const std::string& bytes,
                                               world::ActiveRegionLedger& ledger,
                                               std::vector<std::string>* errors = nullptr);

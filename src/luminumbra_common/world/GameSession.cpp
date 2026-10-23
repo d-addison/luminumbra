@@ -1903,7 +1903,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
     WorldStreamingState state;
-    for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+    const auto live_chunks = m_worldSystem->snapshot_streamed_chunks();
+    for (const auto& chunk : live_chunks) {
         state.insert_chunk(chunk);
     }
     result.chunks_total = state.size();
@@ -1933,7 +1934,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // Include durable-only evicted authority in exports without redirecting the
     // live session away from its canonical destination.
     if (m_activeRegionsEnabled && !Persistence::WorldSaveService::copy_chunk_authority(
-                                      m_worldSystem->authority_directory(), save_dir))
+                                      m_worldSystem->authority_directory(), save_dir, live_chunks))
         return false;
     bool ok = true;
     const bool write_chunks = full_snapshot || !dirty_ids.empty();
@@ -1960,11 +1961,13 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         ok = save_batch.save_plant_entities(plant_snapshot, &errors);
     if (ok)
         ok = SaveEnergyFieldRecord(save_dir);
-    // Regions-disabled incremental saves preserve legacy metadata and file layout.
-    // Explicit complete saves publish metadata only after all required state.
+    // Publish scheduler state after all required payloads, including incremental
+    // saves without regions. Zero/absent cursors retain the legacy exact bytes.
     write_metadata = write_metadata && !m_transientWorld;
     if (ok && write_metadata)
         ok = SaveWorldMetadata(save_batch);
+    else if (ok)
+        ok = save_batch.save_water_cursor(m_worldSystem->GetWaterSimWindowCursor(), &errors);
     for (const auto& error : errors)
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     if (!ok)
