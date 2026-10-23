@@ -1,4 +1,5 @@
 #include "TerrainPresetLoader.h"
+#include "core/Profiler.h"
 
 #include <algorithm>
 #include <array>
@@ -469,6 +470,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
                                           const std::filesystem::path& data_root) {
+    LUMIN_PROFILE_ZONE_N("File preset load");
     TerrainPresetLoadResult result;
 
     std::ifstream file(preset_path);
@@ -844,6 +846,7 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                const std::filesystem::path& data_root,
                                std::string& json_text,
                                std::string& error) {
+    LUMIN_PROFILE_ZONE_N("File preset override load");
     std::ifstream file(preset_path);
     if (!file) {
         error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);

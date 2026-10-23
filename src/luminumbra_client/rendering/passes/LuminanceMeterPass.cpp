@@ -1,5 +1,6 @@
 #include "LuminanceMeterPass.h"
 #include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "PassGlHelpers.h"
@@ -15,7 +16,10 @@ namespace {
 GLuint create_compute_shader(const char* source) {
     GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(shader);
+    }
 
     GLint success;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
@@ -41,7 +45,10 @@ AttributedGl::Program create_compute_program(const char* compute_source) {
 
     auto program = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     glAttachShader(program, compute_shader);
-    glLinkProgram(program);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+        glLinkProgram(program);
+    }
 
     GLint success;
     glGetProgramiv(program, GL_LINK_STATUS, &success);
@@ -61,6 +68,7 @@ LuminanceMeterPass::LuminanceMeterPass() = default;
 LuminanceMeterPass::~LuminanceMeterPass() = default;
 
 bool LuminanceMeterPass::execute(const RenderContext& ctx, const std::filesystem::path& root_path) {
+    LUMIN_PROFILE_ZONE_N("GL LuminanceMeterPass.execute");
     if (m_reduce_program == 0) {
         const Client::Attribution::PhaseScope shader_phase(Client::Attribution::Phase::ShaderLoad);
         // Lazy init: compile the reduce kernel + the 1-float SSBO on first use.

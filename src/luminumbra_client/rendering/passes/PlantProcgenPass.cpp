@@ -1,4 +1,5 @@
 #include "PlantProcgenPass.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "PassGlHelpers.h"
@@ -119,6 +120,7 @@ void PlantProcgenPass::set_plants(const std::vector<Vertex>& vertices,
 }
 
 void PlantProcgenPass::execute(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL PlantProcgenPass.execute");
     if (!m_enabled || !m_has_geometry || m_index_count == 0) {
         return;
     }

@@ -1,5 +1,6 @@
 #include "Rml_Interfaces.h"
 #include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 #include <GLFW/glfw3.h> // For glfwGetTime
 #include <SOIL2/SOIL2.h>
@@ -106,11 +107,17 @@ RmlRenderer::RmlRenderer() {
     const Attribution::PhaseScope shader_phase(Attribution::Phase::ShaderLoad);
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vertex_shader_gl, nullptr);
-    glCompileShader(vs);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(vs);
+    }
 
     GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fs, 1, &fragment_shader_gl, nullptr);
-    glCompileShader(fs);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(fs);
+    }
 
     m_program = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     glAttachShader(m_program, vs);
@@ -118,7 +125,10 @@ RmlRenderer::RmlRenderer() {
     glBindAttribLocation(m_program, 0, "inPosition");
     glBindAttribLocation(m_program, 1, "inColor");
     glBindAttribLocation(m_program, 2, "inTexCoord");
-    glLinkProgram(m_program);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+        glLinkProgram(m_program);
+    }
 
     glDeleteShader(vs);
     glDeleteShader(fs);

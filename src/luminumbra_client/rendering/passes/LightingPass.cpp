@@ -1,6 +1,7 @@
 #include "LightingPass.h"
 #include "../FarWorldReplay.h"
 #include "../RenderingDefaults.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
@@ -177,6 +178,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
 }
 
 void LightingPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL LightingPass.execute");
     if (!ctx.render_view && !ctx.camera)
         throw std::invalid_argument("Lighting requires a validated view or production camera");
     if (ctx.static_studio && (!ctx.render_view || ctx.authored_surface.id == 0))
@@ -437,6 +439,7 @@ void LightingPass::execute(const RenderContext& ctx) {
 }
 
 void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL LightingPass.execute_lightning_overlay");
     const LightningRenderState& lit = *ctx.lightning_state;
     if (!lit.active || lit.pulse_intensity <= 0.0f) {
         return; // zero-cost OFF path (no strike this frame)

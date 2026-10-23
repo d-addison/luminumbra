@@ -1,4 +1,5 @@
 #include "WaterPass.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -164,6 +165,7 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
 
 WaterDrawStats
 WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL WaterPass.execute");
     WaterDrawStats stats;
     // --- 0. Generate the animated caustics pattern (offscreen) ---
     generate_caustics(ctx);

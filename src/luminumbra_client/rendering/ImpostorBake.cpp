@@ -1,5 +1,6 @@
 #include "ImpostorBake.h"
 #include "app/FrameAttribution.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "Mesh.h"
@@ -85,7 +86,10 @@ void main() {
     auto compile = [&](GLenum type, const char* src) -> GLuint {
         GLuint s = glCreateShader(type);
         glShaderSource(s, 1, &src, nullptr);
-        glCompileShader(s);
+        {
+            LUMIN_PROFILE_ZONE_N("Shader compile");
+            glCompileShader(s);
+        }
         GLint ok = 0;
         glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
         if (!ok) {
@@ -108,7 +112,10 @@ void main() {
     auto prog = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
-    glLinkProgram(prog);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+        glLinkProgram(prog);
+    }
     glDeleteShader(vs);
     glDeleteShader(fs);
     GLint ok = 0;

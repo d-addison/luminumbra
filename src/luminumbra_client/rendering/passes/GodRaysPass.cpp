@@ -1,4 +1,5 @@
 #include "GodRaysPass.h"
+#include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h"
@@ -26,6 +27,7 @@ void GodRaysPass::reset_shader() {
 }
 
 void GodRaysPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL GodRaysPass.execute");
     // Screen-space crepuscular rays: additive shafts fanning from the sun around
     // occluders. Only when the sun is above the horizon and on screen (zero cost
     // otherwise). Only the shader stays a member; all frame state comes from ctx.

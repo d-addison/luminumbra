@@ -25,6 +25,7 @@ import importlib.util
 import io
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -891,7 +892,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
             # Require all three offline-dependency partitions in local-check evidence.
             "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
-            "gns-compile-probe": "8ba48b3b08d1b8c8b3c566827d1c07b850f3d21b3ee2c4765952169a7c13532b",
+            "gns-compile-probe": "7c0b1c6387113510ed76ffc66108cbf9efc3fa01617a68ca79b112fc3998a642",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
             # Pin Python 3.14.8 across consumers and require partitioned local-check evidence.
             "windows-msvc": "763218a207e024d39c82df14c933c89ac1d090342d7f4a794baa046a7a8d10f5",
@@ -902,7 +903,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "522c626dce80dc98e1f474bea381d9eaac93eb17979a2d5389e2d4358ca2ded6",
-            "tidy": "6be4e21d810e25d0cef9b84528e5ef8772ee26723b75018a01f86992aef7a074",
+            "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
             "public-tree": "f9f59910f6674d861330ee21b21acdf61043b00dfee998939f8c59564cdd58e2",
         }
         actual = jobs(self.workflows["ci.yml"])
@@ -2246,6 +2247,188 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                      value(refusal, "run", 8)], capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Aggregate dependencies did not pass", result.stderr)
+
+    def test_required_aggregate_verdicts_run_after_failure_and_cancellation(self):
+        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
+        aggregates = []
+        # Validate both jobs before running either grid. Mutation checks must
+        # reject an invalid tidy condition without replaying the valid ASan grid.
+        for filename, job_id, shard_id, label in (
+            ("asan.yml", "asan", "asan-shard", "ASan"),
+            ("ci.yml", "tidy", "tidy-shard", "clang-tidy"),
+        ):
+            aggregate = jobs(self.workflows[filename])[job_id]
+            ordered_steps = steps(aggregate)
+            self.assertIn("      - name: Reject invalid dependencies\n", aggregate)
+            refusal = next(step for step in ordered_steps
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            verdict = next(step for step in ordered_steps
+                           if step.startswith(f"      - name: Require all {label} shards to pass\n"))
+            # Explicit always() also runs after an earlier step fails or is
+            # cancelled. The job condition stops workflow cancellation when
+            # no dependency needs the explicit refusal.
+            expected = "always() && (" + READY + ")" if job_id == "asan" else "always()"
+            self.assertEqual(value(verdict, "if", 8), expected)
+            self.assertIsNone(value(verdict, "continue-on-error", 8))
+            self.assertLess(ordered_steps.index(refusal), ordered_steps.index(verdict))
+            result_key = "ASAN_SHARD_RESULT" if job_id == "asan" else "TIDY_SHARD_RESULT"
+            for key, expression in (
+                (result_key, "${{ needs." + shard_id + ".result }}"),
+                ("CI_PATHS_RESULT", "${{ needs.changes.result }}"),
+                ("NEEDS_CPP", "${{ needs.changes.outputs.needs_cpp }}"),
+            ):
+                self.assertEqual(value(verdict, key, 10), expression)
+            aggregates.append((job_id, shard_id, aggregate, result_key, (refusal, verdict)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            for job_id, shard_id, aggregate, result_key, checked_steps in aggregates:
+                condition = value(aggregate, "if", 4)
+                conditions = [value(step, "if", 8) for step in checked_steps]
+                scripts = [value(step, "run", 8) for step in checked_steps]
+                # At most 144 input triples per job, each with two steps. Keep
+                # exact scripts (including exit/errexit) in isolated subshells,
+                # but pay for Bash interpreter startup only once per job.
+                driver = ["set +e"]
+                observations = {}
+                cases = []
+                for classification in results:
+                    for shard in results:
+                        for cpp in ("true", "false", "", "unknown"):
+                            for cancelled in (False, True):
+                                with self.subTest(job=job_id, classification=classification,
+                                                  shard=shard, cpp=cpp, cancelled=cancelled):
+                                    scheduled = self.aggregate_condition(condition, shard_id, cancelled,
+                                                                         classification, shard)
+                                    if not scheduled:
+                                        self.assertTrue(cancelled)
+                                        self.assertNotIn("cancelled", (classification, shard))
+                                        continue
+                                    selected = tuple(index for index, step_condition in enumerate(conditions)
+                                                     if self.aggregate_condition(step_condition, shard_id, cancelled,
+                                                                                 classification, shard, step=True))
+                                    # Cancellation changes scheduling, not shell
+                                    # inputs. Reuse only an identical scheduled
+                                    # step sequence with identical environment.
+                                    key = (classification, shard, cpp, selected)
+                                    if key not in observations:
+                                        summary = Path(directory) / f"summary-{job_id}-{len(observations)}"
+                                        observations[key] = summary
+                                        environment = {result_key: shard, "CI_PATHS_RESULT": classification,
+                                                       "NEEDS_CPP": cpp, "GITHUB_STEP_SUMMARY": summary.as_posix()}
+                                        driver.append("export " + " ".join(f"{name}={shlex.quote(item)}"
+                                                                          for name, item in environment.items()))
+                                        for index in selected:
+                                            driver.append("(\nset -e -o pipefail\n" + scripts[index]
+                                                          + "\n) >/dev/null 2>&1\nprintf '%s\\n' \"$?\"")
+                                    cases.append((classification, shard, cpp, cancelled, key))
+                # Use a file, rather than -c, to stay below Windows argv limits.
+                path = Path(directory) / f"{job_id}.sh"
+                path.write_text("\n".join(driver) + "\n", encoding="utf-8", newline="\n")
+                process = subprocess.run([BASH, "--noprofile", "--norc", path.as_posix()],
+                                         cwd=directory, capture_output=True, text=True, timeout=10)
+                self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+                observed = process.stdout.splitlines()
+                self.assertEqual(len(observed), sum(len(key[-1]) for key in observations))
+                outcomes_by_key = {}
+                offset = 0
+                for key in observations:
+                    count = len(key[-1])
+                    outcomes_by_key[key] = [int(code) for code in observed[offset:offset + count]]
+                    offset += count
+                for classification, shard, cpp, cancelled, key in cases:
+                    with self.subTest(job=job_id, classification=classification,
+                                      shard=shard, cpp=cpp, cancelled=cancelled):
+                        summary = observations[key]
+                        outcomes = outcomes_by_key[key]
+                        self.assertTrue(outcomes, "An aggregate cannot pass without validation")
+                        routed = classification == "success" and cpp == "false" and shard == "skipped"
+                        accepted = not cancelled and classification == "success" and (
+                            shard == "success" or routed)
+                        self.assertEqual(all(code == 0 for code in outcomes), accepted)
+                        self.assertEqual(summary.exists(), routed)
+                        if routed:
+                            self.assertIn("route: skipped", summary.read_text(encoding="utf-8"))
+
+    def test_required_aggregate_verdict_policy_rejects_weakened_conditions(self):
+        method = "test_required_aggregate_verdicts_run_after_failure_and_cancellation"
+        for filename, job_id in (("asan.yml", "asan"), ("ci.yml", "tidy")):
+            condition = "        if: " + ("always() && (" + READY + ")" if job_id == "asan" else "always()") + "\n"
+            workflow = self.workflows[filename]
+            aggregate = jobs(workflow)[job_id]
+            verdict = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Require all "))
+            for mutation, original, replacement in (
+                ("implicit-success", condition, ""),
+                ("success-only", condition, "        if: success()\n"),
+                ("cancellation-skip", condition, "        if: ${{ !cancelled() }}\n"),
+                ("always-false", condition, "        if: always() && false\n"),
+                ("ignored-verdict", "        env:\n", "        continue-on-error: true\n        env:\n"),
+            ):
+                with self.subTest(job=job_id, mutation=mutation):
+                    mutated = verdict.replace(original, replacement, 1)
+                    self.assertNotEqual(mutated, verdict)
+                    case = WorkflowDraftPolicyTests(method)
+                    case.workflows = {
+                        **self.workflows,
+                        filename: workflow.replace(aggregate, aggregate.replace(verdict, mutated, 1), 1),
+                    }
+                    result = unittest.TestResult()
+                    with patch.object(subprocess, "run", wraps=subprocess.run) as run:
+                        case.run(result)
+                    self.assertEqual(run.call_count, 0)
+                    self.assertEqual(result.errors, [], result.errors)
+                    self.assertTrue(result.failures)
+
+    def test_required_aggregate_verdict_grid_keeps_bounded_launches_and_step_isolation(self):
+        method = "test_required_aggregate_verdicts_run_after_failure_and_cancellation"
+        case = WorkflowDraftPolicyTests(method)
+        case.workflows = dict(self.workflows)
+        for filename, job_id in (("asan.yml", "asan"), ("ci.yml", "tidy")):
+            workflow = case.workflows[filename]
+            aggregate = jobs(workflow)[job_id]
+            mutated = aggregate
+            for step in steps(aggregate):
+                if not step.startswith(("      - name: Reject invalid dependencies\n",
+                                        "      - name: Require all ")):
+                    continue
+                script = value(step, "run", 8)
+                # Each real script must get a fresh shell scope, and exit must
+                # stop that step without preventing the next step from running.
+                isolated = ('if [[ -n "${POLICY_STEP_SCOPE-}" ]]; then exit 99; fi\n'
+                            'export POLICY_STEP_SCOPE=occupied\n' + script + '\nexit 0')
+                if step.startswith("      - name: Reject invalid dependencies\n"):
+                    # Errexit still aborts, and return outside a function must
+                    # remain an error just as in a standalone workflow script.
+                    failure = "false" if job_id == "asan" else "return 0"
+                    isolated = isolated.replace("exit 1", failure + "\nexit 0")
+                mutated = mutated.replace(step, step.replace(
+                    "          " + script.replace("\n", "\n          "),
+                    "          " + isolated.replace("\n", "\n          "), 1), 1)
+            self.assertNotEqual(mutated, aggregate)
+            case.workflows[filename] = workflow.replace(aggregate, mutated, 1)
+        result = unittest.TestResult()
+        with patch.dict(os.environ), patch.object(subprocess, "run", wraps=subprocess.run) as run:
+            os.environ.pop("POLICY_STEP_SCOPE", None)
+            case.run(result)
+        self.assertEqual(result.errors, [], result.errors)
+        self.assertEqual(result.failures, [], result.failures)
+        self.assertEqual(run.call_count, 2)
+
+        for response in (
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "0\n", ""),
+            subprocess.CompletedProcess([], 1, "", "driver failed"),
+            subprocess.TimeoutExpired([BASH], 10, output=b"0\n"),
+        ):
+            with self.subTest(response=response):
+                case = WorkflowDraftPolicyTests(method)
+                case.workflows = self.workflows
+                result = unittest.TestResult()
+                options = ({"side_effect": response} if isinstance(response, Exception)
+                           else {"return_value": response})
+                with patch.object(subprocess, "run", **options):
+                    case.run(result)
+                self.assertTrue(result.failures or result.errors)
 
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
         ci = jobs(self.workflows["ci.yml"])

@@ -3,6 +3,27 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "profiler.build-contract",
+      "source": "issue #433",
+      "statement": "Static source contracts require the existing Linux/GCC GNS compile job to configure the profile preset and build the common library, server, shipping client, QA client and both macro fixtures against pinned Tracy. The bootstrap installs NumPy and Pillow before enabling tests. Disposable TCP accept attempts retain job and future-wait zones without process-lifetime thread-name registration; persistent workers remain named. The licence disclosure links to the repository-hosted notice from generated documentation. Enabled native compile/link qualification is pending a successful CI run; no local profile configure or application build is claimed. Windows and macOS enabled builds, profiler captures and GPU execution remain outside this check. Release/perf lanes retain Tracy disabled.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ProfilerSourceContract"
+        },
+        {
+          "kind": "script",
+          "ref": "test/tools/check_profiler_contract.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.fast-replay-budget",
       "source": "docs/ci/local-checks.md#fast-hosted-validation",
       "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Changed first-party sources are admitted by each compiler's configured dependency closure, including included sources without their own database entries; standalone sources without database entries and sources consumed only by absent targets refuse before replay even above budget. Local compile/tidy share this admission. Included-source reports name proven consumers' inputs, and unconfigured-source reports exclude those inputs. Refusals, missing consumers or cross-selected TU entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes.",
