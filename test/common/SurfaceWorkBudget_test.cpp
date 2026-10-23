@@ -1,6 +1,7 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra/core/Types.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -253,6 +254,198 @@ TEST(SurfaceWorkBudget, TallSurfaceRefusesExactWorkBeforeCreatingChunks) {
     EXPECT_EQ(chunk->sdf_data, original_sdf);
     EXPECT_EQ(world.find_streamed_chunk(Luminumbra::IVec3(0)), chunk);
     EXPECT_EQ(world.far_lod_authority_revision(), original_revision);
+}
+
+TEST(SurfaceWorkBudget, TallSurfaceRefusalRetainsUnpublishedMeshBatch) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 10000000.0f;
+    params.base_frequency = 0.1f;
+    params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+    Luminumbra::Systems::SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    Luminumbra::Systems::PhysicsSystem physics;
+    entt::registry registry;
+    const Luminumbra::Vec3 anchor(8.0f);
+    const auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    // One full lattice is sufficient to dispatch a real, tick-stamped mesh job.
+    constexpr std::size_t samples = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(samples, -1.0f);
+    chunk->material_data.assign(samples, 0u);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    world.begin_tick(0);
+    world.update(registry, anchor, nullptr);
+    world.quiesce_streaming_jobs_for_save();
+    ASSERT_EQ(world.pending_publication_chunks(), 1u);
+    ASSERT_EQ(chunk->get_state(), Luminumbra::ChunkState::Meshing);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    ASSERT_TRUE(chunk->pending_mesh_ready.load());
+    ASSERT_FALSE(chunk->pending_mesh_failed.load());
+    const auto original_lod = chunk->current_lod.load();
+    const auto original_version = chunk->mesh_version.load();
+    const auto original_sdf = chunk->sdf_data;
+    const auto original_revision = world.far_lod_authority_revision();
+
+    EXPECT_FALSE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));
+    EXPECT_FALSE(world.EnsureCollisionReadyNear(anchor, &physics, 0));
+    EXPECT_EQ(world.EditTerrainVoxel(anchor, 1.0f, false, &physics), 0);
+    EXPECT_EQ(world.pending_publication_chunks(), 1u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Meshing);
+    EXPECT_EQ(chunk->pending_lod.load(), 0);
+    EXPECT_EQ(chunk->current_lod.load(), original_lod);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version);
+    EXPECT_EQ(chunk->sdf_data, original_sdf);
+    EXPECT_EQ(world.find_streamed_chunk(Luminumbra::IVec3(0)), chunk);
+    EXPECT_EQ(world.snapshot_streamed_chunks().size(), 1u);
+    EXPECT_EQ(world.far_lod_authority_revision(), original_revision);
+
+    // Refusal must leave the original batch available for its legal publication.
+    world.begin_tick(8);
+    world.activate_due(8);
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Ready);
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_EQ(chunk->current_lod.load(), 0);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);
+}
+
+TEST(SurfaceWorkBudget, TallSurfaceRefusalRetainsUnpublishedGenerationBatch) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 10000000.0f;
+    params.base_frequency = 0.1f;
+    params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+    Luminumbra::Systems::SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    Luminumbra::Systems::PhysicsSystem physics;
+    const Luminumbra::Vec3 anchor(8.0f);
+    world.begin_tick(0);
+    world.dispatch_generation_jobs(std::vector<Luminumbra::IVec3>{Luminumbra::IVec3(0)});
+    world.quiesce_streaming_jobs_for_save();
+    const auto chunk = world.find_streamed_chunk(Luminumbra::IVec3(0));
+    ASSERT_NE(chunk, nullptr);
+    ASSERT_EQ(world.pending_publication_chunks(), 1u);
+    ASSERT_EQ(chunk->get_state(), Luminumbra::ChunkState::Loading);
+    ASSERT_TRUE(chunk->pending_generation_ready.load());
+    ASSERT_FALSE(chunk->sdf_data.empty());
+    const auto original_sdf = chunk->sdf_data;
+    const auto original_lod = chunk->current_lod.load();
+    const auto original_pending_lod = chunk->pending_lod.load();
+    const auto original_version = chunk->mesh_version.load();
+    const auto original_revision = world.far_lod_authority_revision();
+
+    EXPECT_FALSE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));
+    EXPECT_FALSE(world.EnsureCollisionReadyNear(anchor, &physics, 0));
+    EXPECT_EQ(world.EditTerrainVoxel(anchor, 1.0f, false, &physics), 0);
+    EXPECT_EQ(world.pending_publication_chunks(), 1u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Loading);
+    EXPECT_TRUE(chunk->pending_generation_ready.load());
+    EXPECT_EQ(chunk->current_lod.load(), original_lod);
+    EXPECT_EQ(chunk->pending_lod.load(), original_pending_lod);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version);
+    EXPECT_EQ(chunk->sdf_data, original_sdf);
+    EXPECT_EQ(world.find_streamed_chunk(Luminumbra::IVec3(0)), chunk);
+    EXPECT_EQ(world.snapshot_streamed_chunks().size(), 1u);
+    EXPECT_EQ(world.far_lod_authority_revision(), original_revision);
+
+    world.begin_tick(8);
+    world.activate_due(8);
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Idle);
+    EXPECT_FALSE(chunk->pending_generation_ready.load());
+    EXPECT_EQ(chunk->sdf_data, original_sdf);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version);
+}
+
+TEST(SurfaceWorkBudget, TallSurfaceRefusalRetainsUnpublishedPromotionBatch) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 10000000.0f;
+    params.base_frequency = 0.1f;
+    params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+    Luminumbra::Systems::SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    Luminumbra::Systems::PhysicsSystem physics;
+    entt::registry registry;
+    const Luminumbra::Vec3 anchor(8.0f);
+    const auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    // One coarse column triggers stage A through the ordinary LOD0 scheduler.
+    constexpr std::size_t samples =
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    chunk->heightmap_data.assign(samples, 0.0f);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    world.begin_tick(0);
+    world.update(registry, anchor, nullptr);
+    world.quiesce_streaming_jobs_for_save();
+    ASSERT_EQ(world.pending_publication_chunks(), 1u);
+    ASSERT_EQ(chunk->get_state(), Luminumbra::ChunkState::Meshing);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    ASSERT_TRUE(chunk->pending_promotion_ready.load());
+    ASSERT_FALSE(chunk->pending_promotion_failed.load());
+    ASSERT_TRUE(chunk->sdf_data.empty());
+    ASSERT_FALSE(chunk->pending_sdf_data.empty());
+    const auto original_sdf = chunk->sdf_data;
+    const auto staged_sdf = chunk->pending_sdf_data;
+    const auto original_heightmap = chunk->heightmap_data;
+    const auto original_lod = chunk->current_lod.load();
+    const auto original_version = chunk->mesh_version.load();
+    const auto original_revision = world.far_lod_authority_revision();
+
+    EXPECT_FALSE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));
+    EXPECT_FALSE(world.EnsureCollisionReadyNear(anchor, &physics, 0));
+    EXPECT_EQ(world.EditTerrainVoxel(anchor, 1.0f, false, &physics), 0);
+    EXPECT_EQ(world.pending_publication_chunks(), 1u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Meshing);
+    EXPECT_EQ(chunk->pending_lod.load(), 0);
+    EXPECT_TRUE(chunk->pending_promotion_ready.load());
+    EXPECT_EQ(chunk->current_lod.load(), original_lod);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version);
+    EXPECT_EQ(chunk->sdf_data, original_sdf);
+    EXPECT_EQ(chunk->pending_sdf_data, staged_sdf);
+    EXPECT_EQ(chunk->heightmap_data, original_heightmap);
+    EXPECT_EQ(world.find_streamed_chunk(Luminumbra::IVec3(0)), chunk);
+    EXPECT_EQ(world.snapshot_streamed_chunks().size(), 1u);
+    EXPECT_EQ(world.far_lod_authority_revision(), original_revision);
+
+    // Completed stage-A data stays unpublished until the original due tick.
+    world.begin_tick(7);
+    world.activate_due(7);
+    EXPECT_EQ(world.pending_publication_chunks(), 1u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Meshing);
+    EXPECT_EQ(chunk->pending_lod.load(), 0);
+    EXPECT_TRUE(chunk->pending_promotion_ready.load());
+    EXPECT_FALSE(chunk->pending_promotion_failed.load());
+    EXPECT_EQ(chunk->current_lod.load(), original_lod);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version);
+    EXPECT_EQ(chunk->sdf_data, original_sdf);
+    EXPECT_EQ(chunk->pending_sdf_data, staged_sdf);
+    EXPECT_EQ(chunk->heightmap_data, original_heightmap);
+    EXPECT_EQ(world.far_lod_authority_revision(), original_revision);
+
+    // Stage B inherits stage A's due tick, so this activation publishes both.
+    world.begin_tick(8);
+    world.activate_due(8);
+    EXPECT_EQ(chunk->sdf_data, staged_sdf);
+    EXPECT_TRUE(chunk->pending_sdf_data.empty());
+    EXPECT_FALSE(chunk->pending_promotion_ready.load());
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Ready);
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_EQ(chunk->current_lod.load(), 0);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);
+
+    // A later fence and activation cannot publish the same mesh twice.
+    world.quiesce_streaming_jobs_for_save();
+    world.begin_tick(16);
+    world.activate_due(16);
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Ready);
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_EQ(chunk->current_lod.load(), 0);
+    EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);
 }
 
 } // namespace

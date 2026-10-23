@@ -229,6 +229,14 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_const_scope_observations_have_mutable_storage(self):
+        # Writes through the registered pointer must remain defined for const
+        # scope tokens; runtime assertions alone cannot reliably expose this UB.
+        scope = compact(block(self.header, "class FoliageFrameScope"))
+        self.assertRegex(scope, r"\bmutable FoliageFrame m_frame\s*\{\s*\}\s*;")
+        self.assertEqual(compact(block(scope, "const FoliageFrame& snapshot() const")),
+                         "return m_frame;")
+
     def test_benchmark_does_not_enable_foliage_input_hashing(self):
         update = compact(block(self.main, "static void UpdateFoliageScatter("))
         self.assertIn("foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() && "
@@ -1211,26 +1219,30 @@ class FrameAttributionWiring(unittest.TestCase):
         transition = compact(block(native, "TEST_F(FoliageRebuildTest, "
                                    "CameraReorderUploadsMetadataOnceAndPrefixReplacesEveryCommandWord)"))
         baseline, movement = transition.split("for (const glm::vec3 camera :", 1)
-        self.assertIn("const auto initial = RebuildAttributed(reused.pass, chunks, 1);", baseline)
+        self.assertIn("const auto initial = RebuildAttributed(reused.pass(), chunks, 1);", baseline)
         self.assertIn("EXPECT_EQ(initial.reasons, Attribution::Initial);", baseline)
-        self.assertNotIn("Rebuild(reused.pass, chunks, 1);", baseline)
+        self.assertNotIn("Rebuild(reused.pass(), chunks, 1);", baseline)
         self.assertIn("glm::vec3{kCamera.x + 32, kCamera.y, kCamera.z}, kCamera", movement)
-        self.assertIn("RebuildAttributed(reused.pass, chunks, ++frame, camera)", movement)
+        self.assertIn("RebuildAttributed(reused.pass(), chunks, ++frame, camera)", movement)
         self.assertIn("EXPECT_EQ(work.reasons, Attribution::CameraCell);", movement)
         self.assertIn("for (const bool gpu : {false, true})", movement)
-        self.assertIn("Rebuild(fresh.pass, chunks, frame, camera);", movement)
+        self.assertIn("Rebuild(fresh.pass(), chunks, frame, camera);", movement)
 
     def test_legacy_hash_oracle_uses_the_callers_camera_and_preserves_the_default(self):
-        native = read(ROOT / "test/rendering/foliage_rebuild_test.cpp")
+        rebuild = read(ROOT / "test/rendering/foliage_rebuild_test.cpp")
+        self.assertIn('#include "foliage_rebuild_fixture.h"', rebuild)
+        native = read(ROOT / "test/rendering/foliage_rebuild_fixture.h")
+        for counter in ("uploaded_bytes", "uploads", "surface_upload_bytes", "surface_uploads"):
+            self.assertIn(f"mutable std::size_t {counter} = 0;", rebuild)
         self.assertRegex(compact(native), r"LegacyUploadedHash\(const FoliagePass& pass, "
                          r"std::size_t count, const glm::vec3& camera = kCamera\)")
         oracle = compact(block(native, "static std::uint64_t LegacyUploadedHash("))
         self.assertIn("{camera.x, camera.z, pass.density_scale(), pass.fade_end_m(), total_weight}",
                       oracle)
         self.assertNotIn("kCamera", oracle)
-        transition = compact(block(native, "TEST_F(FoliageRebuildTest, "
+        transition = compact(block(rebuild, "TEST_F(FoliageRebuildTest, "
                                    "CameraReorderUploadsMetadataOnceAndPrefixReplacesEveryCommandWord)"))
-        self.assertIn("EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size(), camera));",
+        self.assertIn("EXPECT_EQ(hash, LegacyUploadedHash(reused.pass(), chunks.size(), camera));",
                       transition)
 
     def test_csv_nullable_counts_precede_both_complete_upload_lanes(self):

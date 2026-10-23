@@ -681,6 +681,8 @@ add_executable(pass_context_test
     # Evidence reuse, stable surface slots and column-local invalidation on both backends.
     rendering/foliage_rebuild_test.cpp
     # Includes deterministic CPU/compute work budgets, idle zero and stale results.
+    # Fresh-pass equivalence and moving horizons on both scatter backends.
+    rendering/foliage_invalidation_test.cpp
 )
 
 target_compile_definitions(pass_context_test PRIVATE
