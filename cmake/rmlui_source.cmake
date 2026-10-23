@@ -4,6 +4,7 @@
 if(NOT IS_ABSOLUTE "${Python3_EXECUTABLE}" OR NOT EXISTS "${Python3_EXECUTABLE}")
   message(FATAL_ERROR "RmlUi requires an absolute bootstrap Python3_EXECUTABLE")
 endif()
+file(TO_CMAKE_PATH "${Python3_EXECUTABLE}" _rmlui_python)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(_rmlui_helper "${CMAKE_SOURCE_DIR}/tools/ci/rmlui_source.py")
 set(_rmlui_manifest "${CMAKE_SOURCE_DIR}/vendor/rmlui/rmlui-6.1-source.json")
@@ -36,7 +37,7 @@ set(_rmlui_disconnected)
 if(FETCHCONTENT_FULLY_DISCONNECTED)
   list(APPEND _rmlui_disconnected --fully-disconnected)
 endif()
-execute_process(COMMAND "${Python3_EXECUTABLE}" -I -B "${_rmlui_helper}"
+execute_process(COMMAND "${_rmlui_python}" -I -B "${_rmlui_helper}"
   preflight --root "${CMAKE_BINARY_DIR}" ${_rmlui_disconnected}
   RESULT_VARIABLE _rmlui_preflight)
 if(NOT _rmlui_preflight EQUAL 0)
@@ -45,7 +46,7 @@ endif()
 FetchContent_Declare(RmlUi
   SOURCE_DIR "${_rmlui_population}"
   BINARY_DIR "${_rmlui_expected_binary}"
-  DOWNLOAD_COMMAND "${Python3_EXECUTABLE}" -I -B "${_rmlui_helper}"
+  DOWNLOAD_COMMAND "${_rmlui_python}" -I -B "${_rmlui_helper}"
     download --root "${CMAKE_BINARY_DIR}"
   UPDATE_COMMAND ""
   PATCH_COMMAND ""
@@ -55,7 +56,7 @@ if(NOT rmlui_SOURCE_DIR STREQUAL _rmlui_population OR
    NOT rmlui_BINARY_DIR STREQUAL _rmlui_expected_binary)
   message(FATAL_ERROR "RmlUi population substituted an unexpected directory")
 endif()
-execute_process(COMMAND "${Python3_EXECUTABLE}" -I -B "${_rmlui_helper}"
+execute_process(COMMAND "${_rmlui_python}" -I -B "${_rmlui_helper}"
   verify --root "${CMAKE_BINARY_DIR}"
   RESULT_VARIABLE _rmlui_verified)
 if(NOT _rmlui_verified EQUAL 0)

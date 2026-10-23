@@ -1436,6 +1436,18 @@ class PairedWorkflowInitialization(unittest.TestCase):
 
 
 class BootstrapInterpreterBinding(unittest.TestCase):
+    def test_validated_interpreter_is_normalized_before_every_helper_command(self):
+        cmake = (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8", errors="strict")
+        cmake = re.sub(r'(?m)#.*$', '', cmake)
+        self.assertIn(
+            'if(NOT IS_ABSOLUTE "${Python3_EXECUTABLE}" OR NOT EXISTS "${Python3_EXECUTABLE}")\n'
+            '  message(FATAL_ERROR "RmlUi requires an absolute bootstrap Python3_EXECUTABLE")\n'
+            'endif()\n'
+            'file(TO_CMAKE_PATH "${Python3_EXECUTABLE}" _rmlui_python)\n', cmake)
+        commands = re.findall(r'(?:execute_process\(COMMAND|DOWNLOAD_COMMAND)\s+([^\n]+)', cmake)
+        self.assertEqual(commands, ['"${_rmlui_python}" -I -B "${_rmlui_helper}"'] * 3)
+        self.assertLess(cmake.index('file(TO_CMAKE_PATH'), cmake.index('execute_process('))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="rmlui-interpreter-")
         self.addCleanup(self.directory.cleanup)
