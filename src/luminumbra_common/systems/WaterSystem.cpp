@@ -802,7 +802,9 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending) {
                                               ? std::chrono::steady_clock::now()
                                               : std::chrono::steady_clock::time_point{};
         for (std::size_t i = 0; i < to_init.size(); ++i) {
-            if (!use_seed_inputs)
+            // Payloads exist only for the high grid; any other configured grid
+            // retires a staged request here so it cannot outlive initialization.
+            if (!use_seed_inputs || m_sim_resolution != HighWaterSeedInputs::kResolution)
                 to_init[i]->stage_water_seed_inputs({});
             const auto* inputs = high_seed_inputs.empty() ? nullptr : high_seed_inputs[i].get();
             seed_chunk_water(to_init[i],
