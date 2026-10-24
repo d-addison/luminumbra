@@ -902,9 +902,10 @@ field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
 `other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
 remains rebuild time only.
 
-The CSV has 72 fields. Existing fields retain their zero-based indices;
+The CSV has 76 fields. Existing fields retain their zero-based indices;
 `dirty_columns` remains at index 62, after all terrain, water and phase fields.
 The nine water subzone fields below follow it at indices 63–71.
+Worker counters follow at indices 72–75.
 Within each range below, columns appear in the listed order:
 
 | Indices | Columns |
@@ -918,6 +919,7 @@ Within each range below, columns appear in the listed order:
 | 51–61 | The phase columns below |
 | 62 | `dirty_columns` |
 | 63–71 | `water_selection_ms`, `water_seed_inputs_ms`, `water_initialization_ms`, `water_sim_ms`, `water_seam_ms`, `water_bookkeeping_ms`, `water_precomputed_columns`, `water_fallback_columns`, `water_stale_columns` |
+| 72–75 | `worker_dispatched`, `worker_completed`, `worker_stale_rejected`, `worker_queue_age_frames` |
 
 Issue #402's CPU wall-time phase columns follow the terrain and water fields,
 at indices 51–61, in order:
@@ -988,9 +990,10 @@ and early-out handling. `surface_ms` covers complete uncached column builds
 `cpu_fallback_ms` is inclusive of its surface builds and mapped uploads; do not
 add it to those sub-times. Palette/scratch time includes null-data storage
 allocation; `scratch_bytes` records that allocation separately from actual
-`uploaded_bytes`. The final `dirty_columns` field counts surface-slot uploads,
+`uploaded_bytes`. The `dirty_columns` field counts surface-slot uploads,
 including reconstruction after storage growth or compute-resource recreation.
-Unchanged columns transfer zero surface bytes. Copy bytes include the sorted
+Worker counters report dispatched, completed and stale-rejected builds, plus the
+oldest outstanding or consumed job age in frames. Unchanged columns transfer zero surface bytes. Copy bytes include the sorted
 working copy, column metadata, dirty-slot batch scratch, completed readback
 snapshots and CPU emitted/mapped records; hash bytes describe
 the unchanged evidence input hash. Frozen qualification rebuilds are identified
