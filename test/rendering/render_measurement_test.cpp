@@ -417,6 +417,22 @@ void workload_dispatch() {
 }
 
 void reload_boundaries() {
+    // Cover all frame policy branches through this registered native entry.
+    // Invalid nonpositive/NaN scales cannot enable the variable-dt tick path.
+    const std::array<float, 6> scales{
+        -1.0f, 0.0f, 0.5f, 1.0f, 16.0f, std::numeric_limits<float>::quiet_NaN()};
+    for (const bool measuring : {false, true}) {
+        for (const bool paused : {false, true}) {
+            for (const float scale : scales) {
+                require(frame_simulation_enabled(true, true, measuring, paused, scale) ==
+                        (measuring && !paused));
+                require(frame_simulation_enabled(false, true, measuring, paused, scale) ==
+                        measuring);
+                require(frame_simulation_enabled(false, false, measuring, paused, scale) ==
+                        (scale > 0.0f));
+            }
+        }
+    }
     require(!reload_residency_observed(0, 4));
     require(!reload_residency_observed(3, 4));
     require(reload_residency_observed(4, 4));

@@ -304,7 +304,10 @@ header field for compatibility; v2 key ticks determine motion, including holds.
 The native parser expands at most 18001 poses once, giving constant-time lookup
 per frame. A script tick advances once per measured frame regardless of wall
 time. Gameplay simulation advances one fixed 30 Hz tick on unpaused gameplay
-frames and stays paused during menus and warmup. Script ticks remain consecutive
+frames. The same frame decision gates physics and water initialization and stepping;
+menus, warmup (including extra upload-settling frames), and report frames preserve
+simulation state while streaming, meshing, uploads, and rendering continue. Extra
+reload-settling passes also disable world simulation. Script ticks remain consecutive
 across save/load and menus; `actual_ticks` counts script ticks in v4.
 
 V4 starts from a newly created world. It refuses `--load-world` and loads of

@@ -4294,6 +4294,13 @@ int main(int argc, char* argv[]) {
             RefreshInputOwnership(window);
         }
 
+        const bool simulate_frame = Measurement::frame_simulation_enabled(benchmark_v4,
+                                                                          traversal.has_value(),
+                                                                          measuring_v3,
+                                                                          g_app.hud.paused,
+                                                                          g_app.capture.timeScale);
+        // Preserve the historical frame-driven behavior outside benchmark capture.
+        const bool advance_frame_simulation = !g_rb_active || simulate_frame;
         switch (currentState) {
             case GameState::WORLD_LOADING: {
                 const int JOBS_PER_FRAME = 512;
@@ -4461,7 +4468,8 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
-                    g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera) {
+                    g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera &&
+                    advance_frame_simulation) {
                     // runtime telemetry (--profile-fly): drive the player FORWARD at a constant
                     // noclip speed in normal-play mode so the SLOWFRAME logger captures a
                     // representative MOVING cost without the time-based scenario camera's
@@ -4486,7 +4494,7 @@ int main(int argc, char* argv[]) {
                     if (elapsed > g_app.capture.profile_fly_seconds)
                         glfwSetWindowShouldClose(window, true);
                 } else if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
-                           g_playerController && !benchmark_v4) {
+                           g_playerController && !benchmark_v4 && advance_frame_simulation) {
                     g_playerController->SetLiveInputGate(
                         [&](int key) { return uiInputRouter.GameplayKeyAllowed(key); });
                     g_playerController->Update(deltaTime); // live input uses current ownership
@@ -4633,8 +4641,10 @@ int main(int argc, char* argv[]) {
                         g_camera->updateCameraVectors();
                     }
                 }
-                if (auto* physics = gameSession->GetPhysicsSystem())
-                    physics->update(deltaTime * g_app.capture.timeScale);
+                if (advance_frame_simulation) {
+                    if (auto* physics = gameSession->GetPhysicsSystem())
+                        physics->update(deltaTime * g_app.capture.timeScale);
+                }
                 // fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
                 // physics, and scenario paths above remain variable-dt.
@@ -4645,44 +4655,47 @@ int main(int argc, char* argv[]) {
                 // host, and camera-anchored streaming would diverge the hashed world.
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
-                    if (benchmark_v4 && g_camera)
-                        gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, true);
-                    else if (g_playerController)
-                        gameSession->SetLocalPlayerSimulationPosition(
-                            g_playerController->GetPosition(),
-                            g_playerController->GetMovementMode() ==
-                                Luminumbra::Client::MovementMode::Walking);
-                    if (benchmark_v4) {
-                        if (measuring_v3 && !g_app.hud.paused)
+                    if (advance_frame_simulation) {
+                        if (benchmark_v4 && g_camera)
+                            gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, true);
+                        else if (g_playerController)
+                            gameSession->SetLocalPlayerSimulationPosition(
+                                g_playerController->GetPosition(),
+                                g_playerController->GetMovementMode() ==
+                                    Luminumbra::Client::MovementMode::Walking);
+                    }
+                    if (simulate_frame) {
+                        if (benchmark_v4) {
                             gameSession->TickSimulation(1.0 / traversal->tickRate);
-                    } else if (traversal) {
-                        while (measuring_v3 && !gameSession->GetRegionSchedulerFault() &&
-                               traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
-                            traversal_ticks +=
-                                gameSession->TickSimulation(1.0 / traversal->tickRate);
-                    } else if (g_app.capture.timeScale == 1.0f) {
-                        gameSession->TickSimulation(static_cast<double>(
-                            deltaTime)); // byte-identical default (gates run here)
-                    } else if (g_app.capture.timeScale > 0.0f) {
-                        // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps so a
-                        // high scale isn't dropped by the catch-up clamp, capped per frame to keep
-                        // spiral protection. Determinism holds (fixed dt per tick).
-                        double simDt = static_cast<double>(deltaTime) *
-                                       static_cast<double>(g_app.capture.timeScale);
-                        const double kFourTicks = (1.0 / 30.0) * 4.0;
-                        const int budget = static_cast<int>(
-                            std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
-                        int ran = 0;
-                        while (simDt > 1e-9 && ran < budget) {
-                            const double step = std::min(simDt, kFourTicks);
-                            const std::uint32_t t = gameSession->TickSimulation(step);
-                            simDt -= step;
-                            if (t == 0u)
-                                break; // accumulator < 1 tick this frame
-                            ran += static_cast<int>(t);
+                        } else if (traversal) {
+                            while (!gameSession->GetRegionSchedulerFault() &&
+                                   traversal_ticks <
+                                       static_cast<std::uint64_t>(traversal_target_tick))
+                                traversal_ticks +=
+                                    gameSession->TickSimulation(1.0 / traversal->tickRate);
+                        } else if (g_app.capture.timeScale == 1.0f) {
+                            gameSession->TickSimulation(static_cast<double>(
+                                deltaTime)); // byte-identical default (gates run here)
+                        } else if (g_app.capture.timeScale > 0.0f) {
+                            // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps
+                            // so a high scale isn't dropped by the catch-up clamp, capped per frame
+                            // to keep spiral protection. Determinism holds (fixed dt per tick).
+                            double simDt = static_cast<double>(deltaTime) *
+                                           static_cast<double>(g_app.capture.timeScale);
+                            const double kFourTicks = (1.0 / 30.0) * 4.0;
+                            const int budget = static_cast<int>(
+                                std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
+                            int ran = 0;
+                            while (simDt > 1e-9 && ran < budget) {
+                                const double step = std::min(simDt, kFourTicks);
+                                const std::uint32_t t = gameSession->TickSimulation(step);
+                                simDt -= step;
+                                if (t == 0u)
+                                    break; // accumulator < 1 tick this frame
+                                ran += static_cast<int>(t);
+                            }
                         }
-                    } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
-                      // continue)
+                    } // Paused captures still render and stream without simulation steps.
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
@@ -4736,7 +4749,8 @@ int main(int argc, char* argv[]) {
                         }
                         gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
                                                               streaming_position,
-                                                              gameSession->GetPhysicsSystem());
+                                                              gameSession->GetPhysicsSystem(),
+                                                              advance_frame_simulation);
                     }
                     rb_stream_ms = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - _rb_stream_t0)
@@ -4772,7 +4786,8 @@ int main(int argc, char* argv[]) {
                 ++reload_settling_passes;
                 world->update(gameSession->GetRegistry(),
                               g_camera->Position,
-                              gameSession->GetPhysicsSystem());
+                              gameSession->GetPhysicsSystem(),
+                              /*advance_simulation=*/false);
                 double scatter_ms = 0, foliage_ms = 0;
                 UpdateFoliageScatter(g_app,
                                      root_dir,

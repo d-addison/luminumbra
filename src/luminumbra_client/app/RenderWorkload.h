@@ -15,6 +15,20 @@
 
 namespace Luminumbra::Client::Measurement {
 
+// Share the tick decision with frame-driven physics and world simulation.
+// Streaming, meshing, uploads and presentation do not depend on this decision.
+inline bool frame_simulation_enabled(bool workload_capture,
+                                     bool traversal_capture,
+                                     bool measuring,
+                                     bool paused,
+                                     float time_scale) noexcept {
+    if (workload_capture)
+        return measuring && !paused;
+    if (traversal_capture)
+        return measuring;
+    return time_scale > 0.0f;
+}
+
 // Initial saved authority is outside the v4 identity. Only reloads of the world
 // created by this capture are allowed, for save/load and menu-entry scripts.
 inline void require_workload_world_load(bool capture_active,

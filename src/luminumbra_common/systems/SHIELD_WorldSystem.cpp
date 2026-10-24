@@ -3081,15 +3081,17 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const Vec3& camera_position,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
     // Single-anchor convenience overload — forwards to the multi-anchor path with one
     // anchor (byte-identical streaming/world_hash to the historical single-anchor code).
-    update(registry, std::vector<Vec3>{camera_position}, physics_system);
+    update(registry, std::vector<Vec3>{camera_position}, physics_system, advance_simulation);
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const std::vector<Vec3>& anchor_positions,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
     const MeshingSnapshotPass snapshot_pass(m_last_meshing_snapshot_bytes,
                                             m_meshing_snapshot_pass_active);
     // runtime telemetry ( implementation note): split the 300ms+ streaming spike by sub-phase.
@@ -3181,7 +3183,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
-    if (m_water_system) {
+    if (advance_simulation && m_water_system) {
         m_water_system->update(registry, m_streaming_state.chunks);
     }
     _dbg_split(m_dbg_stream.water); // runtime telemetry

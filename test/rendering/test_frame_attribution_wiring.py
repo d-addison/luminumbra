@@ -270,6 +270,68 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('workload_observation_json', writer)
         self.assertIn('{"settling_passes", reload_settling_passes}', self.main)
 
+    def test_capture_simulation_decision_covers_ticks_physics_and_water(self):
+        main = compact(self.main)
+        self.assertIn('const bool simulate_frame = Measurement::frame_simulation_enabled('
+                      'benchmark_v4, traversal.has_value(), measuring_v3, '
+                      'g_app.hud.paused, g_app.capture.timeScale);', main)
+        self.assertIn('const bool advance_frame_simulation = !g_rb_active || simulate_frame;', main)
+        session = block(self.main, 'if (!scenario_config.networked_session_smoke())')
+        ticking = block(session, 'if (simulate_frame)')
+        self.assertEqual(session.count('gameSession->TickSimulation('),
+                         ticking.count('gameSession->TickSimulation('))
+        self.assertEqual(ticking.count('gameSession->TickSimulation('), 4)
+        physics = block(self.main, 'if (advance_frame_simulation)')
+        self.assertIn('physics->update(deltaTime * g_app.capture.timeScale);', physics)
+        self.assertIn('g_playerController && !benchmark_v4 && advance_frame_simulation)', main)
+        self.assertIn('g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera && '
+                      'advance_frame_simulation)', main)
+        anchors = block(session, 'if (advance_frame_simulation)')
+        self.assertEqual(anchors.count('SetLocalPlayerSimulationPosition('), 2)
+        # The streaming call stays outside the tick gate on held warmup/menu frames.
+        self.assertNotIn('GetWorldSystem()->update(', ticking)
+        self.assertIn('gameSession->GetWorldSystem()->update(gameSession->GetRegistry(), '
+                      'streaming_position, gameSession->GetPhysicsSystem(), '
+                      'advance_frame_simulation);', compact(session))
+        settling = compact(block(self.main, 'const auto settle_workload_reload ='))
+        self.assertIn('world->update(gameSession->GetRegistry(), g_camera->Position, '
+                      'gameSession->GetPhysicsSystem(), /*advance_simulation=*/false);', settling)
+        world = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.cpp')
+        single = block(world, 'void SHIELD_WorldSystem::update(entt::registry& registry,')
+        self.assertIn('update(registry, std::vector<Vec3>{camera_position}, physics_system, '
+                      'advance_simulation);', compact(single))
+        multi = block(world, 'const std::vector<Vec3>& anchor_positions,')
+        water = block(multi, 'if (advance_simulation && m_water_system)')
+        self.assertEqual(compact(water),
+                         'm_water_system->update(registry, m_streaming_state.chunks);')
+        self.assertEqual(multi.count('m_water_system->update('), water.count('m_water_system->update('))
+        for fragment in ('publish_completed_generation_jobs(', 'update_chunk_activation(',
+                         'dispatch_deferred_meshing(', 'replace_chunk_collision('):
+            self.assertIn(fragment, multi)
+            self.assertNotIn(fragment, water)
+        header = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.h')
+        self.assertEqual(header.count('bool advance_simulation = true'), 2)
+
+    def test_capture_simulation_policy_handles_held_and_live_frames(self):
+        source = compact(block(read(CLIENT / 'app/RenderWorkload.h'),
+                               'inline bool frame_simulation_enabled('))
+        rules = re.findall(r'(?:if \(([^()]*)\) )?return ([^;]+);', source)
+        self.assertEqual(len(rules), 3)
+        for workload, traversal in ((True, True), (False, True), (False, False)):
+            for measuring in (False, True):
+                for paused in (False, True):
+                    for scale in (-1.0, 0.0, 0.5, 1.0, 16.0, float('nan')):
+                        values = dict(workload_capture=workload, traversal_capture=traversal,
+                                      measuring=measuring, paused=paused, time_scale=scale)
+                        for condition, returned in rules:
+                            if not condition or cpp_expression(condition, **values):
+                                actual = cpp_expression(re.sub(r'(?<=\d)f\b', '', returned), **values)
+                                break
+                        expected = (measuring and not paused if workload else
+                                    measuring if traversal else scale > 0)
+                        with self.subTest(**values):
+                            self.assertEqual(actual, expected)
+
     def test_const_scope_token_keeps_registered_observations_mutable(self):
         scope = compact(block(self.header, "class FoliageFrameScope"))
         self.assertIn("mutable FoliageFrame m_frame{};", scope)

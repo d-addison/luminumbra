@@ -457,11 +457,16 @@ public:
     // to this, so existing callers + single-anchor behaviour are byte-identical (one
     // anchor -> one disc, identical eviction). Streaming sets RESIDENCY only, not chunk
     // content, so world_hash is unaffected for a given anchor set.
+    // Disabling simulation preserves water state while streaming, meshing and
+    // collision preparation continue. Existing callers retain live stepping.
     void update(entt::registry& registry,
                 const std::vector<Vec3>& anchor_positions,
-                PhysicsSystem* physics_system);
-    void
-    update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
+                PhysicsSystem* physics_system,
+                bool advance_simulation = true);
+    void update(entt::registry& registry,
+                const Vec3& camera_position,
+                PhysicsSystem* physics_system,
+                bool advance_simulation = true);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
