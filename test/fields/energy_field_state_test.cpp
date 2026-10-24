@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -454,6 +455,47 @@ TEST(RegionalEnergy, CentreOwnershipSplitsOnePhysicalPageAndHandlesNegativeCells
     EXPECT_TRUE(field.OwnsRegion({0, 0}));
     EXPECT_TRUE(field.OwnsRegion({1, 0}));
     EXPECT_FALSE(field.OwnsRegion({2, 0}));
+}
+
+TEST(RegionalEnergy, OwnershipQueriesOnlyOverlappingStoredValuesWithoutChangingBytes) {
+    EnergyFieldState field(3);
+    ASSERT_TRUE(field.DeserializeRegionalRecord(
+        "EFS1 3 0\nP -2 -2 512:1 563:2\nP 1 1 206:3 257:4\nP 100 100 0:5\n"));
+    const auto before = field.SerializeRegionalRecord();
+    for (std::int32_t z = -3; z <= 3; ++z) {
+        for (std::int32_t x = -3; x <= 3; ++x) {
+            const RegionKey owner{x, z};
+            SCOPED_TRACE(::testing::Message() << x << ',' << z);
+            EXPECT_EQ(field.OwnsRegion(owner), !field.RegionBytes(owner).empty());
+        }
+    }
+    EXPECT_FALSE(field.OwnsRegion({std::numeric_limits<std::int32_t>::min(), 0}));
+    EXPECT_FALSE(field.OwnsRegion({0, std::numeric_limits<std::int32_t>::max()}));
+    EXPECT_EQ(field.SerializeRegionalRecord(), before);
+    ASSERT_TRUE(field.QueueRegionalDeposit(1, 86, -86, 2, 7));
+    EXPECT_TRUE(field.OwnsRegion(EnergyFieldState::OwnerOfCell(86, -86)));
+    EXPECT_EQ(field.SerializeRegionalRecord(), before);
+    field.ResetEmptyAtTick(0);
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    EXPECT_FALSE(field.OwnsRegion(EnergyFieldState::OwnerOfCell(86, -86)));
+
+    // Legacy records can contain empty pages and the extreme representable int cells.
+    ASSERT_TRUE(field.DeserializeRecord("EFS1 3 " + std::to_string(kEnergyCadenceTicks) +
+                                            "\nP -134217728 -134217728 2:1\nP 0 0\n"
+                                            "P 134217727 134217727 767:2\n",
+                                        0));
+    const auto legacy = field.CanonicalBytes();
+    for (const int coordinate : {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()})
+        EXPECT_TRUE(field.OwnsRegion(EnergyFieldState::OwnerOfCell(coordinate, coordinate)));
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    EXPECT_EQ(field.CanonicalBytes(), legacy);
+
+    if constexpr (sizeof(std::size_t) == 4) {
+        // The legacy decoder's page-size multiplication can wrap to an empty vector.
+        ASSERT_TRUE(field.DeserializeRecord(
+            "EFS1 16777216 " + std::to_string(kEnergyCadenceTicks) + "\nP 0 0\n", 0));
+        EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    }
 }
 
 TEST(RegionalEnergy, FrozenOwnerCellsAndAgeStayExactOnAMixedOwnerPage) {

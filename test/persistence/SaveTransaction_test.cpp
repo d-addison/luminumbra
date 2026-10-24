@@ -216,6 +216,19 @@ bool RawDigest(const fs::path& save_dir,
     return true;
 }
 
+std::map<std::string, std::size_t>& DigestCalls() {
+    static std::map<std::string, std::size_t> calls;
+    return calls;
+}
+
+bool CountingDigest(const fs::path& save_dir,
+                    std::string_view relative_path,
+                    MemberDigest& out,
+                    std::string& error) {
+    ++DigestCalls()[std::string(relative_path)];
+    return RawDigest(save_dir, relative_path, out, error);
+}
+
 bool RejectingDigest(const fs::path& save_dir,
                      std::string_view relative_path,
                      MemberDigest& out,
@@ -431,6 +444,116 @@ TEST(SaveTransaction, MemberPathAllowListAcceptsOnlyKnownShapes) {
     }
 }
 
+TEST(SaveTransaction, HashesMissingEmptyAndBlockBoundaryRegularFiles) {
+    const TempSave save;
+    const auto member = save.path() / "aether_state.efs";
+    std::uint64_t bytes = 91, digest = 92;
+    bool exists = true;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(exists);
+    EXPECT_EQ(bytes, 0u);
+    EXPECT_EQ(digest, 0u);
+    for (const std::size_t size : {std::size_t{0},
+                                   std::size_t{1},
+                                   std::size_t{1048575},
+                                   std::size_t{1048576},
+                                   std::size_t{1048577}}) {
+        SCOPED_TRACE(size);
+        std::string payload(size, 'x');
+        if (!payload.empty())
+            payload.back() = '\0';
+        Put(member, payload);
+        ASSERT_TRUE(hash_file(member, bytes, digest, exists, &errors));
+        EXPECT_TRUE(exists);
+        EXPECT_EQ(bytes, payload.size());
+        EXPECT_EQ(digest, fnv1a64_bytes(payload.data(), payload.size()));
+    }
+    EXPECT_TRUE(errors.empty());
+    ASSERT_TRUE(fs::remove(member));
+    ASSERT_TRUE(fs::create_directory(member));
+    EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(errors.empty());
+}
+
+#ifndef _WIN32
+TEST(SaveTransaction, IndexedEnergyFifoIsRefusedWithoutWaitingForAWriter) {
+    const TempSave save;
+    const auto energy =
+        "EFS1 1 " + std::to_string(luminumbra::fields::kEnergyCadenceTicks) + "\nP 0 0 0:1\n";
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"aether_state.efs", energy}}));
+    ASSERT_TRUE(WorldSaveService::validate_save(save.path(), nullptr));
+    const auto member = save.path() / "aether_state.efs";
+    ASSERT_TRUE(fs::remove(member));
+    ASSERT_EQ(::mkfifo(member.c_str(), 0600), 0);
+    const auto before = Tree(save.path());
+    ASSERT_EXIT(
+        {
+            // A broken blocking open must fail this child promptly instead of hanging CTest.
+            ::alarm(2);
+            std::uint64_t bytes = 0;
+            std::uint64_t digest = 0;
+            bool exists = false;
+            std::vector<std::string> errors;
+            const bool hashed = hash_file(member, bytes, digest, exists, &errors);
+            const bool validated = WorldSaveService::validate_save(save.path(), &errors);
+            std::_Exit(!hashed && !validated && !errors.empty() ? 0 : 1);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_EQ(fs::symlink_status(member).type(), fs::file_type::fifo);
+}
+
+TEST(SaveTransaction, HashingRefusesSymlinksWithoutReadingTheirTargets) {
+    const TempSave save;
+    const auto target = save.path() / "target";
+    Put(target, "payload");
+    const auto member = save.path() / "aether_state.efs";
+    fs::create_symlink(target, member);
+    std::uint64_t bytes = 0, digest = 0;
+    bool exists = false;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(Get(target), "payload");
+    EXPECT_TRUE(fs::is_symlink(member));
+    ASSERT_TRUE(fs::remove(target));
+    errors.clear();
+    EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_TRUE(fs::is_symlink(member));
+}
+#else
+TEST(SaveTransaction, HashingRefusesUnreadableAndLockedFiles) {
+    const TempSave save;
+    const auto member = save.path() / "aether_state.efs";
+    Put(member, "payload");
+    for (const bool exclusive_open : {true, false}) {
+        const HANDLE handle = ::CreateFileW(member.c_str(),
+                                            GENERIC_READ | GENERIC_WRITE,
+                                            exclusive_open ? 0 : FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                            nullptr,
+                                            OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL,
+                                            nullptr);
+        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+        OVERLAPPED overlap{};
+        if (!exclusive_open)
+            ASSERT_NE(::LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlap), 0);
+        std::uint64_t bytes = 0, digest = 0;
+        bool exists = false;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+        EXPECT_FALSE(errors.empty());
+        if (!exclusive_open)
+            EXPECT_NE(::UnlockFileEx(handle, 0, 1, 0, &overlap), 0);
+        EXPECT_NE(::CloseHandle(handle), 0);
+    }
+    EXPECT_EQ(Get(member), "payload");
+}
+#endif
+
 TEST(SaveTransaction, IndexCodecRoundTripIsDeterministic) {
     const SnapshotIndex original = MakeIndex();
     const std::string encoded = encode_snapshot_index(original);
@@ -563,6 +686,98 @@ TEST(SaveTransaction, AbortRestoresPreviousBytesAndRemovesCreatedMembers) {
     EXPECT_EQ(Get(save.path() / "world_info.json"), "a");
     EXPECT_FALSE(fs::exists(save.path() / "chunks/region/plant-entities.json"));
     EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, FirstIndexDigestsProtectedAndUntouchedMembersOnce) {
+    const TempSave save;
+    Put(save.path() / "world_info.json", "metadata");
+    Put(save.path() / "chunks/region/r.0.0.lmr", "before");
+    Put(save.path() / "chunks/region/r.1.0.lmr", "untouched");
+    DigestCalls().clear();
+    SaveTransaction txn(save.path(), 1, {}, &CountingDigest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(txn.begin(&errors));
+    ASSERT_TRUE(
+        txn.protect({"world_info.json", "chunks/region/r.0.0.lmr", "aether_state.efs"}, &errors));
+    ASSERT_TRUE(WorldSaveService::durable_write_file(
+        save.path() / "chunks/region/r.0.0.lmr", "after", &errors));
+    ASSERT_TRUE(txn.commit(&errors));
+    for (const auto& [path, count] : DigestCalls())
+        EXPECT_EQ(count, 1u) << path;
+    for (const char* path : {"world_info.json",
+                             "chunks/region/r.0.0.lmr",
+                             "chunks/region/r.1.0.lmr",
+                             "aether_state.efs"})
+        EXPECT_EQ(DigestCalls().at(path), 1u) << path;
+    SnapshotIndex index;
+    ASSERT_TRUE(read_snapshot_index(save.path(), index, &errors));
+    EXPECT_EQ(index.members.size(), 3u); // The never-created energy member remains absent.
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(SaveTransaction, UndoCopiesAndRestoresEmptyAndBlockBoundaryPayloads) {
+    for (const std::size_t size : {std::size_t{0},
+                                   std::size_t{1},
+                                   std::size_t{65535},
+                                   std::size_t{65536},
+                                   std::size_t{65537}}) {
+        SCOPED_TRACE(size);
+        const TempSave save;
+        std::string previous(size, 'x');
+        if (!previous.empty())
+            previous.front() = '\0';
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        Put(member, previous);
+        SaveTransaction txn(save.path(), 1, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(txn.begin(&errors));
+        ASSERT_TRUE(txn.protect({"world_info.json", "world_info.json"}, &errors));
+        EXPECT_EQ(Get(undo), previous);
+        EXPECT_FALSE(fs::exists(journal_directory(save.path()) / "undo/1"));
+        EXPECT_EQ(WorldSaveService::region_staging_path(undo),
+                  journal_directory(save.path()) / "0");
+        ASSERT_TRUE(WorldSaveService::durable_write_file(member, "changed", &errors));
+        txn.abort(&errors);
+        EXPECT_EQ(Get(member), previous);
+        EXPECT_FALSE(journal_pending(save.path()));
+        EXPECT_TRUE(errors.empty());
+    }
+}
+
+TEST(SaveTransaction, MissingPartialCorruptAndNonregularUndoCannotBeRestored) {
+    for (const int damage : {0, 1, 2, 3}) {
+        SCOPED_TRACE(damage);
+        const TempSave save;
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        const std::string previous(65537, 'x');
+        Put(member, previous);
+        SaveTransaction txn(save.path(), 1, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(txn.begin(&errors));
+        ASSERT_TRUE(txn.protect({"world_info.json"}, &errors));
+        ASSERT_TRUE(WorldSaveService::durable_write_file(member, "changed", &errors));
+        if (damage == 0 || damage == 3) {
+            ASSERT_TRUE(fs::remove(undo));
+            if (damage == 3) {
+                ASSERT_TRUE(fs::create_directory(undo));
+            }
+        } else if (damage == 1) {
+            Put(undo, previous.substr(0, 65536));
+        } else {
+            auto corrupted = previous;
+            corrupted.back() = 'y';
+            Put(undo, corrupted);
+        }
+        txn.abort(&errors);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Get(member), "changed");
+        EXPECT_TRUE(journal_pending(save.path()));
+        const auto damaged = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), damaged);
+    }
 }
 
 TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {

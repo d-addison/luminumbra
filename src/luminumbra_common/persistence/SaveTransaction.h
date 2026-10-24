@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -185,6 +186,8 @@ private:
     std::uint64_t m_txn_id = 0;
     std::uint64_t m_new_generation = 0;
     std::vector<Entry> m_entries;
+    // Membership lookup never scans the journal prefix; at most kMaxJournalEntries paths.
+    std::set<std::string> m_protected_paths;
     std::vector<std::function<void()>> m_committed_actions;
     std::uint64_t m_next_undo = 0;
     bool m_registered = false;

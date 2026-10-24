@@ -260,6 +260,7 @@ public:
     // Read-only diagnostic of the staging filename base used by region/manifest
     // writers, before the unique temporary suffix. Region members stage in the
     // save root outside strict scans when the original suffix is chunks/region.
+    // Journal undo members stage in the journal root, outside the growing undo directory.
     // Other spellings retain standalone behavior. Recognition performs no filesystem
     // I/O; relocation preserves symlinks followed by parent components in that prefix.
     static std::filesystem::path region_staging_path(const std::filesystem::path& destination);

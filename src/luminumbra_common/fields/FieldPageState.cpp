@@ -504,10 +504,28 @@ bool FieldPageState::sample(int channel,
 }
 
 std::size_t FieldPageState::owned_initialized_cells(RegionKey key) const {
+    const auto x = AxisCellRange(key.x), z = AxisCellRange(key.z);
+    if (x.lo > x.hi || z.lo > z.hi)
+        return 0;
     std::size_t count = 0;
-    for (const auto& [cell_x, cell_z] : cells_of_region(key)) {
-        if (initialized(cell_x, cell_z)) {
-            ++count;
+    // A region spans at most 22 cells per axis and 3 x 3 physical pages. Count only
+    // its row-mask intersections; never allocate a cell list or visit unrelated pages.
+    for (auto pz = FloorDiv(z.lo, kPageSpan); pz <= FloorDiv(z.hi, kPageSpan); ++pz) {
+        for (auto px = FloorDiv(x.lo, kPageSpan); px <= FloorDiv(x.hi, kPageSpan); ++px) {
+            const auto page =
+                m_pages.find({static_cast<std::int32_t>(px), static_cast<std::int32_t>(pz)});
+            if (page == m_pages.end())
+                continue;
+            const auto min_x = std::max(x.lo, px * kPageSpan) - px * kPageSpan;
+            const auto end_x = std::min(x.hi + 1, (px + 1) * kPageSpan) - px * kPageSpan;
+            const auto row_mask = ((std::uint64_t{1} << (end_x - min_x)) - 1) << min_x;
+            for (auto row = std::max(z.lo, pz * kPageSpan);
+                 row <= std::min(z.hi, (pz + 1) * kPageSpan - 1);
+                 ++row) {
+                const auto offset = static_cast<std::size_t>((row - pz * kPageSpan) * kPageSpan);
+                count += static_cast<std::size_t>(
+                    std::popcount((page->second.mask[offset / 64] >> (offset % 64)) & row_mask));
+            }
         }
     }
     return count;

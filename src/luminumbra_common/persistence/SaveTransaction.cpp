@@ -13,7 +13,6 @@
 #include <fstream>
 #include <functional>
 #include <ios>
-#include <iterator>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -143,8 +142,19 @@ bool ReadAllBytes(const fs::path& file, std::string& out, std::vector<std::strin
         AddError(errors, "cannot open for reading: " + file.string());
         return false;
     }
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    if (in.bad()) {
+    // Undo payloads can span large region files. Copy in bounded 64 KiB blocks rather than
+    // invoking stream iterators for every byte; the returned bytes also supply the undo hash.
+    std::array<char, std::size_t{64} * 1024> block{};
+    while (in) {
+        in.read(block.data(), static_cast<std::streamsize>(block.size()));
+        const auto count = static_cast<std::size_t>(in.gcount());
+        if (count > out.max_size() - out.size()) {
+            AddError(errors, "snapshot payload exceeds string capacity");
+            return false;
+        }
+        out.append(block.data(), count);
+    }
+    if (!in.eof() || in.bad()) {
         AddError(errors, "cannot read: " + file.string());
         return false;
     }
@@ -164,6 +174,9 @@ public:
                                  OPEN_EXISTING,
                                  FILE_FLAG_OPEN_REPARSE_POINT,
                                  nullptr);
+        const DWORD open_error =
+            m_handle == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
+        m_missing = open_error == ERROR_FILE_NOT_FOUND || open_error == ERROR_PATH_NOT_FOUND;
         BY_HANDLE_FILE_INFORMATION information{};
         m_valid = m_handle != INVALID_HANDLE_VALUE && ::GetFileType(m_handle) == FILE_TYPE_DISK &&
                   ::GetFileInformationByHandle(m_handle, &information) != 0 &&
@@ -171,6 +184,7 @@ public:
                    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
 #else
         m_descriptor = ::open(file.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        m_missing = m_descriptor < 0 && errno == ENOENT;
         struct stat information {};
         m_valid = m_descriptor >= 0 && ::fstat(m_descriptor, &information) == 0 &&
                   S_ISREG(information.st_mode);
@@ -189,6 +203,9 @@ public:
     SnapshotInput& operator=(const SnapshotInput&) = delete;
     [[nodiscard]] bool valid() const {
         return m_valid;
+    }
+    [[nodiscard]] bool missing() const {
+        return m_missing;
     }
     bool read(char* data, std::size_t request, std::size_t& count) {
 #ifdef _WIN32
@@ -215,6 +232,7 @@ private:
     int m_descriptor = -1;
 #endif
     bool m_valid = false;
+    bool m_missing = false;
 };
 
 bool ReadBoundedBytes(const fs::path& file,
@@ -458,19 +476,13 @@ bool RollbackEntries(const fs::path& save_dir,
             const bool matches = exists && bytes == entry.prev_bytes && fnv64 == entry.prev_fnv64;
             if (!matches) {
                 const fs::path undo_path = journal_directory(save_dir) / entry.undo;
-                std::uint64_t undo_bytes = 0;
-                std::uint64_t undo_fnv64 = 0;
-                bool undo_exists = false;
-                if (!hash_file(undo_path, undo_bytes, undo_fnv64, undo_exists, errors)) {
-                    return false;
-                }
-                if (!undo_exists || undo_bytes != entry.prev_bytes ||
-                    undo_fnv64 != entry.prev_fnv64) {
-                    AddError(errors, "journal undo copy missing or corrupt: " + entry.path);
-                    return false;
-                }
                 std::string restored;
                 if (!ReadAllBytes(undo_path, restored, errors)) {
+                    return false;
+                }
+                if (restored.size() != entry.prev_bytes ||
+                    fnv1a64_bytes(restored.data(), restored.size()) != entry.prev_fnv64) {
+                    AddError(errors, "journal undo copy missing or corrupt: " + entry.path);
                     return false;
                 }
                 if (!WorldSaveService::durable_write_file(destination, restored, errors)) {
@@ -753,36 +765,28 @@ bool hash_file(const fs::path& path,
     bytes = 0;
     fnv64 = 0;
     exists = false;
-    std::error_code ec;
-    const bool present = fs::exists(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat file: " + path.string());
-        return false;
-    }
-    if (!present) {
-        return true;
-    }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
+    SnapshotInput in(path);
+    if (!in.valid()) {
+        if (in.missing())
+            return true;
         AddError(errors, "cannot open for hashing: " + path.string());
         return false;
     }
     exists = true;
     fnv64 = kFnvOffset;
+    // Hash one regular-file handle in bounded 1 MiB blocks, including short final reads.
     std::vector<char> block(kHashBlockBytes);
-    while (in) {
-        in.read(block.data(), static_cast<std::streamsize>(block.size()));
-        const std::streamsize got = in.gcount();
-        if (got > 0) {
-            fnv64 = Fnv1aUpdate(fnv64, block.data(), static_cast<std::size_t>(got));
-            bytes += static_cast<std::uint64_t>(got);
+    for (;;) {
+        std::size_t count = 0;
+        if (!in.read(block.data(), block.size(), count)) {
+            AddError(errors, "cannot read for hashing: " + path.string());
+            return false;
         }
+        if (count == 0)
+            return true;
+        fnv64 = Fnv1aUpdate(fnv64, block.data(), count);
+        bytes += static_cast<std::uint64_t>(count);
     }
-    if (!in.eof()) {
-        AddError(errors, "cannot read for hashing: " + path.string());
-        return false;
-    }
-    return true;
 }
 
 bool journal_pending(const fs::path& save_dir) {
@@ -950,25 +954,22 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
         const fs::path undo_directory = journal_directory(m_save_dir) / "undo";
         bool added = false;
         for (const std::string& rel : todo) {
-            bool already = false;
-            for (const Entry& entry : m_entries) {
-                if (entry.path == rel) {
-                    already = true;
-                    break;
-                }
-            }
-            if (already) {
+            if (m_protected_paths.contains(rel)) {
                 continue;
             }
             if (rel != kSnapshotIndexRelativePath && !member_path_allowed(rel)) {
                 AddError(errors, "path not allowed in snapshot transaction: " + rel);
                 return false;
             }
+            if (m_entries.size() >= kMaxJournalEntries) {
+                AddError(errors, "journal entry count exceeds limit");
+                return false;
+            }
             const fs::path destination = m_save_dir / rel;
-            std::uint64_t bytes = 0;
-            std::uint64_t fnv64 = 0;
-            bool exists = false;
-            if (!hash_file(destination, bytes, fnv64, exists, errors)) {
+            std::error_code exists_error;
+            const bool exists = fs::exists(destination, exists_error);
+            if (exists_error) {
+                AddError(errors, "cannot inspect snapshot member: " + exists_error.message());
                 return false;
             }
             Entry entry;
@@ -992,6 +993,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
                 entry.action = "create";
             }
             m_entries.push_back(std::move(entry));
+            m_protected_paths.insert(rel);
             added = true;
         }
         if (!added) {
@@ -1101,6 +1103,10 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 }
             }
             for (const std::string& rel : baseline) {
+                // Protected members are validated below, after their final replacement. Avoid
+                // decoding and hashing those same region payloads twice on the first save.
+                if (m_protected_paths.contains(rel))
+                    continue;
                 MemberDigest digest;
                 if (!digest_member(rel, digest)) {
                     abort(errors);

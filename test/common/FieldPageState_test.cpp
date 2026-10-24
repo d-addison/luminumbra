@@ -221,6 +221,65 @@ TEST(FieldPageStateTest, ActivatingANeighbourAddsOnlyItsMissingPages) {
     EXPECT_EQ(store.owned_initialized_cells(RegionKey{1, 0}), 22u * 21u);
 }
 
+TEST(FieldPageStateTest, OwnershipCountsOnlyRegionalMaskIntersectionsWithoutChangingBytes) {
+    FieldPageState store;
+    const std::array owners{RegionKey{-2, -2},
+                            RegionKey{-1, 0},
+                            RegionKey{0, -1},
+                            RegionKey{0, 0},
+                            RegionKey{1, 1},
+                            RegionKey{2, 2},
+                            RegionKey{-32768, -32768},
+                            RegionKey{32767, 32767}};
+    for (const auto owner : owners)
+        ASSERT_TRUE(store.activate_region(owner, kSeed, 0));
+    auto bytes = store.serialize();
+    // Retain partial rows across every mask word, clearing uninitialized channel slots too.
+    for (std::size_t page = kPage0; page < bytes.size() - 8; page += kPageBytes) {
+        for (std::size_t cell = 0; cell < FieldPage::kCells; ++cell) {
+            if (cell % 3 == 1)
+                continue;
+            const auto mask_at = page + kMaskOffset + (cell / 64) * 8;
+            WriteU(
+                bytes, mask_at, ReadU(bytes, mask_at, 8) & ~(std::uint64_t{1} << (cell % 64)), 8);
+            for (std::size_t channel = 0; channel < kChannelCount; ++channel)
+                WriteU(bytes,
+                       page + kMaskOffset + 32 + 2 * (channel * FieldPage::kCells + cell),
+                       0,
+                       2);
+        }
+    }
+    Reseal(bytes);
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(bytes, store, error)) << error;
+    const auto before = store.serialize();
+    auto probes = std::vector<RegionKey>(owners.begin(), owners.end());
+    for (std::int32_t z = -3; z <= 3; ++z)
+        for (std::int32_t x = -3; x <= 3; ++x)
+            probes.push_back({x, z});
+    probes.insert(probes.end(),
+                  {{-32769, 0},
+                   {32768, 0},
+                   {0, -32769},
+                   {0, 32768},
+                   {std::numeric_limits<std::int32_t>::min(), 0},
+                   {0, std::numeric_limits<std::int32_t>::max()}});
+    for (const auto owner : probes) {
+        SCOPED_TRACE(::testing::Message() << owner.x << ',' << owner.z);
+        std::size_t expected = 0;
+        for (const auto& [x, z] : FieldPageState::cells_of_region(owner))
+            expected += static_cast<std::size_t>(store.initialized(x, z));
+        EXPECT_EQ(store.owned_initialized_cells(owner), expected);
+        EXPECT_EQ(store.owns_region(owner), expected != 0);
+    }
+    EXPECT_EQ(store.serialize(), before);
+    store.clear();
+    for (const auto owner : probes) {
+        EXPECT_EQ(store.owned_initialized_cells(owner), 0u);
+        EXPECT_FALSE(store.owns_region(owner));
+    }
+}
+
 TEST(FieldPageStateTest, RegionsSharingAPhysicalPageOwnDisjointCells) {
     const auto a_cells = FieldPageState::cells_of_region(RegionKey{0, 0});
     const auto b_cells = FieldPageState::cells_of_region(RegionKey{1, 0});
@@ -773,8 +832,9 @@ TEST(FieldPageStateTest, ScentRegionQueriesMatchCanonicalProjectionAtEveryBounda
                              RegionKey{32767, 32767}}) {
         FieldPageState expected;
         for (const auto cell : cells)
-            if (FieldPageState::region_of_scent_cell(cell) == owner)
+            if (FieldPageState::region_of_scent_cell(cell) == owner) {
                 ASSERT_TRUE(expected.set_scent(cell, one));
+            }
         EXPECT_TRUE(store.owns_evolution_state(owner));
         EXPECT_TRUE(restored.owns_evolution_state(owner));
         EXPECT_EQ(store.region_bytes(owner), expected.region_bytes(owner));

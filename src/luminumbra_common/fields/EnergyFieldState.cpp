@@ -577,7 +577,49 @@ bool EnergyFieldState::OwnsRegion(RegionKey owner) const {
         if (OwnerOfCell(cx, cz) == owner)
             return true;
     }
-    return !RegionBytes(owner).empty();
+    const auto cell_range = [](std::int32_t axis) {
+        const auto start = std::int64_t{axis} * 512 - 12;
+        return std::pair{
+            std::max(-RegionalFloorDiv(-start, 24), std::int64_t{std::numeric_limits<int>::min()}),
+            std::min(-RegionalFloorDiv(-(start + 512), 24),
+                     std::int64_t{std::numeric_limits<int>::max()} + 1)};
+    };
+    const auto [x0, x1] = cell_range(owner.x);
+    const auto [z0, z1] = cell_range(owner.z);
+    if (x0 >= x1 || z0 >= z1)
+        return false;
+    // At most 3 x 3 overlapping pages and 22 x 22 cells (each with m_channels
+    // values). No serialization, allocation, age normalization or unrelated page scan.
+    for (auto pz = RegionalFloorDiv(z0, kEnergyPageCells);
+         pz <= RegionalFloorDiv(z1 - 1, kEnergyPageCells);
+         ++pz) {
+        for (auto px = RegionalFloorDiv(x0, kEnergyPageCells);
+             px <= RegionalFloorDiv(x1 - 1, kEnergyPageCells);
+             ++px) {
+            const auto page = m_pages.find(PackPageKey(static_cast<int>(px), static_cast<int>(pz)));
+            if (page == m_pages.end())
+                continue;
+            const auto min_x = std::max(x0, px * kEnergyPageCells) - px * kEnergyPageCells;
+            const auto end_x = std::min(x1, (px + 1) * kEnergyPageCells) - px * kEnergyPageCells;
+            for (auto row = std::max(z0, pz * kEnergyPageCells);
+                 row < std::min(z1, (pz + 1) * kEnergyPageCells);
+                 ++row) {
+                const auto offset = (row - pz * kEnergyPageCells) * kEnergyPageCells;
+                // Keep legacy channel arithmetic wide even on 32-bit hosts, and intersect
+                // with the actual stored values before narrowing an index.
+                const auto end = std::min(static_cast<std::uint64_t>(offset + end_x) *
+                                              static_cast<std::uint64_t>(m_channels),
+                                          static_cast<std::uint64_t>(page->second.values.size()));
+                for (auto i = static_cast<std::uint64_t>(offset + min_x) *
+                              static_cast<std::uint64_t>(m_channels);
+                     i < end;
+                     ++i)
+                    if (page->second.values[static_cast<std::size_t>(i)] != 0)
+                        return true;
+            }
+        }
+    }
+    return false;
 }
 
 std::string EnergyFieldState::RegionBytes(RegionKey owner) const {

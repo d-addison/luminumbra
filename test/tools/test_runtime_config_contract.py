@@ -476,6 +476,165 @@ class PersistenceAndFieldSourceContract(unittest.TestCase):
     def source(self, relative):
         return compact_cpp((ROOT / relative).read_text(encoding="utf-8"))
 
+    def test_hashing_reads_the_validated_regular_file_handle(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        hashing = source[source.index("boolhash_file("):source.index("booljournal_pending(")]
+        self.assertIn("SnapshotInputin(path);", hashing)
+        self.assertNotIn("ifstream", hashing)
+        self.assertNotIn("fs::exists(", hashing)
+        self.assertIn("if(in.missing())returntrue;", hashing)
+        self.assertLess(hashing.index("if(!in.valid())"), hashing.index("in.read("))
+        self.assertIn("if(!in.read(block.data(),block.size(),count))", hashing)
+        self.assertIn("if(count==0)returntrue;", hashing)
+        self.assertIn("Fnv1aUpdate(fnv64,block.data(),count)", hashing)
+        native = source[source.index("classSnapshotInput{"):source.index("boolReadBoundedBytes(")]
+        for guard in ("O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW", "::fstat(m_descriptor,&information)",
+                      "S_ISREG(information.st_mode)", "::GetFileType(m_handle)==FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle,&information)",
+                      "FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT",
+                      "open_error==ERROR_FILE_NOT_FOUND||open_error==ERROR_PATH_NOT_FOUND",
+                      "m_descriptor<0&&errno==ENOENT"):
+            self.assertIn(guard, native)
+
+    def test_field_ownership_counts_only_overlapping_page_masks(self):
+        source = self.source("src/luminumbra_common/fields/FieldPageState.cpp")
+        count = source[source.index("std::size_tFieldPageState::owned_initialized_cells("):
+                       source.index("boolFieldPageState::activate_region(")]
+        self.assertNotIn("cells_of_region(", count)
+        self.assertNotIn("initialized(", count)
+        self.assertNotIn(":m_pages)", count)
+        for required in ("AxisCellRange(key.x)", "AxisCellRange(key.z)",
+                         "if(x.lo>x.hi||z.lo>z.hi)return0;", "m_pages.find(",
+                         "FloorDiv(z.lo,kPageSpan)", "FloorDiv(z.hi,kPageSpan)",
+                         "FloorDiv(x.lo,kPageSpan)", "FloorDiv(x.hi,kPageSpan)",
+                         "std::popcount(", "page->second.mask["):
+            self.assertIn(required, count)
+
+    def test_energy_ownership_reads_only_overlapping_pages_without_serialization(self):
+        source = self.source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        owns = source[source.index("boolEnergyFieldState::OwnsRegion("):
+                      source.index("std::stringEnergyFieldState::RegionBytes(")]
+        for forbidden in ("RegionBytes(", "CanonicalBytes(", "ostringstream", ":m_pages)"):
+            self.assertNotIn(forbidden, owns)
+        for required in ("OwnerOfCell(cx,cz)==owner", "cell_range(owner.x)",
+                         "cell_range(owner.z)", "if(x0>=x1||z0>=z1)returnfalse;",
+                         "RegionalFloorDiv(z0,kEnergyPageCells)",
+                         "RegionalFloorDiv(z1-1,kEnergyPageCells)",
+                         "RegionalFloorDiv(x0,kEnergyPageCells)",
+                         "RegionalFloorDiv(x1-1,kEnergyPageCells)",
+                         "m_pages.find(PackPageKey(",
+                         "static_cast<std::uint64_t>(offset+end_x)*"
+                         "static_cast<std::uint64_t>(m_channels)",
+                         "static_cast<std::uint64_t>(page->second.values.size())",
+                         "page->second.values[static_cast<std::size_t>(i)]!=0"):
+            self.assertIn(required, owns)
+
+    def test_hash_and_ownership_regressions_are_registered(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        for relative, cases in (
+                ("persistence/SaveTransaction_test.cpp",
+                 ("HashesMissingEmptyAndBlockBoundaryRegularFiles",
+                  "IndexedEnergyFifoIsRefusedWithoutWaitingForAWriter",
+                  "HashingRefusesSymlinksWithoutReadingTheirTargets",
+                  "HashingRefusesUnreadableAndLockedFiles")),
+                ("common/FieldPageState_test.cpp",
+                 ("OwnershipCountsOnlyRegionalMaskIntersectionsWithoutChangingBytes",)),
+                ("fields/energy_field_state_test.cpp",
+                 ("OwnershipQueriesOnlyOverlappingStoredValuesWithoutChangingBytes",))):
+            self.assertIn(relative, cmake)
+            fixture = self.source("test/" + relative)
+            for case in cases:
+                self.assertIn("," + case + "){", fixture)
+        fifo = self.source("test/persistence/SaveTransaction_test.cpp")
+        fifo = fifo[fifo.index(",IndexedEnergyFifoIsRefusedWithoutWaitingForAWriter){"):
+                    fifo.index(",HashingRefusesSymlinksWithoutReadingTheirTargets){")]
+        self.assertIn("::mkfifo(member.c_str(),0600)", fifo)
+        self.assertIn("::alarm(2)", fifo)
+        self.assertIn("WorldSaveService::validate_save(save.path(),&errors)", fifo)
+        self.assertIn("::testing::ExitedWithCode(0)", fifo)
+
+    def test_undo_protection_reads_each_payload_once_and_indexes_membership(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        protect = source[source.index("boolSaveTransaction::protect("):
+                         source.index("boolSaveTransaction::write_journal(")]
+        self.assertIn("m_protected_paths.contains(rel)", protect)
+        self.assertIn("m_protected_paths.insert(rel);", protect)
+        self.assertLess(protect.index("m_entries.size()>=kMaxJournalEntries"),
+                        protect.index("ReadAllBytes(destination,previous,errors)"))
+        self.assertLess(protect.index("m_entries.size()>=kMaxJournalEntries"),
+                        protect.index("m_protected_paths.insert(rel)"))
+        self.assertNotIn(":m_entries)", protect)
+        self.assertNotIn("hash_file(", protect)
+        self.assertEqual(protect.count("ReadAllBytes(destination,previous,errors)"), 1)
+        self.assertIn("fs::exists(destination,exists_error)", protect)
+        self.assertIn("if(exists_error){AddError(", protect)
+        self.assertIn("entry.prev_fnv64=fnv1a64_bytes(previous.data(),previous.size());", protect)
+        self.assertLess(protect.index("durable_write_file("), protect.index("write_journal(errors)"))
+        read = source[source.index("boolReadAllBytes("):source.index("classSnapshotInput{")]
+        self.assertNotIn("istreambuf_iterator", read)
+        self.assertIn("std::array<char,std::size_t{64}*1024>block{};", read)
+        self.assertIn("in.read(block.data(),static_cast<std::streamsize>(block.size()))", read)
+        self.assertLess(read.index("count>out.max_size()-out.size()"),
+                        read.index("out.append(block.data(),count)"))
+        self.assertIn("if(!in.eof()||in.bad())", read)
+
+    def test_rollback_checks_the_same_undo_bytes_it_restores(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        rollback = source[source.index("boolRollbackEntries("):
+                          source.index("voidFinishJournal(")]
+        self.assertNotIn("hash_file(undo_path,", rollback)
+        read = rollback.index("ReadAllBytes(undo_path,restored,errors)")
+        check = rollback.index("restored.size()!=entry.prev_bytes||"
+                               "fnv1a64_bytes(restored.data(),restored.size())!=entry.prev_fnv64")
+        write = rollback.index("durable_write_file(destination,restored,errors)")
+        self.assertLess(read, check)
+        self.assertLess(check, write)
+        self.assertIn("returnfalse;", rollback[check:write])
+
+    def test_undo_staging_does_not_scan_prior_undo_copies(self):
+        source = self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        staging = source[source.index("WorldSaveService::region_staging_path("):
+                         source.index("boolWorldSaveService::save_metadata(")]
+        self.assertIn('if(directory.filename()=="undo"&&'
+                      'directory.parent_path().filename()=="journal")'
+                      'returndirectory.parent_path()/destination.filename();', staging)
+        writer = source[source.index("boolWorldSaveService::durable_write_file("):
+                        source.index("boolWorldSaveService::durable_remove(")]
+        self.assertIn("constautostaging=region_staging_path(destination);", writer)
+        self.assertIn("ReclaimAbandonedStaging(staging);", writer)
+        self.assertNotIn("ReclaimAbandonedStaging(destination)", writer)
+        self.assertIn("WriteDurableRegionTemp(staging,bytes,temp,errors)", writer)
+        self.assertIn("ReplaceMember(temp,destination,errors)", writer)
+
+    def test_first_index_validates_each_protected_member_only_once(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        commit = source[source.index("boolSaveTransaction::commit("):
+                        source.index("voidSaveTransaction::abort(")]
+        baseline = commit[commit.index("for(conststd::string&rel:baseline)"):
+                          commit.index("for(constEntry&entry:m_entries)")]
+        self.assertLess(baseline.index("if(m_protected_paths.contains(rel))continue;"),
+                        baseline.index("digest_member(rel,digest)"))
+        final = commit[commit.index("for(constEntry&entry:m_entries)"):]
+        self.assertIn("if(!digest_member(entry.path,digest)){abort(errors);returnfalse;}", final)
+        self.assertLess(final.index("digest_member(entry.path,digest)"),
+                        final.index("m_state=State::Committing"))
+
+    def test_exact_chunk_reads_share_one_membership_verification(self):
+        source = self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        read = source[source.index("WorldSaveService::ChunkReadResultWorldSaveService::read_chunk("):
+                      source.index("WorldSaveService::chunk_save_acknowledgement(")]
+        self.assertEqual(read.count("VerifyRegionMembership(path,records,&errors)"), 1)
+        self.assertNotIn("read_snapshot_index(", read)
+        self.assertNotIn("Lod0Fingerprint(", read)
+        self.assertIn("if(require_index&&!indexed)", read)
+        verify = source[source.index("boolVerifyRegionMembership("):
+                        source.index("WorldSaveService::SaveOwnership::SaveOwnership(")]
+        self.assertEqual(verify.count("read_snapshot_index(save_dir,index,errors)"), 1)
+        for check in ("CheckMetadataFile(save_dir,&format)", "format>=1",
+                      "member->present!=digest.present", "member->bytes!=digest.bytes",
+                      "member->fnv64!=digest.fnv64"):
+            self.assertIn(check, verify)
+
     def test_journal_and_index_reads_stop_at_their_byte_budgets(self):
         source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
         read = source[source.index("boolReadBoundedBytes("):source.index("boolSamePath(")]
@@ -569,7 +728,10 @@ class PersistenceAndFieldSourceContract(unittest.TestCase):
                   "RecoveryRefusesEmptyTruncatedAndNonregularJournalsWithoutWrites",
                   "RecoveryRefusesFifoJournalWithoutWaitingForAWriter",
                   "RecoveryRefusesSymlinkJournalWithoutWrites",
-                  "RecoveryRefusesUnreadableAndLockedJournalsWithoutWrites")),
+                  "RecoveryRefusesUnreadableAndLockedJournalsWithoutWrites",
+                  "FirstIndexDigestsProtectedAndUntouchedMembersOnce",
+                  "UndoCopiesAndRestoresEmptyAndBlockBoundaryPayloads",
+                  "MissingPartialCorruptAndNonregularUndoCannotBeRestored")),
                 ("fields/energy_field_state_test.cpp",
                  ("IdleAndBorderTicksExcludeDormantPagesFromBuffers",
                   "CommonBorderStagesBothExistingPhysicalPagesAndSkipsAbsentPages",

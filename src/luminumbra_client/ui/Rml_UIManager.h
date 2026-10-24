@@ -200,7 +200,7 @@ public:
     }
     // Convenience for bounded in-memory providers. Runs off-thread, too.
     void SetSavedWorldList(std::function<Persistence::SavedWorldCatalog()> callback) {
-        m_savedWorldList = [scan = std::move(callback)](std::stop_token) {
+        m_savedWorldList = [scan = std::move(callback)](const std::stop_token&) {
             return scan();
         };
     }

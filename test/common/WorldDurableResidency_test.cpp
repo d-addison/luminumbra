@@ -427,8 +427,6 @@ TEST(WorldDurableResidency, ParkedChunksAppearOnceInAuthoritativeSnapshot) {
 
     const auto edited = fx.EditAtSpawnAndFindEdited();
     ASSERT_TRUE(edited);
-    const IVec3 coords = edited->get_coords();
-
     fx.Settle(fx.FarAnchor(), kSettleIterations);
     const auto snapshot = fx.world->snapshot_authoritative_chunks();
 

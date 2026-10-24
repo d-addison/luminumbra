@@ -1077,7 +1077,7 @@ TEST(FarLodWorker, DurableChunkTruthRepairsOldFarWithoutAStreamedSnapshot) {
                 ++owner_reads;
                 return nullptr;
             },
-            [](std::string) {});
+            [](const std::string&) {});
         const auto recovery_home_snapshot = recovery_world.capture_far_lod_sdf_snapshot(0, 0);
         const auto recovery_target_snapshot = recovery_world.capture_far_lod_sdf_snapshot(1, 0);
         ASSERT_TRUE(recovery_home_snapshot);

@@ -2575,10 +2575,12 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     constexpr int n = 317, k = 73;
     const double dt = original.GetSimulationClock().fixed_dt();
     for (int i = 0; i < n; ++i) {
-        if (i == n - 1)
-            for (auto* session : {&original, &control})
+        if (i == n - 1) {
+            for (auto* session : {&original, &control}) {
                 ASSERT_TRUE(
                     session->GetEnergyFieldState()->QueueRegionalDeposit(1, 0, 0, 0, 60000));
+            }
+        }
         ASSERT_EQ(original.TickSimulation(dt), 1u);
         ASSERT_EQ(control.TickSimulation(dt), 1u);
     }
@@ -3235,10 +3237,11 @@ TEST(GameSessionHeadlessWorldTest, LegacyEnergyImportPreservesNonAlignedCadence)
     for (int tick = 1; tick <= 8; ++tick) {
         for (auto* session : {&loaded, &explicit_load}) {
             ASSERT_EQ(session->TickSimulation(dt), 1u);
-            if (tick < 3)
+            if (tick < 3) {
                 EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60001u);
-            else
+            } else {
                 EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60001u);
+            }
         }
         EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(explicit_load));
     }
@@ -4381,8 +4384,9 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
                 // Adopt its exact durable bytes before editing the live authoritative object.
                 const auto chunk = session->GetWorldSystem()->find_authoritative_chunk(coords);
                 ASSERT_NE(chunk, nullptr);
-                if (!session->GetWorldSystem()->find_streamed_chunk(coords))
+                if (!session->GetWorldSystem()->find_streamed_chunk(coords)) {
                     ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+                }
                 chunk->heightmap_data[0] = 12.0f;
                 chunk->mark_voxel_data_dirty();
             }
@@ -6292,12 +6296,18 @@ void SeedRegionalWaterFixture(RegionalWaterScenario& scenario,
                               .durable = {},
                               .ground_object_bytes = {},
                               .field_page_bytes = {}});
-    // A legacy generator supplies the pristine baseline for this provenance fixture.
-    // The enabled streaming caller only binds query storage; fixed ticks own evolution.
+    // A legacy generator without weather rain supplies the pristine baseline.
     Luminumbra::Systems::WaterSystem baseline_seed(nullptr, session.GetWorldSystem());
     baseline_seed.SetSimResolution(8);
     baseline_seed.update(session.GetRegistry(), scenario.water_chunks);
+    ASSERT_FALSE(chunk->is_water_state_dirty());
+    ASSERT_EQ(baseline_seed.cells_stepped_last_update(), 0u);
+    // Bind query storage under the production boot pause. Otherwise the session's
+    // wired weather rain makes even sleeping chunks eligible for a simulation step.
+    session.GetWaterSystem()->SetBootPaused(true);
     session.GetWaterSystem()->update(session.GetRegistry(), scenario.water_chunks);
+    session.GetWaterSystem()->SetBootPaused(false);
+    ASSERT_EQ(session.GetWaterSystem()->cells_stepped_last_update(), 0u);
     ASSERT_TRUE(chunk->has_water_sim.load());
     ASSERT_EQ(chunk->water_depth_mm.size(), 64u);
     ASSERT_EQ(chunk->water_bed_mm.size(), 64u);
@@ -6448,8 +6458,9 @@ void AssertWaterRetentionRecords(GameSession& session,
     EXPECT_EQ(records.size(), initial_records.size() + 1);
     for (const auto& [key, previous] : initial_records) {
         ASSERT_TRUE(records.contains(key));
-        if (previous.visited)
+        if (previous.visited) {
             EXPECT_TRUE(session.GetFieldPages().owns_region(key));
+        }
     }
     const auto& disk_retained = records.at(disk_region);
     EXPECT_EQ(disk_retained.state, RegionState::Frozen);

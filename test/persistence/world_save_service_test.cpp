@@ -30,6 +30,7 @@
 #include <ios>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -868,10 +869,11 @@ TEST(WorldSaveService, SharedWritesAndEmptyRemovalReclaimStagingOnEverySave) {
     ASSERT_TRUE(WorldSaveService::write_file_durably(unrelated, "keep"));
     for (const bool empty : {false, true}) {
         ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial field"));
-        if (empty)
+        if (empty) {
             ASSERT_TRUE(WorldSaveService::remove_file_and_staging(file));
-        else
+        } else {
             ASSERT_TRUE(WorldSaveService::write_file_durably(file, "complete field"));
+        }
         EXPECT_FALSE(std::filesystem::exists(abandoned));
         EXPECT_TRUE(std::filesystem::exists(unrelated));
         EXPECT_TRUE(std::filesystem::is_directory(retained_directory));
@@ -1051,51 +1053,83 @@ TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
 }
 
 TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
-    const TempSaveDir save_dir("clock_metadata");
-    const auto metadata_path = save_dir.path() / "world_info.json";
-    const auto read = [&]() {
-        const std::ifstream file(metadata_path, std::ios::binary);
-        std::ostringstream bytes;
-        bytes << file.rdbuf();
-        return bytes.str();
-    };
-    std::vector<std::string> errors;
-    EXPECT_FALSE(WorldSaveService::save_metadata(
-        R"({"container_version":2,"simulationTick":-1})", save_dir.path(), &errors));
-    EXPECT_FALSE(std::filesystem::exists(metadata_path));
-    EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
-    nlohmann::json metadata = {{"container_version", 2}};
-    Luminumbra::world::WorldClock(123, {12000, 4}).write_metadata(metadata);
-    const auto valid = metadata.dump(4) + "\n";
-    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
-    EXPECT_EQ(read(), valid);
-    const auto index_path = Luminumbra::Persistence::snapshot_index_path(save_dir.path());
-    ASSERT_TRUE(std::filesystem::exists(index_path));
-    std::ifstream index_file(index_path, std::ios::binary);
-    const std::string index_before(std::istreambuf_iterator<char>{index_file}, {});
-    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path()));
-    EXPECT_EQ(read(), valid);
-    metadata["calendar"]["daysPerYear"] = 0;
-    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path()));
-    EXPECT_EQ(read(), valid);
-    // A pre-existing corrupt clock blocks chunk, entity and metadata writers.
-    {
-        std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
-        output << metadata.dump();
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        const TempSaveDir save_dir("clock_metadata");
+        const auto metadata_path = save_dir.path() / "world_info.json";
+        const auto index_path = Luminumbra::Persistence::snapshot_index_path(save_dir.path());
+        const auto read_disk = [&]() {
+            std::map<std::filesystem::path, std::string> files;
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(save_dir.path()))
+                if (entry.is_regular_file())
+                    files.emplace(entry.path(), ReadFileBytes(entry.path()));
+            return files;
+        };
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::save_metadata(
+            R"({"container_version":2,"simulationTick":-1})", save_dir.path(), &errors));
+        EXPECT_TRUE(std::filesystem::is_empty(save_dir.path()));
+        EXPECT_FALSE(std::filesystem::exists(metadata_path));
+        EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
+        nlohmann::json metadata = {{"container_version", 2}};
+        const Luminumbra::world::WorldClock clock(123, {12000, 4});
+        clock.write_metadata(metadata);
+        const auto valid = metadata.dump(4) + "\n";
+        ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
+        EXPECT_EQ(ReadFileBytes(metadata_path), valid);
+        // A clock alone preserves the legacy layout. Publishing a ledger explicitly
+        // opts into the indexed format; every refusal below must preserve either form.
+        EXPECT_FALSE(std::filesystem::exists(index_path));
+        EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
+        if (indexed) {
+            Luminumbra::world::ActiveRegionLedger ledger;
+            ledger.pin({0, 0}, true, clock);
+            ASSERT_TRUE(
+                WorldSaveService::save_metadata_and_active_regions(valid, ledger, save_dir.path()));
+            ASSERT_TRUE(std::filesystem::exists(index_path));
+            ASSERT_TRUE(
+                std::filesystem::exists(WorldSaveService::active_regions_path(save_dir.path())));
+        }
+        const auto valid_disk = read_disk();
+        EXPECT_FALSE(
+            WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path()));
+        EXPECT_EQ(ReadFileBytes(metadata_path), valid);
+        EXPECT_EQ(read_disk(), valid_disk);
+        metadata["calendar"]["daysPerYear"] = 0;
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path()));
+        EXPECT_EQ(ReadFileBytes(metadata_path), valid);
+        EXPECT_EQ(read_disk(), valid_disk);
+        // A pre-existing corrupt clock blocks chunk, entity and metadata writers.
+        {
+            std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
+            output << metadata.dump();
+            output.close();
+            ASSERT_FALSE(output.fail());
+        }
+        const auto damaged = ReadFileBytes(metadata_path);
+        const auto damaged_disk = read_disk();
+        WorldStreamingState state;
+        PopulateFixtureWorld(state);
+        EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
+        EXPECT_EQ(read_disk(), damaged_disk);
+        EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path()));
+        EXPECT_EQ(read_disk(), damaged_disk);
+        EXPECT_EQ(ReadFileBytes(metadata_path), damaged);
+        {
+            std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
+            output << "{";
+            output.close();
+            ASSERT_FALSE(output.fail());
+        }
+        const auto partial_disk = read_disk();
+        EXPECT_NO_THROW(
+            EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path(), &errors)));
+        EXPECT_EQ(ReadFileBytes(metadata_path), "{");
+        EXPECT_EQ(read_disk(), partial_disk);
+        EXPECT_EQ(std::filesystem::exists(index_path), indexed);
+        EXPECT_EQ(std::filesystem::exists(save_dir.path() / "chunks"), indexed);
+        EXPECT_FALSE(Luminumbra::Persistence::journal_pending(save_dir.path()));
     }
-    const auto damaged = read();
-    WorldStreamingState state;
-    PopulateFixtureWorld(state);
-    EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
-    EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path()));
-    // Clock-bearing metadata is an enabled indexed snapshot, so its region directory
-    // already exists. Refusal must preserve the published index, not remove that directory.
-    std::ifstream index_after_file(index_path, std::ios::binary);
-    EXPECT_EQ(std::string(std::istreambuf_iterator<char>{index_after_file}, {}), index_before);
-    EXPECT_EQ(read(), damaged);
-    std::ofstream(metadata_path, std::ios::binary | std::ios::trunc) << "{";
-    EXPECT_NO_THROW(EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path(), &errors)));
-    EXPECT_EQ(read(), "{");
 }
 
 TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {
@@ -1752,10 +1786,11 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
                                    .durable = {},
                                    .ground_object_bytes = {},
                                    .field_page_bytes = {}});
-            if (edited)
+            if (edited) {
                 ASSERT_NE(settled, empty);
-            else
+            } else {
                 ASSERT_EQ(settled, empty);
+            }
             chunk->set_state(lifecycle);
             const auto in_memory = lifecycle == ChunkState::Loading ? empty : settled;
             EXPECT_EQ(WorldSaveService::region_simulation_digest(

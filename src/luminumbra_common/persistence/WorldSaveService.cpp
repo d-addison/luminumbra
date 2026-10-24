@@ -1489,6 +1489,10 @@ WorldSaveService::region_staging_path(const std::filesystem::path& destination) 
         // Remove layout components without traversing a region symlink's parents
         // or collapsing symlink/.. components in the caller's save-root prefix.
         return directory.parent_path().parent_path() / destination.filename();
+    // Keep undo staging beside txn.json. Scanning undo/ for each new copy would visit every
+    // earlier copy again; the journal root contains only the manifest and undo directory.
+    if (directory.filename() == "undo" && directory.parent_path().filename() == "journal")
+        return directory.parent_path() / destination.filename();
     // Raw container access also supports standalone files outside a world save.
     return destination;
 }
@@ -3283,31 +3287,14 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         region_coords_for_chunk(coords, rx, rz);
         const auto path = region_file_path(save_dir, rx, rz);
         std::vector<std::string> errors;
-        SnapshotIndex index;
         const bool indexed = snapshot_index_exists(save_dir);
         if (require_index && !indexed)
             return fail("inconsistent snapshot: index missing");
-        if (indexed && !read_snapshot_index(save_dir, index, &errors))
-            return fail(errors.empty() ? "corrupt snapshot index" : errors.front());
         std::vector<RegionRecord> records;
         if (std::filesystem::exists(path) && !ReadRegionFile(path, records, &errors))
             return fail(errors.empty() ? "unreadable chunk region" : errors.front());
         if (!VerifyRegionMembership(path, records, &errors))
             return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
-        if (indexed) {
-            const auto relative = RelativeRegionMember(rx, rz);
-            const auto member = std::find_if(
-                index.members.begin(),
-                index.members.end(),
-                [&relative](const SnapshotMember& value) { return value.path == relative; });
-            const auto digest = Lod0Fingerprint(records);
-            if ((member == index.members.end() && digest.present) ||
-                (member != index.members.end() &&
-                 (member->present != digest.present ||
-                  (digest.present &&
-                   (member->bytes != digest.bytes || member->fnv64 != digest.fnv64)))))
-                return fail("inconsistent snapshot: " + relative);
-        }
         const auto id = Chunk::calculate_id(coords);
         for (const auto& record : records) {
             if (record.lod_level != 0 || record.id != id)
