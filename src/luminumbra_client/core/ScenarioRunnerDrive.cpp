@@ -524,7 +524,8 @@ bool ScenarioRunnerImpl::onPreRenderFoliage() {
         foliage->rebuild_instances(chunk_scatter,
                                    &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
                                    &ctx,
-                                   g_camera->Position);
+                                   g_camera->Position,
+                                   Luminumbra::Rendering::FoliagePass::Preparation::Complete);
     }
     return true;
 }

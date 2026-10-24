@@ -84,6 +84,11 @@ struct FoliageRebuild {
     std::uint64_t hashed_bytes = 0;
     std::uint64_t uploaded_bytes = 0;
     std::uint64_t dirty_columns = 0;
+    std::uint64_t worker_dispatched = 0;
+    std::uint64_t worker_completed = 0;
+    std::uint64_t worker_stale_rejected = 0;
+    // Oldest outstanding or consumed job, in frames, including worker service.
+    std::uint64_t worker_queue_age_frames = 0;
     std::uint64_t uploads = 0;
     std::uint64_t stale_results = 0;
     // Storage allocated with null glBufferData, separate from transferred bytes.

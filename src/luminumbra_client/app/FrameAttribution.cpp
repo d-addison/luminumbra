@@ -2,6 +2,7 @@
 #include "../rendering/UploadBudget.h"
 #include "luminumbra_common/core/WaterAttribution.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -146,6 +147,11 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.hashed_bytes += rebuild.hashed_bytes;
     total.uploaded_bytes += rebuild.uploaded_bytes;
     total.dirty_columns += rebuild.dirty_columns;
+    total.worker_dispatched += rebuild.worker_dispatched;
+    total.worker_completed += rebuild.worker_completed;
+    total.worker_stale_rejected += rebuild.worker_stale_rejected;
+    total.worker_queue_age_frames =
+        std::max(total.worker_queue_age_frames, rebuild.worker_queue_age_frames);
     total.uploads += rebuild.uploads;
     total.stale_results += rebuild.stale_results;
     total.scratch_bytes += rebuild.scratch_bytes;
@@ -263,7 +269,8 @@ void write_csv_header(std::ostream& out) {
     out << ",dirty_columns,water_selection_ms,"
            "water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms,"
            "water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns,"
-           "water_stale_columns\n";
+           "water_stale_columns,worker_dispatched,worker_completed,worker_stale_rejected,"
+           "worker_queue_age_frames\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -309,7 +316,9 @@ bool write_csv_row(std::ostream& out,
     out << ',' << water.selection_ms << ',' << water.seed_inputs_ms << ','
         << water.initialization_ms << ',' << water.sim_ms << ',' << water.seam_ms << ','
         << water.bookkeeping_ms << ',' << water.precomputed_columns << ',' << water.fallback_columns
-        << ',' << water.stale_columns << '\n';
+        << ',' << water.stale_columns;
+    out << ',' << foliage.worker_dispatched << ',' << foliage.worker_completed << ','
+        << foliage.worker_stale_rejected << ',' << foliage.worker_queue_age_frames << '\n';
 
     return out.good();
 }

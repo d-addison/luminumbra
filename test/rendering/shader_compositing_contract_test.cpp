@@ -344,7 +344,7 @@ TEST(FoliagePreviewContract, BothPreviewPathsKeepTheirLookAndRestoreBeforeOtherV
     }
     const auto foliage = ExtractBlock(preview, "void WorldgenPreview::rebuild_foliage_if_needed(");
     const auto look = foliage.find("foliage->set_fade_distances(");
-    const auto cached = foliage.find("if (m_last_foliage_generation == m_rebuild_generation)");
+    const auto cached = foliage.find("if (m_last_foliage_generation != m_rebuild_generation) {");
     ASSERT_NE(look, std::string::npos);
     ASSERT_NE(cached, std::string::npos);
     EXPECT_LT(look, cached); // Re-entry preserves the preview even with a cached world.
