@@ -10,6 +10,7 @@
 #include <entt/entity/registry.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -107,6 +108,60 @@ void ExpectSameWater(const SeedFixture& a, const SeedFixture& b) {
                       std::bit_cast<std::uint32_t>(other.water_sim_terrain_height[i]));
         }
     }
+}
+
+void ExpectInlineSeed(SeedFixture& fixture, int resolution) {
+    ASSERT_EQ(fixture.chunks().size(), 1u);
+    const auto& chunk = *fixture.chunks().begin()->second;
+    ASSERT_EQ(chunk.current_water_resolution.load(), resolution);
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    ASSERT_EQ(chunk.water_bed_mm.size(), cells);
+    ASSERT_EQ(chunk.water_rest_level.size(), cells);
+    ASSERT_EQ(chunk.water_sim_terrain_height.size(), cells);
+    ASSERT_EQ(chunk.water_level_data.size(), cells);
+    ASSERT_EQ(chunk.water_flow_data.size(), cells);
+    EXPECT_EQ(fixture.water().cells_stepped_last_update(), 0u);
+    std::vector<std::int32_t> beds;
+    std::vector<std::int32_t> depths;
+    const auto coords = chunk.get_coords();
+    for (int z = 0; z < resolution; ++z) {
+        for (int x = 0; x < resolution; ++x) {
+            const float wx =
+                static_cast<float>(coords.x * CHUNK_SIZE_X) +
+                (static_cast<float>(x) + 0.5f) * (CHUNK_SIZE_X / static_cast<float>(resolution));
+            const float wz =
+                static_cast<float>(coords.z * CHUNK_SIZE_Z) +
+                (static_cast<float>(z) + 0.5f) * (CHUNK_SIZE_Z / static_cast<float>(resolution));
+            const float rest = fixture.world().WaterLevelAt(wx, wz);
+            const float terrain = fixture.world().GetTerrainHeightAt(wx, wz);
+            const auto cell = static_cast<std::size_t>(z) * static_cast<std::size_t>(resolution) +
+                              static_cast<std::size_t>(x);
+            beds.push_back(static_cast<std::int32_t>(std::lround(terrain * 1000)));
+            const long depth = std::lround(static_cast<double>(rest - terrain) * 1000);
+            depths.push_back(static_cast<std::int32_t>(depth > 0 ? depth : 0));
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_rest_level[cell]),
+                      std::bit_cast<std::uint32_t>(rest));
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_level_data[cell]),
+                      std::bit_cast<std::uint32_t>(rest));
+            EXPECT_FLOAT_EQ(chunk.water_flow_data[cell].x, 0.0f);
+            EXPECT_FLOAT_EQ(chunk.water_flow_data[cell].y, 0.0f);
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_sim_terrain_height[cell]),
+                      std::bit_cast<std::uint32_t>(terrain));
+        }
+    }
+    EXPECT_EQ(chunk.water_bed_mm, beds);
+    EXPECT_EQ(chunk.water_depth_mm, depths);
+    std::uint64_t expected_hash = 1469598103934665603ull;
+    const auto mix = [&expected_hash](std::uint64_t value) {
+        expected_hash ^= value;
+        expected_hash *= 1099511628211ull;
+    };
+    mix(static_cast<std::uint64_t>(chunk.get_id()));
+    for (const auto depth : depths)
+        mix(static_cast<std::uint32_t>(depth));
+    for (const auto bed : beds)
+        mix(static_cast<std::uint32_t>(bed));
+    EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);
 }
 
 TEST(WaterSeedInputs, HighCellsMatchOriginalInlineBitsIncludingEditedTerrain) {
@@ -247,50 +302,129 @@ TEST(WaterSeedInputs, HighInitializationPreservesInlineRoundingAndCellLayout) {
         if (precompute)
             fixture.prepare(chunk);
         fixture.tick();
-        ASSERT_EQ(chunk.water_bed_mm.size(), 256u);
-        ASSERT_EQ(chunk.water_rest_level.size(), 256u);
-        ASSERT_EQ(chunk.water_sim_terrain_height.size(), 256u);
-        ASSERT_EQ(chunk.water_level_data.size(), 256u);
-        ASSERT_EQ(chunk.water_flow_data.size(), 256u);
-        EXPECT_EQ(fixture.water().cells_stepped_last_update(), 0u);
-        std::vector<std::int32_t> beds;
-        std::vector<std::int32_t> depths;
-        const auto coords = chunk.get_coords();
-        for (int z = 0; z < 16; ++z) {
-            for (int x = 0; x < 16; ++x) {
-                const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X) +
-                                 (static_cast<float>(x) + 0.5f) * (CHUNK_SIZE_X / 16.0f);
-                const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
-                                 (static_cast<float>(z) + 0.5f) * (CHUNK_SIZE_Z / 16.0f);
-                const float rest = fixture.world().WaterLevelAt(wx, wz);
-                const float terrain = fixture.world().GetTerrainHeightAt(wx, wz);
-                const auto cell = static_cast<std::size_t>(z) * 16 + static_cast<std::size_t>(x);
-                beds.push_back(static_cast<std::int32_t>(std::lround(terrain * 1000)));
-                const long depth = std::lround(static_cast<double>(rest - terrain) * 1000);
-                depths.push_back(static_cast<std::int32_t>(depth > 0 ? depth : 0));
-                EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_rest_level[cell]),
-                          std::bit_cast<std::uint32_t>(rest));
-                EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_level_data[cell]),
-                          std::bit_cast<std::uint32_t>(rest));
-                EXPECT_FLOAT_EQ(chunk.water_flow_data[cell].x, 0.0f);
-                EXPECT_FLOAT_EQ(chunk.water_flow_data[cell].y, 0.0f);
-                EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_sim_terrain_height[cell]),
-                          std::bit_cast<std::uint32_t>(terrain));
+        ExpectInlineSeed(fixture, 16);
+    }
+}
+
+TEST(WaterSeedInputs, UnsupportedResolutionBootAndLiveMatchInlineHash) {
+    JobSystem jobs;
+    jobs.startup(2);
+    for (const bool boot : {false, true}) {
+        for (const bool staged : {false, true}) {
+            SeedFixture accelerated(1, &jobs);
+            SeedFixture inline_path;
+            accelerated.water().SetSimResolution(32);
+            inline_path.water().SetSimResolution(32);
+            ASSERT_EQ(accelerated.water().sim_resolution(), 32);
+            ASSERT_EQ(inline_path.water().sim_resolution(), 32);
+            accelerated.water().SetBootSettleMode(boot);
+            auto& chunk = *accelerated.chunks().begin()->second;
+            chunk.is_water_sleeping.store(true);
+            inline_path.chunks().begin()->second->is_water_sleeping.store(true);
+            if (staged) {
+                accelerated.prepare(chunk);
+                auto inputs = chunk.take_water_seed_inputs();
+                // A completed High result is still invalid for the active Ultra grid.
+                inputs->terrain.fill(10000.0f);
+                inputs->rest.fill(-10000.0f);
+                chunk.stage_water_seed_inputs(std::move(inputs));
             }
+            accelerated.tick();
+            inline_path.tick();
+            EXPECT_FALSE(chunk.water_seed_inputs());
+            ExpectSameWater(accelerated, inline_path);
+            ExpectInlineSeed(accelerated, 32);
+            ExpectInlineSeed(inline_path, 32);
+            // A later update has an empty initialization set and preserves the seed.
+            const auto seeded_hash = accelerated.world().debug_water_state_hash().hash;
+            accelerated.tick();
+            inline_path.tick();
+            EXPECT_EQ(accelerated.world().debug_water_state_hash().hash, seeded_hash);
+            ExpectSameWater(accelerated, inline_path);
         }
-        EXPECT_EQ(chunk.water_bed_mm, beds);
-        EXPECT_EQ(chunk.water_depth_mm, depths);
-        std::uint64_t expected_hash = 1469598103934665603ull;
-        const auto mix = [&expected_hash](std::uint64_t value) {
-            expected_hash ^= value;
-            expected_hash *= 1099511628211ull;
-        };
-        mix(static_cast<std::uint64_t>(chunk.get_id()));
-        for (const auto depth : depths)
-            mix(static_cast<std::uint32_t>(depth));
-        for (const auto bed : beds)
-            mix(static_cast<std::uint32_t>(bed));
-        EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);
+    }
+    jobs.shutdown();
+}
+
+TEST(WaterSeedInputs, UnpublishedPartialAndWrongResolutionInputsFallBackInBootAndLive) {
+    JobSystem jobs;
+    jobs.startup(2);
+    for (const bool boot : {false, true}) {
+        for (int payload = 0; payload < 4; ++payload) {
+            SeedFixture prepared(1, &jobs);
+            SeedFixture inline_path;
+            prepared.water().SetBootSettleMode(boot);
+            auto& chunk = *prepared.chunks().begin()->second;
+            chunk.is_water_sleeping.store(true);
+            inline_path.chunks().begin()->second->is_water_sleeping.store(true);
+            prepared.prepare(chunk, false);
+            auto inputs = chunk.take_water_seed_inputs();
+            if (payload == 0) {
+                // Unpublished data must not be read even if its resolution matches.
+                inputs->resolution = 16;
+            } else if (payload == 1) {
+                const auto scope = prepared.world().acquire_worldgen_sample_scope();
+                ComputeWaterSeedInputs(*inputs, chunk.get_coords(), 8, prepared.world());
+                ASSERT_TRUE(inputs->ready_for(8));
+            } else if (payload == 2) {
+                const std::array<float, 63> partial{};
+                ComputeWaterSeedInputs(*inputs, chunk.get_coords(), 8, prepared.world(), partial);
+                EXPECT_FALSE(inputs->ready.load(std::memory_order_acquire));
+            } else {
+                // Published storage without resolution metadata is also invalid.
+                inputs->ready.store(true, std::memory_order_release);
+            }
+            ASSERT_FALSE(inputs->ready_for(16));
+            chunk.stage_water_seed_inputs(std::move(inputs));
+            prepared.tick();
+            inline_path.tick();
+            EXPECT_FALSE(chunk.water_seed_inputs());
+            EXPECT_EQ(prepared.water().dbg_seed_attribution().precomputed_columns, 0u);
+            EXPECT_EQ(prepared.water().dbg_seed_attribution().fallback_columns, 1u);
+            ExpectSameWater(prepared, inline_path);
+            ExpectInlineSeed(prepared, 16);
+        }
+    }
+    jobs.shutdown();
+}
+
+TEST(WaterSeedInputs, LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash) {
+    JobSystem jobs;
+    jobs.startup(2);
+    for (const bool boot : {false, true}) {
+        for (const int resolution : {8, 16, 32}) {
+            SeedFixture prepared(1, &jobs);
+            SeedFixture inline_path;
+            auto params = SeedParams();
+            params.lakes_enabled = false;
+            prepared.world().set_params(params);
+            inline_path.world().set_params(params);
+            prepared.water().SetSimResolution(resolution);
+            inline_path.water().SetSimResolution(resolution);
+            prepared.water().SetBootSettleMode(boot);
+            auto& chunk = *prepared.chunks().begin()->second;
+            chunk.is_water_sleeping.store(true);
+            inline_path.chunks().begin()->second->is_water_sleeping.store(true);
+            prepared.prepare(chunk, false);
+            prepared.tick();
+            inline_path.tick();
+            EXPECT_FALSE(chunk.water_seed_inputs());
+            EXPECT_EQ(prepared.water().dbg_seed_attribution().fallback_columns, 0u);
+            EXPECT_EQ(prepared.water().dbg_seed_attribution().precomputed_columns, 0u);
+            ExpectSameWater(prepared, inline_path);
+            ExpectInlineSeed(prepared, resolution);
+        }
+    }
+    jobs.shutdown();
+}
+
+TEST(WaterSeedInputs, InvalidSessionResolutionsLeaveTheConfiguredGridUnchanged) {
+    SeedFixture fixture;
+    fixture.water().SetSimResolution(32);
+    ASSERT_EQ(fixture.water().sim_resolution(), 32);
+    for (const int resolution : {-1, 0, 1, 3, 17, 31, 33, 64, std::numeric_limits<int>::max()}) {
+        fixture.water().SetSimResolution(resolution);
+        EXPECT_EQ(fixture.water().sim_resolution(), 32);
     }
 }
 
@@ -427,6 +561,49 @@ TEST(WaterSeedInputs, BootSurfaceJobsPrepareHighInputsAndMediumKeepsExistingPath
             }
         }
     }
+}
+
+TEST(WaterSeedInputs, BootSurfaceAndGenerationJobsRespectPresetAndResolutionEligibility) {
+    JobSystem jobs;
+    jobs.startup(2);
+    for (const bool threaded : {false, true}) {
+        for (const bool lakes : {false, true}) {
+            for (const int resolution : {8, 16, 32}) {
+                const bool eligible = lakes && resolution == 16;
+                auto params = SeedParams();
+                params.lakes_enabled = lakes;
+                SHIELD_WorldSystem world(threaded ? &jobs : nullptr, nullptr, params, 777);
+                WaterSystem water(threaded ? &jobs : nullptr, &world);
+                Systems::PhysicsSystem physics;
+                water.SetSimResolution(resolution);
+                ASSERT_EQ(water.sim_resolution(), resolution);
+                world.SetWaterSystem(&water);
+                const IVec3 generated_coords(10, 0, 10);
+                world.dispatch_generation_jobs(std::vector<IVec3>{generated_coords});
+                world.wait_for_streaming_jobs();
+                const auto generated = world.find_streamed_chunk(generated_coords);
+                ASSERT_TRUE(generated);
+                EXPECT_EQ(generated->water_seed_inputs() != nullptr, eligible);
+                if (eligible) {
+                    ASSERT_TRUE(generated->water_seed_inputs());
+                    EXPECT_TRUE(generated->water_seed_inputs()->ready_for(resolution));
+                }
+                ASSERT_TRUE(
+                    world.EnsureSurfaceReadyNear(Vec3(-48.0f, 0.0f, -32.0f), &physics, 0, 0));
+                const auto chunks = world.snapshot_streamed_chunks();
+                ASSERT_FALSE(chunks.empty());
+                for (const auto& chunk : chunks) {
+                    ASSERT_TRUE(chunk);
+                    EXPECT_EQ(chunk->water_seed_inputs() != nullptr, eligible);
+                    if (eligible) {
+                        ASSERT_TRUE(chunk->water_seed_inputs());
+                        EXPECT_TRUE(chunk->water_seed_inputs()->ready_for(resolution));
+                    }
+                }
+            }
+        }
+    }
+    jobs.shutdown();
 }
 
 TEST(WaterSeedInputs, AdoptionDropsInputsFromTheProducingWorld) {
@@ -587,7 +764,7 @@ TEST(WaterSeedInputs, BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory) 
 
 TEST(WaterSeedInputs, RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing) {
     JobSystem stopped_jobs;
-    for (const int resolution : {2, 4, 8, 16}) {
+    for (const int resolution : {2, 4, 8, 16, 32}) {
         SeedFixture rejected(7, &stopped_jobs);
         SeedFixture serial(7);
         rejected.water().SetSimResolution(resolution);
@@ -658,6 +835,8 @@ TEST(WaterSeedInputs, BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrai
         inputs.rest.fill(456.0f);
         ComputeWaterSeedInputs(inputs, IVec3(0), resolution, fixture.world());
         EXPECT_FALSE(inputs.ready.load(std::memory_order_acquire));
+        EXPECT_EQ(inputs.resolution, 0);
+        EXPECT_FALSE(inputs.ready_for(resolution));
         EXPECT_TRUE(std::all_of(inputs.terrain.begin(), inputs.terrain.end(), [](float value) {
             return value == 123.0f;
         }));
@@ -670,5 +849,33 @@ TEST(WaterSeedInputs, BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrai
     EXPECT_FALSE(inputs.ready.load(std::memory_order_acquire));
     EXPECT_EQ(inputs.terrain, (std::array<float, 256>{}));
     EXPECT_EQ(inputs.rest, (std::array<float, 256>{}));
+    const std::array<float, 65> excess{};
+    ComputeWaterSeedInputs(inputs, IVec3(0), 8, fixture.world(), excess);
+    EXPECT_FALSE(inputs.ready.load(std::memory_order_acquire));
+    EXPECT_EQ(inputs.resolution, 0);
+    EXPECT_EQ(inputs.terrain, (std::array<float, 256>{}));
+    EXPECT_EQ(inputs.rest, (std::array<float, 256>{}));
+}
+
+TEST(WaterSeedInputs, ReadinessRequiresPublishedSupportedAndMatchingResolution) {
+    SeedFixture fixture;
+    for (const int resolution : {2, 4, 8, 16}) {
+        HighWaterSeedInputs inputs;
+        inputs.resolution = resolution;
+        EXPECT_FALSE(inputs.ready_for(resolution));
+        const auto scope = fixture.world().acquire_worldgen_sample_scope();
+        ComputeWaterSeedInputs(inputs, IVec3(0), resolution, fixture.world());
+        ASSERT_TRUE(inputs.ready.load(std::memory_order_acquire));
+        EXPECT_EQ(inputs.resolution, resolution);
+        for (const int requested : {0, 2, 4, 8, 16, 32})
+            EXPECT_EQ(inputs.ready_for(requested), requested == resolution);
+    }
+    HighWaterSeedInputs unknown;
+    unknown.ready.store(true, std::memory_order_release);
+    EXPECT_FALSE(unknown.ready_for(16));
+    HighWaterSeedInputs oversized;
+    oversized.resolution = 32;
+    oversized.ready.store(true, std::memory_order_release);
+    EXPECT_FALSE(oversized.ready_for(32));
 }
 } // namespace

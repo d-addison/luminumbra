@@ -613,7 +613,7 @@ WaterSystem::prepare_high_water_seed_inputs(std::span<Chunk* const> to_init, boo
                 ++m_seed_attribution.stale_columns;
                 inputs.reset();
             }
-            if (inputs && inputs->ready.load(std::memory_order_acquire)) {
+            if (inputs && inputs->ready_for(m_sim_resolution)) {
                 ++m_seed_attribution.precomputed_columns;
             } else {
                 ++m_seed_attribution.fallback_columns;
@@ -671,7 +671,9 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending) {
     // Match the existing boot surface-build sub-batch size; live play still
     // prepares only its six selected chunks inline. No world-sized payload list.
     constexpr std::size_t kBootSeedBatch = 64;
-    const bool parallel_boot = m_boot_settle_mode && m_job_system;
+    const bool use_seed_inputs = HighWaterSeedInputs::supports_resolution(m_sim_resolution) &&
+                                 m_shield_system->get_params().lakes_enabled;
+    const bool parallel_boot = use_seed_inputs && m_boot_settle_mode && m_job_system;
     std::shared_ptr<const SHIELD_WorldSystem> sampler;
     for (std::size_t begin = 0; begin < pending.size();) {
         const auto count = std::min(kBootSeedBatch, pending.size() - begin);
@@ -739,7 +741,9 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending) {
         // publication, or cell order. Retire the request even on fallback so a late
         // worker cannot retain storage in an already initialized column.
         // At most six handles in live play; boot uses one per resident init candidate.
-        auto high_seed_inputs = prepare_high_water_seed_inputs(to_init, parallel_boot);
+        auto high_seed_inputs = use_seed_inputs
+                                    ? prepare_high_water_seed_inputs(to_init, parallel_boot)
+                                    : std::vector<std::shared_ptr<HighWaterSeedInputs>>{};
         if (parallel_boot) {
             high_seed_inputs.resize(to_init.size());
             std::vector<Job> jobs;
@@ -777,7 +781,7 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending) {
             }
             for (std::size_t i = 0; i < to_init.size(); ++i) {
                 auto& inputs = high_seed_inputs[i];
-                if (!inputs->ready.load(std::memory_order_acquire)) {
+                if (!inputs->ready_for(m_sim_resolution)) {
                     ComputeWaterSeedInputs(*inputs,
                                            to_init[i]->get_coords(),
                                            m_sim_resolution,
@@ -798,9 +802,12 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending) {
                                               ? std::chrono::steady_clock::now()
                                               : std::chrono::steady_clock::time_point{};
         for (std::size_t i = 0; i < to_init.size(); ++i) {
+            if (!use_seed_inputs)
+                to_init[i]->stage_water_seed_inputs({});
+            const auto* inputs = high_seed_inputs.empty() ? nullptr : high_seed_inputs[i].get();
             seed_chunk_water(to_init[i],
                              terrain_seed[i],
-                             high_seed_inputs.empty() ? nullptr : high_seed_inputs[i].get());
+                             inputs && inputs->ready_for(m_sim_resolution) ? inputs : nullptr);
         }
         if (WaterAttribution::CurrentFrame()) {
             m_dbg_water.initialization +=
@@ -818,6 +825,10 @@ void WaterSystem::seed_chunk_water(Chunk* cp,
     //  init directly at the fixed camera-independent sim resolution (no later
     // camera-driven resize -> the hashed grid is uniform + stable on every peer).
     const int initial_resolution = m_sim_resolution;
+    // Acceleration data is optional. Never index unpublished, partial or differently
+    // sized samples; retain the exact inline queries and rounding on fallback.
+    if (inputs && !inputs->ready_for(initial_resolution))
+        inputs = nullptr;
     cp->current_water_resolution.store(initial_resolution);
     const size_t sim_size =
         static_cast<size_t>(initial_resolution) * static_cast<size_t>(initial_resolution);
@@ -1620,13 +1631,14 @@ WaterDetailLevel WaterSystem::CalculateRequiredDetail(const Chunk& chunk,
 }
 
 void WaterSystem::SetSimResolution(int cells_per_side) {
-    // One uniform grid for the whole session: the resolution must divide the chunk so
-    // seam cells align cell-for-cell (see SetSimResolution's header contract). Reject
+    // One uniform grid for the whole session: integral-metre cells or Ultra's
+    // half-metre cells keep seams aligned cell-for-cell. Reject
     // anything else and keep the current resolution — the caller wires this once from
     // sim.water_high_res before the first update, so a rejected value simply leaves
     // the current session resolution in place.
-    if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 ||
-        CHUNK_SIZE_Z % cells_per_side != 0) {
+    if (cells_per_side <= 1 ||
+        (cells_per_side != static_cast<int>(WaterDetailLevel::Ultra) &&
+         (CHUNK_SIZE_X % cells_per_side != 0 || CHUNK_SIZE_Z % cells_per_side != 0))) {
         return;
     }
     m_sim_resolution = cells_per_side;

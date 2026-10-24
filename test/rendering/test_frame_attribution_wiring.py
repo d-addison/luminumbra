@@ -1344,7 +1344,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertLess(boot.index("jobs.clear()"), boot.index("wait(handle)"))
         self.assertLess(boot.index("fence->load(std::memory_order_acquire)"),
                         boot.index("seed_chunk_water("))
-        self.assertLess(boot.index("inputs->ready.load(std::memory_order_acquire)"),
+        self.assertLess(boot.index("inputs->ready_for(m_sim_resolution)"),
                         boot.index("seed_chunk_water("))
         task = compact(block(water, "struct BootWaterSeedTask"))
         self.assertIn("std::shared_ptr<const SHIELD_WorldSystem> sampler", task)
@@ -1378,8 +1378,98 @@ class FrameAttributionWiring(unittest.TestCase):
                      "BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory",
                      "RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing",
                      "DetachedSamplerSurvivesSourceResetPrefetchAndDestruction",
-                     "BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain"):
+                     "BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain",
+                     "UnsupportedResolutionBootAndLiveMatchInlineHash",
+                     "UnpublishedPartialAndWrongResolutionInputsFallBackInBootAndLive",
+                     "LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash",
+                     "InvalidSessionResolutionsLeaveTheConfiguredGridUnchanged",
+                     "BootSurfaceAndGenerationJobsRespectPresetAndResolutionEligibility",
+                     "ReadinessRequiresPublishedSupportedAndMatchingResolution"):
             self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
+
+    def test_water_seed_inputs_require_supported_preset_and_matching_publication(self):
+        header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
+        self.assertIn("static constexpr bool supports_resolution(", header)
+        self.assertIn("bool ready_for(", header)
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", text).group(1))
+                     for name, text in (("kResolution", header), ("CHUNK_SIZE_X", types),
+                                        ("CHUNK_SIZE_Z", types))}
+        supported = compact(block(header, "static constexpr bool supports_resolution("))
+        supported = re.fullmatch(r"return (.*);", supported).group(1)
+        readiness = compact(block(header, "bool ready_for("))
+        readiness = re.fullmatch(r"return (.*);", readiness).group(1)
+        readiness = readiness.replace("supports_resolution(cells_per_side)", "supported")
+        readiness = readiness.replace("ready.load(std::memory_order_acquire)", "published")
+        for requested in (-1, 0, 1, 2, 3, 4, 8, 16, 17, 32, 2**31 - 1):
+            accepts = cpp_expression(supported, cells_per_side=requested, **constants)
+            self.assertEqual(accepts, requested in (2, 4, 8, 16))
+            for published in (False, True):
+                for resolution in (0, 2, 4, 8, 16, 32):
+                    self.assertEqual(
+                        cpp_expression(readiness, supported=accepts, published=published,
+                                       resolution=resolution, cells_per_side=requested,
+                                       true=True, false=False),
+                        accepts and published and resolution == requested,
+                    )
+        # The empty default span is outside the function body.
+        compute = compact(block(header.replace("std::span<const float> terrain = {}",
+                                               "std::span<const float> terrain"),
+                                "void ComputeWaterSeedInputs("))
+        self.assertIn("if (!HighWaterSeedInputs::supports_resolution(resolution)) return;", compute)
+        self.assertIn("if (!terrain.empty() && terrain.size() != cells) return;", compute)
+        self.assertLess(compute.index("inputs.resolution = resolution;"),
+                        compute.index("inputs.ready.store(true, std::memory_order_release);"))
+
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        boot = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        eligibility = re.search(r"const bool use_seed_inputs = (.*?);", boot).group(1)
+        eligibility = eligibility.replace(
+            "HighWaterSeedInputs::supports_resolution(m_sim_resolution)", "supported")
+        for accepts in (False, True):
+            for lakes in (False, True):
+                self.assertEqual(
+                    cpp_expression(eligibility, supported=accepts,
+                                   **{"m_shield_system->get_params().lakes_enabled": lakes}),
+                    accepts and lakes,
+                )
+        self.assertIn("const bool parallel_boot = use_seed_inputs && "
+                      "m_boot_settle_mode && m_job_system;", boot)
+        self.assertIn("auto high_seed_inputs = use_seed_inputs ? "
+                      "prepare_high_water_seed_inputs(to_init, parallel_boot) : "
+                      "std::vector<std::shared_ptr<HighWaterSeedInputs>>{};", boot)
+        parallel = compact(block(water, "if (parallel_boot)"))
+        self.assertIn("std::make_shared<HighWaterSeedInputs>()", parallel)
+        self.assertIn("ComputeWaterSeedInputs(*inputs,", parallel)
+        self.assertIn("if (!use_seed_inputs) to_init[i]->stage_water_seed_inputs({});", boot)
+        self.assertIn("seed_chunk_water(to_init[i], terrain_seed[i], "
+                      "inputs && inputs->ready_for(m_sim_resolution) ? inputs : nullptr);", boot)
+        live = compact(block(water, "WaterSystem::prepare_high_water_seed_inputs("))
+        self.assertIn("if (inputs && inputs->ready_for(m_sim_resolution))", live)
+        consumer = compact(block(water, "void WaterSystem::seed_chunk_water("))
+        guard = "if (inputs && !inputs->ready_for(initial_resolution)) inputs = nullptr;"
+        self.assertIn(guard, consumer)
+        self.assertLess(consumer.index(guard), consumer.index("inputs->rest[cell]"))
+        self.assertLess(consumer.index(guard), consumer.index("inputs->terrain[cell]"))
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        request = compact(block(world, "SHIELD_WorldSystem::request_water_seed_inputs("))
+        self.assertIn("!m_params.lakes_enabled", request)
+        self.assertIn("m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution", request)
+        self.assertLess(request.index("return {};"),
+                        request.index("std::make_shared<HighWaterSeedInputs>()"))
+
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        regression = compact(block(native, "TEST(WaterSeedInputs, "
+                                   "UnsupportedResolutionBootAndLiveMatchInlineHash)"))
+        self.assertIn("for (const bool boot : {false, true})", regression)
+        self.assertIn("accelerated.water().SetBootSettleMode(boot);", regression)
+        for fixture in ("accelerated", "inline_path"):
+            self.assertIn(f"{fixture}.water().SetSimResolution(32);", regression)
+            self.assertIn(f"ASSERT_EQ({fixture}.water().sim_resolution(), 32);", regression)
+            self.assertIn(f"ExpectInlineSeed({fixture}, 32);", regression)
+        self.assertIn("ExpectSameWater(accelerated, inline_path);", regression)
+        oracle = compact(block(native, "void ExpectInlineSeed("))
+        self.assertIn("EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);", oracle)
 
 
 if __name__ == "__main__":

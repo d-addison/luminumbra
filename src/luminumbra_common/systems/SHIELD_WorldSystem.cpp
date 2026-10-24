@@ -5468,7 +5468,8 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
 
 std::shared_ptr<HighWaterSeedInputs>
 SHIELD_WorldSystem::request_water_seed_inputs(Chunk& chunk) const {
-    if (!m_water_system || m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution ||
+    if (!m_water_system || !m_params.lakes_enabled ||
+        m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution ||
         chunk.has_water_sim.load(std::memory_order_acquire)) {
         return {};
     }
