@@ -2501,13 +2501,14 @@ bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
     const fs::path save_dir = GetWorldSaveDir();
     if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
         m_metadata.worldId.empty() || !m_worldUsable || !IsSimulationTickBoundary() ||
-        !ClockConfigurationCompatible(save_dir) ||
         Persistence::SaveTransaction::active_for(save_dir)) {
         return body(); // nothing to wrap: the writers keep their own commits
     }
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
     const Persistence::WorldSaveService::SaveOwnership save_ownership;
+    if (!ClockConfigurationCompatible(save_dir))
+        return body();
     auto outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
     if (!outer)
         return false;
@@ -2613,6 +2614,7 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
 } // namespace
 
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
+    const Persistence::WorldSaveService::SaveOwnership save_ownership;
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&

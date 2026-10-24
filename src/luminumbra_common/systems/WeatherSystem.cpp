@@ -1,9 +1,13 @@
 #include "WeatherSystem.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
+#include <span>
 #include <sstream>
 #include <vector>
 
@@ -44,6 +48,8 @@ constexpr std::uint64_t kStormSpawnEpochTicks = 45; // a spawn opportunity every
 constexpr std::uint32_t kStormLifetimeTicks = 240;  // 8 s at 30 Hz
 constexpr std::uint32_t kStormRampTicks = 45;       // ramp-in / decay-out window
 constexpr float kStormRadiusM = 220.0f;             // influence radius (world metres)
+constexpr double kStormBinSizeM = 512.0;
+static_assert(2 * kStormRadiusM < kStormBinSizeM);
 constexpr float kStormPeakIntensity = 1.0f;
 
 // Lightning strike schedule. A storm cell whose envelope intensity is
@@ -461,9 +467,60 @@ std::vector<StrikeEvent> WeatherSystem::StrikesThisTick() const {
     return out;
 }
 
+std::size_t WeatherSystem::StormBinHash::operator()(const StormBin& bin) const noexcept {
+    const auto x = std::hash<double>{}(bin[0]);
+    const auto z = std::hash<double>{}(bin[1]);
+    return x ^ (z + std::size_t{0x9e3779b9} + (x << 6) + (x >> 2));
+}
+
+WeatherSystem::StormIndex
+WeatherSystem::BuildRegionalStormIndex(std::span<const StormCell> storms) {
+    StormIndex result;
+    for (std::size_t index = 0; index < storms.size(); ++index) {
+        const auto& center = storms[index].center_world;
+        if (!std::isfinite(center.x) || !std::isfinite(center.y))
+            continue;
+        // Double bin coordinates avoid integer conversion overflow even for extreme queries.
+        const std::array xs{
+            std::floor((static_cast<double>(center.x) - kStormRadiusM) / kStormBinSizeM),
+            std::floor((static_cast<double>(center.x) + kStormRadiusM) / kStormBinSizeM)};
+        const std::array zs{
+            std::floor((static_cast<double>(center.y) - kStormRadiusM) / kStormBinSizeM),
+            std::floor((static_cast<double>(center.y) + kStormRadiusM) / kStormBinSizeM)};
+        // Two endpoints per axis, at most four references per storm; never a world scan.
+        for (std::size_t x = 0; x < xs.size(); ++x) {
+            if (x == 1 && xs[0] == xs[1])
+                continue;
+            for (std::size_t z = 0; z < zs.size(); ++z) {
+                if (z == 1 && zs[0] == zs[1])
+                    continue;
+                result[{xs[x], zs[z]}].push_back(index);
+            }
+        }
+    }
+    return result;
+}
+
+std::span<const std::size_t> WeatherSystem::RegionalStormIndices(const Vec3& world_pos) const {
+    if (!std::isfinite(world_pos.x) || !std::isfinite(world_pos.z))
+        return {};
+    const auto found =
+        m_regionalStormIndex.find({std::floor(static_cast<double>(world_pos.x) / kStormBinSizeM),
+                                   std::floor(static_cast<double>(world_pos.z) / kStormBinSizeM)});
+    return found == m_regionalStormIndex.end() ? std::span<const std::size_t>{} : found->second;
+}
+
+std::size_t WeatherSystem::storm_candidates_at(const Vec3& world_pos) const {
+    return m_regional_sample ? RegionalStormIndices(world_pos).size() : m_storm_cells.size();
+}
+
 float WeatherSystem::StormPrecipAt(const Vec3& world_pos) const {
     float precip = 0.0f;
-    for (const StormCell& cell : m_storm_cells) {
+    const auto candidates =
+        m_regional_sample ? RegionalStormIndices(world_pos) : std::span<const std::size_t>{};
+    const auto count = m_regional_sample ? candidates.size() : m_storm_cells.size();
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& cell = m_storm_cells[m_regional_sample ? candidates[index] : index];
         const float dx = world_pos.x - cell.center_world.x;
         const float dz = world_pos.z - cell.center_world.y;
         const float dist = DeterministicMath::Sqrt(dx * dx + dz * dz);
@@ -480,7 +537,11 @@ float WeatherSystem::StormPrecipAt(const Vec3& world_pos) const {
 
 float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
     float best = 0.0f;
-    for (const StormCell& cell : m_storm_cells) {
+    const auto candidates =
+        m_regional_sample ? RegionalStormIndices(world_pos) : std::span<const std::size_t>{};
+    const auto count = m_regional_sample ? candidates.size() : m_storm_cells.size();
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& cell = m_storm_cells[m_regional_sample ? candidates[index] : index];
         const float dx = world_pos.x - cell.center_world.x;
         const float dz = world_pos.z - cell.center_world.y;
         const float dist = DeterministicMath::Sqrt(dx * dx + dz * dz);

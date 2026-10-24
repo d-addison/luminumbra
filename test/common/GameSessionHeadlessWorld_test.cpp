@@ -27,6 +27,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <barrier>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -45,6 +47,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -6266,6 +6269,82 @@ TEST(GameSessionHeadlessWorldTest, FirstAndIncrementalSavePreserveChangesAfterSe
 }
 
 namespace {
+std::atomic<std::size_t>*& SnapshotRollbackCount() {
+    static std::atomic<std::size_t>* count = nullptr;
+    return count;
+}
+void ObserveSnapshotRollback(const char* step, const fs::path&) {
+    if (std::string_view(step) == "rollback-entry")
+        SnapshotRollbackCount()->fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, SnapshotPreflightWaitsForOuterCommitOrRollback) {
+    // Both successful and refused bodies retain ownership until journal cleanup.
+    for (const bool commit : {true, false}) {
+        SCOPED_TRACE(commit);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession owner, observer;
+        EnableSnapshotSession(owner, root, jobs);
+        ASSERT_TRUE(owner.CreateWorld("Snapshot ownership", "1337", "default"));
+        ASSERT_TRUE(owner.SaveWorld());
+        EnableSnapshotSession(observer, root, jobs);
+        ASSERT_TRUE(observer.LoadWorld(owner.GetMetadata().worldId));
+        const auto save = owner.GetWorldSaveDir();
+        const auto baseline = ReadClockTestFile(save / "world_info.json");
+        owner.SetSpawnPoint(Luminumbra::Vec3(29.0f, 31.0f, 37.0f));
+        std::barrier staged(2), release(2);
+        std::atomic<std::size_t> rollbacks{0};
+        SnapshotRollbackCount() = &rollbacks;
+        P::set_snapshot_step_hook_for_testing(&ObserveSnapshotRollback);
+        bool owner_saved = false, observer_saved = false;
+        std::atomic<bool> observer_done{false};
+        std::jthread writer([&] {
+            owner_saved = owner.RunInSnapshotTransaction([&] {
+                const bool saved = owner.SaveWorld();
+                staged.arrive_and_wait();
+                release.arrive_and_wait();
+                return saved && commit;
+            });
+        });
+        staged.arrive_and_wait();
+        std::jthread reader([&] {
+            observer_saved = observer.RunInSnapshotTransaction([] { return true; });
+            observer_done.store(true, std::memory_order_release);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (P::WorldSaveService::waiting_save_writers() == 0 &&
+               !observer_done.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        EXPECT_FALSE(observer_done.load(std::memory_order_acquire));
+        EXPECT_EQ(P::WorldSaveService::waiting_save_writers(), 1u);
+        // Recovery must not inspect and roll back the other thread's open transaction.
+        EXPECT_EQ(rollbacks.load(std::memory_order_relaxed), 0u);
+        release.arrive_and_wait();
+        writer.join();
+        reader.join();
+        P::set_snapshot_step_hook_for_testing(nullptr);
+        SnapshotRollbackCount() = nullptr;
+        EXPECT_EQ(owner_saved, commit);
+        EXPECT_TRUE(observer_saved);
+        EXPECT_EQ(P::WorldSaveService::waiting_save_writers(), 0u);
+        EXPECT_FALSE(P::journal_pending(save));
+        EXPECT_TRUE(P::WorldSaveService::validate_save(save));
+        if (commit) {
+            const auto metadata =
+                nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+            EXPECT_EQ(metadata.at("spawnPoint").at("x"), 29.0f);
+        } else {
+            EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), baseline);
+            EXPECT_GT(rollbacks.load(std::memory_order_relaxed), 0u);
+        }
+    }
+}
+
+namespace {
 using Luminumbra::Chunk;
 using Luminumbra::ChunkID;
 using Luminumbra::ChunkSdfProvenance;
@@ -6278,6 +6357,21 @@ struct RegionalWaterScenario {
     std::unordered_map<ChunkID, std::shared_ptr<Chunk>> water_chunks;
     GameSession session;
 };
+
+std::string RegionalWaterFieldProjection(const GameSession& session, RegionKey key) {
+    // Freeze binds energy state and age even when no energy cells are populated.
+    auto bytes = session.GetFieldPages().region_bytes(key);
+    if (session.GetEnergyFieldState())
+        bytes += session.GetEnergyFieldState()->RegionBytes(key);
+    const auto& ages = session.GetActiveRegionLedger().energy_ages();
+    const auto age = ages.find(key);
+    if (age != ages.end()) {
+        bytes += "|energy_age:";
+        for (int i = 0; i < 8; ++i)
+            bytes.push_back(static_cast<char>((age->second >> (8 * i)) & 255));
+    }
+    return bytes;
+}
 
 void SeedRegionalWaterFixture(RegionalWaterScenario& scenario,
                               const std::shared_ptr<Luminumbra::Chunk>& chunk,
@@ -6400,7 +6494,7 @@ void FreezeRegionalWaterFixture(RegionalWaterScenario& scenario,
                                         .durable = {},
                                         .ground_object_bytes = {},
                                         .field_page_bytes =
-                                            session.GetFieldPages().region_bytes(water_region)}));
+                                            RegionalWaterFieldProjection(session, water_region)}));
 }
 
 void ExpectGeneratedWaterNeutral(const GameSession& session,
@@ -6428,7 +6522,7 @@ void ExpectGeneratedWaterNeutral(const GameSession& session,
                                         .durable = {},
                                         .ground_object_bytes = {},
                                         .field_page_bytes =
-                                            session.GetFieldPages().region_bytes(water_region)}));
+                                            RegionalWaterFieldProjection(session, water_region)}));
     EXPECT_EQ(chunk->water_depth_mm, generated_depth);
     EXPECT_FALSE(chunk->has_water_authority());
     EXPECT_FALSE(chunk->is_voxel_data_dirty());
@@ -6515,7 +6609,7 @@ void AssertDurableWaterContinuation(GameSession& session,
                       .parked = {},
                       .durable = reopened.GetWorldSystem()->durable_chunk_inventory(),
                       .ground_object_bytes = {},
-                      .field_page_bytes = reopened.GetFieldPages().region_bytes(water_region)}),
+                      .field_page_bytes = RegionalWaterFieldProjection(reopened, water_region)}),
               frozen_record.frozen_digest);
 }
 

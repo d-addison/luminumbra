@@ -1,3 +1,4 @@
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -17,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -162,16 +164,28 @@ TreeMap Tree(const fs::path& root) {
 }
 
 auto TreeFingerprints(const fs::path& root) {
-    std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> fingerprints;
+    std::map<std::string, std::tuple<fs::file_type, std::uint64_t, std::uint64_t>> fingerprints;
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
-        if (!entry.is_regular_file())
+        const auto status = entry.symlink_status();
+        const auto relative =
+            Filesystem::GenericUtf8PathString(entry.path().lexically_relative(root));
+        if (fs::is_symlink(status)) {
+            // Snapshot hashing refuses links. Fingerprint the link itself without opening
+            // its target; regular targets inside the tree are checked independently.
+            const auto target = Filesystem::GenericUtf8PathString(fs::read_symlink(entry.path()));
+            fingerprints.emplace(relative,
+                                 std::tuple{status.type(),
+                                            static_cast<std::uint64_t>(target.size()),
+                                            fnv1a64_bytes(target.data(), target.size())});
+            continue;
+        }
+        if (!fs::is_regular_file(status))
             continue;
         std::uint64_t bytes = 0, digest = 0;
         bool exists = false;
         EXPECT_TRUE(hash_file(entry.path(), bytes, digest, exists, nullptr));
         EXPECT_TRUE(exists);
-        fingerprints.emplace(fs::relative(entry.path(), root).generic_string(),
-                             std::pair{bytes, digest});
+        fingerprints.emplace(relative, std::tuple{status.type(), bytes, digest});
     }
     return fingerprints;
 }
@@ -932,8 +946,13 @@ TEST(SaveTransaction, RecoveryRefusesSymlinkJournalWithoutWrites) {
     const auto txn = journal_directory(save.path()) / "txn.json";
     fs::create_directories(txn.parent_path());
     fs::create_symlink(target, txn);
+    const auto fingerprints = TreeFingerprints(save.path());
+    EXPECT_TRUE(fingerprints.contains("foreign.json"));
+    EXPECT_TRUE(fingerprints.contains("journal/txn.json"));
     ExpectJournalRefusalWithoutWrites(save.path(), "cannot open bounded snapshot input");
     EXPECT_TRUE(fs::is_symlink(txn));
+    EXPECT_EQ(fs::read_symlink(txn), target);
+    EXPECT_EQ(Get(target), kJournalPrefix + "]}");
 }
 #else
 TEST(SaveTransaction, RecoveryRefusesUnreadableAndLockedJournalsWithoutWrites) {
