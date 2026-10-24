@@ -5,6 +5,7 @@
 #include "gtest/gtest.h"
 
 #include "../support/UniqueTempPath.h"
+#include "persistence/SaveTransaction.h"
 
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
@@ -559,4 +560,126 @@ TEST(WorldSaveRegionFormat, HasWorldSaveRecognizesOnlySupportedContainers) {
     std::vector<std::string> errors;
     ASSERT_TRUE(service.save_world(state, v2_dir.path, &errors));
     EXPECT_TRUE(WorldSaveService::has_world_save(v2_dir.path));
+}
+
+TEST(WorldSaveRegionFormat, ExactIndexedReadDistinguishesAbsentFromLostOrCorruptAuthority) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("exact_indexed");
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk({40, 0, -40});
+    chunk->sdf_data.assign(17 * 17 * 17, -2.0f);
+    chunk->mark_voxel_data_dirty();
+    {
+        P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    const auto found = WorldSaveService::read_chunk(save.path, {40, 0, -40}, true);
+    ASSERT_EQ(found.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(found.chunk, nullptr);
+    EXPECT_EQ(found.chunk->sdf_data, chunk->sdf_data);
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {41, 0, -40}, true).status,
+              WorldSaveService::ChunkReadStatus::Absent);
+    const auto region = WorldSaveService::region_file_path(save.path, 1, -2);
+    const auto bytes = ReadFileBytes(region);
+    ASSERT_TRUE(std::filesystem::remove(region));
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {40, 0, -40}, true).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    std::vector<std::shared_ptr<Chunk>> region_chunks;
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(region, region_chunks));
+    std::ofstream(region, std::ios::binary) << bytes;
+    std::ofstream(region, std::ios::binary | std::ios::trunc) << "invalid";
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {40, 0, -40}, true).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    ASSERT_TRUE(std::filesystem::remove(P::snapshot_index_path(save.path)));
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {0, 0, 0}, true).status,
+              WorldSaveService::ChunkReadStatus::Error);
+}
+
+TEST(WorldSaveRegionFormat, IndexedCommitRefusesMalformedLatticeWithoutAcknowledgement) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("indexed_lattice");
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, -1.0f);
+    chunk->mark_voxel_data_dirty();
+    {
+        P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    chunk->sdf_data.resize(4);
+    chunk->mark_voxel_data_dirty();
+    {
+        P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        EXPECT_EQ(WorldSaveService{}.save_dirty_chunks(state, save.path).regions_written, 1u);
+        EXPECT_FALSE(transaction.commit(nullptr));
+    }
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    const auto recovered = WorldSaveService::read_chunk(save.path, {0, 0, 0}, true);
+    ASSERT_EQ(recovered.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(recovered.chunk, nullptr);
+    EXPECT_EQ(recovered.chunk->sdf_data.size(), 17u * 17u * 17u);
+}
+
+TEST(WorldSaveRegionFormat, FilteredBootValidatesDistantLatticesAndPublishesInventoryAtomically) {
+    TempSaveDir save("filtered_inventory");
+    WorldStreamingState source;
+    for (const IVec3 coords : {IVec3(0, 0, 0), IVec3(400, 0, 400)}) {
+        auto chunk = source.get_or_create_chunk(coords);
+        chunk->sdf_data.assign(17 * 17 * 17, -1.0f);
+        chunk->mark_voxel_data_dirty();
+    }
+    ASSERT_TRUE(WorldSaveService{}.save_world(source, save.path));
+    WorldStreamingState loaded;
+    std::vector<IVec3> inventory;
+    std::vector<std::string> errors;
+    const auto wanted = [](const IVec3& coords) {
+        return coords.x == 0;
+    };
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, wanted, &inventory));
+    EXPECT_EQ(loaded.size(), 1u);
+    EXPECT_EQ(inventory.size(), 2u);
+    source.find_chunk(Chunk::calculate_id({400, 0, 400}))->sdf_data.resize(4);
+    ASSERT_TRUE(WorldSaveService{}.save_world(source, save.path));
+    EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, wanted, &inventory));
+    EXPECT_EQ(loaded.size(), 0u);
+    EXPECT_TRUE(inventory.empty());
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.back().find("SDF lattice"), std::string::npos);
+}
+
+TEST(WorldSaveRegionFormat, JoinedIncrementalSaveAcknowledgesOnlyCommittedUnchangedRevisions) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("joined_ack");
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, 1.0f);
+    chunk->mark_voxel_data_dirty();
+    chunk->mark_water_state_dirty();
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    for (const int mode : {0, 1, 2}) {
+        SCOPED_TRACE(mode);
+        chunk->mark_voxel_data_dirty();
+        chunk->mark_water_state_dirty();
+        {
+            P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            EXPECT_EQ(WorldSaveService{}.save_dirty_chunks(state, save.path).regions_written, 1u);
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
+            EXPECT_TRUE(chunk->is_water_state_dirty());
+            if (mode == 1) {
+                chunk->sdf_data[0] = -3.0f;
+                chunk->mark_voxel_data_dirty();
+                chunk->mark_water_state_dirty();
+            }
+            if (mode != 0)
+                ASSERT_TRUE(transaction.commit(nullptr));
+        }
+        EXPECT_EQ(chunk->is_voxel_data_dirty(), mode != 2);
+        EXPECT_EQ(chunk->is_water_state_dirty(), mode != 2);
+    }
 }

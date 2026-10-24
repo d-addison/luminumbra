@@ -54,7 +54,9 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
     return sequence;
 }
 
-std::vector<SimulationEvent> OrderedEventBus::drain(std::uint64_t inclusive_tick) {
+std::vector<SimulationEvent>
+OrderedEventBus::drain(std::uint64_t inclusive_tick,
+                       const std::function<bool()>& continue_delivery) {
     std::stable_sort(pending_events_.begin(), pending_events_.end(), event_order_less);
 
     std::vector<SimulationEvent> delivered;
@@ -67,6 +69,8 @@ std::vector<SimulationEvent> OrderedEventBus::drain(std::uint64_t inclusive_tick
 
     for (const SimulationEvent& event : delivered) {
         for (const Handler& handler : handlers_) {
+            if (continue_delivery && !continue_delivery())
+                return delivered;
             handler(event);
         }
     }

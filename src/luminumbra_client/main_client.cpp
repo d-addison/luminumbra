@@ -4401,6 +4401,11 @@ int main(int argc, char* argv[]) {
                       // continue)
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                    if (gameSession->PersistenceSaveRequested() ||
+                        gameSession->PersistenceAutosaveDue()) {
+                        // Parked-bytes pressure or the periodic interval: persist now.
+                        gameSession->SaveWorldState();
+                    }
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //

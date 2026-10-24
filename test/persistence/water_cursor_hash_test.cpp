@@ -224,3 +224,16 @@ TEST(WaterCursorHash, SavedMetadataAndLoadedChunksReproduceTheSameHash) {
     EXPECT_FALSE(errors.empty());
 }
 } // namespace
+
+TEST(WaterCursorHash, AuthorityProjectionUsesTheCanonicalCursorBinding) {
+    const std::string authority = "authoritative_chunks:v2:";
+    EXPECT_EQ(P::HashSimulationProjection(authority), P::StableChecksum(authority));
+    for (const std::uint64_t cursor : {1ull, 65ull, 256ull, 0xffffffffffffffffull}) {
+        std::string encoded = authority + "|waterSimCursor:v1:";
+        for (unsigned shift = 0; shift < 64; shift += 8)
+            encoded.push_back(static_cast<char>((cursor >> shift) & 0xffu));
+        EXPECT_EQ(P::HashSimulationProjection(authority, cursor), P::StableChecksum(encoded));
+        EXPECT_NE(P::HashSimulationProjection(authority, cursor),
+                  P::HashSimulationProjection(authority));
+    }
+}

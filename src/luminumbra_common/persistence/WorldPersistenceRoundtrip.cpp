@@ -919,13 +919,18 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
 }
 } // namespace
 
+std::string HashSimulationProjection(const std::string& canonical_bytes,
+                                     std::uint64_t water_sim_cursor) {
+    return Checksum(canonical_bytes, WaterCursorHashInput(water_sim_cursor));
+}
+
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
                                            std::uint64_t water_sim_cursor) {
     // Determinism oracle over SIM TRUTH only (render mesh excluded — see
     // kRenderMeshHashExcludedFields). The save/load snapshot remains the full
     // SerializeWorldStreamingStateSnapshotJson; only the HASH scope changes.
-    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state),
-                    WaterCursorHashInput(water_sim_cursor));
+    return HashSimulationProjection(SerializeWorldStreamingStateSimTruthForHash(state),
+                                    water_sim_cursor);
 }
 
 std::string ComputeRegionContentHash(const WorldStreamingState& state) {

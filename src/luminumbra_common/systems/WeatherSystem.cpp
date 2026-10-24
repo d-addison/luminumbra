@@ -512,6 +512,10 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
 void WeatherSystem::RestoreAtTick(std::uint64_t tick,
                                   const Vec3& region_anchor,
                                   WindFieldSystem& wind) {
+    if (m_regional_sample) {
+        m_last_tick = tick;
+        return;
+    }
     // At most ceil(240/45) storms can coexist, below the cap. Motion samples
     // base wind, so earlier storms cannot affect the survivors of this window.
     static_assert(kMaxStormCells >
@@ -531,6 +535,8 @@ void WeatherSystem::Update(std::uint64_t tick,
                            const Vec3& region_anchor,
                            const WindFieldSystem* wind) {
     m_last_tick = tick;
+    if (m_regional_sample)
+        return;
     // 1) Category map + base precipitation field for this tick.
     RebuildFields(tick, region_anchor);
     // 2) Storm cells: age/advect existing, spawn on the deterministic schedule.
@@ -549,6 +555,8 @@ void WeatherSystem::Update(std::uint64_t tick,
 }
 
 WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
+    if (m_regional_sample)
+        return m_regional_sample(world_pos).category;
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -560,6 +568,9 @@ WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
 }
 
 float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
+    if (m_regional_sample)
+        return std::min(1.0f,
+                        m_regional_sample(world_pos).precip_intensity + StormPrecipAt(world_pos));
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -577,11 +588,13 @@ WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
     sample.category = CategoryAt(world_pos);
     sample.precip_intensity = PrecipitationAt(world_pos);
     sample.storm_intensity = StormIntensityAt(world_pos);
-    sample.wind = m_anchor_wind;
+    sample.wind = m_regional_sample ? m_regional_sample(world_pos).wind : m_anchor_wind;
     return sample;
 }
 
 std::string WeatherSystem::ComputeWeatherSubHash() const {
+    if (m_regional_hash)
+        return m_regional_hash();
     // fnv1a-64 over: seed, tick, grid geometry, origin, the per-cell category +
     // precip in the FieldGrid canonical order, then the bounded storm-cell set
     // (count + each cell's pos/velocity/intensity/spawn/lifetime/salt), then the

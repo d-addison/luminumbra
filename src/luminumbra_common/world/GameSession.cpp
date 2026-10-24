@@ -30,6 +30,7 @@
 #include "../ai/ScavengingSystem.h"   // Converts carcasses into scavenger food.
 #include "../ai/ScentDepositSystem.h"
 #include "../ai/ScentField.h"
+#include "../ai/ScentFieldGates.h"
 #include "../ai/ScentSteeringSystem.h"
 #include "../ai/SimTuningConfig.h"
 #include "../ai/SteeringConsumer.h" // Blends steering biases into desired motion.
@@ -57,6 +58,7 @@
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
 #include "../persistence/PlantPersistence.h"
+#include "../persistence/SaveTransaction.h"
 #include "../persistence/SavedWorldCatalog.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
@@ -81,7 +83,9 @@
 #include "WorldStreamingState.h"
 #include "entt/entity/entity.hpp"
 #include "nlohmann/json.hpp" // For parsing JSON
+#include <array>
 #include <atomic>
+#include <bit>
 #include <cmath> // std::floor (energy-layer anchor quantization)
 #include <cstddef>
 #include <cstdint>
@@ -184,6 +188,11 @@ namespace Luminumbra::world {
 
 struct GameSession::LoadedWorldState {
     WorldStreamingState chunks;
+    std::set<ChunkID> wanted;
+    std::vector<IVec3> durable_inventory;
+    GroundObjectStore ground_objects;
+    FieldPageState field_pages;
+    std::optional<luminumbra::fields::EnergyFieldState> energy;
     WorldClock clock;
     std::size_t water_sim_cursor = 0;
     std::optional<Vec3> ambient_anchor;
@@ -223,14 +232,21 @@ void GameSession::ResetWorldSystems() {
     m_worldClock = WorldClock{};
     m_renderCalendar.reset();
     ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
+    m_groundObjects.clear();
+    m_fieldPages.clear();
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
+    m_regionCompletedWork.clear();
     m_regionFault.reset();
     m_regionInputRejections = {};
     m_regionDurableDirectory.clear();
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
+    m_lastSaveTick = -1;
+    m_lastSaveMs = 0.0;
+    m_saveFailures = 0;
+    m_lastSaveFailureTick = -1;
 }
 
 // The preset dependency snapshot captures the per-world species table at create/load.
@@ -455,691 +471,719 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                                                      current_tick);
         if (m_activeRegionsEnabled)
             m_worldClock.set_tick(current_tick);
-
-        // Deterministic per-tick system order. The ordered event bus drains everything
-        // published for this tick after simulation systems finish (tick -> lane -> sequence).
-
-        budget.Next(Stage::Animation, [&] {
-            return SimParticipantCount<luminumbra::animation::AnimationPlayerComponent>(m_registry);
-        });
-        // 1. Animation pose sampling: FIRST in the tick order.
-        luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
-
-        budget.Next(Stage::Instinct, [&] {
-            return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
-                                       TelemetryComp::NeedsComponent>(m_registry);
-        });
-        // 2. Instinct planning: need growth + deterministic
-        // replanning over the registry.
-        //
-        // the ecology stimulus-channel registry is supplied ONLY
-        // when at least one creature has OPTED IN via a game-data
-        // StimulusSubscriptionComponent. The canonical roster carries none, so
-        // the `view.empty` guard keeps the call BYTE-IDENTICAL to the pre-5b
-        // path (nullptr context) -- world_hash stays d950a6afc12a5cdc (critique
-        //  / ). When subscribers exist, the context reads the replicated
-        // weather state (one-way; weather updated on the PREVIOUS tick, slot 4)
-        // and the per-tick time-of-day/season/light channels derived from the
-        // tick. The engine still names no creature behavior.
-        if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
-                .empty()) {
-            luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
-        } else {
-            luminumbra::ai::StimulusContext stimulus_context;
-            stimulus_context.tick = current_tick;
-            stimulus_context.world_clock = m_activeRegionsEnabled ? &m_worldClock : nullptr;
-            stimulus_context.sample_position = m_metadata.spawnPoint;
-            stimulus_context.weather = m_weatherSystem.get();
-            //  (-7): the composite energy environment. Prefer the
-            // STATEFUL layer when sim.aether_state is ON (gameplay deposits are the
-            // truth creatures react to): the cell at the sample position, quantized
-            // by the shared 24 m grid identity and normalized by the PINNED
-            // fields::kEnergyRawPerUnit (1 gameplay unit == full stimulus; the
-            // channel clamps [0, 1]). Else the re-derivable ambience, whose
-            // emission is already [0, 1] by construction (identity pin -- the same
-            // scalar the render emissive tap consumes). Both reads are one-way
-            // PRIOR-tick state (the fields update later this tick at slot 5/5a),
-            // mirroring the weather slot-order rule above. Neither system present
-            // -> the -1 sentinel -> the channel's deterministic neutral 0.
-            if (m_energyFieldState) {
-                const int stim_cell_x = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-                const int stim_cell_z = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
-                stimulus_context.aether_level =
-                    static_cast<float>(m_energyFieldState->at_cell(stim_cell_x, stim_cell_z)) /
-                    static_cast<float>(luminumbra::fields::kEnergyRawPerUnit);
-            } else if (m_aetherFieldSystem) {
-                stimulus_context.aether_level =
-                    m_aetherFieldSystem->SampleAether(m_metadata.spawnPoint);
+        try {
+            if (m_activeRegionsEnabled) {
+                m_regionCompletedWork.clear();
+                RunRegionScheduler(current_tick);
+                if (m_regionFault)
+                    return i + 1;
+                AdvanceGroundObjects(current_tick);
+                if (m_regionFault)
+                    return i + 1;
+                AdvanceFieldPages(current_tick);
+                if (m_regionFault)
+                    return i + 1;
             }
-            const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
-            luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick, &stimulus_registry);
-        }
 
-        budget.Next(Stage::Perception, [&] {
-            return SimParticipantCount<TelemetryComp::TransformComponent,
-                                       TelemetryComp::PerceptionComponent,
-                                       TelemetryComp::AwarenessComponent>(m_registry);
-        });
-        // 2b.  : perception fusion. Updates each perceiving creature's
-        // awareness (vision cone + hearing audiogram over Sensable entities of
-        // other factions -> detection meter/state + last-known memory). Runs after
-        // planning so awareness is fresh for the NEXT plan/locomotion. Operates
-        // ONLY on entities carrying PerceptionComponent+AwarenessComponent; the
-        // canonical headless roster carries none, so this is a no-op there and
-        // world_hash is UNCHANGED (byte-identical) -- same discipline as the
-        // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
-        luminumbra::ai::RunPerceptionSystemOnTick(m_registry,
-                                                  static_cast<float>(m_simulationClock.fixed_dt()));
+            // Deterministic per-tick system order. The ordered event bus drains everything
+            // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
-        budget.Next(Stage::Scent, [&] {
-            return (m_scentField &&
-                    (HasScentParticipants() ||
-                     SimParticipantCount<TelemetryComp::ForagerComponent>(m_registry) != 0))
-                       ? static_cast<std::uint64_t>(kScentFieldCells) * kScentFieldCells *
-                             kScentFieldChannels
-                       : 0ull;
-        });
-        // 2c.: scent stigmergy write/update. Game-data opt-in:
-        // no scent emitter/sensor components means no field mutation, while active
-        // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
-        const bool scent_active = HasScentParticipants();
-        // ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
-        // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate this
-        // tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a no-op,
-        // so the canonical roster (and any scent-only world) is byte-identical.
-        // Integer/id-ordered/libm-free.
-        const auto foragers_view =
-            m_registry.view<const Luminumbra::Components::ForagerComponent>();
-        const bool foraging_active = foragers_view.begin() != foragers_view.end();
-        if ((scent_active || foraging_active) && m_scentField) {
-            if (scent_active) {
-                luminumbra::ai::RunScentDepositOnTick(m_registry,
-                                                      *m_scentField,
-                                                      ScentOriginFor(m_metadata.spawnPoint.x),
-                                                      ScentOriginFor(m_metadata.spawnPoint.z),
-                                                      kScentCellSize);
+            budget.Next(Stage::Animation, [&] {
+                return SimParticipantCount<luminumbra::animation::AnimationPlayerComponent>(
+                    m_registry);
+            });
+            // 1. Animation pose sampling: FIRST in the tick order.
+            luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
+
+            budget.Next(Stage::Instinct, [&] {
+                return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
+                                           TelemetryComp::NeedsComponent>(m_registry);
+            });
+            // 2. Instinct planning: need growth + deterministic
+            // replanning over the registry.
+            //
+            // the ecology stimulus-channel registry is supplied ONLY
+            // when at least one creature has OPTED IN via a game-data
+            // StimulusSubscriptionComponent. The canonical roster carries none, so
+            // the `view.empty` guard keeps the call BYTE-IDENTICAL to the pre-5b
+            // path (nullptr context) -- world_hash stays d950a6afc12a5cdc (critique
+            //  / ). When subscribers exist, the context reads the replicated
+            // weather state (one-way; weather updated on the PREVIOUS tick, slot 4)
+            // and the per-tick time-of-day/season/light channels derived from the
+            // tick. The engine still names no creature behavior.
+            if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
+                    .empty()) {
+                luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+            } else {
+                luminumbra::ai::StimulusContext stimulus_context;
+                stimulus_context.tick = current_tick;
+                stimulus_context.world_clock = m_activeRegionsEnabled ? &m_worldClock : nullptr;
+                stimulus_context.sample_position = m_metadata.spawnPoint;
+                stimulus_context.weather = m_weatherSystem.get();
+                //  (-7): the composite energy environment. Prefer the
+                // STATEFUL layer when sim.aether_state is ON (gameplay deposits are the
+                // truth creatures react to): the cell at the sample position, quantized
+                // by the shared 24 m grid identity and normalized by the PINNED
+                // fields::kEnergyRawPerUnit (1 gameplay unit == full stimulus; the
+                // channel clamps [0, 1]). Else the re-derivable ambience, whose
+                // emission is already [0, 1] by construction (identity pin -- the same
+                // scalar the render emissive tap consumes). Both reads are one-way
+                // PRIOR-tick state (the fields update later this tick at slot 5/5a),
+                // mirroring the weather slot-order rule above. Neither system present
+                // -> the -1 sentinel -> the channel's deterministic neutral 0.
+                if (m_energyFieldState) {
+                    const int stim_cell_x = static_cast<int>(
+                        std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
+                    const int stim_cell_z = static_cast<int>(
+                        std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+                    stimulus_context.aether_level =
+                        static_cast<float>(m_energyFieldState->at_cell(stim_cell_x, stim_cell_z)) /
+                        static_cast<float>(luminumbra::fields::kEnergyRawPerUnit);
+                } else if (m_aetherFieldSystem) {
+                    stimulus_context.aether_level =
+                        m_aetherFieldSystem->SampleAether(m_metadata.spawnPoint);
+                }
+                const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
+                luminumbra::ai::RunInstinctSystemOnTick(
+                    m_registry, current_tick, &stimulus_registry);
             }
-            if (foraging_active) {
-                luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+
+            budget.Next(Stage::Perception, [&] {
+                return SimParticipantCount<TelemetryComp::TransformComponent,
+                                           TelemetryComp::PerceptionComponent,
+                                           TelemetryComp::AwarenessComponent>(m_registry);
+            });
+            // 2b.  : perception fusion. Updates each perceiving creature's
+            // awareness (vision cone + hearing audiogram over Sensable entities of
+            // other factions -> detection meter/state + last-known memory). Runs after
+            // planning so awareness is fresh for the NEXT plan/locomotion. Operates
+            // ONLY on entities carrying PerceptionComponent+AwarenessComponent; the
+            // canonical headless roster carries none, so this is a no-op there and
+            // world_hash is UNCHANGED (byte-identical) -- same discipline as the
+            // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
+            luminumbra::ai::RunPerceptionSystemOnTick(
+                m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+
+            budget.Next(Stage::Scent, [&] {
+                return (m_scentField &&
+                        (HasScentParticipants() ||
+                         SimParticipantCount<TelemetryComp::ForagerComponent>(m_registry) != 0))
+                           ? static_cast<std::uint64_t>(kScentFieldCells) * kScentFieldCells *
+                                 kScentFieldChannels
+                           : 0ull;
+            });
+            const bool scent_active = HasScentParticipants();
+            AdvanceNearScent();
+
+            budget.Next(Stage::Locomotion, [&] {
+                return SimParticipantCount<TelemetryComp::ActionPlanComponent,
+                                           TelemetryComp::TransformComponent,
+                                           TelemetryComp::LocomotionProfile>(m_registry);
+            });
+            // 2d.: action-plan locomotion, then scent gradient bias.
+            // The executor writes only LocomotionIntentComponent; physics/render owners
+            // consume that intent in their existing lanes.
+            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
+            if (scent_active && m_scentField) {
+                luminumbra::ai::RunScentSteeringOnTick(m_registry,
+                                                       *m_scentField,
+                                                       ScentDomainOrigin(true),
+                                                       ScentDomainOrigin(false),
+                                                       kScentCellSize);
             }
-            // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
-            // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
-            // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
-            // Step skips advection -> byte-identical (no re-pin until tuned on).
-            double wind_cx = 0.0, wind_cz = 0.0;
-            if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
-                const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
-                const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
-                                 static_cast<double>(kScentCellSize);
-                wind_cx = static_cast<double>(w.x) * k;
-                wind_cz = static_cast<double>(w.y) * k;
-            }
-            m_scentField->Step(kScentDiffusionRate,
-                               kScentDiffusionIterations,
-                               kScentEvaporation,
-                               wind_cx,
-                               wind_cz);
-            m_scentField->Clamp(kScentTauMin, kScentTauMax);
-        }
 
-        budget.Next(Stage::Locomotion, [&] {
-            return SimParticipantCount<TelemetryComp::ActionPlanComponent,
-                                       TelemetryComp::TransformComponent,
-                                       TelemetryComp::LocomotionProfile>(m_registry);
-        });
-        // 2d.: action-plan locomotion, then scent gradient bias.
-        // The executor writes only LocomotionIntentComponent; physics/render owners
-        // consume that intent in their existing lanes.
-        luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
-        if (scent_active && m_scentField) {
-            luminumbra::ai::RunScentSteeringOnTick(m_registry,
-                                                   *m_scentField,
-                                                   ScentOriginFor(m_metadata.spawnPoint.x),
-                                                   ScentOriginFor(m_metadata.spawnPoint.z),
-                                                   kScentCellSize);
-        }
+            budget.Next(Stage::Creatures, [&] {
+                return SimParticipantCount<TelemetryComp::CreatureComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
+            // 2e. : Utility-AI creature brain (predator/prey movement). Per-entity opt-in
+            // via CreatureComponent -> a world with none is a no-op (canonical roster
+            // byte-identical, same discipline as plants/scent). Deterministic (id-ordered,
+            // libm-free).
+            {
+                auto creatures = m_registry.view<const Luminumbra::Components::CreatureComponent>();
+                if (creatures.begin() != creatures.end()) {
+                    // hand the brain the scent field so a predator without a
+                    // directly-perceived target tracks the prey-scent gradient (channel 0).
+                    // No scent participants -> the field is all-zero -> byte-identical.
+                    luminumbra::ai::RunCreatureBrainSystemOnTick(
+                        m_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        m_ecologyTuning,
+                        m_scentField.get(),
+                        ScentDomainOrigin(true),
+                        ScentDomainOrigin(false),
+                        kScentCellSize,
+                        true,
+                        m_speciesTable.get());
 
-        budget.Next(Stage::Creatures, [&] {
-            return SimParticipantCount<TelemetryComp::CreatureComponent,
-                                       TelemetryComp::TransformComponent>(m_registry);
-        });
-        // 2e. : Utility-AI creature brain (predator/prey movement). Per-entity opt-in
-        // via CreatureComponent -> a world with none is a no-op (canonical roster byte-identical,
-        // same discipline as plants/scent). Deterministic (id-ordered, libm-free).
-        {
-            auto creatures = m_registry.view<const Luminumbra::Components::CreatureComponent>();
-            if (creatures.begin() != creatures.end()) {
-                // hand the brain the scent field so a predator without a
-                // directly-perceived target tracks the prey-scent gradient (channel 0).
-                // No scent participants -> the field is all-zero -> byte-identical.
-                luminumbra::ai::RunCreatureBrainSystemOnTick(
-                    m_registry,
-                    static_cast<float>(m_simulationClock.fixed_dt()),
-                    m_ecologyTuning,
-                    m_scentField.get(),
-                    ScentOriginFor(m_metadata.spawnPoint.x),
-                    ScentOriginFor(m_metadata.spawnPoint.z),
-                    kScentCellSize,
-                    true,
-                    m_speciesTable.get());
+                    // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
+                    // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
+                    // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
+                    // fleeing) — so the physics bridge below actually walks them together. Opt-in
+                    // (genome component); no genome -> untouched.
+                    luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
 
-                // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
-                // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
-                // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
-                // fleeing) — so the physics bridge below actually walks them together. Opt-in
-                // (genome component); no genome -> untouched.
-                luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
+                    // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
+                    // the wish velocity before the physics bridge applies it -- pack flank steer,
+                    // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
+                    // integration layer is unit-tested independently of the producers.
+                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
 
-                // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
-                // the wish velocity before the physics bridge applies it -- pack flank steer,
-                // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
-                // integration layer is unit-tested independently of the producers.
-                luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
-
-                // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
-                // systems wired into the live tick. Opt-in via ThirstComponent /
-                // ScavengerComponent (+ WaterHoleComponent water sources / carcasses); a
-                // roster carrying none is a pure no-op, so the canonical NetworkStateHash
-                // stays byte-identical. Thirst rises + drinks at water; hungry scavengers
-                // feed on carcasses (death -> food). Each writes its OWN component's wish,
-                // blended into the creature wish below so the physics bridge walks them there.
-                luminumbra::ai::RunThirstOnTick(
-                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()), m_thirstTuning);
-                luminumbra::ai::RunScavengingOnTick(m_registry, current_tick, m_scavengingTuning);
-                {
-                    // Additive blend of the survival wishes into CreatureComponent.wish so a
-                    // thirsty/scavenging creature actually steers to water/carrion. Entities
-                    // without the opt-in components are untouched (try_get -> null), keeping
-                    // the baseline byte-identical; the physics bridge below consumes wish_x/z.
-                    auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
-                    for (auto e : sv) {
-                        auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
-                        // the thirst pull applies ONLY when the arbiter
-                        // actually chose Drink — the old unconditional blend let a
-                        // FLEEING creature be simultaneously steered toward water
-                        // (the contract's exact defect). Thirst now competes inside
-                        // DecideCreatureAction; this blend is its motor output.
-                        if (cr.last_action ==
-                            static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
-                            if (const auto* th =
-                                    m_registry.try_get<Luminumbra::Components::ThirstComponent>(
+                    // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
+                    // systems wired into the live tick. Opt-in via ThirstComponent /
+                    // ScavengerComponent (+ WaterHoleComponent water sources / carcasses); a
+                    // roster carrying none is a pure no-op, so the canonical NetworkStateHash
+                    // stays byte-identical. Thirst rises + drinks at water; hungry scavengers
+                    // feed on carcasses (death -> food). Each writes its OWN component's wish,
+                    // blended into the creature wish below so the physics bridge walks them there.
+                    luminumbra::ai::RunThirstOnTick(
+                        m_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        m_thirstTuning);
+                    luminumbra::ai::RunScavengingOnTick(
+                        m_registry, current_tick, m_scavengingTuning);
+                    {
+                        // Additive blend of the survival wishes into CreatureComponent.wish so a
+                        // thirsty/scavenging creature actually steers to water/carrion. Entities
+                        // without the opt-in components are untouched (try_get -> null), keeping
+                        // the baseline byte-identical; the physics bridge below consumes wish_x/z.
+                        auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
+                        for (auto e : sv) {
+                            auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
+                            // the thirst pull applies ONLY when the arbiter
+                            // actually chose Drink — the old unconditional blend let a
+                            // FLEEING creature be simultaneously steered toward water
+                            // (the contract's exact defect). Thirst now competes inside
+                            // DecideCreatureAction; this blend is its motor output.
+                            if (cr.last_action ==
+                                static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
+                                if (const auto* th =
+                                        m_registry.try_get<Luminumbra::Components::ThirstComponent>(
+                                            e)) {
+                                    cr.wish_x += th->wish_x;
+                                    cr.wish_z += th->wish_z;
+                                }
+                            }
+                            if (const auto* scv =
+                                    m_registry.try_get<Luminumbra::Components::ScavengerComponent>(
                                         e)) {
-                                cr.wish_x += th->wish_x;
-                                cr.wish_z += th->wish_z;
+                                cr.wish_x += scv->wish_x;
+                                cr.wish_z += scv->wish_z;
                             }
                         }
-                        if (const auto* scv =
-                                m_registry.try_get<Luminumbra::Components::ScavengerComponent>(e)) {
-                            cr.wish_x += scv->wish_x;
-                            cr.wish_z += scv->wish_z;
+                    }
+
+                    // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
+                    // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
+                    // controller (the same one player/networked avatars use): push the brain's
+                    // wish velocity in, step the avatars once at the fixed dt (index-ordered =
+                    // deterministic same-binary, mirrors ServerWorldRunner), and read the
+                    // terrain-resolved position (gravity/collision/slopes) back into the
+                    // transform. Gated on a physics system + at least one physics creature, so
+                    // the canonical roster (none) keeps world_hash byte-identical.
+                    if (m_physicsSystem) {
+                        auto phys =
+                            m_registry.view<Luminumbra::Components::CreaturePhysicsComponent,
+                                            Luminumbra::Components::CreatureComponent,
+                                            Luminumbra::Components::TransformComponent>();
+                        if (phys.begin() != phys.end()) {
+                            std::vector<entt::entity> pe(phys.begin(), phys.end());
+                            std::sort(pe.begin(), pe.end(), [](entt::entity a, entt::entity b) {
+                                return entt::to_integral(a) < entt::to_integral(b);
+                            });
+                            for (auto e : pe) {
+                                const auto& cr =
+                                    phys.get<Luminumbra::Components::CreatureComponent>(e);
+                                const auto& cp =
+                                    phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
+                                m_physicsSystem->set_avatar_wish_velocity(
+                                    cp.avatar_index, glm::vec2(cr.wish_x, cr.wish_z));
+                            }
+                            m_physicsSystem->update_avatars(
+                                static_cast<float>(m_simulationClock.fixed_dt()));
+                            for (auto e : pe) {
+                                const auto& cp =
+                                    phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
+                                phys.get<Luminumbra::Components::TransformComponent>(e).position =
+                                    m_physicsSystem->get_avatar_position(cp.avatar_index);
+                            }
                         }
                     }
-                }
 
-                // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
-                // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
-                // controller (the same one player/networked avatars use): push the brain's
-                // wish velocity in, step the avatars once at the fixed dt (index-ordered =
-                // deterministic same-binary, mirrors ServerWorldRunner), and read the
-                // terrain-resolved position (gravity/collision/slopes) back into the
-                // transform. Gated on a physics system + at least one physics creature, so
-                // the canonical roster (none) keeps world_hash byte-identical.
-                if (m_physicsSystem) {
-                    auto phys = m_registry.view<Luminumbra::Components::CreaturePhysicsComponent,
-                                                Luminumbra::Components::CreatureComponent,
-                                                Luminumbra::Components::TransformComponent>();
-                    if (phys.begin() != phys.end()) {
-                        std::vector<entt::entity> pe(phys.begin(), phys.end());
-                        std::sort(pe.begin(), pe.end(), [](entt::entity a, entt::entity b) {
-                            return entt::to_integral(a) < entt::to_integral(b);
-                        });
-                        for (auto e : pe) {
-                            const auto& cr = phys.get<Luminumbra::Components::CreatureComponent>(e);
-                            const auto& cp =
-                                phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
-                            m_physicsSystem->set_avatar_wish_velocity(
-                                cp.avatar_index, glm::vec2(cr.wish_x, cr.wish_z));
-                        }
-                        m_physicsSystem->update_avatars(
-                            static_cast<float>(m_simulationClock.fixed_dt()));
-                        for (auto e : pe) {
-                            const auto& cp =
-                                phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
-                            phys.get<Luminumbra::Components::TransformComponent>(e).position =
-                                m_physicsSystem->get_avatar_position(cp.avatar_index);
-                        }
+                    // 2e-mate: SEXUAL reproduction, phase B (after the pair has moved together via
+                    // the bridge). Ready adjacent opposite-sex pairs accumulate courtship; once a
+                    // pair has courted long enough, ONE offspring is born from a SEEDED blend of
+                    // BOTH parents' genomes (caught prey leave none -> selection). Deterministic
+                    // (id-ordered, libm-free, RNG seeded from offset 16 + parent ids + tick).
+                    // Per-entity opt-in (genome component): no genome / no creatures -> nothing
+                    // created, so the canonical NetworkStateHash baseline stays byte-identical.
+                    // the REAL world seed feeds the per-birth RNG —
+                    // previously 0ull, so offspring genomes were identical across worlds
+                    // with the same entity ids and ticks. Same-seed worlds reproduce
+                    // identically; different seeds diverge (the reproduction test pins both).
+                    const auto repro = luminumbra::ai::RunMatingResolveOnTick(
+                        m_registry,
+                        current_tick,
+                        static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)),
+                        m_reproductionTuning,
+                        m_speciesTable.get());
+                    if (repro.born > 0) {
+                        LUMINUMBRA_CORE_INFO(
+                            ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
                     }
-                }
-
-                // 2e-mate: SEXUAL reproduction, phase B (after the pair has moved together via
-                // the bridge). Ready adjacent opposite-sex pairs accumulate courtship; once a
-                // pair has courted long enough, ONE offspring is born from a SEEDED blend of
-                // BOTH parents' genomes (caught prey leave none -> selection). Deterministic
-                // (id-ordered, libm-free, RNG seeded from offset 16 + parent ids + tick).
-                // Per-entity opt-in (genome component): no genome / no creatures -> nothing
-                // created, so the canonical NetworkStateHash baseline stays byte-identical.
-                // the REAL world seed feeds the per-birth RNG —
-                // previously 0ull, so offspring genomes were identical across worlds
-                // with the same entity ids and ticks. Same-seed worlds reproduce
-                // identically; different seeds diverge (the reproduction test pins both).
-                const auto repro = luminumbra::ai::RunMatingResolveOnTick(
-                    m_registry,
-                    current_tick,
-                    static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)),
-                    m_reproductionTuning,
-                    m_speciesTable.get());
-                if (repro.born > 0) {
-                    LUMINUMBRA_CORE_INFO(
-                        ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
                 }
             }
-        }
 
-        if (m_activeRegionsEnabled && m_windFieldSystem && m_weatherSystem) {
-            // A distinct stage owns the whole clock-driven wind/weather sequence.
-            // Count each input field cell once (wind + weather = 8192), not
-            // rebuild passes: UpdateFromClock rebuilds wind twice around weather.
-            // Wind and Weather have no samples on this path; see telemetry v2.
-            budget.Next(Stage::WindWeather, [] {
-                return static_cast<std::uint64_t>(Systems::kWindExtentCells) *
-                           Systems::kWindExtentCells +
-                       static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
-                           Systems::kWeatherExtentCells;
-            });
-            m_weatherSystem->UpdateFromClock(
-                current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
-        } else {
-            budget.Next(Stage::Wind, [&] {
-                return m_windFieldSystem ? static_cast<std::uint64_t>(Systems::kWindExtentCells) *
-                                               Systems::kWindExtentCells
-                                         : 0ull;
-            });
-            // 3.  : wind field update. Deterministic (DeterministicMath +
-            // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
-            // anchor so the streamed-region grid follows it. The wind cell values
-            // feed the world_hash `wind` sub-hash; the update must run every tick so
-            // run==replay and resim agree on the field at every checkpoint.
-            if (m_windFieldSystem) {
-                m_windFieldSystem->ClearStormPerturbations();
+            if (m_activeRegionsEnabled && m_windFieldSystem && m_weatherSystem) {
+                // A distinct stage owns the whole clock-driven wind/weather sequence.
+                // Count each input field cell once (wind + weather = 8192), not
+                // rebuild passes: UpdateFromClock rebuilds wind twice around weather.
+                // Wind and Weather have no samples on this path; see telemetry v2.
+                budget.Next(Stage::WindWeather, [] {
+                    return static_cast<std::uint64_t>(Systems::kWindExtentCells) *
+                               Systems::kWindExtentCells +
+                           static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
+                               Systems::kWeatherExtentCells;
+                });
+                m_windFieldSystem->Update(current_tick, m_ambientFieldAnchor);
+                AdvanceRegionalWeather(current_tick);
+            } else {
+                budget.Next(Stage::Wind, [&] {
+                    return m_windFieldSystem
+                               ? static_cast<std::uint64_t>(Systems::kWindExtentCells) *
+                                     Systems::kWindExtentCells
+                               : 0ull;
+                });
+                // 3.  : wind field update. Deterministic (DeterministicMath +
+                // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
+                // anchor so the streamed-region grid follows it. The wind cell values
+                // feed the world_hash `wind` sub-hash; the update must run every tick so
+                // run==replay and resim agree on the field at every checkpoint.
+                if (m_windFieldSystem) {
+                    m_windFieldSystem->ClearStormPerturbations();
+                    if (m_weatherSystem) {
+                        for (const Systems::StormCell& storm : m_weatherSystem->StormCells()) {
+                            m_windFieldSystem->InjectStormPerturbation({
+                                storm.center_world,
+                                96.0f,
+                                storm.velocity,
+                                storm.intensity,
+                            });
+                        }
+                    }
+                    m_windFieldSystem->Update(current_tick, m_metadata.spawnPoint);
+                }
+
+                budget.Next(Stage::Weather, [&] {
+                    return m_weatherSystem
+                               ? static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
+                                     Systems::kWeatherExtentCells
+                               : 0ull;
+                });
+                // 4.  : weather core update. Runs AFTER wind so storm cells
+                // advect by the freshly-updated wind grid. Deterministic (DeterministicMath
+                // + FastNoise batch path; no wall-clock/RNG, no std::random). The weather
+                // state (category map + storm cells + precip field) feeds the world_hash
+                // `weather` sub-hash; the update runs every tick so run==replay and resim
+                // agree on the state at every checkpoint.
                 if (m_weatherSystem) {
-                    for (const Systems::StormCell& storm : m_weatherSystem->StormCells()) {
-                        m_windFieldSystem->InjectStormPerturbation({
-                            storm.center_world,
-                            96.0f,
-                            storm.velocity,
-                            storm.intensity,
-                        });
-                    }
+                    m_weatherSystem->Update(
+                        current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
                 }
-                m_windFieldSystem->Update(current_tick, m_metadata.spawnPoint);
             }
 
-            budget.Next(Stage::Weather, [&] {
-                return m_weatherSystem ? static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
-                                             Systems::kWeatherExtentCells
-                                       : 0ull;
-            });
-            // 4.  : weather core update. Runs AFTER wind so storm cells
-            // advect by the freshly-updated wind grid. Deterministic (DeterministicMath
-            // + FastNoise batch path; no wall-clock/RNG, no std::random). The weather
-            // state (category map + storm cells + precip field) feeds the world_hash
-            // `weather` sub-hash; the update runs every tick so run==replay and resim
-            // agree on the state at every checkpoint.
-            if (m_weatherSystem) {
-                m_weatherSystem->Update(
-                    current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
-            }
-        }
-
-        budget.Next(Stage::Aether, [&] {
-            return m_aetherFieldSystem ? static_cast<std::uint64_t>(Systems::kAetherExtentCells) *
-                                             Systems::kAetherExtentCells
-                                       : 0ull;
-        });
-        // 5.: Aether scalar field update. Runs AFTER weather so it
-        // advects its emission source by the freshly-updated wind grid, keeping
-        // same-tick weather coupling current. Deterministic
-        // (pure function of seed+14, tick, origin[, wind]; DeterministicMath +
-        // FastNoise batch path; no wall-clock/RNG). The cell values feed the
-        // world_hash `aether` sub-hash; the update runs every tick so run==replay
-        // and resim agree on the field at every checkpoint.
-        if (m_aetherFieldSystem) {
-            m_aetherFieldSystem->Update(current_tick,
-                                        m_activeRegionsEnabled ? m_ambientFieldAnchor
-                                                               : m_metadata.spawnPoint,
-                                        m_windFieldSystem.get());
-        }
-
-        budget.Next(Stage::Energy,
-                    [&] { return m_energyFieldState ? m_energyFieldState->page_count() : 0ull; });
-        // 5a.: the STATEFUL energy layer ticks directly
-        // after the re-derivable field, anchored on the SAME replicated anchor
-        // quantized by the shared 24 m cell size (never camera state). Null
-        // unless sim.aether_state opted in — the canonical world skips this
-        // block entirely (byte-identical). Deposits are queued by emitters
-        // right below; Tick applies them sorted.
-        if (m_energyFieldState) {
-            const int anchor_cx =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-            const int anchor_cz =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
-            m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
-            // gather this tick's FieldEmitterComponent deposits
-            // (id-sorted, two-phase) into the layer before it ticks.
-            // Participant-gated: no emitter component, no deposits, no bytes.
-            Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
-            m_energyFieldState->Tick(current_tick);
-        }
-
-        // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
-        // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order had
-        // growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale env). Opt-in
-        // via WaterSource/SoilFeeder; a world with none updates no grid, so the canonical roster is
-        // byte-identical. The shared foliage field anchor (origin + cell size) is hoisted here so
-        // both the growth env-sampler (slot 6) and the  living-world systems (slot 7) share it.
-        constexpr int kFoliageFieldCells = 256;   // grid extent (cells)
-        constexpr float kFoliageFieldCell = 1.0f; // metres / cell
-        const float foliageOriginX =
-            m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
-        const float foliageOriginZ =
-            m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
-        {
-            namespace Comp = Luminumbra::Components;
-            namespace fol = luminumbra::foliage;
-            budget.Next(Stage::Irrigation, [&] {
-                return SimParticipantCount<TelemetryComp::WaterSourceComponent>(m_registry) != 0
-                           ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+            budget.Next(Stage::Aether, [&] {
+                return m_aetherFieldSystem
+                           ? static_cast<std::uint64_t>(Systems::kAetherExtentCells) *
+                                 Systems::kAetherExtentCells
                            : 0ull;
             });
-            if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
-                if (!m_irrigationGrid)
-                    m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(kFoliageFieldCells,
-                                                                             kFoliageFieldCells);
-                fol::RunIrrigationOnTick(m_registry,
-                                         *m_irrigationGrid,
-                                         foliageOriginX,
-                                         foliageOriginZ,
-                                         kFoliageFieldCell);
+            // 5.: Aether scalar field update. Runs AFTER weather so it
+            // advects its emission source by the freshly-updated wind grid, keeping
+            // same-tick weather coupling current. Deterministic
+            // (pure function of seed+14, tick, origin[, wind]; DeterministicMath +
+            // FastNoise batch path; no wall-clock/RNG). The cell values feed the
+            // world_hash `aether` sub-hash; the update runs every tick so run==replay
+            // and resim agree on the field at every checkpoint.
+            if (m_aetherFieldSystem) {
+                m_aetherFieldSystem->Update(current_tick,
+                                            m_activeRegionsEnabled ? m_ambientFieldAnchor
+                                                                   : m_metadata.spawnPoint,
+                                            m_windFieldSystem.get());
             }
-            budget.Next(Stage::Soil, [&] {
-                return SimParticipantCount<TelemetryComp::SoilFeederComponent>(m_registry) != 0
-                           ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
-                           : 0ull;
-            });
-            if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
-                if (!m_soilGrid)
-                    m_soilGrid =
-                        std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
-                fol::RunSoilNutrientOnTick(
-                    m_registry, *m_soilGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
-            }
-        }
 
-        budget.Next(Stage::Plants, [&] {
-            return SimParticipantCount<TelemetryComp::PlantTag,
-                                       TelemetryComp::PlantGrowthComponent,
-                                       TelemetryComp::PlantGenomeComponent,
-                                       TelemetryComp::TransformComponent>(m_registry);
-        });
-        // 6. : deterministic plant GROWTH. Game-data opt-in (PlantTag):
-        // no plants -> the system never runs and world_hash stays byte-identical
-        // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
-        // driven by the freshly-updated weather precip field (rain -> growth), so
-        // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
-        // Temperature, light, soil, weather, and irrigation are sampled below.
-        if (HasPlantParticipants()) {
-            const luminumbra::foliage::EnvSampler plant_env =
-                [this, foliageOriginX, foliageOriginZ, current_tick](
-                    const Luminumbra::Components::TransformComponent& tf) {
-                    luminumbra::foliage::PlantEnvSample s;
-                    const Luminumbra::Vec3 p = tf.position;
-                    // Moisture: weather precipitation (rain -> growth) + irrigation (player
-                    // watering).
-                    const float precip =
-                        m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
-                    s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
-                    // fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
-                    // watered cells grow better (watered-beats-dry). No grid -> unchanged.
-                    if (m_irrigationGrid) {
-                        const int moist = luminumbra::foliage::MoistureAt(*m_irrigationGrid,
-                                                                          p.x,
-                                                                          p.z,
-                                                                          foliageOriginX,
-                                                                          foliageOriginZ,
-                                                                          kFoliageFieldCell);
-                        s.moisture = luminumbra::foliage::clamp01(
-                            s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
-                    }
-                    // Soil + temperature from the TERRAIN: surface-material favourability
-                    // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
-                    // ground is colder -> alpine vs lowland growth). The real atmospheric/
-                    // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
-                    // world queries are bounded.)
-                    float soil = 0.5f, temp = 0.55f;
-                    if (m_worldSystem) {
-                        const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
-                        switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
-                            case Luminumbra::MaterialType::Grass:
-                                soil = 0.95f;
-                                break;
-                            case Luminumbra::MaterialType::Soil:
-                                soil = 0.85f;
-                                break;
-                            case Luminumbra::MaterialType::Sand:
-                                soil = 0.45f;
-                                break;
-                            case Luminumbra::MaterialType::Stone:
-                                soil = 0.30f;
-                                break;
-                            default:
-                                soil = 0.25f;
-                                break;
+            budget.Next(Stage::Energy, [&] {
+                return m_energyFieldState ? m_energyFieldState->page_count() : 0ull;
+            });
+            // 5a.: the STATEFUL energy layer ticks directly
+            // after the re-derivable field, anchored on the SAME replicated anchor
+            // quantized by the shared 24 m cell size (never camera state). Null
+            // unless sim.aether_state opted in — the canonical world skips this
+            // block entirely (byte-identical). Deposits are queued by emitters
+            // right below; Tick applies them sorted.
+            if (m_energyFieldState) {
+                const int anchor_cx = static_cast<int>(
+                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
+                const int anchor_cz = static_cast<int>(
+                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+                m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
+                // gather this tick's FieldEmitterComponent deposits
+                // (id-sorted, two-phase) into the layer before it ticks.
+                // Participant-gated: no emitter component, no deposits, no bytes.
+                Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
+                if (m_activeRegionsEnabled) {
+                    luminumbra::fields::EnergyFieldState::RegionalResult result;
+                    const auto due = SortedDueRegions();
+                    if (!m_energyFieldState->TickRegional(current_tick,
+                                                          m_activeRegionLedger.records(),
+                                                          due,
+                                                          m_activeRegionLedger.energy_ages(),
+                                                          result) ||
+                        !m_activeRegionLedger.set_energy_ages(result.ages))
+                        throw std::runtime_error("Regional energy tick refused");
+                    for (const auto& work : result.work)
+                        RecordActiveRegionWork(work);
+                } else {
+                    m_energyFieldState->Tick(current_tick);
+                }
+            }
+
+            // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
+            // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order
+            // had growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale
+            // env). Opt-in via WaterSource/SoilFeeder; a world with none updates no grid, so the
+            // canonical roster is byte-identical. The shared foliage field anchor (origin + cell
+            // size) is hoisted here so both the growth env-sampler (slot 6) and the  living-world
+            // systems (slot 7) share it.
+            constexpr int kFoliageFieldCells = 256;   // grid extent (cells)
+            constexpr float kFoliageFieldCell = 1.0f; // metres / cell
+            const float foliageOriginX =
+                m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+            const float foliageOriginZ =
+                m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+            {
+                namespace Comp = Luminumbra::Components;
+                namespace fol = luminumbra::foliage;
+                budget.Next(Stage::Irrigation, [&] {
+                    return SimParticipantCount<TelemetryComp::WaterSourceComponent>(m_registry) != 0
+                               ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+                               : 0ull;
+                });
+                if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
+                    if (!m_irrigationGrid)
+                        m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(
+                            kFoliageFieldCells, kFoliageFieldCells);
+                    fol::RunIrrigationOnTick(m_registry,
+                                             *m_irrigationGrid,
+                                             foliageOriginX,
+                                             foliageOriginZ,
+                                             kFoliageFieldCell);
+                }
+                budget.Next(Stage::Soil, [&] {
+                    return SimParticipantCount<TelemetryComp::SoilFeederComponent>(m_registry) != 0
+                               ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+                               : 0ull;
+                });
+                if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
+                    if (!m_soilGrid)
+                        m_soilGrid =
+                            std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
+                    fol::RunSoilNutrientOnTick(
+                        m_registry, *m_soilGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+                }
+            }
+
+            budget.Next(Stage::Plants, [&] {
+                return SimParticipantCount<TelemetryComp::PlantTag,
+                                           TelemetryComp::PlantGrowthComponent,
+                                           TelemetryComp::PlantGenomeComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
+            // 6. : deterministic plant GROWTH. Game-data opt-in (PlantTag):
+            // no plants -> the system never runs and world_hash stays byte-identical
+            // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
+            // driven by the freshly-updated weather precip field (rain -> growth), so
+            // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
+            // Temperature, light, soil, weather, and irrigation are sampled below.
+            if (HasPlantParticipants()) {
+                luminumbra::foliage::EnvSampler plant_env =
+                    [this, foliageOriginX, foliageOriginZ, current_tick](
+                        const Luminumbra::Components::TransformComponent& tf) {
+                        luminumbra::foliage::PlantEnvSample s;
+                        const Luminumbra::Vec3 p = tf.position;
+                        // Moisture: weather precipitation (rain -> growth) + irrigation (player
+                        // watering).
+                        const float precip =
+                            m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
+                        s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
+                        // fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
+                        // watered cells grow better (watered-beats-dry). No grid -> unchanged.
+                        if (m_irrigationGrid) {
+                            const int moist = luminumbra::foliage::MoistureAt(*m_irrigationGrid,
+                                                                              p.x,
+                                                                              p.z,
+                                                                              foliageOriginX,
+                                                                              foliageOriginZ,
+                                                                              kFoliageFieldCell);
+                            s.moisture = luminumbra::foliage::clamp01(
+                                s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
                         }
-                        const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
-                        temp = luminumbra::foliage::clamp01(
-                            0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
+                        // Soil + temperature from the TERRAIN: surface-material favourability
+                        // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
+                        // ground is colder -> alpine vs lowland growth). The real atmospheric/
+                        // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
+                        // world queries are bounded.)
+                        float soil = 0.5f, temp = 0.55f;
+                        if (m_worldSystem) {
+                            const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
+                            switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
+                                case Luminumbra::MaterialType::Grass:
+                                    soil = 0.95f;
+                                    break;
+                                case Luminumbra::MaterialType::Soil:
+                                    soil = 0.85f;
+                                    break;
+                                case Luminumbra::MaterialType::Sand:
+                                    soil = 0.45f;
+                                    break;
+                                case Luminumbra::MaterialType::Stone:
+                                    soil = 0.30f;
+                                    break;
+                                default:
+                                    soil = 0.25f;
+                                    break;
+                            }
+                            const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
+                            temp = luminumbra::foliage::clamp01(
+                                0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
+                        }
+                        s.soil_quality = soil;
+                        // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
+                        // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
+                        // starves itself (monoculture-starves). No grid -> unchanged terrain
+                        // quality.
+                        if (m_soilGrid) {
+                            const int nut = luminumbra::foliage::NutrientAt(*m_soilGrid,
+                                                                            p.x,
+                                                                            p.z,
+                                                                            foliageOriginX,
+                                                                            foliageOriginZ,
+                                                                            kFoliageFieldCell);
+                            // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so
+                            // normalise by kSoilBaseline (NOT 1000) to a [0,1] fraction before
+                            // blending.
+                            const float nutFrac =
+                                static_cast<float>(nut) /
+                                static_cast<float>(luminumbra::foliage::kSoilBaseline);
+                            s.soil_quality = luminumbra::foliage::clamp01(s.soil_quality * 0.5f +
+                                                                          nutFrac * 0.5f);
+                        }
+                        s.temperature = temp;
+                        // Real day/night light from the sim clock. Triangular day
+                        // curve peaking at noon, with a twilight floor so growth slows (not halts)
+                        // at night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
+                        constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
+                        const float tod01 =
+                            m_activeRegionsEnabled
+                                ? static_cast<float>(m_worldClock.solar_phase(current_tick))
+                                : static_cast<float>(current_tick % kTicksPerDay) /
+                                      static_cast<float>(kTicksPerDay);
+                        const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
+                        const float day = 1.0f - 2.0f * noonDist; // 0 at midnight -> 1 at noon
+                        s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
+                        //  (season): a deterministic ANNUAL temperature swing folded onto the
+                        //  terrain
+                        // temp so growth varies across the year — colder in winter (slower growth +
+                        // cold stress), warmer in summer. Triangular (libm-free) over a year of
+                        // kSeasonDays in-game days; tick-based -> run==replay (kSeasonSeedOffset 37
+                        // reserved, no RNG). Only opt-in plant rosters run this, so the canonical
+                        // (no-plant) world is unchanged.
+                        constexpr std::uint64_t kSeasonDays = 8ull;
+                        const std::uint64_t kTicksPerYear = kTicksPerDay * kSeasonDays;
+                        const float season01 =
+                            m_activeRegionsEnabled
+                                ? static_cast<float>(m_worldClock.year_phase(current_tick))
+                                : static_cast<float>(current_tick % kTicksPerYear) /
+                                      static_cast<float>(kTicksPerYear);
+                        const float midDist =
+                            season01 < 0.5f ? (0.5f - season01) : (season01 - 0.5f);
+                        const float warmth =
+                            1.0f - 2.0f * midDist;                // 0 = midwinter -> 1 = midsummer
+                        constexpr float kSeasonAmplitude = 0.30f; // +-0.15 temperature swing
+                        s.temperature = luminumbra::foliage::clamp01(
+                            s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
+                        return s;
+                    };
+                luminumbra::foliage::RunPlantGrowthSystemOnTick(
+                    m_registry, current_tick, plant_env);
+            }
+
+            // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing / lifespan
+            // / … Each is per-entity OPT-IN via its own participant component, so a world carrying
+            // none runs ZERO of them and world_hash stays byte-identical (canonical
+            // NetworkStateHash baseline holds) — same discipline as plants/creatures/scent.
+            // Deterministic (id-ordered, libm-free, seeded-from-ints). Fixed run order for
+            // run==replay. NOTE: the soil-nutrient + irrigation FIELDS now update at slot 5b
+            // (BEFORE plant growth) so growth reads fresh availability; only the consumers remain
+            // here. Wind coupling (fire/pollination) drifts downwind.
+            {
+                namespace Comp = Luminumbra::Components;
+                namespace fol = luminumbra::foliage;
+                // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
+                // (already deterministic, already-hashed) wind field at the anchor.
+                const ::Luminumbra::Vec2 windXZ =
+                    m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
+                                      : ::Luminumbra::Vec2(0.0f);
+
+                budget.Next(Stage::Pollination, [&] {
+                    return SimParticipantCount<TelemetryComp::PollinationTag,
+                                               TelemetryComp::PlantGenomeComponent,
+                                               TelemetryComp::PlantGrowthComponent,
+                                               TelemetryComp::TransformComponent,
+                                               TelemetryComp::PollinationComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
+                    fol::RunPollinationOnTick(
+                        m_registry, current_tick, windXZ, 0, m_plantMutationRate);
+                budget.Next(Stage::Disease, [&] {
+                    return SimParticipantCount<TelemetryComp::PlantTag,
+                                               TelemetryComp::PlantHealthComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::PlantHealthComponent>().empty())
+                    fol::RunPlantDiseaseOnTick(m_registry, current_tick);
+                //  germination: ripe plants senesce -> annual dies + reseeds, perennial
+                // resets + reseeds (child genome = the pollination cross, computed just above, or
+                // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
+                // CropLifecycleComponent.
+                budget.Next(Stage::Crops, [&] {
+                    return SimParticipantCount<TelemetryComp::CropLifecycleComponent,
+                                               TelemetryComp::PlantGrowthComponent,
+                                               TelemetryComp::PlantGenomeComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
+                    fol::RunCropLifecycleOnTick(m_registry, current_tick);
+                budget.Next(Stage::Fire, [&] {
+                    return SimParticipantCount<TelemetryComp::CombustibleComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::CombustibleComponent>().empty()) {
+                    std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
+                    if (m_weatherSystem) {
+                        for (const Systems::StrikeEvent& strike :
+                             m_weatherSystem->StrikesThisTick()) {
+                            weather_ignitions.push_back({
+                                glm::vec2(strike.world_x, strike.world_z),
+                                3.0f + strike.magnitude * 5.0f,
+                                std::max(0.25f, strike.magnitude),
+                            });
+                        }
                     }
-                    s.soil_quality = soil;
-                    // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
-                    // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
-                    // starves itself (monoculture-starves). No grid -> unchanged terrain quality.
-                    if (m_soilGrid) {
-                        const int nut = luminumbra::foliage::NutrientAt(*m_soilGrid,
-                                                                        p.x,
-                                                                        p.z,
-                                                                        foliageOriginX,
-                                                                        foliageOriginZ,
-                                                                        kFoliageFieldCell);
-                        // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so
-                        // normalise by kSoilBaseline (NOT 1000) to a [0,1] fraction before
-                        // blending.
-                        const float nutFrac =
-                            static_cast<float>(nut) /
-                            static_cast<float>(luminumbra::foliage::kSoilBaseline);
-                        s.soil_quality =
-                            luminumbra::foliage::clamp01(s.soil_quality * 0.5f + nutFrac * 0.5f);
-                    }
-                    s.temperature = temp;
-                    // Real day/night light from the sim clock. Triangular day
-                    // curve peaking at noon, with a twilight floor so growth slows (not halts) at
-                    // night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
-                    constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
+                    luminumbra::sim::RunFireSpreadOnTick(
+                        m_registry, current_tick, windXZ, weather_ignitions);
+                }
+                budget.Next(Stage::Grazing, [&] {
+                    return SimParticipantCount<TelemetryComp::GrazeableComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::GrazeableComponent>().empty())
+                    luminumbra::ai::RunWildlifeFoliageOnTick(
+                        m_registry, current_tick, m_wildlifeFoliageTuning);
+                budget.Next(Stage::Lifespan, [&] {
+                    return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::MortalComponent>().empty())
+                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
+                // Herd alarm: propagate collective vigilance among same-role creatures. The brain
+                // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
+                // propagated level to flee with the herd; this maintains the field.
+                budget.Next(Stage::Alarm, [&] {
+                    return SimParticipantCount<TelemetryComp::AlarmComponent,
+                                               TelemetryComp::CreatureComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::AlarmComponent>().empty())
+                    luminumbra::ai::RunHerdAlarmOnTick(
+                        m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                // Decomposition: dead creatures decay + release nutrient (consumed by the soil
+                // loop).
+                budget.Next(Stage::Decay, [&] {
+                    return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::DecayComponent>().empty())
+                    luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
+                // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
+                budget.Next(Stage::Circadian, [&] {
+                    return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::CircadianComponent>().empty()) {
+                    constexpr std::uint64_t kTicksPerDay =
+                        30ull * 60ull * 20ull; // 20-min day @30Hz
                     const float tod01 =
                         m_activeRegionsEnabled
                             ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerDay) /
                                   static_cast<float>(kTicksPerDay);
-                    const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
-                    const float day = 1.0f - 2.0f * noonDist; // 0 at midnight -> 1 at noon
-                    s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
-                    //  (season): a deterministic ANNUAL temperature swing folded onto the terrain
-                    // temp so growth varies across the year — colder in winter (slower growth +
-                    // cold stress), warmer in summer. Triangular (libm-free) over a year of
-                    // kSeasonDays in-game days; tick-based -> run==replay (kSeasonSeedOffset 37
-                    // reserved, no RNG). Only opt-in plant rosters run this, so the canonical
-                    // (no-plant) world is unchanged.
-                    constexpr std::uint64_t kSeasonDays = 8ull;
-                    const std::uint64_t kTicksPerYear = kTicksPerDay * kSeasonDays;
+                    luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
+                }
+                // Territory: claim home + emit a homing bias (movement blends it like
+                // mate-seeking).
+                budget.Next(Stage::Territory, [&] {
+                    return SimParticipantCount<TelemetryComp::TerritoryComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::TerritoryComponent>().empty())
+                    luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
+                // Predator pack: flanking coordination (a pack surrounds the prey).
+                budget.Next(Stage::Packs, [&] {
+                    return SimParticipantCount<TelemetryComp::PackHunterComponent,
+                                               TelemetryComp::CreatureComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::PackHunterComponent>().empty())
+                    luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
+                // Migration: seasonal drive toward a moving target (tick-derived year fraction).
+                budget.Next(Stage::Migration, [&] {
+                    return SimParticipantCount<TelemetryComp::MigratoryComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::MigratoryComponent>().empty()) {
+                    constexpr std::uint64_t kTicksPerYear = 30ull * 60ull * 60ull; // ~1h year @30Hz
                     const float season01 =
                         m_activeRegionsEnabled
-                            ? static_cast<float>(m_worldClock.year_phase(current_tick))
+                            ? static_cast<float>(m_worldClock.spring_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerYear) /
                                   static_cast<float>(kTicksPerYear);
-                    const float midDist = season01 < 0.5f ? (0.5f - season01) : (season01 - 0.5f);
-                    const float warmth = 1.0f - 2.0f * midDist; // 0 = midwinter -> 1 = midsummer
-                    constexpr float kSeasonAmplitude = 0.30f;   // +-0.15 temperature swing
-                    s.temperature = luminumbra::foliage::clamp01(
-                        s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
-                    return s;
-                };
-            luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
-        }
-
-        // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing / lifespan
-        // / … Each is per-entity OPT-IN via its own participant component, so a world carrying none
-        // runs ZERO of them and world_hash stays byte-identical (canonical NetworkStateHash
-        // baseline holds) — same discipline as plants/creatures/scent. Deterministic (id-ordered,
-        // libm-free, seeded-from-ints). Fixed run order for run==replay. NOTE: the soil-nutrient +
-        // irrigation FIELDS now update at slot 5b (BEFORE plant growth) so growth reads fresh
-        // availability; only the consumers remain here. Wind coupling (fire/pollination) drifts
-        // downwind.
-        {
-            namespace Comp = Luminumbra::Components;
-            namespace fol = luminumbra::foliage;
-            // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
-            // (already deterministic, already-hashed) wind field at the anchor.
-            const ::Luminumbra::Vec2 windXZ =
-                m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
-                                  : ::Luminumbra::Vec2(0.0f);
-
-            budget.Next(Stage::Pollination, [&] {
-                return SimParticipantCount<TelemetryComp::PollinationTag,
-                                           TelemetryComp::PlantGenomeComponent,
-                                           TelemetryComp::PlantGrowthComponent,
-                                           TelemetryComp::TransformComponent,
-                                           TelemetryComp::PollinationComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
-                fol::RunPollinationOnTick(m_registry, current_tick, windXZ, 0, m_plantMutationRate);
-            budget.Next(Stage::Disease, [&] {
-                return SimParticipantCount<TelemetryComp::PlantTag,
-                                           TelemetryComp::PlantHealthComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::PlantHealthComponent>().empty())
-                fol::RunPlantDiseaseOnTick(m_registry, current_tick);
-            //  germination: ripe plants senesce -> annual dies + reseeds, perennial
-            // resets + reseeds (child genome = the pollination cross, computed just above, or
-            // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
-            // CropLifecycleComponent.
-            budget.Next(Stage::Crops, [&] {
-                return SimParticipantCount<TelemetryComp::CropLifecycleComponent,
-                                           TelemetryComp::PlantGrowthComponent,
-                                           TelemetryComp::PlantGenomeComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
-                fol::RunCropLifecycleOnTick(m_registry, current_tick);
-            budget.Next(Stage::Fire, [&] {
-                return SimParticipantCount<TelemetryComp::CombustibleComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::CombustibleComponent>().empty()) {
-                std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
-                if (m_weatherSystem) {
-                    for (const Systems::StrikeEvent& strike : m_weatherSystem->StrikesThisTick()) {
-                        weather_ignitions.push_back({
-                            glm::vec2(strike.world_x, strike.world_z),
-                            3.0f + strike.magnitude * 5.0f,
-                            std::max(0.25f, strike.magnitude),
-                        });
-                    }
+                    luminumbra::ai::RunMigrationOnTick(m_registry, season01);
                 }
-                luminumbra::sim::RunFireSpreadOnTick(
-                    m_registry, current_tick, windXZ, weather_ignitions);
             }
-            budget.Next(Stage::Grazing, [&] {
-                return SimParticipantCount<TelemetryComp::GrazeableComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::GrazeableComponent>().empty())
-                luminumbra::ai::RunWildlifeFoliageOnTick(
-                    m_registry, current_tick, m_wildlifeFoliageTuning);
-            budget.Next(Stage::Lifespan, [&] {
-                return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::MortalComponent>().empty())
-                luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
-            // Herd alarm: propagate collective vigilance among same-role creatures. The brain
-            // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
-            // propagated level to flee with the herd; this maintains the field.
-            budget.Next(Stage::Alarm, [&] {
-                return SimParticipantCount<TelemetryComp::AlarmComponent,
-                                           TelemetryComp::CreatureComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::AlarmComponent>().empty())
-                luminumbra::ai::RunHerdAlarmOnTick(
-                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
-            // Decomposition: dead creatures decay + release nutrient (consumed by the soil loop).
-            budget.Next(Stage::Decay, [&] {
-                return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::DecayComponent>().empty())
-                luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
-            // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
-            budget.Next(Stage::Circadian, [&] {
-                return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::CircadianComponent>().empty()) {
-                constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull; // 20-min day @30Hz
-                const float tod01 = m_activeRegionsEnabled
-                                        ? static_cast<float>(m_worldClock.solar_phase(current_tick))
-                                        : static_cast<float>(current_tick % kTicksPerDay) /
-                                              static_cast<float>(kTicksPerDay);
-                luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
-            }
-            // Territory: claim home + emit a homing bias (movement blends it like mate-seeking).
-            budget.Next(Stage::Territory, [&] {
-                return SimParticipantCount<TelemetryComp::TerritoryComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::TerritoryComponent>().empty())
-                luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
-            // Predator pack: flanking coordination (a pack surrounds the prey).
-            budget.Next(Stage::Packs, [&] {
-                return SimParticipantCount<TelemetryComp::PackHunterComponent,
-                                           TelemetryComp::CreatureComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::PackHunterComponent>().empty())
-                luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
-            // Migration: seasonal drive toward a moving target (tick-derived year fraction).
-            budget.Next(Stage::Migration, [&] {
-                return SimParticipantCount<TelemetryComp::MigratoryComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::MigratoryComponent>().empty()) {
-                constexpr std::uint64_t kTicksPerYear = 30ull * 60ull * 60ull; // ~1h year @30Hz
-                const float season01 =
-                    m_activeRegionsEnabled
-                        ? static_cast<float>(m_worldClock.spring_phase(current_tick))
-                        : static_cast<float>(current_tick % kTicksPerYear) /
-                              static_cast<float>(kTicksPerYear);
-                luminumbra::ai::RunMigrationOnTick(m_registry, season01);
-            }
-        }
 
-        budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
-        m_simulationEventBus.drain(current_tick);
-        // The v2 events stage measures only the ordered drain. Region scheduling
-        // records its separate time-free work items after the timed stages.
-        budget.Finish();
-        RunRegionScheduler(current_tick);
-        if (m_regionFault)
-            return i + 1; // the faulting tick's systems ran; the clock was rewound to it
+            budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
+            if (m_activeRegionsEnabled)
+                m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
+            else
+                m_simulationEventBus.drain(current_tick);
+            // Consumer counters are published only after the ordered drain succeeds.
+            budget.Finish();
+            if (m_regionFault)
+                return i + 1;
+            if (m_activeRegionsEnabled) {
+                m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
+                m_regionCompletedWork.clear();
+            }
+        } catch (const std::exception& error) {
+            if (!m_activeRegionsEnabled)
+                throw;
+            LatchRegionFault(current_tick, error.what());
+            return i + 1;
+        } catch (...) {
+            if (!m_activeRegionsEnabled)
+                throw;
+            LatchRegionFault(current_tick, "Unknown simulation consumer fault");
+            return i + 1;
+        }
     }
     return ticks_executed;
 }
@@ -1351,6 +1395,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     //    world seed (uses seed+14 for its emission noise); updated per tick AFTER
     //    weather, advected by the wind grid. Feeds the world_hash `aether` slot.
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+    BindRegionalFieldQueries();
     LUMINUMBRA_CORE_INFO("Aether field system initialized.");
 
     // the stateful energy layer, constructed ONLY when
@@ -1404,6 +1449,25 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
+    // An interrupted indexed save is rolled back (or its stale journal dropped) before anything
+    // reads the directory. The identifier check mirrors InspectSavedWorld's.
+    if (!worldId.empty() && worldId != "." && worldId != ".." &&
+        worldId.find_first_of("/\\:") == std::string::npos) {
+        const fs::path candidate = GetSaveRootPath() / "worlds" / "saves" / worldId;
+        std::error_code status_error;
+        if (fs::is_directory(candidate, status_error) && !fs::is_symlink(candidate, status_error)) {
+            std::vector<std::string> recovery_errors;
+            if (Persistence::recover_pending_journal(candidate, &recovery_errors) ==
+                Persistence::RecoveryOutcome::Failed) {
+                m_worldOpenError =
+                    "World unavailable: an interrupted save could not be recovered: " +
+                    (recovery_errors.empty() ? std::string("unknown error")
+                                             : recovery_errors.front());
+                LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+                return false;
+            }
+        }
+    }
     const auto saved =
         Persistence::InspectSavedWorld(GetSaveRootPath(), RuntimeRoot(m_rootPath), worldId);
     m_worldOpenError = saved.error;
@@ -1439,7 +1503,13 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     ClampTerrainParams(params);
 
     // Validate all refusing state readers before replacing the live world.
+    const int world_seed = static_cast<int>(StringToSeed(saved.metadata.seed));
+    auto staged_world =
+        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
     LoadedWorldState loaded;
+    if (m_activeRegionsEnabled)
+        for (const auto& coords : staged_world->GetInitialChunkLoadList(saved.metadata.spawnPoint))
+            loaded.wanted.insert(Chunk::calculate_id(coords));
     if (!ReadWorldStateFrom(worldPath, loaded)) {
         m_worldUsable = false;
         if (m_worldSystem)
@@ -1457,14 +1527,11 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
-    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
-
     // Initialize Physics System after config and preset validation passes.
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    m_worldSystem = std::move(staged_world);
     // Worldgen seam for audio-raycast surface materials (non-owning; physics
     // is destroyed before the world system by member order, so the pointer
     // cannot dangle).
@@ -1483,17 +1550,16 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+    BindRegionalFieldQueries();
 
     // unlike the re-derivable trio above, the stateful
     // energy layer is AUTHORITATIVE state — when enabled, a persisted record
     // restores it (epoch-rebased onto the session clock); an absent
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
-    if (m_energyFieldState) {
-        const auto recordPath = worldPath / "aether_state.efs";
-        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
-        std::ifstream recordFile;
-        recordFile.open(recordPath);
+    if (m_energyFieldState && !m_activeRegionsEnabled) {
+        const fs::path recordPath = worldPath / "aether_state.efs";
+        std::ifstream recordFile(recordPath, std::ios::binary);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();
@@ -1533,6 +1599,18 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 }
 
 bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
+    // An interrupted save may have left uncommitted clock-bearing metadata: recover before reading
+    // the clock so the compatibility verdict describes the committed snapshot.
+    // Never during a live transaction on this directory (its journal is the active one), and
+    // never for an empty destination (a relative join would resolve against the cwd).
+    std::vector<std::string> recovery_errors;
+    if (!save_dir.empty() && !Persistence::SaveTransaction::active_for(save_dir) &&
+        Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
+            Persistence::RecoveryOutcome::Failed) {
+        for (const std::string& error : recovery_errors)
+            LUMINUMBRA_CORE_ERROR("World save recovery failed: {}", error);
+        return false;
+    }
     WorldClock clock;
     bool required = false;
     std::optional<WorldCalendar> render_calendar;
@@ -1543,6 +1621,10 @@ bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
 
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault) {
+        // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
+        // probe.
+        m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
+        m_worldSystem->sync_water_authority();
         const auto anchors =
             m_replicatedSimulationAnchors
                 ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
@@ -1561,17 +1643,32 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return Persistence::WorldSaveService::region_simulation_digest(
                         directory,
                         key,
-                        Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                        {}});
+                        Persistence::RegionDigestInputs{
+                            .live = m_worldSystem->snapshot_streamed_chunks(),
+                            .parked = m_worldSystem->snapshot_parked_chunks(),
+                            .durable = m_worldSystem->durable_chunk_inventory(),
+                            .ground_object_bytes = m_groundObjects.region_bytes(key),
+                            .field_page_bytes = RegionalFieldProjection(key)});
                 },
-                // Later slices extend this probe with parked chunks, ground objects,
-                // pages, creatures, plants and water debt.
+                // Later slices extend this probe with creatures, plants and water debt.
                 [this, &owned_regions](RegionKey key) {
+                    if (m_groundObjects.owns_region(key))
+                        return true;
+                    if (m_fieldPages.owns_region(key))
+                        return true;
+                    if (m_activeRegionLedger.energy_ages().contains(key) ||
+                        (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
+                        return true;
                     if (!owned_regions) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
-                        for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+                        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
+                            int rx = 0, rz = 0;
+                            Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+                            owned_regions->insert(RegionKey{rx, rz});
+                        }
+                        for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
                             if (!chunk)
                                 continue;
                             int rx = 0, rz = 0;
@@ -1596,9 +1693,328 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                     m_activeRegionsEnabled ? m_regionSchedule.due.size() : 0);
 }
 
+std::vector<RegionKey> GameSession::SortedDueRegions() const {
+    // The schedule's own order is rank/proximity order and must not change; callers age in key
+    // order.
+    std::vector<RegionKey> due = m_regionSchedule.due;
+    std::sort(due.begin(), due.end());
+    due.erase(std::unique(due.begin(), due.end()), due.end());
+    return due;
+}
+
+void GameSession::AdvanceFieldPages(std::uint64_t tick) {
+    const std::uint64_t seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    const auto& records = m_activeRegionLedger.records();
+    const auto due = SortedDueRegions();
+    const auto previous = m_fieldPages.scheduled_snapshot(records, due, tick);
+    for (const RegionKey key : due) {
+        if (records.find(key) == records.end())
+            continue;
+        if (!m_fieldPages.activate_region(key, seed, tick))
+            ++m_regionInputRejections.field_pages;
+        const auto initialized =
+            m_fieldPages.owned_initialized_cells(key) - previous.owned_initialized_cells(key);
+        if (initialized)
+            m_regionCompletedWork.push_back(RegionWork{key, 0, 0, 0, initialized});
+    }
+    for (const auto& [key, updates] :
+         m_fieldPages.step_scheduled(records, due, seed, tick, &previous))
+        m_regionCompletedWork.push_back(RegionWork{key, 0, 0, 0, updates});
+}
+
+std::uint16_t GameSession::SampleRegionalChannel(int channel, const Vec3& position) const {
+    if (!std::isfinite(position.x) || !std::isfinite(position.z) || position.x < -16777216.0f ||
+        position.x >= 16777216.0f || position.z < -16777216.0f || position.z >= 16777216.0f)
+        return 0;
+    const auto x = static_cast<std::int32_t>(std::floor(static_cast<double>(position.x) / 24.0));
+    const auto z = static_cast<std::int32_t>(std::floor(static_cast<double>(position.z) / 24.0));
+    const auto owner = FieldPageState::region_of_cell(x, z);
+    const auto found = m_activeRegionLedger.records().find(owner);
+    std::uint16_t value = 0;
+    if (found != m_activeRegionLedger.records().end() &&
+        found->second.state != RegionState::Frozen && m_fieldPages.sample(channel, x, z, value))
+        return value;
+    const auto seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    return FieldPageState::seed_value(
+        seed, channel, x, z, m_worldClock.tick() / FieldPageState::kCadenceTicks);
+}
+
+std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather) const {
+    auto bytes = m_fieldPages.ambient_bytes(channels, weather);
+    // The same regional authority can be projected at different anchors. The anchor
+    // drives ambient diagnostics and the scent domain, so include its identity in
+    // the slot hash without changing the stored region/freeze digest projection.
+    bytes += "|ambient_anchor:";
+    for (const float coordinate : {m_ambientFieldAnchor.x, m_ambientFieldAnchor.z}) {
+        const auto bits = std::bit_cast<std::uint32_t>(coordinate);
+        for (int i = 0; i < 4; ++i)
+            bytes.push_back(static_cast<char>((bits >> (8 * i)) & 255));
+    }
+    return Persistence::StableChecksum(bytes);
+}
+
+void GameSession::BindRegionalFieldQueries() {
+    if (!m_activeRegionsEnabled)
+        return;
+    m_windFieldSystem->BindRegionalBackend(
+        [this](const Vec3& position, Systems::WindLayer layer) {
+            // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
+            const float scale = layer == Systems::WindLayer::Ground ? 1.0f
+                                : layer == Systems::WindLayer::Mid  ? 2.0f
+                                                                    : 4.0f;
+            return Vec2(static_cast<float>(
+                            std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
+                            (scale / 1024.0f),
+                        static_cast<float>(
+                            std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
+                            (scale / 1024.0f));
+        },
+        [this] { return RegionalAmbientHash(3, false); });
+    m_weatherSystem->BindRegionalBackend(
+        [this](const Vec3& position) {
+            Systems::WeatherSample sample;
+            const auto moisture = SampleRegionalChannel(2, position);
+            const auto front = SampleRegionalChannel(3, position);
+            sample.category = front < 13107   ? Systems::WeatherCategory::Clear
+                              : front < 26214 ? Systems::WeatherCategory::Overcast
+                              : front < 39321 ? Systems::WeatherCategory::Rain
+                              : front < 52428 ? Systems::WeatherCategory::Snow
+                                              : Systems::WeatherCategory::Fog;
+            sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
+                                              sample.category == Systems::WeatherCategory::Snow
+                                          ? static_cast<float>(moisture) / 65535.0f
+                                          : 0.0f;
+            sample.wind = m_windFieldSystem->SampleWind(position);
+            return sample;
+        },
+        [this] { return RegionalAmbientHash(12, true); });
+    m_aetherFieldSystem->BindRegionalBackend(
+        [this](const Vec3& position) {
+            return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
+        },
+        [this] { return RegionalAmbientHash(16, false); });
+}
+
+std::string GameSession::RegionalFieldProjection(RegionKey key) const {
+    auto bytes = m_fieldPages.region_bytes(key);
+    if (m_energyFieldState)
+        bytes += m_energyFieldState->RegionBytes(key);
+    const auto age = m_activeRegionLedger.energy_ages().find(key);
+    if (age != m_activeRegionLedger.energy_ages().end()) {
+        bytes += "|energy_age:";
+        for (int i = 0; i < 8; ++i)
+            bytes.push_back(static_cast<char>((age->second >> (8 * i)) & 255));
+    }
+    return bytes;
+}
+void GameSession::ProjectRegionalWeather(bool restoring) {
+    if (!m_activeRegionsEnabled || !m_weatherSystem)
+        return;
+    std::vector<Systems::StormCell> storms;
+    for (const auto& storm : m_fieldPages.storms())
+        storms.push_back(
+            {Vec2(std::bit_cast<float>(storm.center_x), std::bit_cast<float>(storm.center_z)),
+             Vec2(std::bit_cast<float>(storm.velocity_x), std::bit_cast<float>(storm.velocity_z)),
+             std::bit_cast<float>(storm.intensity),
+             storm.spawn_tick,
+             storm.lifetime_ticks,
+             storm.seed_salt});
+    std::vector<Systems::StrikeEvent> strikes;
+    for (const auto& strike : m_fieldPages.strikes()) {
+        if (restoring && strike.strike_tick <= m_worldClock.tick())
+            continue;
+        strikes.push_back({strike.strike_tick,
+                           std::bit_cast<float>(strike.world_x),
+                           std::bit_cast<float>(strike.world_z),
+                           std::bit_cast<float>(strike.magnitude),
+                           strike.storm_salt});
+    }
+    m_weatherSystem->AdoptRegionalWeather(
+        m_worldClock.tick(), m_ambientFieldAnchor, std::move(storms), std::move(strikes));
+}
+
+void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
+    // Weather admission is transactional without copying pages or the dense scent map.
+    auto clocks = m_fieldPages.weather_clocks();
+    const auto& records = m_activeRegionLedger.records();
+    const auto due_list = SortedDueRegions();
+    const std::set<RegionKey> due(due_list.begin(), due_list.end());
+    const auto eligible = [&records](RegionKey owner) {
+        const auto found = records.find(owner);
+        return found != records.end() && found->second.state != RegionState::Frozen;
+    };
+    const auto common = [&records, &eligible, tick](RegionKey source, RegionKey destination) {
+        if (!eligible(source) || !eligible(destination))
+            return false;
+        const auto shift =
+            std::max(records.at(source).cadence_shift, records.at(destination).cadence_shift);
+        return shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0;
+    };
+    const auto owner_of = [](float x, float z) {
+        return RegionKey{static_cast<std::int32_t>(std::floor(static_cast<double>(x) / 512.0)),
+                         static_cast<std::int32_t>(std::floor(static_cast<double>(z) / 512.0))};
+    };
+    const auto mix = [](std::uint64_t value) {
+        value += 0x9e3779b97f4a7c15ull;
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+        return value ^ (value >> 31);
+    };
+    const auto unit = [&mix](std::uint64_t key) {
+        return static_cast<float>(mix(key) >> 40) / 16777216.0f;
+    };
+    const auto seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    std::map<RegionKey, std::uint64_t> work;
+    for (const auto owner : due_list) {
+        const auto found = clocks.find(owner);
+        const auto age = found == clocks.end() ? 0 : found->second;
+        if (age + 1 >= WorldClock::kTickLimit ||
+            (found == clocks.end() && clocks.size() == FieldPageState::kMaxWeatherClocks))
+            throw std::overflow_error("Regional weather clock admission failed");
+        clocks[owner] = age + 1;
+        ++work[owner];
+    }
+    std::vector<RegionalStrike> strikes;
+    // Same-tick events have already been delivered at the saved boundary. Frozen strikes stay
+    // as stored and never re-emit because their absolute provenance tick is immutable.
+    for (const auto& strike : m_fieldPages.strikes())
+        if (!due.contains(strike.owner))
+            strikes.push_back(strike);
+        else
+            ++work[strike.owner];
+    std::vector<RegionalStorm> storms;
+    for (auto storm : m_fieldPages.storms()) {
+        const auto source = storm.owner;
+        if (!eligible(source)) {
+            storms.push_back(storm);
+            continue;
+        }
+        const bool interior_due = due.contains(source);
+        float x = std::bit_cast<float>(storm.center_x), z = std::bit_cast<float>(storm.center_z);
+        float vx = std::bit_cast<float>(storm.velocity_x),
+              vz = std::bit_cast<float>(storm.velocity_z);
+        if (interior_due) {
+            ++storm.active_age;
+            ++work[source];
+            if (storm.active_age >= storm.lifetime_ticks)
+                continue;
+            const auto wind =
+                m_windFieldSystem->SampleWind(Vec3{x, 5, z}, Systems::WindLayer::Ground);
+            vx = wind.x;
+            vz = wind.y;
+            storm.velocity_x = std::bit_cast<std::uint32_t>(vx);
+            storm.velocity_z = std::bit_cast<std::uint32_t>(vz);
+            const auto remaining = storm.lifetime_ticks - storm.active_age;
+            const float intensity =
+                std::min(1.0f, static_cast<float>(std::min(storm.active_age, remaining)) / 45.0f);
+            storm.intensity = std::bit_cast<std::uint32_t>(intensity);
+        }
+        float px = x + vx * (1.0f / 30.0f), pz = z + vz * (1.0f / 30.0f);
+        // Discard blocked displacement; no hidden accumulated motion. World limits are sealed.
+        const bool valid_position = std::isfinite(px) && std::isfinite(pz) && px >= -16777216.0f &&
+                                    px < 16777216.0f && pz >= -16777216.0f && pz < 16777216.0f;
+        const auto destination = valid_position ? owner_of(px, pz) : source;
+        bool transfer = valid_position && destination != source && common(source, destination);
+        if (transfer && destination.x != source.x && destination.z != source.z)
+            transfer = common(source, {destination.x, source.z}) &&
+                       common(source, {source.x, destination.z});
+        if (transfer) {
+            storm.owner = destination;
+            ++work[source];
+            ++work[destination];
+        } else if (interior_due) {
+            const float low_x = static_cast<float>(source.x) * 512.0f;
+            const float low_z = static_cast<float>(source.z) * 512.0f;
+            px = valid_position ? std::clamp(px, low_x, std::nextafter(low_x + 512.0f, low_x)) : x;
+            pz = valid_position ? std::clamp(pz, low_z, std::nextafter(low_z + 512.0f, low_z)) : z;
+        } else {
+            px = x;
+            pz = z;
+        }
+        storm.center_x = std::bit_cast<std::uint32_t>(px);
+        storm.center_z = std::bit_cast<std::uint32_t>(pz);
+        // Strike cadence follows the storm's own active age, not elapsed absolute ticks.
+        const float intensity = std::bit_cast<float>(storm.intensity);
+        if (interior_due && storm.active_age % 18 == 0 && intensity >= 0.45f) {
+            auto key = mix((seed + 40) ^ 0x535452494b455300ull ^
+                           (static_cast<std::uint64_t>(storm.seed_salt) * 0x9e3779b97f4a7c15ull));
+            key = mix(key ^ ((storm.active_age / 18) * 0xff51afd7ed558ccdull));
+            if (unit(key) < 0.4f * intensity) {
+                const float sx = px + (unit(key ^ 0x1111222233334444ull) * 2.0f - 1.0f) * 180.0f;
+                const float sz = pz + (unit(key ^ 0x5555666677778888ull) * 2.0f - 1.0f) * 180.0f;
+                if (std::isfinite(sx) && std::isfinite(sz) && sx >= -16777216.0f &&
+                    sx < 16777216.0f && sz >= -16777216.0f && sz < 16777216.0f) {
+                    const auto target = owner_of(sx, sz);
+                    if (eligible(target) &&
+                        (target == storm.owner || common(storm.owner, target))) {
+                        const float magnitude = std::min(
+                            1.0f, 0.55f * intensity + 0.45f * unit(key ^ 0x99990000aaaabbbbull));
+                        if (strikes.size() == FieldPageState::kMaxStrikes)
+                            throw std::runtime_error("Regional strike capacity exhausted");
+                        strikes.push_back({target,
+                                           tick,
+                                           std::bit_cast<std::uint32_t>(sx),
+                                           std::bit_cast<std::uint32_t>(sz),
+                                           std::bit_cast<std::uint32_t>(magnitude),
+                                           storm.seed_salt,
+                                           0});
+                        ++work[storm.owner];
+                        if (target != storm.owner)
+                            ++work[target];
+                    }
+                }
+            }
+        }
+        storms.push_back(storm);
+    }
+    for (const auto owner : due_list) {
+        const auto age = clocks.at(owner);
+        if (age % 45 != 0)
+            continue;
+        auto key = mix((seed + 40) ^ 0x535041574e000000ull ^ ((age / 45) * 0x100000001b3ull));
+        key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.x)) * 0x9e3779b1u;
+        key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.z)) * 0x85ebca77u;
+        if (unit(key) >= 0.55f)
+            continue;
+        const float x = static_cast<float>(owner.x) * 512.0f + 256.0f +
+                        (unit(key ^ 0xaaaa5555ull) * 2.0f - 1.0f) * 204.8f;
+        const float z = static_cast<float>(owner.z) * 512.0f + 256.0f +
+                        (unit(key ^ 0x5555aaaaull) * 2.0f - 1.0f) * 204.8f;
+        const auto wind = m_windFieldSystem->SampleWind(Vec3{x, 5, z}, Systems::WindLayer::Ground);
+        const auto salt = static_cast<std::uint32_t>(mix(key ^ 0xc0ffeeull));
+        if (std::any_of(storms.begin(), storms.end(), [tick, salt](const auto& storm) {
+                return storm.spawn_tick == tick && storm.seed_salt == salt;
+            }))
+            continue;
+        if (storms.size() == FieldPageState::kMaxStorms)
+            throw std::runtime_error("Regional storm capacity exhausted");
+        storms.push_back({owner,
+                          std::bit_cast<std::uint32_t>(x),
+                          std::bit_cast<std::uint32_t>(z),
+                          std::bit_cast<std::uint32_t>(wind.x),
+                          std::bit_cast<std::uint32_t>(wind.y),
+                          0,
+                          tick,
+                          240,
+                          salt,
+                          0});
+        ++work[owner];
+    }
+    if (!m_fieldPages.replace_weather(std::move(storms), std::move(strikes), std::move(clocks)))
+        throw std::runtime_error("Regional weather state admission failed");
+    ProjectRegionalWeather();
+    for (const auto& [owner, updates] : work)
+        RecordActiveRegionWork({owner, 0, 0, 0, updates});
+}
+
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     if (m_worldSystem)
         throw std::logic_error("Set region scheduler configuration before creating a world");
+    m_groundObjects.clear();
+    m_fieldPages.clear();
     ReplaceActiveRegionLedger(ActiveRegionLedger(config));
     m_regionSchedulerOverride = config;
 }
@@ -1613,7 +2029,13 @@ void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     m_regionFault = RegionSchedulerFault{tick, message};
     m_simulationClock.reset(tick);
     m_activeRegionLedger.acknowledge_world_clock(m_worldClock);
+    m_activeRegionLedger.clear_completed_work();
+    m_regionCompletedWork.clear();
     m_regionWork.clear();
+    // A fault can stop the tick before the ambient fields run. These fields are
+    // reconstructed from the saved clock on load, so align them with that same
+    // clock now without running any consumers or discarding stateful authority.
+    RestoreAmbientFieldsAtTick(tick);
     LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}", tick, message);
 }
 void GameSession::SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking) {
@@ -1651,11 +2073,186 @@ void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
     }
 }
 void GameSession::RecordActiveRegionWork(RegionWork work) {
-    if (m_activeRegionsEnabled && !m_regionFault)
-        m_regionWork.push_back(work);
+    if (m_activeRegionsEnabled && !m_regionFault) {
+        if (m_simulationBatchInProgress)
+            m_regionCompletedWork.push_back(work);
+        else
+            m_regionWork.push_back(work);
+    }
 }
+
+namespace {
+
+std::string GroundEventPayload(const GroundObject& object) {
+    return std::to_string(object.id) + "," + std::to_string(object.type) + "," +
+           std::to_string(object.x_mm) + "," + std::to_string(object.y_mm) + "," +
+           std::to_string(object.z_mm);
+}
+
+// Floor division for a positive divisor: negative quotients round toward minus infinity.
+std::int64_t FloorDivide(std::int64_t value, std::int64_t divisor) {
+    const std::int64_t quotient = value / divisor;
+    return (value % divisor != 0 && value < 0) ? quotient - 1 : quotient;
+}
+
+// (chunk x, chunk z) of every streamed chunk that is not still loading.
+std::set<std::pair<int, int>>
+ResidentChunkColumns(const std::vector<std::shared_ptr<Luminumbra::Chunk>>& chunks) {
+    std::set<std::pair<int, int>> columns;
+    for (const auto& chunk : chunks) {
+        if (!chunk || chunk->get_state() == ChunkState::Loading)
+            continue;
+        columns.emplace(chunk->get_coords().x, chunk->get_coords().z);
+    }
+    return columns;
+}
+
+// Settles an unsettled object with an owner-thread downward terrain probe.
+// Returns false, leaving the object unchanged, when its chunk column is not resident or the
+// height is not finite.
+bool SettleGroundObjectOnTerrain(GroundObject& object,
+                                 const std::set<std::pair<int, int>>& columns,
+                                 const Systems::SHIELD_WorldSystem& world) {
+    if (object.settled())
+        return true;
+    const std::int64_t column_x_mm = static_cast<std::int64_t>(CHUNK_SIZE_X) * 1000;
+    const std::int64_t column_z_mm = static_cast<std::int64_t>(CHUNK_SIZE_Z) * 1000;
+    const std::pair<int, int> column{static_cast<int>(FloorDivide(object.x_mm, column_x_mm)),
+                                     static_cast<int>(FloorDivide(object.z_mm, column_z_mm))};
+    if (!columns.contains(column))
+        return false;
+    const auto height = world.ProbeTerrainBelow({static_cast<float>(object.x_mm) / 1000.0f,
+                                                 static_cast<float>(object.y_mm) / 1000.0f,
+                                                 static_cast<float>(object.z_mm) / 1000.0f});
+    if (!height || !std::isfinite(*height))
+        return false;
+    const double y_mm = static_cast<double>(*height) * 1000.0;
+    if (std::abs(y_mm) >= static_cast<double>(GroundObjectStore::kMaxVerticalMm))
+        return false;
+    object.y_mm = std::llround(y_mm);
+    object.flags = static_cast<std::uint16_t>(object.flags | GroundObject::kSettled);
+    return true;
+}
+
+} // namespace
+
+std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
+                                             std::int64_t x_mm,
+                                             std::int64_t y_mm,
+                                             std::int64_t z_mm,
+                                             std::uint64_t despawn_after,
+                                             std::uint32_t payload) {
+    if (!m_activeRegionsEnabled)
+        return 0;
+    if (despawn_after > std::numeric_limits<std::uint32_t>::max()) {
+        ++m_regionInputRejections.ground_spawns;
+        return 0;
+    }
+    const std::uint64_t tick = m_worldClock.tick();
+    // Probe candidate: the real id is allocated only once the candidate is accepted.
+    GroundObject candidate;
+    candidate.id = 1;
+    candidate.type = type;
+    candidate.x_mm = x_mm;
+    candidate.y_mm = y_mm;
+    candidate.z_mm = z_mm;
+    candidate.spawn_tick = tick;
+    candidate.despawn_after = static_cast<std::uint32_t>(despawn_after);
+    candidate.payload = payload;
+    if (!m_worldSystem || m_regionFault.has_value() ||
+        m_groundObjects.size() >= GroundObjectStore::kMaxObjects ||
+        !GroundObjectStore::valid(candidate)) {
+        ++m_regionInputRejections.ground_spawns;
+        return 0;
+    }
+    std::uint64_t id = 0;
+    if (!m_activeRegionLedger.allocate_persistent_id(id)) {
+        LatchRegionFault(tick, "persistent id space exhausted");
+        return 0;
+    }
+    // A failure from here on still consumes the id.
+    candidate.id = id;
+    SettleGroundObjectOnTerrain(
+        candidate, ResidentChunkColumns(m_worldSystem->snapshot_streamed_chunks()), *m_worldSystem);
+    if (!m_groundObjects.insert(candidate))
+        return 0;
+    if (!MarkGroundRegionEdited(candidate)) {
+        m_groundObjects.erase(id);
+        return 0;
+    }
+    m_simulationEventBus.publish(tick, "ground.spawned", GroundEventPayload(candidate));
+    return id;
+}
+
+std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
+                                             Vec3 position,
+                                             std::uint32_t despawn_after,
+                                             std::uint32_t payload) {
+    if (!m_activeRegionsEnabled)
+        return 0;
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+        std::abs(static_cast<double>(position.x)) >= 16777216.0 ||
+        std::abs(static_cast<double>(position.z)) >= 16777216.0 ||
+        std::abs(static_cast<double>(position.y)) >= 1048576.0) {
+        ++m_regionInputRejections.ground_spawns;
+        return 0;
+    }
+    return SpawnGroundObject(type,
+                             std::llround(static_cast<double>(position.x) * 1000.0),
+                             std::llround(static_cast<double>(position.y) * 1000.0),
+                             std::llround(static_cast<double>(position.z) * 1000.0),
+                             despawn_after,
+                             payload);
+}
+
+bool GameSession::MarkGroundRegionEdited(const GroundObject& object) {
+    try {
+        m_activeRegionLedger.mark_edited(GroundObjectStore::region_of(object), m_worldClock);
+        return true;
+    } catch (const std::length_error& error) {
+        LatchRegionFault(m_worldClock.tick(), error.what());
+    } catch (const std::invalid_argument&) {
+        ++m_regionInputRejections.edits;
+    }
+    return false;
+}
+
+void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
+    const std::vector<RegionKey> due = SortedDueRegions();
+    // Resident chunk columns, built on the first unsettled object of this call.
+    std::optional<std::set<std::pair<int, int>>> columns;
+    const auto settle = [this, &columns](GroundObject& object) {
+        if (!columns.has_value())
+            columns = ResidentChunkColumns(m_worldSystem->snapshot_streamed_chunks());
+        return SettleGroundObjectOnTerrain(object, columns.value(), *m_worldSystem);
+    };
+    for (const RegionKey key : due) {
+        if (!m_groundObjects.owns_region(key))
+            continue;
+        const auto processed = static_cast<std::uint64_t>(m_groundObjects.in_region(key).size());
+        const GroundObjectStore::AgeResult result = m_groundObjects.age_region(key, settle);
+        m_regionCompletedWork.push_back(RegionWork{key, 0, processed, 0, 0});
+        for (const GroundObject& object : result.despawned)
+            m_simulationEventBus.publish(tick, "ground.despawned", GroundEventPayload(object));
+    }
+}
+
 void GameSession::AttachRegionEditObserver() {
-    if (m_activeRegionsEnabled && m_worldSystem)
+    if (m_activeRegionsEnabled && m_worldSystem) {
+        m_worldSystem->set_durable_residency(true);
+        m_worldSystem->set_parked_bytes_limit(m_parkedBytesLimit);
+        m_worldSystem->set_durable_chunk_loader(
+            [this](const IVec3& coords) {
+                const auto directory =
+                    m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+                const auto result =
+                    Persistence::WorldSaveService::read_chunk(directory, coords, true);
+                if (result.status != Persistence::WorldSaveService::ChunkReadStatus::Found)
+                    throw std::runtime_error(
+                        result.error.empty() ? "expected durable chunk is missing" : result.error);
+                return result.chunk;
+            },
+            [this](std::string error) { LatchRegionFault(m_worldClock.tick(), std::move(error)); });
         m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
             int x = 0, z = 0;
             Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
@@ -1667,12 +2264,141 @@ void GameSession::AttachRegionEditObserver() {
                 ++m_regionInputRejections.edits;
             }
         });
+    }
+}
+
+PersistenceStatus GameSession::GetPersistenceStatus() const {
+    PersistenceStatus status;
+    if (!m_activeRegionsEnabled || !m_worldSystem)
+        return status;
+    const auto parking = m_worldSystem->parking_status();
+    status.parked_count = parking.parked_count;
+    status.parked_bytes = parking.parked_bytes;
+    status.oldest_parked_tick = parking.oldest_parked_tick;
+    status.last_save_tick = m_lastSaveTick;
+    status.last_save_ms = m_lastSaveMs;
+    status.failures = m_saveFailures;
+    status.save_requested = parking.save_requested;
+    return status;
+}
+
+bool GameSession::PersistenceSaveRequested() const {
+    if (!m_activeRegionsEnabled || !m_worldSystem || !m_worldSystem->persistence_save_requested())
+        return false;
+    if (m_lastSaveFailureTick >= 0 &&
+        static_cast<std::int64_t>(GetSimulationTickCount()) <
+            m_lastSaveFailureTick + static_cast<std::int64_t>(kSaveRetryTicks))
+        return false;
+    return true;
+}
+
+bool GameSession::PersistenceAutosaveDue() {
+    if (!m_activeRegionsEnabled || !m_worldSystem)
+        return false;
+    const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
+    if (m_lastSaveTick < 0) {
+        m_lastSaveTick = tick; // first observation is the baseline, not a save
+        return false;
+    }
+    if (m_lastSaveFailureTick >= 0 &&
+        tick < m_lastSaveFailureTick + static_cast<std::int64_t>(kSaveRetryTicks))
+        return false;
+    return tick >= m_lastSaveTick + static_cast<std::int64_t>(kAutosaveTicks);
+}
+
+void GameSession::ClearPersistenceSaveRequest() {
+    if (m_worldSystem)
+        m_worldSystem->clear_persistence_save_request();
+}
+
+void GameSession::SetParkedBytesLimit(std::size_t bytes) {
+    m_parkedBytesLimit = bytes;
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->set_parked_bytes_limit(bytes);
+}
+
+void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
+    if (!m_activeRegionsEnabled)
+        return;
+    if (m_worldSystem)
+        m_worldSystem->note_persistence_outcome(ok);
+    const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
+    if (ok) {
+        m_lastSaveTick = tick;
+        m_lastSaveMs = elapsed_ms;
+        m_lastSaveFailureTick = -1;
+        if (m_worldSystem)
+            m_worldSystem->clear_persistence_save_request();
+    } else {
+        ++m_saveFailures;
+        m_lastSaveFailureTick = tick;
+    }
+}
+
+std::string GameSession::ComputeChunkStateHash() {
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->sync_water_authority();
+    if (!m_worldSystem)
+        return {};
+    const auto live = m_worldSystem->snapshot_streamed_chunks();
+    if (!m_activeRegionsEnabled) {
+        WorldStreamingState state;
+        for (const auto& chunk : live)
+            state.insert_chunk(chunk);
+        return Persistence::ComputeWorldStreamingStateHash(
+            state, m_worldSystem->GetWaterSimWindowCursor());
+    }
+    const auto parked = m_worldSystem->snapshot_parked_chunks();
+    const auto durable = m_worldSystem->durable_chunk_inventory();
+    std::set<RegionKey> keys;
+    const auto add_key = [&keys](const IVec3& coords) {
+        int rx = 0, rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+        keys.insert({rx, rz});
+    };
+    for (const auto& chunk : live)
+        if (chunk && chunk->needs_authority() && chunk->get_state() != ChunkState::Loading)
+            add_key(chunk->get_coords());
+    for (const auto& chunk : parked)
+        if (chunk && chunk->needs_authority())
+            add_key(chunk->get_coords());
+    for (const auto& coords : durable)
+        add_key(coords);
+    const auto directory =
+        m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+    std::string projection = "authoritative_chunks:v2:";
+    try {
+        if (!durable.empty() && !Persistence::snapshot_index_exists(directory))
+            throw std::runtime_error("inconsistent snapshot: index missing");
+        for (const auto key : keys) {
+            const auto record = m_activeRegionLedger.records().find(key);
+            const auto digest = record != m_activeRegionLedger.records().end() &&
+                                        record->second.state == RegionState::Frozen
+                                    ? record->second.frozen_digest
+                                    : Persistence::WorldSaveService::region_simulation_digest(
+                                          directory,
+                                          key,
+                                          Persistence::RegionDigestInputs{.live = live,
+                                                                          .parked = parked,
+                                                                          .durable = durable,
+                                                                          .ground_object_bytes = {},
+                                                                          .field_page_bytes = {}});
+            projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
+                          std::to_string(digest) + ";";
+        }
+    } catch (const std::exception& error) {
+        LatchRegionFault(m_worldClock.tick(), error.what());
+    }
+    return Persistence::HashSimulationProjection(projection,
+                                                 m_worldSystem->GetWaterSimWindowCursor());
 }
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
                ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
-                                             m_activeRegionLedger.canonical_bytes())
+                                             m_activeRegionLedger.canonical_bytes() +
+                                             m_groundObjects.canonical_bytes() +
+                                             m_fieldPages.canonical_bytes())
                : ecology_hash;
 }
 
@@ -1681,8 +2407,120 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_simulationClock.reset(clock.tick());
     if (m_energyFieldState)
         m_energyFieldState->ResetEmptyAtTick(clock.tick());
-    m_weatherSystem->RestoreAtTick(clock.tick(), m_ambientFieldAnchor, *m_windFieldSystem);
-    m_aetherFieldSystem->Update(clock.tick(), m_ambientFieldAnchor, m_windFieldSystem.get());
+    RestoreAmbientFieldsAtTick(clock.tick());
+}
+
+void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
+    if (m_activeRegionsEnabled) {
+        // Rebuild projections from authority without advancing regional ages or consumers.
+        // Regional RestoreAtTick only stamps weather's tick; it does not update wind.
+        if (m_windFieldSystem)
+            m_windFieldSystem->Update(tick, m_ambientFieldAnchor);
+        ProjectRegionalWeather(true);
+    }
+    if (m_weatherSystem && m_windFieldSystem)
+        m_weatherSystem->RestoreAtTick(tick, m_ambientFieldAnchor, *m_windFieldSystem);
+    if (m_aetherFieldSystem)
+        m_aetherFieldSystem->Update(tick, m_ambientFieldAnchor, m_windFieldSystem.get());
+    if (m_activeRegionsEnabled)
+        RestoreRegionalScent();
+}
+
+namespace {
+
+// One flag-on save is one snapshot transaction (S4): recovery, one validation, then every indexed
+// member writer joins this transaction and the index is published once at Commit. Owner thread
+// only.
+class OuterSaveTransaction {
+public:
+    OuterSaveTransaction(const fs::path& save_dir,
+                         std::uint64_t tick,
+                         std::vector<std::array<float, 3>> anchors)
+        : m_facts(save_dir)
+        , m_transaction(
+              save_dir, tick, std::move(anchors), &Persistence::WorldSaveService::member_digest)
+        , m_save_dir(save_dir) {}
+
+    // Recovers an interrupted save, validates the directory once, then opens the journal.
+    bool Start(const std::function<bool()>& preflight) {
+        std::vector<std::string> errors;
+        if (Persistence::recover_pending_journal(m_save_dir, &errors) ==
+            Persistence::RecoveryOutcome::Failed) {
+            Log(errors);
+            return false;
+        }
+        if (!m_facts.validate(&errors)) {
+            Log(errors);
+            return false;
+        }
+        if (preflight && !preflight())
+            return false;
+        if (!m_transaction.begin(&errors)) {
+            Log(errors);
+            return false;
+        }
+        return true;
+    }
+
+    bool Commit() {
+        std::vector<std::string> errors;
+        if (!m_transaction.commit(&errors)) {
+            Log(errors);
+            return false;
+        }
+        m_facts.run_deferred();
+        return true;
+    }
+
+private:
+    static void Log(const std::vector<std::string>& errors) {
+        for (const std::string& error : errors)
+            LUMINUMBRA_CORE_ERROR("World save transaction failed: {}", error);
+    }
+
+    // Declared in this order so the transaction (which rolls back) is destroyed before the facts.
+    Persistence::WorldSaveService::SaveFactsScope m_facts;
+    Persistence::SaveTransaction m_transaction;
+    fs::path m_save_dir;
+};
+
+std::unique_ptr<OuterSaveTransaction> StartOuterSave(const fs::path& save_dir,
+                                                     std::uint64_t tick,
+                                                     const std::optional<Vec3>& anchor,
+                                                     const std::function<bool()>& preflight = {}) {
+    std::vector<std::array<float, 3>> anchors;
+    if (anchor)
+        anchors.push_back({anchor->x, anchor->y, anchor->z});
+    auto outer = std::make_unique<OuterSaveTransaction>(save_dir, tick, std::move(anchors));
+    if (!outer->Start(preflight))
+        return nullptr;
+    return outer;
+}
+
+} // namespace
+
+bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
+    const fs::path save_dir = GetWorldSaveDir();
+    if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
+        m_metadata.worldId.empty() || !m_worldUsable || !IsSimulationTickBoundary() ||
+        !ClockConfigurationCompatible(save_dir) ||
+        Persistence::SaveTransaction::active_for(save_dir)) {
+        return body(); // nothing to wrap: the writers keep their own commits
+    }
+    if (m_worldSystem)
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+    const Persistence::WorldSaveService::SaveOwnership save_ownership;
+    auto outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
+    if (!outer)
+        return false;
+    if (!body()) {
+        RecordPersistenceSaveOutcome(false, 0);
+        return false; // the destructor rolls the whole snapshot back
+    }
+    const bool committed = outer->Commit();
+    if (!committed)
+        RecordPersistenceSaveOutcome(false, 0);
+    return committed;
 }
 
 bool GameSession::SaveWorld() {
@@ -1710,6 +2548,12 @@ bool GameSession::ReconcileWorldStateMetadataTo(const fs::path& save_dir) {
         metadata = nlohmann::json::parse(input, nullptr, false);
         if (!metadata.is_object())
             return false;
+        // Missing cursors load as zero. Preserve legacy extensions and formatting when the
+        // evolution state is unchanged; only calendar removal requires a metadata rewrite.
+        if (!metadata.contains("renderCalendar") &&
+            ((!metadata.contains("waterSimCursor") && cursor == 0) ||
+             (metadata.contains("waterSimCursor") && metadata.at("waterSimCursor") == cursor)))
+            return true;
     }
     metadata.erase("renderCalendar");
     metadata["waterSimCursor"] = cursor;
@@ -1770,19 +2614,17 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
 }
 } // namespace
 
-bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
+bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&
          (m_activeRegionsEnabled || !m_renderCalendar)) ||
         !m_worldUsable || !SavedPresetCompatible(save_dir))
         return false;
-    if (m_activeRegionsEnabled) {
-        if (!Persistence::WorldSaveService::validate_save(save_dir))
-            return false;
-        std::error_code error;
-        fs::create_directories(save_dir, error);
-        if (error)
+    std::unique_ptr<OuterSaveTransaction> outer;
+    if (m_activeRegionsEnabled && !Persistence::SaveTransaction::active_for(save_dir)) {
+        outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
+        if (!outer)
             return false;
     }
     if (!PersistSavedPreset(save_dir, m_savedPresetJson))
@@ -1815,15 +2657,50 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
         metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
+        // Marks a directory that must carry a snapshot index (downgrade guard, S4). Written only
+        // inside a snapshot transaction, so the marker and the index always appear together.
+        metadata_json["snapshotFormat"] = 1;
     }
     if (m_activeRegionsEnabled) {
         // All production callers save synchronously on the host thread: client
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
-        // The persistence service serializes the whole pair with other writers.
-        auto ledger = m_activeRegionLedger;
+        // Do not dispatch this pair to workers; the writer asserts non-overlap.
+        // The object file joins the same transaction, so the id allocator and objects stay paired.
+        std::vector<std::string> ground_errors;
+        if (!Persistence::WorldSaveService::save_ground_objects(
+                m_groundObjects, save_dir, &ground_errors)) {
+            for (const std::string& error : ground_errors)
+                LUMINUMBRA_CORE_ERROR("Ground object save failed: {}", error);
+            return false;
+        }
+        std::vector<std::string> page_errors;
+        if (!Persistence::WorldSaveService::save_field_pages(
+                m_fieldPages, save_dir, &page_errors)) {
+            for (const std::string& error : page_errors)
+                LUMINUMBRA_CORE_ERROR("Field page save failed: {}", error);
+            return false;
+        }
+        if (!SaveEnergyFieldRecord(save_dir))
+            return false;
+        const auto expected_ledger = m_activeRegionLedger.canonical_bytes();
+        auto saved_ledger = m_activeRegionLedger;
+        saved_ledger.mark_saved(m_worldClock);
+        auto ledger = saved_ledger;
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
                 metadata_json.dump(4) + "\n", ledger, save_dir))
             return false;
+        if (save_dir == GetWorldSaveDir()) {
+            if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+                transaction->defer_until_commit(
+                    [this, expected_ledger, saved = std::move(saved_ledger)]() mutable {
+                        if (m_activeRegionLedger.canonical_bytes() == expected_ledger)
+                            m_activeRegionLedger = std::move(saved);
+                    });
+        }
+        if (outer) {
+            if (!outer->Commit())
+                return false;
+        }
     } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
                                                              save_dir)) {
         return false;
@@ -1865,6 +2742,12 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                        WorldStateSaveReport* report,
                                        bool full_snapshot,
                                        bool write_metadata) {
+    const auto save_started = std::chrono::steady_clock::now();
+    const auto elapsed_ms = [&save_started]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                         save_started)
+            .count();
+    };
     const bool canonical_save = save_dir == GetWorldSaveDir();
     full_snapshot =
         full_snapshot || (m_activeRegionsEnabled && !m_transientWorld && !canonical_save);
@@ -1887,8 +2770,13 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // so the saved bytes are identical to the old publishing barrier's.
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
+    if (m_activeRegionsEnabled) {
+        // After the quiesce: a finishing generation worker can no longer erase the obligation.
+        m_worldSystem->sync_water_authority();
+    }
     WorldStreamingState state;
-    for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+    for (const auto& chunk : m_activeRegionsEnabled ? m_worldSystem->snapshot_authoritative_chunks()
+                                                    : m_worldSystem->snapshot_streamed_chunks()) {
         state.insert_chunk(chunk);
     }
     result.chunks_total = state.size();
@@ -1899,6 +2787,26 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // holds).
     const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
 
+    const auto acknowledge =
+        Persistence::WorldSaveService::chunk_save_acknowledgement(state.snapshot_chunks());
+    const auto defer_success = [this, &save_dir, &state, &elapsed_ms]() {
+        if (!m_activeRegionsEnabled)
+            return;
+        std::vector<IVec3> covered;
+        for (const auto& chunk : state.snapshot_chunks())
+            if (chunk && chunk->needs_authority())
+                covered.push_back(chunk->get_coords());
+        const auto completed_ms = elapsed_ms();
+        auto committed =
+            [this, directory = save_dir, covered = std::move(covered), completed_ms]() {
+                m_regionDurableDirectory = directory;
+                m_worldSystem->remember_durable_chunks(covered);
+                m_worldSystem->release_clean_parked_chunks();
+                RecordPersistenceSaveOutcome(true, completed_ms);
+            };
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+            transaction->defer_until_commit(std::move(committed));
+    };
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
     if (report)
@@ -1908,9 +2816,63 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // then retain the shared recursive ownership from destination validation
     // through every payload, metadata publication and dirty acknowledgement.
     const Persistence::WorldSaveService::SaveOwnership save_ownership;
-    if (!ClockConfigurationCompatible(save_dir) ||
-        !Persistence::WorldSaveService::validate_save(save_dir) || !SavedPresetCompatible(save_dir))
+    const auto compatible = [&]() {
+        return ClockConfigurationCompatible(save_dir) && SavedPresetCompatible(save_dir);
+    };
+    std::unique_ptr<OuterSaveTransaction> outer;
+    if (m_activeRegionsEnabled && !Persistence::SaveTransaction::active_for(save_dir)) {
+        outer = StartOuterSave(
+            save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor(), compatible);
+        if (!outer) {
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
+            return false;
+        }
+    } else if (!compatible() || !Persistence::WorldSaveService::validate_save(save_dir)) {
+        RecordPersistenceSaveOutcome(false, elapsed_ms());
         return false;
+    }
+
+    std::error_code source_path_error, target_path_error;
+    const auto source_directory = fs::weakly_canonical(m_regionDurableDirectory, source_path_error);
+    const auto target_directory = fs::weakly_canonical(save_dir, target_path_error);
+    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
+        (source_path_error || target_path_error)) {
+        RecordPersistenceSaveOutcome(false, elapsed_ms());
+        return false;
+    }
+    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
+        source_directory != target_directory) {
+        // Save-as must transfer distant disk-only obligations to the exported snapshot.
+        // Stream one chunk at a time; live/parked state supersedes the old copy.
+        Persistence::WorldSaveService copier;
+        std::vector<std::string> copy_errors;
+        bool copied = true;
+        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
+            if (state.find_chunk(Chunk::calculate_id(coords)))
+                continue;
+            const auto durable =
+                Persistence::WorldSaveService::read_chunk(m_regionDurableDirectory, coords, true);
+            if (durable.status != Persistence::WorldSaveService::ChunkReadStatus::Found) {
+                copied = false;
+                copy_errors.push_back(durable.error.empty()
+                                          ? "expected durable chunk missing during save-as"
+                                          : durable.error);
+                break;
+            }
+            WorldStreamingState one;
+            one.insert_chunk(durable.chunk);
+            if (!copier.save_world(one, save_dir, &copy_errors)) {
+                copied = false;
+                break;
+            }
+        }
+        if (!copied || !copier.save_world(state, save_dir, &copy_errors)) {
+            for (const auto& error : copy_errors)
+                LUMINUMBRA_CORE_ERROR("World save-as failed: {}", error);
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
+            return false;
+        }
+    }
 
     std::vector<std::string> errors;
     const Persistence::WorldSaveService service;
@@ -1953,20 +2915,22 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                             : ReconcileWorldStateMetadataTo(save_dir);
     for (const auto& error : errors)
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
-    if (!ok)
+    if (!ok) {
+        RecordPersistenceSaveOutcome(false, elapsed_ms());
         return false;
-
-    if (write_metadata && canonical_save && m_activeRegionsEnabled) {
-        m_activeRegionLedger.mark_saved(m_worldClock);
-        m_regionDurableDirectory = save_dir;
     }
-    // An export does not persist edits to the canonical save. Keep them pending
-    // there, so the next autosave cannot advance its metadata beside stale chunks.
+
     if (m_transientWorld || canonical_save) {
-        for (const ChunkID id : dirty_ids) {
-            if (const auto chunk = state.find_chunk(id))
-                chunk->clear_voxel_data_dirty();
-        }
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+            transaction->defer_until_commit(acknowledge);
+        else
+            acknowledge();
+        if (write_metadata)
+            defer_success();
+    }
+    if (outer && !outer->Commit()) {
+        RecordPersistenceSaveOutcome(false, elapsed_ms());
+        return false;
     }
     result.saved = write_chunks;
     result.chunks_saved = write_chunks ? result.chunks_total : 0;
@@ -1988,8 +2952,10 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (!m_worldUsable || !m_worldSystem || save_dir.empty()) {
         return false;
     }
-
     LoadedWorldState state;
+    if (m_activeRegionsEnabled)
+        for (const auto& coords : m_worldSystem->GetInitialChunkLoadList(m_metadata.spawnPoint))
+            state.wanted.insert(Chunk::calculate_id(coords));
     if (!ReadWorldStateFrom(save_dir, state)) {
         m_worldUsable = false;
         // Refused snapshots invalidate resident chunks, but never publish staged members.
@@ -2001,9 +2967,31 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 }
 
 bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState& state) {
+    {
+        std::vector<std::string> recovery_errors;
+        if (Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
+            Persistence::RecoveryOutcome::Failed) {
+            m_worldOpenError =
+                "World unavailable: an interrupted save could not be recovered: " +
+                (recovery_errors.empty() ? std::string("unknown error") : recovery_errors.front());
+            return false;
+        }
+    }
+
     const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
-    state.snapshot_present = service.load_world(state.chunks, save_dir, errors);
+    const std::function<bool(const IVec3&)> retain =
+        m_activeRegionsEnabled ? std::function<bool(const IVec3&)>([&state](const IVec3& coords) {
+            return state.wanted.contains(Chunk::calculate_id(coords));
+        })
+                               : std::function<bool(const IVec3&)>{};
+    state.snapshot_present =
+        service.load_world(state.chunks,
+                           save_dir,
+                           errors,
+                           {},
+                           retain,
+                           m_activeRegionsEnabled ? &state.durable_inventory : nullptr);
     if (!state.snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
         for (const std::string& error : errors)
@@ -2035,6 +3023,57 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState&
             m_worldOpenError =
                 errors.empty() ? std::string(ActiveRegionLedger::kCorruptMessage) : errors.front();
             return false;
+        }
+        // Loaded before the ledger is adopted so a refusal leaves the session state as the
+        // ledger-failure path does.
+
+        std::vector<std::string> ground_errors;
+        if (!Persistence::WorldSaveService::load_ground_objects(state.ground_objects,
+                                                                save_dir,
+                                                                state.ledger->next_persistent_id(),
+                                                                &ground_errors)) {
+            m_worldOpenError = ground_errors.empty() ? std::string("Corrupt ground objects.")
+                                                     : ground_errors.front();
+            return false;
+        }
+
+        std::vector<std::string> page_errors;
+        if (!Persistence::WorldSaveService::load_field_pages(
+                state.field_pages, save_dir, &page_errors)) {
+            m_worldOpenError =
+                page_errors.empty() ? std::string("Corrupt field pages.") : page_errors.front();
+            return false;
+        }
+
+        std::error_code energy_ec;
+        const auto energy_path = save_dir / "aether_state.efs";
+        const bool has_energy = fs::exists(energy_path, energy_ec);
+        if (energy_ec ||
+            ((has_energy || !state.ledger->energy_ages().empty()) && !m_aetherStateEnabled)) {
+            m_worldOpenError = energy_ec ? "Unreadable regional energy record."
+                                         : "Incompatible configuration: regional energy state "
+                                           "requires sim.aether_state.";
+            return false;
+        }
+        if (m_aetherStateEnabled) {
+            state.energy.emplace(2);
+            bool valid = true;
+            if (has_energy) {
+                const auto length = fs::file_size(energy_path, energy_ec);
+                valid = !energy_ec &&
+                        length <= luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes;
+                if (valid) {
+                    std::ifstream input(energy_path, std::ios::binary);
+                    const std::string bytes(std::istreambuf_iterator<char>{input}, {});
+                    valid = input.good() && state.energy->DeserializeRegionalRecord(bytes);
+                }
+            }
+            valid = valid && state.energy->ValidateRegionalOwners(state.ledger->records(),
+                                                                  state.ledger->energy_ages());
+            if (!valid) {
+                m_worldOpenError = "Corrupt regional energy record.";
+                return false;
+            }
         }
         if (m_regionSchedulerOverride && state.ledger->config() != *m_regionSchedulerOverride) {
             m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
@@ -2069,14 +3108,20 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         // Interrupted pairs may have an older ledger. Rebase without scheduling.
         saved.ledger->restore_clock(saved.clock);
         ReplaceActiveRegionLedger(std::move(*saved.ledger));
+        m_groundObjects = std::move(saved.ground_objects);
+        m_fieldPages = std::move(saved.field_pages);
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;
+        m_worldSystem->remember_durable_chunks(saved.durable_inventory);
         m_regionSchedule = {};
         m_regionWork.clear();
+        m_regionCompletedWork.clear();
         m_regionFault.reset();
         m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved.clock);
+        if (saved.energy)
+            *m_energyFieldState = std::move(*saved.energy);
     }
     auto& loaded = saved.chunks;
     std::size_t adopted = 0;
@@ -2149,11 +3194,9 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     // restore the stateful energy layer's record (a
     // missing file is a clean miss == all zeros by contract). Epoch-rebased
     // onto the loaded session's tick stream (-4).
-    if (m_energyFieldState) {
+    if (m_energyFieldState && !m_activeRegionsEnabled) {
         const fs::path recordPath = save_dir / "aether_state.efs";
-        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
-        std::ifstream recordFile;
-        recordFile.open(recordPath);
+        std::ifstream recordFile(recordPath, std::ios::binary);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();
@@ -2215,23 +3258,23 @@ int GameSession::ScentFieldCells() const {
     return kScentFieldCells;
 }
 int GameSession::ScentWorldToCellX(float world_x) const {
-    return static_cast<int>(
-        std::lround((world_x - ScentOriginFor(m_metadata.spawnPoint.x)) / kScentCellSize));
+    return static_cast<int>(std::lround((world_x - ScentDomainOrigin(true)) / kScentCellSize));
 }
 int GameSession::ScentWorldToCellZ(float world_z) const {
-    return static_cast<int>(
-        std::lround((world_z - ScentOriginFor(m_metadata.spawnPoint.z)) / kScentCellSize));
+    return static_cast<int>(std::lround((world_z - ScentDomainOrigin(false)) / kScentCellSize));
 }
 float GameSession::ScentCellToWorldX(int cell_x) const {
-    return ScentOriginFor(m_metadata.spawnPoint.x) + static_cast<float>(cell_x) * kScentCellSize;
+    return ScentDomainOrigin(true) + static_cast<float>(cell_x) * kScentCellSize;
 }
 float GameSession::ScentCellToWorldZ(int cell_z) const {
-    return ScentOriginFor(m_metadata.spawnPoint.z) + static_cast<float>(cell_z) * kScentCellSize;
+    return ScentDomainOrigin(false) + static_cast<float>(cell_z) * kScentCellSize;
 }
 
 void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
     m_scentField = std::make_unique<luminumbra::ai::ScentField>(
         kScentFieldCells, kScentFieldCells, kScentFieldChannels);
+    if (m_activeRegionsEnabled)
+        m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
     LUMINUMBRA_CORE_INFO("Scent field initialized: {}x{} cells, {} channel(s), cell_size={}",
                          kScentFieldCells,
                          kScentFieldCells,
@@ -2239,11 +3282,193 @@ void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
                          kScentCellSize);
 }
 
-bool GameSession::HasScentParticipants() const {
+float GameSession::ScentDomainOrigin(bool x_axis) const {
+    const float anchor = m_activeRegionsEnabled
+                             ? (x_axis ? m_ambientFieldAnchor.x : m_ambientFieldAnchor.z)
+                             : (x_axis ? m_metadata.spawnPoint.x : m_metadata.spawnPoint.z);
+    return ScentOriginFor(m_activeRegionsEnabled ? std::floor(anchor) : anchor);
+}
+RegionKey GameSession::ScentCellOwner(int x, int z) const {
+    return FieldPageState::region_of_scent_cell(
+        {static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
+         static_cast<std::int32_t>(ScentDomainOrigin(false)) + z});
+}
+bool GameSession::ScentCellDue(int x, int z) const {
+    if (m_regionFault || x < 0 || z < 0 || x >= kScentFieldCells || z >= kScentFieldCells)
+        return false;
+    const auto owner = ScentCellOwner(x, z);
+    return std::find(m_regionSchedule.due.begin(), m_regionSchedule.due.end(), owner) !=
+           m_regionSchedule.due.end();
+}
+bool GameSession::ScentEdgeOpen(int x, int z, int nx, int nz) const {
+    const auto source = ScentCellOwner(x, z), destination = ScentCellOwner(nx, nz);
+    if (source == destination)
+        return ScentCellDue(x, z);
+    const auto& records = m_activeRegionLedger.records();
+    const auto a = records.find(source), b = records.find(destination);
+    if (a == records.end() || b == records.end() || a->second.state == RegionState::Frozen ||
+        b->second.state == RegionState::Frozen)
+        return false;
+    const auto shift = std::max(a->second.cadence_shift, b->second.cadence_shift);
+    return shift < 63 && (m_worldClock.tick() & ((std::uint64_t{1} << shift) - 1)) == 0;
+}
+void GameSession::RestoreRegionalScent() {
+    if (!m_activeRegionsEnabled || !m_scentField)
+        return;
+    for (int z = 0; z < kScentFieldCells; ++z)
+        for (int x = 0; x < kScentFieldCells; ++x) {
+            const ScentCellKey key{static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
+                                   static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
+            const auto found = m_fieldPages.scent_cells().find(key);
+            for (int channel = 0; channel < kScentFieldChannels; ++channel)
+                m_scentField->RestoreCell(channel,
+                                          x,
+                                          z,
+                                          found == m_fieldPages.scent_cells().end()
+                                              ? 0.0
+                                              : std::bit_cast<double>(found->second[channel]));
+        }
+}
+void GameSession::CaptureRegionalScent() {
+    std::vector<std::pair<ScentCellKey, ScentCell>> changed;
+    std::map<RegionKey, std::uint64_t> work;
+    for (int z = 0; z < kScentFieldCells; ++z)
+        for (int x = 0; x < kScentFieldCells; ++x) {
+            const ScentCellKey key{static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
+                                   static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
+            ScentCell values{};
+            for (int channel = 0; channel < kScentFieldChannels; ++channel)
+                values[channel] = std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
+            const auto found = m_fieldPages.scent_cells().find(key);
+            const ScentCell old =
+                found == m_fieldPages.scent_cells().end() ? ScentCell{} : found->second;
+            if (values == old)
+                continue;
+            changed.emplace_back(key, values);
+            ++work[FieldPageState::region_of_scent_cell(key)];
+        }
+    if (!m_fieldPages.update_scent(changed))
+        throw std::runtime_error("Regional scent admission failed");
+    for (const auto& [owner, updates] : work)
+        RecordActiveRegionWork({owner, 0, 0, 0, updates});
+}
+
+void GameSession::AdvanceNearScent() {
+    // 2c.: scent stigmergy write/update. Game-data opt-in:
+    // no scent emitter/sensor components means no field mutation, while active
+    // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
+    const bool scent_active = HasScentParticipants();
+    // ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
+    // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate
+    // this tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a
+    // no-op, so the canonical roster (and any scent-only world) is byte-identical.
+    // Integer/id-ordered/libm-free.
+    const auto foragers_view = m_registry.view<const Luminumbra::Components::ForagerComponent>();
+    const bool foraging_active = std::any_of(
+        foragers_view.begin(), foragers_view.end(), [this, &foragers_view](const auto entity) {
+            if (!m_activeRegionsEnabled)
+                return true;
+            const auto& forager =
+                foragers_view.get<const Luminumbra::Components::ForagerComponent>(entity);
+            return ScentCellDue(forager.cell_x, forager.cell_z);
+        });
+    const bool scent_interior = scent_active || foraging_active;
+    if ((scent_interior || HasScentBorderWork()) && m_scentField) {
+        if (scent_active) {
+            luminumbra::ai::RunScentDepositOnTick(m_registry,
+                                                  *m_scentField,
+                                                  ScentDomainOrigin(true),
+                                                  ScentDomainOrigin(false),
+                                                  kScentCellSize);
+        }
+        if (foraging_active) {
+            luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+        }
+        // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
+        // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
+        // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
+        // Step skips advection -> byte-identical (no re-pin until tuned on).
+        double wind_cx = 0.0, wind_cz = 0.0;
+        if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
+            const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
+            const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
+                             static_cast<double>(kScentCellSize);
+            wind_cx = static_cast<double>(w.x) * k;
+            wind_cz = static_cast<double>(w.y) * k;
+        }
+        luminumbra::ai::detail::ScentStepGates gates;
+        if (m_activeRegionsEnabled) {
+            // This 128 m square intersects at most two 512 m owners on each axis.
+            // The schedule and anchor are sealed throughout Step/Clamp. Resolve their
+            // gates once per tile, rather than doing world conversions and ledger/due
+            // lookups for every channel, diffusion iteration and advection path hop.
+            static_assert(kScentFieldCells * kScentCellSize < 512.0f);
+            gates = luminumbra::ai::detail::CacheNearScentGates(
+                kScentFieldCells,
+                [this](int x, int z) { return ScentCellOwner(x, z); },
+                [this, scent_interior](int x, int z) {
+                    return scent_interior && ScentCellDue(x, z);
+                },
+                [this](int x, int z, int nx, int nz) { return ScentEdgeOpen(x, z, nx, nz); });
+        }
+        m_scentField->Step(kScentDiffusionRate,
+                           kScentDiffusionIterations,
+                           kScentEvaporation,
+                           wind_cx,
+                           wind_cz,
+                           gates.participants,
+                           gates.exchange);
+        m_scentField->Clamp(kScentTauMin, kScentTauMax, gates.participants);
+        if (m_activeRegionsEnabled)
+            CaptureRegionalScent();
+    }
+}
+
+bool GameSession::HasScentBorderWork() const {
+    if (!m_activeRegionsEnabled || !m_scentField || m_regionFault)
+        return false;
+    bool participant = HasScentParticipants(false);
+    const auto foragers = m_registry.view<const Luminumbra::Components::ForagerComponent>();
+    for (const auto entity : foragers) {
+        const auto& ant = foragers.get<const Luminumbra::Components::ForagerComponent>(entity);
+        participant =
+            participant || (ant.cell_x >= 0 && ant.cell_z >= 0 && ant.cell_x < kScentFieldCells &&
+                            ant.cell_z < kScentFieldCells);
+    }
+    if (!participant)
+        return false;
+    for (int z = 0; z < kScentFieldCells; ++z)
+        for (int x = 0; x < kScentFieldCells; ++x)
+            for (const auto& offset : {std::pair{1, 0}, std::pair{0, 1}}) {
+                const int nx = x + offset.first, nz = z + offset.second;
+                if (nx >= kScentFieldCells || nz >= kScentFieldCells ||
+                    ScentCellOwner(x, z) == ScentCellOwner(nx, nz) || !ScentEdgeOpen(x, z, nx, nz))
+                    continue;
+                for (int channel = 0; channel < kScentFieldChannels; ++channel)
+                    if (m_scentField->Sample(channel, x, z) !=
+                        m_scentField->Sample(channel, nx, nz))
+                        return true;
+            }
+    return false;
+}
+
+bool GameSession::HasScentParticipants(bool require_due) const {
+    const auto near_due = [this, require_due](const Vec3& position) {
+        if (!m_activeRegionsEnabled)
+            return true;
+        const float x = position.x - ScentDomainOrigin(true),
+                    z = position.z - ScentDomainOrigin(false);
+        return std::isfinite(x) && std::isfinite(z) && x >= 0 && z >= 0 && x < kScentFieldCells &&
+               z < kScentFieldCells &&
+               (!require_due || ScentCellDue(static_cast<int>(x), static_cast<int>(z)));
+    };
     {
         auto emitters = m_registry.view<const Luminumbra::Components::TransformComponent,
                                         const Luminumbra::Components::SensableComponent>();
         for (auto e : emitters) {
+            if (!near_due(
+                    emitters.get<const Luminumbra::Components::TransformComponent>(e).position))
+                continue;
             const auto& s = emitters.get<const Luminumbra::Components::SensableComponent>(e);
             if (s.scent_channel >= 0 && s.scent_deposit > 0.0f) {
                 return true;
@@ -2254,6 +3479,9 @@ bool GameSession::HasScentParticipants() const {
         auto sensors = m_registry.view<const Luminumbra::Components::TransformComponent,
                                        const Luminumbra::Components::ScentSenseComponent>();
         for (auto e : sensors) {
+            if (!near_due(
+                    sensors.get<const Luminumbra::Components::TransformComponent>(e).position))
+                continue;
             const auto& s = sensors.get<const Luminumbra::Components::ScentSenseComponent>(e);
             if (s.channel >= 0) {
                 return true;
@@ -2264,6 +3492,22 @@ bool GameSession::HasScentParticipants() const {
 }
 
 std::string GameSession::ComputeScentSubHash() const {
+    if (m_activeRegionsEnabled) {
+        if (m_fieldPages.scent_cells().empty())
+            return {};
+        std::string bytes = "regional_scent:v2:";
+        for (const auto& [cell, values] : m_fieldPages.scent_cells()) {
+            const auto append = [&bytes](std::uint64_t value, int count) {
+                for (int i = 0; i < count; ++i)
+                    bytes.push_back(static_cast<char>((value >> (8 * i)) & 255));
+            };
+            append(static_cast<std::uint32_t>(cell.x), 4);
+            append(static_cast<std::uint32_t>(cell.z), 4);
+            for (const auto value : values)
+                append(value, 8);
+        }
+        return Persistence::StableChecksum(bytes);
+    }
     if (!m_scentField || !HasScentParticipants()) {
         return {};
     }
@@ -2309,6 +3553,17 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
         return false;
     if (!m_energyFieldState || save_dir.empty())
         return true;
+    if (m_activeRegionsEnabled) {
+        const auto record = m_energyFieldState->SerializeRegionalRecord();
+        std::vector<std::string> errors;
+        const bool saved = record.empty() ? Persistence::WorldSaveService::remove_member(
+                                                save_dir, "aether_state.efs", &errors)
+                                          : Persistence::WorldSaveService::write_member_bytes(
+                                                save_dir, "aether_state.efs", record, &errors);
+        for (const auto& error : errors)
+            LUMINUMBRA_CORE_ERROR("Failed to save regional energy: {}", error);
+        return saved;
+    }
     if (m_energyFieldState->page_count() == 0) {
         const auto tick = GetSimulationTickCount();
         const auto absent_remaining = m_activeRegionsEnabled
@@ -2318,13 +3573,31 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
         const auto next_fire = m_energyFieldState->next_fire_tick();
         if (next_fire > tick && next_fire - tick == absent_remaining) {
             // Absence reconstructs this phase. Retire any stale nonempty record.
-            return Persistence::WorldSaveService::remove_file_and_staging(save_dir /
-                                                                          "aether_state.efs");
+            if (!Persistence::SaveTransaction::active_for(save_dir) &&
+                !Persistence::snapshot_index_exists(save_dir))
+                return Persistence::WorldSaveService::remove_file_and_staging(save_dir /
+                                                                              "aether_state.efs");
+            std::vector<std::string> errors;
+            const bool removed =
+                Persistence::WorldSaveService::remove_member(save_dir, "aether_state.efs", &errors);
+            for (const std::string& error : errors)
+                LUMINUMBRA_CORE_ERROR("Failed to retire aether state record: {}", error);
+            return removed;
         }
         // A legacy import can retain a different phase after its last unit decays.
         // The existing header alone preserves it without adding zero pages.
     }
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
+    if (m_activeRegionsEnabled || Persistence::SaveTransaction::active_for(save_dir) ||
+        Persistence::snapshot_index_exists(save_dir)) {
+        // Flag-on (or indexed-directory) lane: durable binary replace inside the save transaction.
+        std::vector<std::string> errors;
+        const bool written = Persistence::WorldSaveService::write_member_bytes(
+            save_dir, "aether_state.efs", record, &errors);
+        for (const std::string& error : errors)
+            LUMINUMBRA_CORE_ERROR("Failed to write aether state record: {}", error);
+        return written;
+    }
     return Persistence::WorldSaveService::write_file_durably(save_dir / "aether_state.efs", record);
 }
 
@@ -2332,7 +3605,8 @@ std::string GameSession::ComputeAetherStateSubHash() const {
     if (!m_energyFieldState) {
         return {};
     }
-    const std::string bytes = m_energyFieldState->CanonicalBytes();
+    const std::string bytes = m_activeRegionsEnabled ? m_energyFieldState->CanonicalRegionalBytes()
+                                                     : m_energyFieldState->CanonicalBytes();
     if (bytes.empty()) {
         return {}; // all-zero == absent (the scent/plant empty-neutral contract)
     }

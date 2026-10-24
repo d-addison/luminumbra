@@ -87,6 +87,10 @@ bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
 // fnv1a_64_stable_json machinery the WorldHash gate artifact records).
 // Nonzero cursors append |waterSimCursor:v1: and a uint64 little-endian value
 // to the canonical bytes. Zero/absent appends nothing, preserving legacy hashes.
+// Shared binding for alternative authority projections; uses the same cursor encoding.
+std::string HashSimulationProjection(const std::string& canonical_bytes,
+                                     std::uint64_t water_sim_cursor = 0);
+
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
                                            std::uint64_t water_sim_cursor = 0);
 

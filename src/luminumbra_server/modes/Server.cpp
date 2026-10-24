@@ -4,7 +4,9 @@
 namespace fs = std::filesystem;
 
 int RunServer(const ServerCliOptions& options) {
-    Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(options));
+    Luminumbra::Server::ServerWorldRunnerConfig runner_config = RunnerConfigFrom(options);
+    runner_config.autosave_default_when_unset = !options.autosave_ticks_explicit;
+    Luminumbra::Server::ServerWorldRunner runner(runner_config);
     if (!runner.Boot()) {
         return 1;
     }

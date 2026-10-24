@@ -120,7 +120,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         parts = service.split("boolReplaceRegionFileAtomically(")[1:]
         self.assertEqual(len(parts), 2)
-        for implementation, syscall in zip(parts, ("::GetFileAttributesW(", "std::rename(")):
+        for implementation, syscall in zip(parts, ("::MoveFileExW(", "std::rename(")):
             self.assertLess(implementation.index("if(!FlushAncestorEntries(destination,errors))"),
                             implementation.index(syscall))
         remove = service[service.index("boolWorldSaveService::remove_file_and_staging("):]
@@ -299,6 +299,26 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
             self.assertIn("WriteDurableRegionTemp(staging,", write)
 
+    def test_far_snapshot_owner_paths_leave_durable_reads_to_the_worker(self):
+        world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                            .read_text(encoding="utf-8"))
+        start = world.index("SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
+        end = world.index("SHIELD_WorldSystem::find_streamed_chunk(", start)
+        owner_paths = world[start:end]
+        for disk_lookup in ("read_committed_chunk(", "find_authoritative_chunk(",
+                            "m_durable_chunk_loader(", "m_durable_chunks"):
+            self.assertNotIn(disk_lookup, owner_paths)
+        self.assertIn("snapshot_authoritative_chunks()", owner_paths)
+        self.assertIn("snapshot.authority_revision!=", owner_paths)
+        worker = compact_cpp((ROOT / "src/luminumbra_client/rendering/FarLodSystem.cpp")
+                             .read_text(encoding="utf-8"))
+        start = worker.index("FarLodWorkerBuildOutcomeBuildFarLodWorkerTile(")
+        durable_read = worker.index("read_authoritative_region_chunks(", start)
+        worker = worker[start:worker.index("returnoutcome;", durable_read)]
+        self.assertIn("neighbor_z=rz-1;neighbor_z<=rz+1;", worker)
+        self.assertIn("neighbor_x=rx-1;neighbor_x<=rx+1;", worker)
+        self.assertIn("read_authoritative_region_chunks(", worker)
+
     def test_session_save_owns_validation_payloads_metadata_and_acknowledgement(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
                               .read_text(encoding="utf-8"))
@@ -317,9 +337,26 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           "SavedPresetCompatible(save_dir)", "service.save_world(",
                           ".save_dirty_chunks(", "save_plant_entities(", "SaveEnergyFieldRecord(",
                           "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
-                          "m_activeRegionLedger.mark_saved(",
-                          "chunk->clear_voxel_data_dirty()"):
+                          "transaction->defer_until_commit(acknowledge)",
+                          "acknowledge()", "outer->Commit()"):
             self.assertLess(ownership, sequence.index(operation))
+        wrapper_start = session.index("boolGameSession::RunInSnapshotTransaction(")
+        wrapper = session[wrapper_start:session.index("boolGameSession::SaveWorld()", wrapper_start)]
+        self.assertIn("!m_worldUsable", wrapper)
+        self.assertNotIn("m_worldOpenError", wrapper)
+        self.assertLess(wrapper.index("quiesce_streaming_jobs_for_save();"), wrapper.index(guard))
+        self.assertLess(wrapper.index(guard), wrapper.index("StartOuterSave("))
+        metadata_start = session.index("boolGameSession::SaveWorldMetadataTo(")
+        metadata = session[metadata_start:session.index("GameSession::GetSaveRootPath", metadata_start)]
+        self.assertLess(metadata.index("saved_ledger.mark_saved(m_worldClock)"),
+                        metadata.index("save_metadata_and_active_regions("))
+        self.assertLess(metadata.index("transaction->defer_until_commit("),
+                        metadata.index("outer->Commit()"))
+        self.assertIn("m_activeRegionLedger.canonical_bytes()==expected_ledger", metadata)
+        self.assertLess(metadata.index("if(save_dir==GetWorldSaveDir())"),
+                        metadata.index("transaction->defer_until_commit("))
+        self.assertLess(sequence.index("ReconcileWorldStateMetadataTo("),
+                        sequence.index("transaction->defer_until_commit(acknowledge)"))
 
     def test_writers_hold_shared_ownership_through_cleanup_and_publication(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -327,7 +364,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for name in ("save_metadata", "save_metadata_and_active_regions", "save_plant_entities",
                      "save_active_regions", "upsert_container_records", "save_dirty_chunks",
                      "write_snapshot", "write_file_durably", "remove_file_and_staging",
-                     "create_file_durably", "rename_file_durably"):
+                     "create_file_durably", "rename_file_durably", "save_ground_objects",
+                     "save_field_pages", "durable_write_file", "durable_remove",
+                     "durable_flush_directory", "write_member_bytes", "remove_member"):
             start = service.index("WorldSaveService::" + name + "(")
             body = service.index("{", start)
             self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)

@@ -1,5 +1,6 @@
 #include "SavedWorldCatalog.h"
 
+#include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
@@ -98,10 +99,34 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         return result;
     }
     try {
-        const auto save = root / "worlds/saves" / world_id;
+        const auto save = root / "worlds" / "saves" / world_id;
         if (!fs::is_directory(save) || fs::is_symlink(save))
             return result;
         const auto metadata_path = save / "world_info.json";
+        // A pending journal means the directory may be mid-transaction: its metadata can be
+        // missing, half-written or inconsistent until LoadWorld recovers it, so the entry stays
+        // selectable and is described best-effort without validation.
+        if (journal_pending(save)) {
+            result.pending_recovery = true;
+            result.error.clear();
+            try {
+                std::error_code size_ec;
+                if (fs::is_regular_file(metadata_path) &&
+                    fs::file_size(metadata_path, size_ec) <= 1024 * 1024 && !size_ec) {
+                    std::ifstream pending_input(metadata_path);
+                    const auto pending_json = nlohmann::json::parse(pending_input);
+                    if (pending_json.is_object()) {
+                        if (pending_json.contains("name") && pending_json.at("name").is_string())
+                            result.metadata.name = pending_json.at("name").get<std::string>();
+                        if (pending_json.contains("seed") && pending_json.at("seed").is_string())
+                            result.metadata.seed = pending_json.at("seed").get<std::string>();
+                    }
+                }
+            } catch (const std::exception&) {
+                // Best effort only.
+            }
+            return result;
+        }
         if (!fs::is_regular_file(metadata_path))
             return result;
         // Bound metadata to 1 MiB before parsing.
@@ -175,7 +200,7 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
         return result;
     }
     try {
-        const auto directory = root / "worlds/saves";
+        const auto directory = root / "worlds" / "saves";
         if (!fs::exists(directory))
             return result;
         for (const auto& entry : fs::directory_iterator(directory)) {
