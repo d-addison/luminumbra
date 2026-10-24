@@ -187,7 +187,9 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
         if (relative.size() > 4096 || relative.find_first_of(u8"\\:") != std::u8string::npos ||
             entry.is_symlink() ||
             std::filesystem::canonical(entry.path()) !=
-                canonical_directory / std::filesystem::path(relative))
+                canonical_directory /
+                    Filesystem::PathFromUtf8(std::string_view(
+                        reinterpret_cast<const char*>(relative.data()), relative.size())))
             throw std::runtime_error("unsupported workload save path");
         if (entry.is_regular_file())
             paths.emplace_back(reinterpret_cast<const char*>(relative.data()), relative.size());
