@@ -1008,6 +1008,18 @@ static bool CaptureTimelapseFrame(ClientAppContext& g_app,
     return true;
 }
 
+// Fixed capture windows must not depend on worker scheduling. Complete
+// preparation also bypasses the synchronous fallback's four-column cap.
+static bool CompleteFoliagePreparation(const ClientAppContext& app,
+                                       const RuntimeScenarioConfig& scenario_config,
+                                       bool photo_mode_active) {
+    const auto& capture = app.capture;
+    return (scenario_config.active() && !capture.play_paths) || capture.scene_active ||
+           !capture.render_benchmark_path.empty() || capture.frame_scan_active ||
+           capture.render_parity_active || capture.timelapse_frames > 0 || capture.survey_active ||
+           photo_mode_active;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void UpdateFoliageScatter(ClientAppContext& g_app,
                                  const std::filesystem::path& root_dir,
@@ -1015,6 +1027,7 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
                                  Luminumbra::Rendering::Camera* g_camera,
                                  Luminumbra::world::GameSession* gameSession,
                                  Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                                 bool photo_mode_active,
                                  double& rb_scatter_ms,
                                  double& rb_foliage_ms) {
     // FOLIAGE in normal play: the GPU grass scatter was previously only
@@ -1144,10 +1157,15 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
                                 std::chrono::steady_clock::now() - _rb_scatter_t0)
                                 .count();                             //
             const auto _rb_fol_t0 = std::chrono::steady_clock::now(); //
-            foliage->rebuild_instances(chunk_scatter,
-                                       &Luminumbra::Rendering::FoliageSurfaceQuery,
-                                       &fol_ctx,
-                                       g_camera->Position);
+            const bool complete =
+                CompleteFoliagePreparation(g_app, scenario_config, photo_mode_active);
+            foliage->rebuild_instances(
+                chunk_scatter,
+                &Luminumbra::Rendering::FoliageSurfaceQuery,
+                &fol_ctx,
+                g_camera->Position,
+                complete ? Luminumbra::Rendering::FoliagePass::Preparation::Complete
+                         : Luminumbra::Rendering::FoliagePass::Preparation::Deferred);
             rb_foliage_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - _rb_fol_t0)
                                 .count(); //
@@ -4901,6 +4919,8 @@ int main(int argc, char* argv[]) {
                                              g_camera.get(),
                                              gameSession.get(),
                                              renderPipeline,
+                                             g_playerController &&
+                                                 g_playerController->photo_mode_active(),
                                              rb_scatter_ms,
                                              rb_foliage_ms);
                     }
@@ -5580,7 +5600,9 @@ int main(int argc, char* argv[]) {
                         "dispatch={:.3f} cpu_fallback={:.3f} rebuild_calls={} reason_mask={} "
                         "admitted={} "
                         "misses={} deferred={} copied_bytes={} hashed_bytes={} uploaded_bytes={} "
-                        "scratch_bytes={} backlog={} path={} fallback={} dirty_columns={}",
+                        "scratch_bytes={} backlog={} path={} fallback={} dirty_columns={} "
+                        "worker_dispatched={} worker_completed={} worker_stale_rejected={} "
+                        "worker_queue_age_frames={}",
                         foliage_attribution.signature_ms,
                         foliage_attribution.sort_ms,
                         foliage_attribution.surface_ms,
@@ -5602,7 +5624,11 @@ int main(int argc, char* argv[]) {
                         foliage_attribution.backlog,
                         Attribution::path_name(foliage_attribution.path),
                         Attribution::fallback_name(foliage_attribution.fallback),
-                        foliage_attribution.dirty_columns);
+                        foliage_attribution.dirty_columns,
+                        foliage_attribution.worker_dispatched,
+                        foliage_attribution.worker_completed,
+                        foliage_attribution.worker_stale_rejected,
+                        foliage_attribution.worker_queue_age_frames);
                 if (gameSession && gameSession->GetWorldSystem()) {
                     const auto& st = gameSession->GetWorldSystem()->dbg_stream_timings();
                     LUMINUMBRA_CORE_WARN(
