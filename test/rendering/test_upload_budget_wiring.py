@@ -263,6 +263,28 @@ class UploadBudgetWiring(unittest.TestCase):
         presentation = body(self.header, "void SetPresentedLadderWaterUpload(")
         self.assertIn("SetLadderWaterUpload(upload, mesh_version, enabled)", presentation)
 
+    def test_benchmark_qualification_holds_mesh_producers_while_streaming_drains(self):
+        self.assertTrue("if (!settling_benchmark_uploads)" in self.main,
+                        "Unmeasured qualification must hold simulation producers")
+        qualification = body(self.main, "if (!settling_benchmark_uploads)")
+        self.assertIn("gameSession->TickSimulation", qualification)
+        self.assertIn("traversal_target_tick", qualification)
+        self.assertRegex(compact(self.main),
+                         r"if \(auto\* physics = gameSession->GetPhysicsSystem\(\); "
+                         r"physics && !settling_benchmark_uploads\) "
+                         r"physics->update\(deltaTime \* g_app.capture.timeScale\);")
+        start = self.main.index("auto* streaming_world = gameSession->GetWorldSystem();")
+        streaming = self.main[start:]
+        pause = streaming.index("SetWaterBootPaused(settling_benchmark_uploads);")
+        update = streaming.index("gameSession->GetWorldSystem()->update(")
+        resume = streaming.index("SetWaterBootPaused(false);")
+        self.assertLess(pause, update)
+        self.assertLess(update, resume)
+        # Qualification retains the same finite wait and upload budgets.
+        wait = body(self.main, "const auto wait_for_uploads =")
+        self.assertIn("wait.waiting(pending,", wait)
+        self.assertIn("wait.failed()", wait)
+
     def test_settled_capture_and_per_frame_telemetry_are_both_wired(self):
         settled = body(self.header, "bool render_uploads_settled() const")
         self.assertIn("terrain_uploads_deferred == 0", settled)

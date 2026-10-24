@@ -1917,7 +1917,7 @@ TEST_P(SavedWorldPresetTest, MissingOrInvalidIdentityRefusesWithoutWrites) {
     const auto path = created.GetWorldSaveDir() / "world_info.json";
     auto metadata = nlohmann::json::parse(ReadClockTestFile(path));
     metadata.erase("presetIdentity");
-    WriteSavedPresetTestJson(path, metadata);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), path.parent_path()));
     ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
     for (const auto& identity : {nlohmann::json(nullptr),
                                  nlohmann::json(123),
@@ -1925,7 +1925,7 @@ TEST_P(SavedWorldPresetTest, MissingOrInvalidIdentityRefusesWithoutWrites) {
                                  nlohmann::json("wrong")}) {
         SCOPED_TRACE(identity.dump());
         metadata["presetIdentity"] = identity;
-        WriteSavedPresetTestJson(path, metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), path.parent_path()));
         ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
     }
 }
@@ -1955,7 +1955,7 @@ TEST_P(SavedWorldPresetTest, InvalidFormatNeverFallsBack) {
                                nlohmann::json("1")}) {
         SCOPED_TRACE(format.dump());
         metadata["presetFormat"] = format;
-        WriteSavedPresetTestJson(save / "world_info.json", metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
         ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "preset format");
     }
 }
@@ -2560,8 +2560,8 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     metadata["simulationTick"] = 0u;
     metadata["calendar"] = {{"dayLengthTicks", calendar.dayLengthTicks},
                             {"daysPerYear", calendar.daysPerYear}};
-    const auto imported_bytes = metadata.dump();
-    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << imported_bytes;
+    const auto imported_bytes = metadata.dump(4) + "\n";
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(imported_bytes, save));
     ASSERT_TRUE(original.LoadWorldStateFrom(save));
     ASSERT_TRUE(control.LoadWorldStateFrom(save));
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), imported_bytes);
@@ -3098,8 +3098,8 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession legacy, control, loaded, explicit_load;
-    for (auto* session : {&legacy, &control, &loaded, &explicit_load}) {
+    GameSession legacy, uninterrupted, control, loaded, explicit_load;
+    for (auto* session : {&legacy, &uninterrupted, &control, &loaded, &explicit_load}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
         session->SetAetherStateEnabled(true);
@@ -3116,42 +3116,83 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
     const auto save = legacy.GetWorldSaveDir();
     ASSERT_FALSE(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"))
                      .contains("simulationTick"));
-    ASSERT_TRUE(control.LoadWorld(legacy.GetMetadata().worldId));
-    ASSERT_EQ(control.GetSimulationTickCount(), 0u);
-    ASSERT_EQ(control.GetEnergyFieldState()->total_raw(), 1u);
-    ASSERT_EQ(control.GetEnergyFieldState()->next_fire_tick(), 3u);
+    ASSERT_TRUE(uninterrupted.LoadWorld(legacy.GetMetadata().worldId));
+    ASSERT_EQ(uninterrupted.GetSimulationTickCount(), 0u);
+    ASSERT_EQ(uninterrupted.GetEnergyFieldState()->total_raw(), 1u);
+    ASSERT_EQ(uninterrupted.GetEnergyFieldState()->next_fire_tick(), 3u);
     for (int i = 0; i < 7; ++i) {
-        ASSERT_EQ(control.TickSimulation(dt), 1u);
+        ASSERT_EQ(uninterrupted.TickSimulation(dt), 1u);
     }
-    ASSERT_EQ(control.GetEnergyFieldState()->page_count(), 0u);
-    ASSERT_EQ(control.GetEnergyFieldState()->next_fire_tick(), 11u);
+    ASSERT_EQ(uninterrupted.GetEnergyFieldState()->page_count(), 0u);
+    ASSERT_EQ(uninterrupted.GetEnergyFieldState()->next_fire_tick(), 11u);
     const auto explicit_save = root.path() / "empty-offset-snapshot";
-    ASSERT_TRUE(control.SaveWorldStateTo(explicit_save));
+    ASSERT_TRUE(uninterrupted.SaveWorldStateTo(explicit_save));
     EXPECT_EQ(ReadClockTestTextRecord(explicit_save / "aether_state.efs"), "EFS1 2 4\n");
-    ASSERT_TRUE(control.SaveWorldState());
+    ASSERT_TRUE(uninterrupted.SaveWorldState());
     EXPECT_EQ(ReadClockTestTextRecord(save / "aether_state.efs"), "EFS1 2 4\n");
-    ASSERT_TRUE(loaded.LoadWorld(control.GetMetadata().worldId));
+    ASSERT_TRUE(loaded.LoadWorld(uninterrupted.GetMetadata().worldId));
     ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit", "1337", "default"));
     ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));
+    // Legacy records retain a relative delay while the session clock starts at zero.
+    // Keep an independent reference in that epoch and compare energy against the
+    // uninterrupted producer at its original epoch on every following tick.
+    ASSERT_TRUE(control.CreateTransientWorld("Rebased reference", "1337", "default"));
+    ASSERT_TRUE(control.GetEnergyFieldState()->DeserializeRecord("EFS1 2 4\n", 0));
+    uninterrupted.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 60000);
     for (auto* session : {&control, &loaded, &explicit_load}) {
         auto* energy = session->GetEnergyFieldState();
         ASSERT_EQ(energy->page_count(), 0u);
-        EXPECT_EQ(energy->next_fire_tick(), 11u);
+        EXPECT_EQ(session->GetSimulationTickCount(), 0u);
+        EXPECT_EQ(energy->next_fire_tick(), 4u);
         energy->QueueDeposit(1, 0, 0, 0, 60000);
     }
-    for (int tick = 8; tick <= 15; ++tick) {
+    for (int tick = 1; tick <= 8; ++tick) {
         SCOPED_TRACE(tick);
         for (auto* session : {&control, &loaded, &explicit_load}) {
             ASSERT_EQ(session->TickSimulation(dt), 1u);
-            if (tick < 11) {
+            if (tick < 4) {
                 EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
             } else {
                 EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
             }
         }
+        ASSERT_EQ(uninterrupted.TickSimulation(dt), 1u);
+        EXPECT_EQ(loaded.GetEnergyFieldState()->SerializeRecord(tick),
+                  uninterrupted.GetEnergyFieldState()->SerializeRecord(7 + tick));
+        EXPECT_EQ(explicit_load.GetEnergyFieldState()->SerializeRecord(tick),
+                  uninterrupted.GetEnergyFieldState()->SerializeRecord(7 + tick));
         EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
         EXPECT_EQ(SessionWorldHash(explicit_load), SessionWorldHash(control));
     }
+
+    // With no chunk snapshot, a reused explicit loader must still replace its
+    // energy state. Missing and malformed legacy records both start all-zero.
+    for (const auto* record : {"", "partial", "EFS1 2 9\n", "EFS1 2 4\nP 0"}) {
+        SCOPED_TRACE(record);
+        const auto path = explicit_save / "aether_state.efs";
+        if (*record == '\0') {
+            ASSERT_TRUE(fs::remove(path));
+        } else {
+            ASSERT_TRUE(
+                Luminumbra::Persistence::WorldSaveService::write_file_durably(path, record));
+        }
+        auto* energy = explicit_load.GetEnergyFieldState();
+        energy->QueueDeposit(2, 0, 0, 0, 60000);
+        ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));
+        EXPECT_EQ(energy->page_count(), 0u);
+        EXPECT_EQ(energy->next_fire_tick(), 16u);
+        ASSERT_EQ(explicit_load.TickSimulation(dt), 1u);
+        EXPECT_EQ(energy->total_raw(), 0u);
+    }
+    const auto unreadable = explicit_save / "aether_state.efs";
+    ASSERT_TRUE(fs::remove(unreadable));
+    ASSERT_TRUE(fs::create_directory(unreadable));
+    explicit_load.GetEnergyFieldState()->QueueDeposit(3, 0, 0, 0, 60000);
+    ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));
+    EXPECT_EQ(explicit_load.GetEnergyFieldState()->page_count(), 0u);
+    EXPECT_EQ(explicit_load.GetEnergyFieldState()->next_fire_tick(), 16u);
+    ASSERT_EQ(explicit_load.TickSimulation(dt), 1u);
+    EXPECT_EQ(explicit_load.GetEnergyFieldState()->total_raw(), 0u);
 }
 
 TEST(GameSessionHeadlessWorldTest, LegacyEnergyImportPreservesNonAlignedCadence) {
@@ -3796,6 +3837,7 @@ TEST(GameSessionHeadlessWorldTest, RenderCalendarActivatesOnNormalLoadAndNextSav
     for (auto* session : {&original, &loaded}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
+        session->SetAetherStateEnabled(false);
     }
     original.SetActiveRegionsEnabled(false);
     loaded.SetActiveRegionsEnabled(true);
@@ -4804,6 +4846,7 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
     session.SetRootPath(root.root_string());
     session.SetJobSystem(&jobs);
     session.SetActiveRegionsEnabled(true);
+    session.SetAetherStateEnabled(false);
     ASSERT_TRUE(session.CreateWorld("Idle retention", "1337", "default"));
     ASSERT_TRUE(session.SaveWorldState());
 
@@ -5470,6 +5513,7 @@ TEST(GameSessionHeadlessWorldTest,
     GameSession owner;
     owner.SetRootPath(root.root_string());
     owner.SetJobSystem(&jobs);
+    owner.SetActiveRegionsEnabled(false);
     ASSERT_TRUE(owner.CreateWorld("Legacy upgrade", "1337", "default"));
     ASSERT_TRUE(owner.SaveWorldState());
     const auto save = owner.GetWorldSaveDir();
@@ -6251,7 +6295,7 @@ void SeedRegionalWaterFixture(RegionalWaterScenario& scenario,
     // A legacy generator supplies the pristine baseline for this provenance fixture.
     // The enabled streaming caller only binds query storage; fixed ticks own evolution.
     Luminumbra::Systems::WaterSystem baseline_seed(nullptr, session.GetWorldSystem());
-    session.SetWaterHighResEnabled(false);
+    baseline_seed.SetSimResolution(8);
     baseline_seed.update(session.GetRegistry(), scenario.water_chunks);
     session.GetWaterSystem()->update(session.GetRegistry(), scenario.water_chunks);
     ASSERT_TRUE(chunk->has_water_sim.load());
@@ -6528,6 +6572,7 @@ void ReopenRegionalWaterBeforeRetention(GameSession& session,
                                         const Luminumbra::IVec3& coords,
                                         const Luminumbra::IVec3& disk_coords) {
     EnableSnapshotSession(reopened, root, jobs);
+    reopened.SetWaterHighResEnabled(false);
     ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
     // Both far chunks are disk-only; disk_region has no field authority to mask the probe.
     ASSERT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(coords), nullptr);
@@ -6605,6 +6650,7 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
         RegionalWaterScenario scenario;
         auto& session = scenario.session;
         EnableSnapshotSession(session, root, jobs);
+        session.SetWaterHighResEnabled(false);
         session.SetRegionSchedulerConfig({0, 1, 1});
         ASSERT_TRUE(session.CreateWorld(
             displace ? "Displaced water" : "Generated water", "1337", "default"));
@@ -6670,6 +6716,7 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
         ASSERT_TRUE(session.SaveWorldState());
         GameSession after_retention;
         EnableSnapshotSession(after_retention, root, jobs);
+        after_retention.SetWaterHighResEnabled(false);
         ASSERT_TRUE(after_retention.LoadWorld(session.GetMetadata().worldId))
             << after_retention.GetWorldOpenError();
         EXPECT_EQ(after_retention.GetWorldClock().tick(), session.GetWorldClock().tick());

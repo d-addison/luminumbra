@@ -100,6 +100,8 @@ public:
         m_pages.clear();
         m_storms.clear();
         m_strikes.clear();
+        m_ownerStorms.clear();
+        m_ownerStrikes.clear();
         m_scent.clear();
         m_weatherClocks.clear();
     }
@@ -183,6 +185,9 @@ private:
     std::map<FieldPageKey, FieldPage> m_pages;
     std::vector<RegionalStorm> m_storms;
     std::vector<RegionalStrike> m_strikes;
+    // Indices retain canonical vector order, bounded by kMaxStorms/kMaxStrikes in total and
+    // kMaxOwnerStorms/kMaxOwnerStrikes per owner. Rebuilt atomically with weather admission.
+    std::map<RegionKey, std::vector<std::size_t>> m_ownerStorms, m_ownerStrikes;
     std::map<ScentCellKey, ScentCell> m_scent;
     std::map<RegionKey, std::uint64_t> m_weatherClocks;
 };

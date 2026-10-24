@@ -106,6 +106,9 @@ public:
         // border work is charged to both owners, even outside the interior due set.
         std::vector<Luminumbra::world::RegionWork> work;
         std::uint64_t clipped_raw = 0;
+        // Physical buffer counts for diagnostics; only potentially participating pages are staged.
+        std::size_t staged_pages = 0;
+        std::size_t diffusion_pages = 0;
     };
     // channels >= 1. v1 ships single-channel;  constructs with 2
     // (Lumin/Umbra polarity) — the record header carries the count either way.
@@ -231,7 +234,10 @@ private:
     void StampWindowPages();
     void DropZeroPages();
     void NormalizeAllPages();
-    [[nodiscard]] bool RegionalRecordFits() const;
+    [[nodiscard]] bool RegionalRecordFits(const EnergyFieldState* replacements = nullptr) const;
+    [[nodiscard]] bool ValidateRegionalOwners(const RegionRecords& records,
+                                              const EnergyAges& ages,
+                                              std::vector<std::int64_t>* empty_pages) const;
 
     int m_channels = 1;
     // Window origin in world cell coords, page-aligned. Valid once anchored.

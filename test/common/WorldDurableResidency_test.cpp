@@ -135,6 +135,7 @@ public:
         jobs.startup(2);
         session = std::make_unique<GameSession>();
         session->SetActiveRegionsEnabled(active_regions);
+        session->SetWeatherRainEnabled(false);
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());
         created = session->CreateWorld("DurableResidency", "12345", "durable");

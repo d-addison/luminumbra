@@ -1441,8 +1441,11 @@ bool VerifyRegionMembership(const std::filesystem::path& region_file,
         }
         world::WorldClock clock;
         bool required = false;
-        if (!WorldSaveService::read_clock_metadata(save_dir, clock, required, errors) || required) {
-            if (required)
+        const bool has_ledger =
+            std::filesystem::exists(WorldSaveService::active_regions_path(save_dir));
+        if (!WorldSaveService::read_clock_metadata(save_dir, clock, required, errors) ||
+            has_ledger) {
+            if (has_ledger)
                 AddError(errors, "inconsistent snapshot: enabled records without index");
             return false;
         }
@@ -1510,11 +1513,6 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, clock_error);
         return false;
     }
-    TransactionScope scope(save_dir, {"world_info.json"}, errors, has_clock);
-    if (!scope.ok())
-        return false;
-    if (!validate_save(save_dir, errors))
-        return false;
     world::WorldClock previous_clock;
     bool requires_active_regions = false;
     if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
@@ -1523,6 +1521,11 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
         return false;
     }
+    // Refuse incompatible input before a transaction can reclaim staging. Clock-only legacy
+    // metadata does not opt into the indexed regional snapshot format.
+    TransactionScope scope(save_dir, {"world_info.json"}, errors);
+    if (!scope.ok() || !validate_save(save_dir, errors))
+        return false;
     // Explicit writes normalize supported calendar encodings; reads never rewrite.
     if (has_clock)
         clock.write_metadata(metadata);
@@ -1852,7 +1855,7 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
                          metadata_error.empty() ? "corrupt world metadata" : metadata_error);
                 return false;
             }
-            if (present || required || format >= 1) {
+            if (present || std::filesystem::exists(active_regions_path(save_dir)) || format >= 1) {
                 AddError(errors, "inconsistent snapshot: ground authority without index");
                 return false;
             }
@@ -3393,7 +3396,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             bool requires_active_regions = false;
             if (!read_clock_metadata(save_dir, clock, requires_active_regions, &errors))
                 return reject("");
-            if (requires_active_regions)
+            if (std::filesystem::exists(active_regions_path(save_dir)))
                 return reject("inconsistent snapshot: enabled records without index");
         }
         const auto chunks_dir = save_dir / kChunksDirectoryName;

@@ -521,6 +521,31 @@ TEST(DeterministicWorkBudget, SessionRegionCountersLeaveCanonicalIdentityUnchang
     }
 }
 
+TEST(DeterministicWorkBudget, RegionOnlyHostsFreezeWithoutCreatingWorldFields) {
+    world::GameSession first, second;
+    const world::RegionKey key{0, 0};
+    for (auto* session : {&first, &second}) {
+        session->SetActiveRegionsEnabled(true);
+        session->SetRegionSchedulerConfig({1, 1, 1});
+        session->SetReplicatedSimulationAnchors({});
+        session->NotifyGroundObjectEdit({8, 0, 8});
+    }
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        for (auto* session : {&first, &second}) {
+            session->RecordActiveRegionWork({key, 2, 0, 0, 0});
+            ASSERT_EQ(session->TickSimulation(1.0 / 30.0), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+            EXPECT_EQ(session->GetWorldSystem(), nullptr);
+            EXPECT_FALSE(session->GetFieldPages().owns_region(key));
+        }
+        EXPECT_EQ(first.GetRegionSchedule(), second.GetRegionSchedule());
+        EXPECT_EQ(first.GetActiveRegionLedger().canonical_bytes(),
+                  second.GetActiveRegionLedger().canonical_bytes());
+    }
+    ASSERT_TRUE(first.GetActiveRegionLedger().records().contains(key));
+    EXPECT_EQ(first.GetActiveRegionLedger().records().at(key).state, world::RegionState::Frozen);
+}
+
 TEST(DeterministicWorkBudget, WorkTraceIsDiagnosticAndRejectsCounterOrTickDrift) {
     SimBudgetTelemetry first;
     SimBudgetTelemetry replay;

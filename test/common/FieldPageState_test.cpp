@@ -2,6 +2,7 @@
 
 #include "luminumbra_common/fields/FieldPageState.h"
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -744,4 +745,116 @@ TEST(FieldPageStateTest, WeatherCapacityIsOwnerAwareAndRefusesAtomically) {
     EXPECT_FALSE(
         store.replace_weather({}, std::vector<RegionalStrike>(FieldPageState::kMaxStrikes + 1)));
     EXPECT_EQ(store.serialize(), before);
+}
+
+TEST(FieldPageStateTest, ScentRegionQueriesMatchCanonicalProjectionAtEveryBoundary) {
+    FieldPageState store;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    const std::array cells{ScentCellKey{-16777216, -16777216},
+                           ScentCellKey{-513, -513},
+                           ScentCellKey{-512, -512},
+                           ScentCellKey{-1, -1},
+                           ScentCellKey{0, 0},
+                           ScentCellKey{0, 511},
+                           ScentCellKey{511, 0},
+                           ScentCellKey{511, 511},
+                           ScentCellKey{512, 512},
+                           ScentCellKey{16777215, 16777215}};
+    for (const auto cell : cells)
+        ASSERT_TRUE(store.set_scent(cell, one));
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(store.serialize(), restored, error)) << error;
+    for (const auto owner : {RegionKey{-32768, -32768},
+                             RegionKey{-2, -2},
+                             RegionKey{-1, -1},
+                             RegionKey{0, 0},
+                             RegionKey{1, 1},
+                             RegionKey{32767, 32767}}) {
+        FieldPageState expected;
+        for (const auto cell : cells)
+            if (FieldPageState::region_of_scent_cell(cell) == owner)
+                ASSERT_TRUE(expected.set_scent(cell, one));
+        EXPECT_TRUE(store.owns_evolution_state(owner));
+        EXPECT_TRUE(restored.owns_evolution_state(owner));
+        EXPECT_EQ(store.region_bytes(owner), expected.region_bytes(owner));
+        EXPECT_EQ(restored.region_bytes(owner), expected.region_bytes(owner));
+        const auto encoded = expected.serialize();
+        EXPECT_EQ(store.region_bytes(owner),
+                  "|evolution:v2:" +
+                      encoded.substr(kHeaderBytes, encoded.size() - kHeaderBytes - 8));
+    }
+    for (const auto owner : {RegionKey{-32769, 0},
+                             RegionKey{32768, 0},
+                             RegionKey{0, -1},
+                             RegionKey{-1, 0},
+                             RegionKey{0, 1},
+                             RegionKey{1, 0}}) {
+        EXPECT_FALSE(store.owns_evolution_state(owner));
+        EXPECT_TRUE(store.region_bytes(owner).empty());
+    }
+    EXPECT_FALSE(store.set_scent({16777216, 0}, one));
+    const std::array<std::pair<ScentCellKey, ScentCell>, 2> removals{
+        std::pair{ScentCellKey{0, 0}, ScentCell{}}, std::pair{ScentCellKey{511, 511}, ScentCell{}}};
+    ASSERT_TRUE(store.update_scent(removals));
+    EXPECT_TRUE(store.owns_evolution_state({0, 0}));
+    ASSERT_TRUE(store.set_scent({0, 511}, {}));
+    ASSERT_TRUE(store.set_scent({511, 0}, {}));
+    EXPECT_FALSE(store.owns_evolution_state({0, 0}));
+    EXPECT_TRUE(store.region_bytes({0, 0}).empty());
+    restored.clear();
+    EXPECT_FALSE(restored.owns_evolution_state({0, 0}));
+    EXPECT_TRUE(restored.region_bytes({0, 0}).empty());
+}
+
+TEST(FieldPageStateTest, ScentRegionQueriesExcludeOtherColumnsAtFullCapacity) {
+    FieldPageState store;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    for (std::int32_t cell = -32768; cell < 32768; ++cell)
+        ASSERT_TRUE(store.set_scent({cell, 700}, one));
+    ASSERT_EQ(store.scent_cells().size(), FieldPageState::kMaxScentCells);
+    for (std::int32_t x = -65; x <= 64; ++x) {
+        const RegionKey present{x, 1}, absent{x, 0};
+        EXPECT_EQ(store.owns_evolution_state(present), x >= -64 && x < 64);
+        EXPECT_FALSE(store.owns_evolution_state(absent));
+        EXPECT_TRUE(store.region_bytes(absent).empty());
+    }
+    const auto before = store.serialize();
+    EXPECT_FALSE(store.set_scent({32768, 700}, one));
+    EXPECT_EQ(store.serialize(), before);
+    EXPECT_FALSE(store.owns_evolution_state({64, 1}));
+}
+
+TEST(FieldPageStateTest, WeatherOwnerIndicesSurviveParseCopyRefusalReplacementAndClear) {
+    FieldPageState store;
+    const RegionalStorm storm{
+        {-1, 0}, std::bit_cast<std::uint32_t>(-1.0f), 0, 0, 0, 0, 0, 20, 1, 0};
+    const RegionalStrike strike{{1, 0}, 0, std::bit_cast<std::uint32_t>(512.0f), 0, 0, 2, 0};
+    ASSERT_TRUE(store.replace_weather({storm}, {strike}));
+    const auto before = store.serialize();
+    auto copied = store;
+    FieldPageState parsed;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(before, parsed, error)) << error;
+    for (auto* state : {&store, &copied, &parsed}) {
+        EXPECT_TRUE(state->owns_evolution_state(storm.owner));
+        EXPECT_TRUE(state->owns_evolution_state(strike.owner));
+        EXPECT_FALSE(state->owns_evolution_state({0, 0}));
+        EXPECT_EQ(state->region_bytes(storm.owner), store.region_bytes(storm.owner));
+        EXPECT_EQ(state->region_bytes(strike.owner), store.region_bytes(strike.owner));
+        auto invalid = storm;
+        invalid.owner = {0, 0}; // position and owner disagree
+        EXPECT_FALSE(state->replace_weather({invalid}, {}));
+        EXPECT_EQ(state->serialize(), before);
+        EXPECT_TRUE(state->owns_evolution_state(storm.owner));
+        EXPECT_TRUE(state->owns_evolution_state(strike.owner));
+    }
+    ASSERT_TRUE(copied.replace_weather({}, {}));
+    EXPECT_FALSE(copied.owns_evolution_state(storm.owner));
+    EXPECT_FALSE(copied.owns_evolution_state(strike.owner));
+    EXPECT_TRUE(copied.region_bytes(storm.owner).empty());
+    parsed.clear();
+    EXPECT_FALSE(parsed.owns_evolution_state(storm.owner));
+    EXPECT_FALSE(parsed.owns_evolution_state(strike.owner));
+    EXPECT_TRUE(parsed.region_bytes(strike.owner).empty());
 }

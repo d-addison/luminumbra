@@ -5,11 +5,14 @@
 #include "nlohmann/json.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <ios>
 #include <iterator>
 #include <map>
 #include <stdexcept>
@@ -19,6 +22,18 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace Luminumbra::Persistence {
@@ -27,7 +42,7 @@ namespace {
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
-constexpr std::size_t kHashBlockBytes = 1024u * 1024u;
+constexpr std::size_t kHashBlockBytes = std::size_t{1024} * 1024;
 
 SaveTransaction*& ActiveTransaction() {
     static thread_local SaveTransaction* active = nullptr;
@@ -65,14 +80,14 @@ bool ParseHex64(std::string_view text, std::uint64_t& out) {
         return false;
     }
     std::uint64_t value = 0;
-    for (char c : text) {
+    for (const char c : text) {
         std::uint64_t digit = 0;
         if (c >= '0' && c <= '9') {
             digit = static_cast<std::uint64_t>(c - '0');
         } else if (c >= 'a' && c <= 'f') {
-            digit = static_cast<std::uint64_t>(c - 'a' + 10);
+            digit = static_cast<std::uint64_t>(c - 'a') + 10;
         } else if (c >= 'A' && c <= 'F') {
-            digit = static_cast<std::uint64_t>(c - 'A' + 10);
+            digit = static_cast<std::uint64_t>(c - 'A') + 10;
         } else {
             return false;
         }
@@ -86,7 +101,7 @@ bool AllDigits(std::string_view text) {
     if (text.empty()) {
         return false;
     }
-    for (char c : text) {
+    for (const char c : text) {
         if (c < '0' || c > '9') {
             return false;
         }
@@ -134,6 +149,102 @@ bool ReadAllBytes(const fs::path& file, std::string& out, std::vector<std::strin
         return false;
     }
     return true;
+}
+
+// Validate and read the same open file. Nonblocking POSIX opens refuse FIFOs without waiting
+// for a writer; Windows refuses directories, reparse points and non-disk handles before reading.
+class SnapshotInput {
+public:
+    explicit SnapshotInput(const fs::path& file) {
+#ifdef _WIN32
+        m_handle = ::CreateFileW(file.c_str(),
+                                 GENERIC_READ,
+                                 FILE_SHARE_READ,
+                                 nullptr,
+                                 OPEN_EXISTING,
+                                 FILE_FLAG_OPEN_REPARSE_POINT,
+                                 nullptr);
+        BY_HANDLE_FILE_INFORMATION information{};
+        m_valid = m_handle != INVALID_HANDLE_VALUE && ::GetFileType(m_handle) == FILE_TYPE_DISK &&
+                  ::GetFileInformationByHandle(m_handle, &information) != 0 &&
+                  (information.dwFileAttributes &
+                   (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+#else
+        m_descriptor = ::open(file.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        struct stat information {};
+        m_valid = m_descriptor >= 0 && ::fstat(m_descriptor, &information) == 0 &&
+                  S_ISREG(information.st_mode);
+#endif
+    }
+    ~SnapshotInput() {
+#ifdef _WIN32
+        if (m_handle != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_handle);
+#else
+        if (m_descriptor >= 0)
+            ::close(m_descriptor);
+#endif
+    }
+    SnapshotInput(const SnapshotInput&) = delete;
+    SnapshotInput& operator=(const SnapshotInput&) = delete;
+    [[nodiscard]] bool valid() const {
+        return m_valid;
+    }
+    bool read(char* data, std::size_t request, std::size_t& count) {
+#ifdef _WIN32
+        DWORD received = 0;
+        if (::ReadFile(m_handle, data, static_cast<DWORD>(request), &received, nullptr) == 0)
+            return false;
+        count = received;
+#else
+        ssize_t received = 0;
+        do {
+            received = ::read(m_descriptor, data, request);
+        } while (received < 0 && errno == EINTR);
+        if (received < 0)
+            return false;
+        count = static_cast<std::size_t>(received);
+#endif
+        return true;
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+    int m_descriptor = -1;
+#endif
+    bool m_valid = false;
+};
+
+bool ReadBoundedBytes(const fs::path& file,
+                      std::size_t limit,
+                      std::string& out,
+                      std::vector<std::string>* errors) {
+    out.clear();
+    SnapshotInput in(file);
+    if (!in.valid()) {
+        AddError(errors, "cannot open bounded snapshot input");
+        return false;
+    }
+    // Read at most limit + 1 bytes from this handle, including when a file grows during reading.
+    std::array<char, 4096> block{};
+    for (;;) {
+        const auto remaining = limit - out.size();
+        const auto request = remaining < block.size() ? remaining + 1 : block.size();
+        std::size_t count = 0;
+        if (!in.read(block.data(), request, count)) {
+            AddError(errors, "cannot read bounded snapshot input");
+            return false;
+        }
+        out.append(block.data(), count);
+        if (out.size() > limit) {
+            AddError(errors, "snapshot input exceeds byte limit");
+            return false;
+        }
+        if (count == 0)
+            return true;
+    }
 }
 
 bool SamePath(const fs::path& lhs, const fs::path& rhs) {
@@ -221,8 +332,11 @@ struct JournalDocument {
 
 bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& error) {
     out = JournalDocument{};
-    const std::string text(bytes);
-    const nlohmann::json root = nlohmann::json::parse(text, nullptr, false);
+    if (bytes.size() > kMaxJournalBytes) {
+        error = "journal exceeds byte limit";
+        return false;
+    }
+    const nlohmann::json root = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
     if (root.is_discarded() || !root.is_object()) {
         error = "malformed journal JSON";
         return false;
@@ -241,10 +355,15 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
         error = "journal header fields invalid";
         return false;
     }
+    if (entries->size() > kMaxJournalEntries) {
+        error = "journal entry count exceeds limit";
+        return false;
+    }
     JournalDocument parsed;
     parsed.txn_id = txn_id->get<std::uint64_t>();
     parsed.base_generation = base->get<std::uint64_t>();
     parsed.new_generation = next->get<std::uint64_t>();
+    parsed.entries.reserve(entries->size());
     for (const nlohmann::json& item : *entries) {
         const nlohmann::json* path = Field(item, "path");
         const nlohmann::json* action = Field(item, "action");
@@ -604,7 +723,7 @@ bool read_snapshot_index(const fs::path& save_dir,
         return false;
     }
     std::string bytes;
-    if (!ReadAllBytes(path, bytes, errors)) {
+    if (!ReadBoundedBytes(path, kMaxSnapshotIndexBytes, bytes, errors)) {
         return false;
     }
     std::string error;
@@ -709,7 +828,7 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             return RecoveryOutcome::DiscardedStale;
         }
         std::string bytes;
-        if (!ReadAllBytes(txn_path, bytes, errors)) {
+        if (!ReadBoundedBytes(txn_path, kMaxJournalBytes, bytes, errors)) {
             return RecoveryOutcome::Failed;
         }
         JournalDocument document;
@@ -893,6 +1012,10 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
 }
 
 bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
+    if (m_entries.size() > kMaxJournalEntries) {
+        AddError(errors, "journal entry count exceeds limit");
+        return false;
+    }
     std::vector<JournalEntry> entries;
     entries.reserve(m_entries.size());
     for (const Entry& entry : m_entries) {
@@ -906,6 +1029,10 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
     }
     const std::string bytes =
         EncodeJournal(m_txn_id, m_previous.generation, m_new_generation, entries);
+    if (bytes.size() > kMaxJournalBytes) {
+        AddError(errors, "journal exceeds byte limit");
+        return false;
+    }
     return WorldSaveService::durable_write_file(
         journal_directory(m_save_dir) / "txn.json", bytes, errors);
 }

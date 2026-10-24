@@ -661,7 +661,7 @@ TEST(StreamingHardening, FarLodCaptureAndFreshnessNeverReadDiskOnlyAuthority) {
             ++reads;
             throw std::runtime_error("unreadable durable authority");
         },
-        [&faults](std::string) { ++faults; });
+        [&faults](const std::string&) { ++faults; });
     world.remember_durable_chunks({{0, 0, 0}, {1000, 0, 1000}});
     const auto captured = world.capture_far_lod_sdf_snapshot(0, 0);
     ASSERT_TRUE(captured);

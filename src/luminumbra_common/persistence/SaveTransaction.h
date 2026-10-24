@@ -48,6 +48,10 @@ inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
 inline constexpr const char* kJournalSchema = "luminumbra.journal.v1";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
+// One undo entry per bounded snapshot member, plus the index itself. The journal's extra undo
+// metadata gets twice the existing 16 MiB index budget; both readers stop at their budget + 1.
+inline constexpr std::size_t kMaxJournalEntries = kMaxSnapshotMembers + 1;
+inline constexpr std::size_t kMaxJournalBytes = 2 * kMaxSnapshotIndexBytes;
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
 
 // <save>/chunks/region/snapshot.json

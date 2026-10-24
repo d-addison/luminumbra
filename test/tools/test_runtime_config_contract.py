@@ -431,6 +431,160 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("returnfalse;", empty_roster)
         self.assertIn("returnFlushRemovalDirectory(path,errors);", service[end:])
 
+    def test_region_scheduler_records_both_modes_without_requiring_a_world(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        tick = session[session.index("std::uint32_tGameSession::TickSimulation("):]
+        schedule = tick.index("RunRegionScheduler(current_tick);")
+        self.assertTrue("try{RunRegionScheduler(current_tick);" in tick,
+                        "Each tick must enter the scheduler in both feature modes")
+        self.assertLess(schedule, tick.index("if(m_activeRegionsEnabled&&m_worldSystem)"))
+        scheduler = session[session.index("voidGameSession::RunRegionScheduler("):]
+        scheduler = scheduler[:scheduler.index("std::vector<RegionKey>GameSession::SortedDueRegions")]
+        self.assertIn("if(m_worldSystem){m_worldSystem->note_persistence_tick(", scheduler)
+        self.assertIn("if(!m_worldSystem)returnPersistence::WorldSaveService::region_simulation_digest(",
+                      scheduler)
+
+    def test_legacy_energy_adoption_precedes_the_chunkless_return(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        adopt = session[session.index("voidGameSession::AdoptWorldStateFrom("):]
+        fresh = adopt.index("if(!saved.snapshot_present&&!m_activeRegionsEnabled)")
+        reset_call = "m_energyFieldState->ResetEmptyAtTick(GetSimulationTickCount());"
+        self.assertTrue(reset_call in adopt, "Legacy adoption must clear reused energy state")
+        reset = adopt.index(reset_call)
+        restore = adopt.index("m_energyFieldState->DeserializeRecord(")
+        self.assertLess(reset, restore)
+        self.assertLess(restore, fresh)
+        normal = session[session.index("boolGameSession::LoadWorld("):]
+        normal = normal[:normal.index("boolGameSession::ClockConfigurationCompatible(")]
+        self.assertNotIn("DeserializeRecord(", normal)
+
+    def test_clock_metadata_alone_does_not_require_an_index(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        metadata = service[service.index("boolWorldSaveService::save_metadata("):]
+        metadata = metadata[:metadata.index("boolWorldSaveService::save_metadata_and_active_regions(")]
+        self.assertIn('TransactionScopescope(save_dir,{"world_info.json"},errors);', metadata)
+        self.assertLess(metadata.index("if(requires_active_regions&&!has_clock)"),
+                        metadata.index("TransactionScopescope("))
+        self.assertNotIn("if(requires_active_regions)returnreject(", service)
+        self.assertNotIn("if(present||required||format>=1)", service)
+
+
+class PersistenceAndFieldSourceContract(unittest.TestCase):
+    def source(self, relative):
+        return compact_cpp((ROOT / relative).read_text(encoding="utf-8"))
+
+    def test_journal_and_index_reads_stop_at_their_byte_budgets(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        read = source[source.index("boolReadBoundedBytes("):source.index("boolSamePath(")]
+        self.assertIn("constautoremaining=limit-out.size();", read)
+        self.assertIn("remaining<block.size()?remaining+1:block.size()", read)
+        self.assertIn("if(!in.read(block.data(),request,count))", read)
+        self.assertIn("out.append(block.data(),count);", read)
+        self.assertIn("if(out.size()>limit)", read)
+        self.assertIn("if(count==0)returntrue;", read)
+        self.assertIn("ReadBoundedBytes(txn_path,kMaxJournalBytes,bytes,errors)", source)
+        self.assertIn("ReadBoundedBytes(path,kMaxSnapshotIndexBytes,bytes,errors)", source)
+        self.assertNotIn("ReadAllBytes(txn_path,", source)
+        native = source[source.index("classSnapshotInput{"):source.index("boolReadBoundedBytes(")]
+        for guard in ("O_NONBLOCK", "O_NOFOLLOW", "::fstat(m_descriptor,&information)",
+                      "S_ISREG(information.st_mode)", "::GetFileType(m_handle)==FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle,&information)",
+                      "FILE_ATTRIBUTE_REPARSE_POINT", "::ReadFile(m_handle,", "::read(m_descriptor,"):
+            self.assertIn(guard, native)
+
+    def test_journal_count_precedes_recovery_state_and_writer_uses_matching_caps(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        parse = source[source.index("boolParseJournal("):source.index("std::stringEncodeJournal(")]
+        self.assertLess(parse.index("bytes.size()>kMaxJournalBytes"),
+                        parse.index("nlohmann::json::parse("))
+        self.assertIn("nlohmann::json::parse(bytes.begin(),bytes.end(),nullptr,false)", parse)
+        self.assertNotIn("conststd::stringtext(bytes)", parse)
+        self.assertLess(parse.index("entries->size()>kMaxJournalEntries"),
+                        parse.index("JournalDocumentparsed;"))
+        self.assertLess(parse.index("entries->size()>kMaxJournalEntries"),
+                        parse.index("parsed.entries.reserve(entries->size())"))
+        writer = source[source.index("boolSaveTransaction::write_journal("):]
+        self.assertLess(writer.index("m_entries.size()>kMaxJournalEntries"),
+                        writer.index("entries.reserve("))
+        self.assertLess(writer.index("bytes.size()>kMaxJournalBytes"),
+                        writer.index("WorldSaveService::durable_write_file("))
+        header = self.source("src/luminumbra_common/persistence/SaveTransaction.h")
+        self.assertIn("kMaxJournalEntries=kMaxSnapshotMembers+1;", header)
+        self.assertIn("kMaxJournalBytes=2*kMaxSnapshotIndexBytes;", header)
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        load = session[session.index("boolGameSession::LoadWorld("):]
+        refusal = load[load.index("Persistence::recover_pending_journal("):
+                       load.index("Persistence::InspectSavedWorld(")]
+        self.assertIn("Persistence::RecoveryOutcome::Failed", refusal)
+        self.assertIn("returnfalse;", refusal)
+
+    def test_regional_energy_stages_participating_pages_and_reuses_diffusion_values(self):
+        source = self.source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        tick = source[source.index("boolEnergyFieldState::TickRegional("):]
+        self.assertIn("EnergyFieldStatestaged(m_channels);", tick)
+        self.assertNotIn("staged=*this", tick)
+        self.assertIn("for(constautoowner:firing)", tick)
+        self.assertIn("RegionalCellRange(owner.x)", tick)
+        self.assertIn("if(present(px,pz)&&present(npx,npz))", tick)
+        allocation = tick.index("next.emplace(key,std::vector<std::int32_t>(")
+        sweep = tick.index("for(intiteration=0;!next.empty()&&iteration<kEnergyDiffuseIterations;")
+        self.assertLess(allocation, sweep)
+        self.assertIn("constauto&snapshot=staged.m_pages;", tick[sweep:])
+        self.assertNotIn("constautosnapshot=staged.m_pages;", tick)
+        self.assertNotIn("next.emplace(", tick[sweep:])
+        self.assertIn("RegionalRecordFits(&staged)", tick)
+        self.assertIn("m_pages.insert(std::move(node))", tick)
+
+    def test_regional_evolution_queries_only_local_scent_and_indexed_weather(self):
+        source = self.source("src/luminumbra_common/fields/FieldPageState.cpp")
+        visit = source[source.index("boolVisitRegionScent("):source.index("voidAppendOwner(")]
+        self.assertIn("if(!ValidOwner(owner)||scent.empty())returnfalse;", visit)
+        self.assertIn("kRegionCells=512;", visit)
+        self.assertIn("for(autox=min_x;x<end_x;++x)", visit)
+        self.assertIn("scent.lower_bound({x,min_z})", visit)
+        self.assertIn("cell->first.x==x&&cell->first.z<end_z", visit)
+        owns = source[source.index("boolFieldPageState::owns_evolution_state("):
+                      source.index("boolFieldPageState::set_weather_age(")]
+        projection = source[source.index("std::stringFieldPageState::region_bytes("):]
+        for region_query in (owns, projection):
+            self.assertIn("VisitRegionScent(m_scent,key,", region_query)
+            self.assertNotIn(":m_scent)", region_query)
+            self.assertNotIn(":m_storms)", region_query)
+            self.assertNotIn(":m_strikes)", region_query)
+        self.assertIn("m_ownerStorms.contains(key)", owns)
+        self.assertIn("m_ownerStrikes.contains(key)", owns)
+        self.assertIn("m_ownerStorms.find(key)", projection)
+        self.assertIn("m_ownerStrikes.find(key)", projection)
+
+    def test_refusal_and_working_set_regressions_are_registered(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        for relative, cases in (
+                ("persistence/SaveTransaction_test.cpp",
+                 ("RecoveryRejectsOversizedJournalWithoutWrites",
+                  "RecoveryRejectsTooManyJournalEntriesBeforeEntryDecoding",
+                  "RecoveryAcceptsJournalAtByteLimit",
+                  "RecoveryRefusesEmptyTruncatedAndNonregularJournalsWithoutWrites",
+                  "RecoveryRefusesFifoJournalWithoutWaitingForAWriter",
+                  "RecoveryRefusesSymlinkJournalWithoutWrites",
+                  "RecoveryRefusesUnreadableAndLockedJournalsWithoutWrites")),
+                ("fields/energy_field_state_test.cpp",
+                 ("IdleAndBorderTicksExcludeDormantPagesFromBuffers",
+                  "CommonBorderStagesBothExistingPhysicalPagesAndSkipsAbsentPages",
+                  "DepositOnlyTickStagesOnlyItsTargetAndRetainsLegacyEpochs",
+                  "NegativeCommonBordersStageBothAxesInCanonicalOrder",
+                  "IdleTickDropsLegacyEmptyPagesAndRejectsInvalidMetadataAtomically")),
+                ("common/FieldPageState_test.cpp",
+                 ("ScentRegionQueriesMatchCanonicalProjectionAtEveryBoundary",
+                  "ScentRegionQueriesExcludeOtherColumnsAtFullCapacity",
+                  "WeatherOwnerIndicesSurviveParseCopyRefusalReplacementAndClear"))):
+            self.assertIn(relative, cmake)
+            fixture = self.source("test/" + relative)
+            for case in cases:
+                self.assertIn("," + case + "){", fixture)
+
 
 if __name__ == "__main__":
     unittest.main()

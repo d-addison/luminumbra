@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #else
@@ -157,6 +159,40 @@ TreeMap Tree(const fs::path& root) {
         out[rel] = Get(it->path());
     }
     return out;
+}
+
+auto TreeFingerprints(const fs::path& root) {
+    std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> fingerprints;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        if (!entry.is_regular_file())
+            continue;
+        std::uint64_t bytes = 0, digest = 0;
+        bool exists = false;
+        EXPECT_TRUE(hash_file(entry.path(), bytes, digest, exists, nullptr));
+        EXPECT_TRUE(exists);
+        fingerprints.emplace(fs::relative(entry.path(), root).generic_string(),
+                             std::pair{bytes, digest});
+    }
+    return fingerprints;
+}
+
+const std::string kJournalPrefix =
+    "{\"schema\":\"luminumbra.journal.v1\",\"txn_id\":1,\"base_generation\":0,"
+    "\"new_generation\":1,\"entries\":[";
+
+void ExpectJournalRefusalWithoutWrites(const fs::path& root, std::string_view diagnostic) {
+    const auto before = TreeFingerprints(root);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::vector<std::string> errors;
+        EXPECT_EQ(recover_pending_journal(root, &errors), RecoveryOutcome::Failed);
+        EXPECT_TRUE(std::any_of(errors.begin(), errors.end(), [&](const auto& message) {
+            return message.find(diagnostic) != std::string::npos;
+        }));
+        EXPECT_EQ(TreeFingerprints(root), before);
+    }
+    SaveTransaction transaction(root, 2, {}, &WorldSaveService::member_digest);
+    EXPECT_FALSE(transaction.begin(nullptr));
+    EXPECT_EQ(TreeFingerprints(root), before);
 }
 
 void CopyTree(const fs::path& from, const fs::path& to) {
@@ -610,6 +646,113 @@ TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
     EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
     EXPECT_FALSE(errors.empty());
 }
+
+TEST(SaveTransaction, RecoveryRejectsOversizedJournalWithoutWrites) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "baseline"}}));
+    Put(save.path() / "world_info.json.tmp.1.2", "staging must survive refusal");
+    Put(journal_directory(save.path()) / "undo/0", "undo must survive refusal");
+    auto journal = kJournalPrefix + "]}";
+    journal.resize(kMaxJournalBytes + 1, ' ');
+    Put(journal_directory(save.path()) / "txn.json", journal);
+    ExpectJournalRefusalWithoutWrites(save.path(), "byte limit");
+}
+
+TEST(SaveTransaction, RecoveryRejectsTooManyJournalEntriesBeforeEntryDecoding) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "baseline"}}));
+    Put(save.path() / "world_info.json.tmp.1.2", "staging must survive refusal");
+    // The count guard must run before constructing/validating any recovery entry. Null entries
+    // keep this over-count input below the byte budget and distinguish the two refusals.
+    std::string journal = kJournalPrefix;
+    for (std::size_t i = 0; i <= kMaxJournalEntries; ++i)
+        journal += i == 0 ? "null" : ",null";
+    journal += "]}";
+    ASSERT_LT(journal.size(), kMaxJournalBytes);
+    Put(journal_directory(save.path()) / "txn.json", journal);
+    ExpectJournalRefusalWithoutWrites(save.path(), "entry count exceeds limit");
+}
+
+TEST(SaveTransaction, RecoveryAcceptsJournalAtByteLimit) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "baseline"}}));
+    const auto baseline = Tree(save.path());
+    auto journal = kJournalPrefix + "]}";
+    journal.resize(kMaxJournalBytes, ' ');
+    Put(journal_directory(save.path()) / "txn.json", journal);
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::DiscardedStale);
+    EXPECT_EQ(Tree(save.path()), baseline);
+}
+
+TEST(SaveTransaction, RecoveryRefusesEmptyTruncatedAndNonregularJournalsWithoutWrites) {
+    for (const auto& journal : {std::string{}, kJournalPrefix, kJournalPrefix + "{}"}) {
+        TempSave save;
+        Put(save.path() / "world_info.json", "baseline");
+        Put(save.path() / "world_info.json.tmp.1.2", "staging");
+        Put(journal_directory(save.path()) / "txn.json", journal);
+        ExpectJournalRefusalWithoutWrites(save.path(), "malformed journal JSON");
+    }
+    TempSave save;
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    fs::create_directories(txn);
+    Put(txn / "sentinel", "directory is not a journal");
+    ExpectJournalRefusalWithoutWrites(save.path(), "cannot open bounded snapshot input");
+    EXPECT_TRUE(fs::is_directory(txn));
+}
+
+#ifndef _WIN32
+TEST(SaveTransaction, RecoveryRefusesFifoJournalWithoutWaitingForAWriter) {
+    TempSave save;
+    fs::create_directories(journal_directory(save.path()));
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    ASSERT_EQ(::mkfifo(txn.c_str(), 0600), 0);
+    ExpectJournalRefusalWithoutWrites(save.path(), "cannot open bounded snapshot input");
+    EXPECT_EQ(fs::symlink_status(txn).type(), fs::file_type::fifo);
+}
+
+TEST(SaveTransaction, RecoveryRefusesSymlinkJournalWithoutWrites) {
+    TempSave save;
+    const auto target = save.path() / "foreign.json";
+    Put(target, kJournalPrefix + "]}");
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    fs::create_directories(txn.parent_path());
+    fs::create_symlink(target, txn);
+    ExpectJournalRefusalWithoutWrites(save.path(), "cannot open bounded snapshot input");
+    EXPECT_TRUE(fs::is_symlink(txn));
+}
+#else
+TEST(SaveTransaction, RecoveryRefusesUnreadableAndLockedJournalsWithoutWrites) {
+    TempSave save;
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    Put(txn, kJournalPrefix + "]}");
+    const auto before = Tree(save.path());
+    for (const bool exclusive_open : {true, false}) {
+        const HANDLE handle = ::CreateFileW(txn.c_str(),
+                                            GENERIC_READ,
+                                            exclusive_open ? 0 : FILE_SHARE_READ,
+                                            nullptr,
+                                            OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL,
+                                            nullptr);
+        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+        OVERLAPPED range{};
+        const bool locked =
+            exclusive_open ||
+            ::LockFileEx(
+                handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &range) != 0;
+        std::vector<std::string> errors;
+        if (locked)
+            EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_NE(::CloseHandle(handle), 0);
+        ASSERT_TRUE(locked);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find(exclusive_open ? "cannot open bounded snapshot input"
+                                                     : "cannot read bounded snapshot input"),
+                  std::string::npos);
+        EXPECT_EQ(Tree(save.path()), before);
+    }
+}
+#endif
 
 TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
     TempSave save;

@@ -827,3 +827,134 @@ TEST(RegionalEnergy, EmptyDueOwnersCountEachPersistentAgeUpdate) {
         EXPECT_EQ(result.ages.at(due[i]), 1u);
     }
 }
+
+TEST(RegionalEnergy, IdleAndBorderTicksExcludeDormantPagesFromBuffers) {
+    EnergyFieldState field;
+    auto records = TwoEnergyOwners();
+    for (auto& [key, record] : records) {
+        (void)key;
+        record.state = RegionState::Reduced;
+        record.cadence_shift = 2;
+        record.cadence_phase = 1;
+    }
+    EnergyAges ages{{{0, 0}, 3}, {{1, 0}, 5}};
+    std::string initial = "EFS1 1 0\nP 1 0 4:16000\n";
+    // Hundreds of distant frozen pages must never join either working set.
+    for (int page = 100; page < 356; ++page) {
+        initial += "P " + std::to_string(page) + " 100 0:777\n";
+        const auto owner = EnergyFieldState::OwnerOfCell(page * kEnergyPageCells, 1600);
+        records[owner].state = RegionState::Frozen;
+        ages[owner] = 19;
+    }
+    ASSERT_TRUE(field.DeserializeRegionalRecord(initial));
+    auto result = RegionalStep(field, 3, records, {}, ages);
+    EXPECT_EQ(result.staged_pages, 0u);
+    EXPECT_EQ(result.diffusion_pages, 0u);
+    EXPECT_EQ(result.ages, ages);
+    EXPECT_TRUE(result.work.empty());
+    EXPECT_EQ(field.SerializeRegionalRecord(), initial);
+
+    // A common border fires even with an empty due set. Its four exact sweeps are
+    // 16000/0 -> 15000/1000 -> 14125/1875 -> 13360/2640 -> 12690/3310.
+    result = RegionalStep(field, 4, records, {}, ages);
+    EXPECT_EQ(result.staged_pages, 1u);
+    EXPECT_EQ(result.diffusion_pages, 1u);
+    EXPECT_EQ(result.ages, ages);
+    ASSERT_EQ(result.work.size(), 2u);
+    EXPECT_EQ(result.work[0].page_updates, 1u);
+    EXPECT_EQ(result.work[1].page_updates, 1u);
+    const auto dormant_at = initial.find("P 100 ");
+    ASSERT_NE(dormant_at, std::string::npos);
+    EXPECT_EQ(field.SerializeRegionalRecord(),
+              "EFS1 1 0\nP 1 0 4:12690 5:3310\n" + initial.substr(dormant_at));
+    EXPECT_EQ(field.total_raw(), 16000u + 256u * 777u);
+    result = RegionalStep(field, 5, records, {}, ages);
+    EXPECT_EQ(result.staged_pages, 0u);
+    EXPECT_EQ(result.diffusion_pages, 0u);
+    const auto right = field.RegionBytes({1, 0});
+    ages[{0, 0}] = 7;
+    const std::array due{RegionKey{0, 0}};
+    result = RegionalStep(field, 9, records, due, ages);
+    EXPECT_EQ(result.staged_pages, 1u);
+    EXPECT_EQ(result.diffusion_pages, 1u);
+    EXPECT_EQ(result.ages.at({0, 0}), 8u);
+    EXPECT_EQ(field.RegionBytes({1, 0}), right);
+    EXPECT_EQ(field.total_raw(), DecayOnceRef(12690) + 3310u + 256u * 777u);
+}
+
+TEST(RegionalEnergy, CommonBorderStagesBothExistingPhysicalPagesAndSkipsAbsentPages) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 3 0 15:16000\nP 4 0 255:1\n"));
+    const EnergyRecords records{{{2, 0}, ActiveRegionRecord{}}, {{3, 0}, ActiveRegionRecord{}}};
+    const auto result = RegionalStep(field, 1, records, {}, {{{2, 0}, 3}, {{3, 0}, 5}});
+    EXPECT_EQ(result.staged_pages, 2u);
+    EXPECT_EQ(result.diffusion_pages, 2u);
+    EXPECT_EQ(field.SerializeRegionalRecord(), "EFS1 1 0\nP 3 0 15:12690\nP 4 0 0:3310 255:1\n");
+
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 3 0 15:16000\n"));
+    const auto sealed = RegionalStep(field, 2, records, {}, {{{2, 0}, 3}});
+    EXPECT_EQ(sealed.staged_pages, 0u);
+    EXPECT_EQ(sealed.diffusion_pages, 0u);
+    EXPECT_EQ(field.SerializeRegionalRecord(), "EFS1 1 0\nP 3 0 15:16000\n");
+}
+
+TEST(RegionalEnergy, DepositOnlyTickStagesOnlyItsTargetAndRetainsLegacyEpochs) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRecord("EFS1 1 8\nP 100 100 0:777\n", 0));
+    field.SetAnchorCell(0, 0);
+    field.Tick(16);
+    const auto frozen_owner = EnergyFieldState::OwnerOfCell(1600, 1600);
+    EnergyRecords records{{{0, 0}, ActiveRegionRecord{}}, {frozen_owner, ActiveRegionRecord{}}};
+    records[frozen_owner].state = RegionState::Frozen;
+    const EnergyAges ages{{frozen_owner, 19}};
+    const std::array due{RegionKey{0, 0}};
+    ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 123));
+    const auto result = RegionalStep(field, 17, records, due, ages);
+    EXPECT_EQ(result.staged_pages, 1u);
+    EXPECT_EQ(result.diffusion_pages, 0u);
+    EXPECT_EQ(field.at_cell(0, 0), 123u);
+    EXPECT_EQ(field.at_cell(1600, 1600), 777u);
+    EXPECT_EQ(field.CanonicalBytes(), "aether_state:v1:1:P0,0,0:0=123;P100,100,2:0=777;");
+}
+
+TEST(RegionalEnergy, NegativeCommonBordersStageBothAxesInCanonicalOrder) {
+    for (const bool vertical : {false, true}) {
+        EnergyFieldState field;
+        const auto source = vertical ? "EFS1 1 0\nP 0 0 255:1\nP 0 -1 240:16000\n"
+                                     : "EFS1 1 0\nP -1 -1 255:16000\nP 0 -1 255:1\n";
+        ASSERT_TRUE(field.DeserializeRegionalRecord(source));
+        const RegionKey first = vertical ? RegionKey{0, -1} : RegionKey{-1, -1};
+        const RegionKey second = vertical ? RegionKey{0, 0} : RegionKey{0, -1};
+        const EnergyRecords records{{first, ActiveRegionRecord{}}, {second, ActiveRegionRecord{}}};
+        const auto result = RegionalStep(field, 1, records, {}, {{first, 3}, {second, 5}});
+        EXPECT_EQ(result.staged_pages, 2u);
+        EXPECT_EQ(result.diffusion_pages, 2u);
+        EXPECT_EQ(field.SerializeRegionalRecord(),
+                  vertical ? "EFS1 1 0\nP 0 0 0:3310 255:1\nP 0 -1 240:12690\n"
+                           : "EFS1 1 0\nP -1 -1 255:12690\nP 0 -1 240:3310 255:1\n");
+        ASSERT_EQ(result.work.size(), 2u);
+        EXPECT_EQ(result.work[0].key, first);
+        EXPECT_EQ(result.work[1].key, second);
+    }
+}
+
+TEST(RegionalEnergy, IdleTickDropsLegacyEmptyPagesAndRejectsInvalidMetadataAtomically) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRecord("EFS1 1 8\nP 0 0\n", 0));
+    EXPECT_EQ(field.page_count(), 1u);
+    const auto empty = RegionalStep(field, 1, {}, {}, {});
+    EXPECT_EQ(empty.staged_pages, 0u);
+    EXPECT_EQ(empty.diffusion_pages, 0u);
+    EXPECT_EQ(field.page_count(), 0u);
+    auto records = TwoEnergyOwners();
+    EnergyResult out;
+    out.staged_pages = 71;
+    out.diffusion_pages = 72;
+    for (const auto invalid : {17u, 255u}) {
+        records.begin()->second.cadence_shift = static_cast<std::uint8_t>(invalid);
+        EXPECT_FALSE(field.TickRegional(1, records, {}, {}, out));
+        EXPECT_EQ(out.staged_pages, 71u);
+        EXPECT_EQ(out.diffusion_pages, 72u);
+        EXPECT_EQ(field.page_count(), 0u);
+    }
+}

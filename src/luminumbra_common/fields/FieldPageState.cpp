@@ -1,5 +1,8 @@
 #include "FieldPageState.h"
 
+#include "../world/ActiveRegionLedger.h"
+#include "../world/WorldClock.h"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -9,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -38,7 +42,8 @@ constexpr std::size_t kFooterBytes = 8;
 // key (i32 x, i32 z) + 4 x u64 mask + 5 x 256 x u16 cells.
 constexpr std::size_t kPageKeyBytes = 8;
 constexpr std::size_t kMaskBytes = 32;
-constexpr std::size_t kPageBytes = kPageKeyBytes + kMaskBytes + 2 * 5 * FieldPage::kCells;
+constexpr std::size_t kPageBytes =
+    kPageKeyBytes + kMaskBytes + std::size_t{2} * 5 * FieldPage::kCells;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
@@ -363,6 +368,26 @@ bool ValidScent(ScentCellKey key, const ScentCell& cell) {
     }
     return true;
 }
+
+template<typename Visitor>
+bool VisitRegionScent(const std::map<ScentCellKey, ScentCell>& scent,
+                      RegionKey owner,
+                      Visitor&& visit) {
+    if (!ValidOwner(owner) || scent.empty())
+        return false;
+    // Scent keys are ordered by (x, z). A region contains exactly 512 one-metre columns;
+    // each lookup skips every cell outside its z interval, including negative coordinates.
+    constexpr std::int32_t kRegionCells = 512;
+    const auto min_x = owner.x * kRegionCells, min_z = owner.z * kRegionCells;
+    const auto end_x = min_x + kRegionCells, end_z = min_z + kRegionCells;
+    for (auto x = min_x; x < end_x; ++x)
+        for (auto cell = scent.lower_bound({x, min_z});
+             cell != scent.end() && cell->first.x == x && cell->first.z < end_z;
+             ++cell)
+            if (visit(cell->first, cell->second))
+                return true;
+    return false;
+}
 void AppendOwner(std::string& out, RegionKey key) {
     AppendLe(out, static_cast<std::uint32_t>(key.x), 4);
     AppendLe(out, static_cast<std::uint32_t>(key.z), 4);
@@ -666,8 +691,15 @@ bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
     for (std::size_t i = 1; i < strikes.size(); ++i)
         if (StrikeOrder(strikes[i - 1]) == StrikeOrder(strikes[i]))
             return false;
+    std::map<RegionKey, std::vector<std::size_t>> owner_storms_index, owner_strikes_index;
+    for (std::size_t i = 0; i < storms.size(); ++i)
+        owner_storms_index[storms[i].owner].push_back(i);
+    for (std::size_t i = 0; i < strikes.size(); ++i)
+        owner_strikes_index[strikes[i].owner].push_back(i);
     m_storms = std::move(storms);
     m_strikes = std::move(strikes);
+    m_ownerStorms.swap(owner_storms_index);
+    m_ownerStrikes.swap(owner_strikes_index);
     return true;
 }
 bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
@@ -740,20 +772,10 @@ RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
                 FloorDiv(static_cast<std::int64_t>(key.z) * 1000 + 500, kRegionMm))};
 }
 bool FieldPageState::owns_evolution_state(RegionKey key) const {
-    if (m_weatherClocks.contains(key))
+    if (m_weatherClocks.contains(key) || m_ownerStorms.contains(key) ||
+        m_ownerStrikes.contains(key))
         return true;
-    for (const auto& storm : m_storms)
-        if (storm.owner == key)
-            return true;
-    for (const auto& strike : m_strikes)
-        if (strike.owner == key)
-            return true;
-    for (const auto& [cell, values] : m_scent) {
-        (void)values;
-        if (region_of_scent_cell(cell) == key)
-            return true;
-    }
-    return false;
+    return VisitRegionScent(m_scent, key, [](ScentCellKey, const ScentCell&) { return true; });
 }
 bool FieldPageState::set_weather_age(RegionKey owner, std::uint64_t active_age) {
     if (!ValidOwner(owner) || active_age >= WorldClock::kTickLimit ||
@@ -954,21 +976,21 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
     }
     std::string storms, strikes, scent;
     std::size_t storm_count = 0, strike_count = 0, scent_count = 0;
-    for (const auto& storm : m_storms)
-        if (storm.owner == key) {
-            AppendStorm(storms, storm);
+    if (const auto owned = m_ownerStorms.find(key); owned != m_ownerStorms.end())
+        for (const auto index : owned->second) {
+            AppendStorm(storms, m_storms[index]);
             ++storm_count;
         }
-    for (const auto& strike : m_strikes)
-        if (strike.owner == key) {
-            AppendStrike(strikes, strike);
+    if (const auto owned = m_ownerStrikes.find(key); owned != m_ownerStrikes.end())
+        for (const auto index : owned->second) {
+            AppendStrike(strikes, m_strikes[index]);
             ++strike_count;
         }
-    for (const auto& [cell, values] : m_scent)
-        if (region_of_scent_cell(cell) == key) {
-            AppendScent(scent, cell, values);
-            ++scent_count;
-        }
+    VisitRegionScent(m_scent, key, [&](ScentCellKey cell, const ScentCell& values) {
+        AppendScent(scent, cell, values);
+        ++scent_count;
+        return false;
+    });
     const auto clock = m_weatherClocks.find(key);
     if (storm_count + strike_count + scent_count != 0 || clock != m_weatherClocks.end()) {
         out += "|evolution:v2:";

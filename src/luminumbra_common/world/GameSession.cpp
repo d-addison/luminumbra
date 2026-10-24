@@ -472,11 +472,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         if (m_activeRegionsEnabled)
             m_worldClock.set_tick(current_tick);
         try {
+            RunRegionScheduler(current_tick);
+            if (m_regionFault)
+                return i + 1;
             if (m_activeRegionsEnabled) {
                 m_regionCompletedWork.clear();
-                RunRegionScheduler(current_tick);
-                if (m_regionFault)
-                    return i + 1;
+            }
+            if (m_activeRegionsEnabled && m_worldSystem) {
                 AdvanceGroundObjects(current_tick);
                 if (m_regionFault)
                     return i + 1;
@@ -1552,27 +1554,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
     BindRegionalFieldQueries();
 
-    // unlike the re-derivable trio above, the stateful
-    // energy layer is AUTHORITATIVE state — when enabled, a persisted record
-    // restores it (epoch-rebased onto the session clock); an absent
-    // record is all-zeros by contract. OFF -> null -> byte-identical.
+    // Stateful energy is adopted with the other saved members below, including
+    // legacy snapshots that contain an energy record without any chunks.
     InitializeEnergyFieldState();
-    if (m_energyFieldState && !m_activeRegionsEnabled) {
-        const fs::path recordPath = worldPath / "aether_state.efs";
-        std::ifstream recordFile(recordPath, std::ios::binary);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
-            }
-        }
-    }
 
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).
@@ -1623,8 +1607,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault) {
         // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
         // probe.
-        m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
-        m_worldSystem->sync_water_authority();
+        if (m_worldSystem) {
+            m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
+            m_worldSystem->sync_water_authority();
+        }
         const auto anchors =
             m_replicatedSimulationAnchors
                 ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
@@ -1637,6 +1623,16 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                 anchors,
                 m_regionWork,
                 [this](RegionKey key) {
+                    if (!m_worldSystem)
+                        return Persistence::WorldSaveService::region_simulation_digest(
+                            {},
+                            key,
+                            Persistence::RegionDigestInputs{
+                                .live = {},
+                                .parked = {},
+                                .durable = {},
+                                .ground_object_bytes = m_groundObjects.region_bytes(key),
+                                .field_page_bytes = RegionalFieldProjection(key)});
                     const auto directory = m_regionDurableDirectory.empty()
                                                ? GetWorldSaveDir()
                                                : m_regionDurableDirectory;
@@ -1663,6 +1659,8 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
+                        if (!m_worldSystem)
+                            return owned_regions->contains(key);
                         for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
@@ -3099,6 +3097,26 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState&
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {
     // All refusing readers have passed; publish the staged state together.
     m_renderCalendar = saved.render_calendar;
+    // Restore legacy energy before the chunkless-save fast path. Its cadence
+    // is a delay relative to this session's tick; absence clears prior state.
+    if (m_energyFieldState && !m_activeRegionsEnabled) {
+        m_energyFieldState->ResetEmptyAtTick(GetSimulationTickCount());
+        const fs::path recordPath = save_dir / "aether_state.efs";
+        std::ifstream recordFile(recordPath, std::ios::binary);
+        if (recordFile) {
+            std::ostringstream recordBytes;
+            recordBytes << recordFile.rdbuf();
+            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
+                                                      GetSimulationTickCount())) {
+                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
+                                     m_energyFieldState->page_count());
+            } else {
+                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
+                                     recordPath.string());
+            }
+        }
+    }
+
     if (!saved.snapshot_present && !m_activeRegionsEnabled) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
         return; // legacy fresh world
@@ -3188,26 +3206,6 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         } else {
             for (const std::string& e : plant_errors)
                 LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
-        }
-    }
-
-    // restore the stateful energy layer's record (a
-    // missing file is a clean miss == all zeros by contract). Epoch-rebased
-    // onto the loaded session's tick stream (-4).
-    if (m_energyFieldState && !m_activeRegionsEnabled) {
-        const fs::path recordPath = save_dir / "aether_state.efs";
-        std::ifstream recordFile(recordPath, std::ios::binary);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
-            }
         }
     }
 

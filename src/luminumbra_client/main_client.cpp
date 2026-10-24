@@ -3690,6 +3690,11 @@ int main(int argc, char* argv[]) {
         const bool g_rb_active = !g_app.capture.render_benchmark_path.empty();
         if (g_rb_active)
             g_rb_frame_start = std::chrono::steady_clock::now();
+        const bool settling_benchmark_uploads =
+            g_rb_active &&
+            ((!upload_warmup_complete &&
+              g_app.benchmark.warmupFrames + 1 >= g_app.capture.render_benchmark_warmup) ||
+             g_app.benchmark.measuredFrames >= g_app.capture.render_benchmark_frames);
         const bool measuring_v3 =
             benchmark_v3 && gameStateManager.GetCurrentState() == GameState::IN_GAME &&
             gameSession && upload_warmup_complete &&
@@ -4354,7 +4359,11 @@ int main(int argc, char* argv[]) {
                         g_camera->updateCameraVectors();
                     }
                 }
-                if (auto* physics = gameSession->GetPhysicsSystem())
+                // Unmeasured benchmark qualification holds the scene at one simulation
+                // instant while existing streaming and GPU uploads finish. Water can publish
+                // more replacement meshes per update than one frame can adopt.
+                if (auto* physics = gameSession->GetPhysicsSystem();
+                    physics && !settling_benchmark_uploads)
                     physics->update(deltaTime * g_app.capture.timeScale);
                 // fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
@@ -4371,34 +4380,38 @@ int main(int argc, char* argv[]) {
                             g_playerController->GetPosition(),
                             g_playerController->GetMovementMode() ==
                                 Luminumbra::Client::MovementMode::Walking);
-                    if (traversal) {
-                        while (measuring_v3 && !gameSession->GetRegionSchedulerFault() &&
-                               traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
-                            traversal_ticks +=
-                                gameSession->TickSimulation(1.0 / traversal->tickRate);
-                    } else if (g_app.capture.timeScale == 1.0f) {
-                        gameSession->TickSimulation(static_cast<double>(
-                            deltaTime)); // byte-identical default (gates run here)
-                    } else if (g_app.capture.timeScale > 0.0f) {
-                        // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps so a
-                        // high scale isn't dropped by the catch-up clamp, capped per frame to keep
-                        // spiral protection. Determinism holds (fixed dt per tick).
-                        double simDt = static_cast<double>(deltaTime) *
-                                       static_cast<double>(g_app.capture.timeScale);
-                        const double kFourTicks = (1.0 / 30.0) * 4.0;
-                        const int budget = static_cast<int>(
-                            std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
-                        int ran = 0;
-                        while (simDt > 1e-9 && ran < budget) {
-                            const double step = std::min(simDt, kFourTicks);
-                            const std::uint32_t t = gameSession->TickSimulation(step);
-                            simDt -= step;
-                            if (t == 0u)
-                                break; // accumulator < 1 tick this frame
-                            ran += static_cast<int>(t);
-                        }
-                    } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
-                      // continue)
+                    if (!settling_benchmark_uploads) {
+                        // The benchmark phase controls this hold, independently of GPU readiness.
+                        if (traversal) {
+                            while (measuring_v3 && !gameSession->GetRegionSchedulerFault() &&
+                                   traversal_ticks <
+                                       static_cast<std::uint64_t>(traversal_target_tick))
+                                traversal_ticks +=
+                                    gameSession->TickSimulation(1.0 / traversal->tickRate);
+                        } else if (g_app.capture.timeScale == 1.0f) {
+                            gameSession->TickSimulation(static_cast<double>(
+                                deltaTime)); // byte-identical default (gates run here)
+                        } else if (g_app.capture.timeScale > 0.0f) {
+                            // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps
+                            // so a high scale isn't dropped by the catch-up clamp, capped per frame
+                            // to keep spiral protection. Determinism holds (fixed dt per tick).
+                            double simDt = static_cast<double>(deltaTime) *
+                                           static_cast<double>(g_app.capture.timeScale);
+                            const double kFourTicks = (1.0 / 30.0) * 4.0;
+                            const int budget = static_cast<int>(
+                                std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
+                            int ran = 0;
+                            while (simDt > 1e-9 && ran < budget) {
+                                const double step = std::min(simDt, kFourTicks);
+                                const std::uint32_t t = gameSession->TickSimulation(step);
+                                simDt -= step;
+                                if (t == 0u)
+                                    break; // accumulator < 1 tick this frame
+                                ran += static_cast<int>(t);
+                            }
+                        } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
+                          // continue)
+                    }
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                     if (gameSession->PersistenceSaveRequested() ||
@@ -4455,9 +4468,12 @@ int main(int argc, char* argv[]) {
                             g_rb_last_streaming_position = streaming_position;
                             g_rb_has_streaming_position = true;
                         }
+                        auto* streaming_world = gameSession->GetWorldSystem();
+                        streaming_world->SetWaterBootPaused(settling_benchmark_uploads);
                         gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
                                                               streaming_position,
                                                               gameSession->GetPhysicsSystem());
+                        streaming_world->SetWaterBootPaused(false);
                     }
                     rb_stream_ms = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - _rb_stream_t0)
@@ -4955,11 +4971,6 @@ int main(int argc, char* argv[]) {
                     // Upload waits may omit intermediate images after required
                     // settling frames. Every measured traversal frame draws.
                     // Residency retries preserve the selected sun and cloud phase.
-                    const bool settling_benchmark_uploads =
-                        g_rb_active &&
-                        ((!upload_warmup_complete && g_app.benchmark.warmupFrames + 1 >=
-                                                         g_app.capture.render_benchmark_warmup) ||
-                         g_app.benchmark.measuredFrames >= g_app.capture.render_benchmark_frames);
                     const bool settling_capture_uploads =
                         (g_app.capture.scene_active &&
                          g_app.capture.render_benchmark_path.empty() &&

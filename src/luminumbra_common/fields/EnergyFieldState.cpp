@@ -1,13 +1,25 @@
 #include "EnergyFieldState.h"
 
+#include "../world/ActiveRegionLedger.h"
+#include "../world/WorldClock.h"
+
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <locale>
+#include <map>
+#include <optional>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace luminumbra::fields {
 
@@ -338,7 +350,7 @@ std::uint64_t EnergyFieldState::Tick(std::uint64_t tick) {
     // Pages re-entering the window catch up BEFORE deposits land on them.
     CatchUpWindowPages();
 
-    std::uint64_t clipped = ApplyDeposits();
+    const std::uint64_t clipped = ApplyDeposits();
 
     // Fire the cadence (a while-loop so a caller skipping ticks stays
     // deterministic: every due firing runs, in order).
@@ -530,6 +542,11 @@ std::int64_t RegionalFloorDiv(std::int64_t value, std::int64_t divisor) noexcept
 bool ValidEnergyOwner(EnergyFieldState::RegionKey key) noexcept {
     return key.x >= -32768 && key.x < 32768 && key.z >= -32768 && key.z < 32768;
 }
+std::pair<int, int> RegionalCellRange(std::int32_t region) noexcept {
+    const auto start = std::int64_t{region} * 512 - 12;
+    return {static_cast<int>(-RegionalFloorDiv(-start, 24)),
+            static_cast<int>(-RegionalFloorDiv(-(start + 512), 24))};
+}
 template<typename Integer>
 bool ParseRegionalInteger(const std::string& token, Integer& value) {
     const auto result = std::from_chars(token.data(), token.data() + token.size(), value);
@@ -642,11 +659,18 @@ std::string EnergyFieldState::SerializeRegionalRecord() const {
     return out.str();
 }
 
-bool EnergyFieldState::RegionalRecordFits() const {
-    if (m_channels < 1 || m_channels > 64 ||
-        m_pages.size() >
-            kMaxRegionalValueBytes / (std::size_t{kEnergyPageCells * kEnergyPageCells} *
-                                      m_channels * sizeof(std::uint16_t)))
+bool EnergyFieldState::RegionalRecordFits(const EnergyFieldState* replacements) const {
+    if (m_channels < 1 || m_channels > 64)
+        return false;
+    auto stored_pages = m_pages.size();
+    if (replacements)
+        for (const auto& [key, page] : replacements->m_pages) {
+            (void)page;
+            if (!m_pages.contains(key))
+                ++stored_pages;
+        }
+    if (stored_pages > kMaxRegionalValueBytes / (std::size_t{kEnergyPageCells} * kEnergyPageCells *
+                                                 m_channels * sizeof(std::uint16_t)))
         return false;
     const auto width = [](std::size_t value) {
         std::size_t digits = 1;
@@ -657,9 +681,9 @@ bool EnergyFieldState::RegionalRecordFits() const {
         return digits;
     };
     std::size_t bytes = 8 + width(static_cast<std::size_t>(m_channels));
-    for (const auto& [key, page] : m_pages) {
+    const auto measure = [&](std::int64_t key, const Page& page) {
         if (page.all_zero())
-            continue;
+            return true;
         int px = 0, pz = 0;
         UnpackCellKey(key, px, pz);
         bytes += 4 + std::to_string(px).size() + std::to_string(pz).size();
@@ -670,7 +694,15 @@ bool EnergyFieldState::RegionalRecordFits() const {
             if (bytes > kMaxRegionalRecordBytes)
                 return false;
         }
-    }
+        return bytes <= kMaxRegionalRecordBytes;
+    };
+    for (const auto& [key, page] : m_pages)
+        if ((!replacements || !replacements->m_pages.contains(key)) && !measure(key, page))
+            return false;
+    if (replacements)
+        for (const auto& [key, page] : replacements->m_pages)
+            if (!measure(key, page))
+                return false;
     return bytes <= kMaxRegionalRecordBytes;
 }
 
@@ -692,7 +724,7 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
         !ParseRegionalInteger(phase_token, phase) || phase != 0)
         return false;
     EnergyFieldState staged(channels);
-    const auto values_per_page = std::size_t{kEnergyPageCells * kEnergyPageCells} * channels;
+    const auto values_per_page = std::size_t{kEnergyPageCells} * kEnergyPageCells * channels;
     const auto max_pages = kMaxRegionalValueBytes / (values_per_page * sizeof(std::uint16_t));
     std::optional<std::int64_t> previous;
     while (std::getline(in, line)) {
@@ -752,6 +784,12 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
 
 bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
                                               const EnergyAges& ages) const {
+    return ValidateRegionalOwners(records, ages, nullptr);
+}
+
+bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
+                                              const EnergyAges& ages,
+                                              std::vector<std::int64_t>* empty_pages) const {
     if (m_channels < 1 || m_channels > 64 ||
         records.size() > Luminumbra::world::ActiveRegionLedger::kMaxRegions)
         return false;
@@ -762,13 +800,15 @@ bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
     for (const auto& [key, page] : m_pages) {
         int px = 0, pz = 0;
         UnpackCellKey(key, px, pz);
-        if (page.values.size() != std::size_t{kEnergyPageCells * kEnergyPageCells} * m_channels)
+        if (page.values.size() != std::size_t{kEnergyPageCells} * kEnergyPageCells * m_channels)
             return false;
         if (px < -43691 || px > 43690 || pz < -43691 || pz > 43690)
             return false;
+        bool any = false;
         for (std::size_t i = 0; i < page.values.size(); ++i) {
             if (page.values[i] == 0)
                 continue;
+            any = true;
             const auto cell = i / static_cast<std::size_t>(m_channels);
             const auto owner =
                 OwnerOfCell(px * kEnergyPageCells + static_cast<int>(cell % kEnergyPageCells),
@@ -776,6 +816,8 @@ bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
             if (!ValidEnergyOwner(owner) || !records.contains(owner) || !ages.contains(owner))
                 return false;
         }
+        if (!any && empty_pages)
+            empty_pages->push_back(key);
     }
     return true;
 }
@@ -809,7 +851,8 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
             firing.insert(key);
         previous = key;
     }
-    if (!ValidateRegionalOwners(records, result.ages))
+    std::vector<std::int64_t> empty_pages;
+    if (!ValidateRegionalOwners(records, result.ages, &empty_pages))
         return false;
     for (const auto& [key, owner] : records)
         if (!ValidEnergyOwner(key) || owner.cadence_shift > 16 ||
@@ -818,13 +861,27 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
             owner.cadence_phase >= (std::uint32_t{1} << owner.cadence_shift))
             return false;
 
-    // Stage all values and deposits. Allocation/cap refusal cannot consume input.
-    EnergyFieldState staged = *this;
+    // Copy only pages that can change. The overlay stays private until all validation passes,
+    // so allocation/cap refusal cannot consume deposits or alter dormant authority.
+    EnergyFieldState staged(m_channels);
+    staged.m_fires_completed = m_fires_completed;
+    staged.m_pending = m_pending;
     const auto max_pages =
         kMaxRegionalValueBytes /
-        (std::size_t{kEnergyPageCells * kEnergyPageCells} * m_channels * sizeof(std::uint16_t));
-    if (staged.m_pages.size() > max_pages)
+        (std::size_t{kEnergyPageCells} * kEnergyPageCells * m_channels * sizeof(std::uint16_t));
+    auto stored_pages = m_pages.size();
+    if (stored_pages > max_pages)
         return false;
+    const auto stage_page = [&](int px, int pz) -> Page& {
+        const auto key = PackPageKey(px, pz);
+        const auto existing = staged.m_pages.find(key);
+        if (existing != staged.m_pages.end())
+            return existing->second;
+        const auto original = m_pages.find(key);
+        if (original != m_pages.end())
+            return staged.m_pages.emplace(key, original->second).first->second;
+        return staged.EnsurePage(px, pz);
+    };
     std::set<std::pair<RegionKey, std::int64_t>> touched;
     std::sort(staged.m_pending.begin(),
               staged.m_pending.end(),
@@ -842,9 +899,12 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
         }
         const int px = FloorDiv(cx, kEnergyPageCells), pz = FloorDiv(cz, kEnergyPageCells);
         const auto page_key = PackPageKey(px, pz);
-        if (!staged.m_pages.contains(page_key) && staged.m_pages.size() == max_pages)
-            return false;
-        auto& page = staged.EnsurePage(px, pz);
+        if (!staged.m_pages.contains(page_key) && !m_pages.contains(page_key)) {
+            if (stored_pages == max_pages)
+                return false;
+            ++stored_pages;
+        }
+        auto& page = stage_page(px, pz);
         const auto index = (std::size_t(cz - pz * kEnergyPageCells) * kEnergyPageCells +
                             (cx - px * kEnergyPageCells)) *
                                m_channels +
@@ -856,9 +916,66 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
     }
     staged.m_pending.clear();
 
+    std::set<std::int64_t> diffusion_pages;
+    const auto present = [&](int px, int pz) {
+        const auto key = PackPageKey(px, pz);
+        return m_pages.contains(key) || staged.m_pages.contains(key);
+    };
+    const auto include = [&](int px, int pz) {
+        if (present(px, pz)) {
+            stage_page(px, pz);
+            diffusion_pages.insert(PackPageKey(px, pz));
+        }
+    };
+    // Each 512 m owner intersects at most 3 x 3 physical pages. Common borders can fire
+    // without an interior due tick, but require both endpoint pages to exist (sealed edges).
+    for (const auto owner : firing) {
+        const auto [min_x, end_x] = RegionalCellRange(owner.x);
+        const auto [min_z, end_z] = RegionalCellRange(owner.z);
+        for (int pz = FloorDiv(min_z, kEnergyPageCells);
+             pz <= FloorDiv(end_z - 1, kEnergyPageCells);
+             ++pz)
+            for (int px = FloorDiv(min_x, kEnergyPageCells);
+                 px <= FloorDiv(end_x - 1, kEnergyPageCells);
+                 ++px)
+                include(px, pz);
+    }
+    for (const auto& [owner, record] : records) {
+        if (record.state == RegionState::Frozen ||
+            (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) != 0)
+            continue;
+        const auto [min_x, end_x] = RegionalCellRange(owner.x);
+        const auto [min_z, end_z] = RegionalCellRange(owner.z);
+        for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+            const auto neighbor = records.find({owner.x + dx, owner.z + dz});
+            if (neighbor == records.end() || neighbor->second.state == RegionState::Frozen)
+                continue;
+            const auto shift = std::max(record.cadence_shift, neighbor->second.cadence_shift);
+            if ((tick & ((std::uint64_t{1} << shift) - 1)) != 0)
+                continue;
+            const auto lo = dx != 0 ? min_z : min_x;
+            const auto end = dx != 0 ? end_z : end_x;
+            for (int along = FloorDiv(lo, kEnergyPageCells);
+                 along <= FloorDiv(end - 1, kEnergyPageCells);
+                 ++along) {
+                const int px = dx != 0 ? FloorDiv(end_x - 1, kEnergyPageCells) : along;
+                const int pz = dz != 0 ? FloorDiv(end_z - 1, kEnergyPageCells) : along;
+                const int npx = dx != 0 ? FloorDiv(end_x, kEnergyPageCells) : px;
+                const int npz = dz != 0 ? FloorDiv(end_z, kEnergyPageCells) : pz;
+                if (present(px, pz) && present(npx, npz)) {
+                    include(px, pz);
+                    include(npx, npz);
+                }
+            }
+        }
+    }
+    result.staged_pages = staged.m_pages.size();
+    result.diffusion_pages = diffusion_pages.size();
+
     // Intrinsic decay precedes the four pinned diffusion sweeps, as in Tick.
     // No page-wide epoch is advanced: cells in the same page can have different owners.
-    for (auto& [key, page] : staged.m_pages) {
+    for (const auto key : diffusion_pages) {
+        auto& page = staged.m_pages.at(key);
         int px = 0, pz = 0;
         UnpackCellKey(key, px, pz);
         for (int z = 0; z < kEnergyPageCells; ++z)
@@ -875,15 +992,22 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                 }
             }
     }
-    for (int iteration = 0; iteration < kEnergyDiffuseIterations; ++iteration) {
+    // At most kMaxRegionalValueBytes of u16 pages, and twice that for the reusable i32 buffer.
+    // An idle tick allocates no diffusion values. Every sweep reads the same sealed page order.
+    std::map<std::int64_t, std::vector<std::int32_t>> next;
+    for (const auto key : diffusion_pages)
+        next.emplace(key, std::vector<std::int32_t>(staged.m_pages.at(key).values.size()));
+    for (int iteration = 0; !next.empty() && iteration < kEnergyDiffuseIterations; ++iteration) {
         // Sealed previous-sweep snapshot. Each undirected edge is processed once;
         // both outflows are subtracted from their source and added to the other.
         // No sweep observes an earlier edge's writes.
-        const auto snapshot = staged.m_pages;
-        std::map<std::int64_t, std::vector<std::int32_t>> next;
-        for (const auto& [key, page] : snapshot)
-            next.emplace(key, std::vector<std::int32_t>(page.values.begin(), page.values.end()));
-        for (const auto& [key, page] : snapshot) {
+        const auto& snapshot = staged.m_pages;
+        for (auto& [key, values] : next) {
+            const auto& page = snapshot.at(key);
+            std::copy(page.values.begin(), page.values.end(), values.begin());
+        }
+        for (auto& [key, next_values] : next) {
+            const auto& page = snapshot.at(key);
             int px = 0, pz = 0;
             UnpackCellKey(key, px, pz);
             for (int z = 0; z < kEnergyPageCells; ++z)
@@ -912,7 +1036,8 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                         const int npz = FloorDiv(nz, kEnergyPageCells);
                         const auto neighbor_key = PackPageKey(npx, npz);
                         const auto neighbor = snapshot.find(neighbor_key);
-                        if (neighbor == snapshot.end())
+                        const auto neighbor_next = next.find(neighbor_key);
+                        if (neighbor == snapshot.end() || neighbor_next == next.end())
                             continue;
                         const auto base_a = (std::size_t(z) * kEnergyPageCells + x) * m_channels;
                         const auto base_b =
@@ -927,8 +1052,8 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                                 continue;
                             const auto flux = static_cast<std::int32_t>(va >> kEnergyDiffuseShift) -
                                               static_cast<std::int32_t>(vb >> kEnergyDiffuseShift);
-                            next.at(key)[base_a + channel] -= flux;
-                            next.at(neighbor_key)[base_b + channel] += flux;
+                            next_values[base_a + channel] -= flux;
+                            neighbor_next->second[base_b + channel] += flux;
                             processed = true;
                         }
                         if (processed) {
@@ -945,8 +1070,8 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                     }
                 }
         }
-        for (auto& [key, page] : staged.m_pages) {
-            const auto& values = next.at(key);
+        for (const auto& [key, values] : next) {
+            auto& page = staged.m_pages.at(key);
             for (std::size_t i = 0; i < values.size(); ++i) {
                 // At most four outflows <= v/16, and four inflows <= 65535/16;
                 // residue stays in the source, proving exact u16 conservation.
@@ -956,8 +1081,7 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
             }
         }
     }
-    staged.DropZeroPages();
-    if (!staged.ValidateRegionalOwners(records, result.ages) || !staged.RegionalRecordFits())
+    if (!staged.ValidateRegionalOwners(records, result.ages) || !RegionalRecordFits(&staged))
         return false;
     std::map<RegionKey, std::uint64_t> counts;
     for (const auto owner : age_updates)
@@ -968,8 +1092,18 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
     }
     for (const auto& [owner, count] : counts)
         result.work.push_back({owner, 0, 0, 0, count});
-    m_pages.swap(staged.m_pages);
-    m_pending.swap(staged.m_pending);
+    for (const auto key : empty_pages)
+        m_pages.erase(key);
+    while (!staged.m_pages.empty()) {
+        auto node = staged.m_pages.extract(staged.m_pages.begin());
+        if (node.mapped().all_zero())
+            m_pages.erase(node.key());
+        else if (const auto original = m_pages.find(node.key()); original != m_pages.end())
+            original->second = std::move(node.mapped());
+        else
+            m_pages.insert(std::move(node));
+    }
+    m_pending.clear();
     out = std::move(result);
     return true;
 }

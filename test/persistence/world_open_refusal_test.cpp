@@ -714,11 +714,7 @@ TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettl
     config.world_id = "fixture";
     config.surface_radius = 0;
     config.collision_radius = 0;
-    auto expected = DiskBytes(save);
-    auto metadata = nlohmann::json::parse(expected.at("world_info.json"));
-    // Existing metadata is reconciled even at zero; absent metadata stays absent.
-    metadata["waterSimCursor"] = 0;
-    expected["world_info.json"] = metadata.dump(4) + "\n";
+    const auto expected = DiskBytes(save);
     Server::ServerWorldRunner runner(config);
     ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
     ASSERT_NE(runner.Session(), nullptr);
