@@ -137,15 +137,16 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                 return result;
             }
         }
-        if (json.contains("waterSimCursor") && (!json.at("waterSimCursor").is_number_unsigned())) {
-            result.error = "Corrupt world metadata: invalid water simulation cursor.";
+        if (!WorldSaveService::read_clock_metadata(save,
+                                                   result.clock,
+                                                   result.requires_active_regions,
+                                                   &errors,
+                                                   nullptr,
+                                                   &result.render_calendar,
+                                                   &result.water_sim_cursor)) {
+            result.error = errors.empty() ? "Corrupt world metadata." : errors.front();
             return result;
         }
-        result.water_sim_cursor = json.value("waterSimCursor", std::size_t{0});
-        if (!world::WorldClock::from_metadata(json, result.clock, result.error))
-            return result;
-        result.requires_active_regions =
-            json.contains("simulationTick") || json.contains("calendar");
         if (!SafeName(result.metadata.worldType)) {
             result.error = "Corrupt world metadata: invalid world type.";
             return result;

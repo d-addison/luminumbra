@@ -4,6 +4,8 @@ import math
 import re
 import struct
 from pathlib import Path
+
+from fixture_paths import read_bytes
 import perf
 
 SCHEMA = 'luminumbra.render_benchmark.v3'
@@ -61,7 +63,7 @@ def traversal_manifest(text):
         raise ValueError('incomplete traversal manifest') from error
     integer(result['expected_ticks'], 'expected_ticks', 1)
     integer(result['seed'], 'seed', 0, 2**32 - 1)
-    if (result['tick_rate'] != 30 or result['preset_revision'] not in (6, 7) or
+    if (result['tick_rate'] != 30 or result['preset_revision'] not in (6, 7, 8) or
         result['cold_cache'] != 'true' or not result['preset'] or
         not re.fullmatch(r'[0-9a-f]{16}', result['preset_identity']) or
         not re.fullmatch(r'[0-9]{1,20}', result['content_identity']) or
@@ -96,11 +98,13 @@ def float32(value):
     return struct.unpack('f', struct.pack('f', value))[0]
 
 
-def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None):
+def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None,
+             ladder_baseline=False):
     if data.get('schema') != SCHEMA:
         raise ValueError('unsupported render measurement schema')
     if data.get('gpu_timers_supported') is not True:
         raise ValueError('GPU timers unavailable')
+    perf.validate_far_world_reporting(data, ladder_baseline)
     count = integer(data['frames'], 'frames', 1)
     warmup = integer(data['warmup_frames'], 'warmup_frames', 1)
     adapter = data['adapter']
@@ -187,7 +191,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
         raise ValueError('warmup/report exclusions are incomplete')
     observed = data['workload']
     integer(observed['seed'], 'workload seed', 0, 2**32 - 1)
-    if observed['expected_frames'] != count or observed['preset_revision'] not in (6, 7) or not isinstance(observed['preset'], str) or not observed['preset']:
+    if observed['expected_frames'] != count or observed['preset_revision'] not in (6, 7, 8) or not isinstance(observed['preset'], str) or not observed['preset']:
         raise ValueError('workload manifest does not match')
     if (not isinstance(observed.get('preset_identity'), str) or
         not re.fullmatch(r'[0-9a-f]{16}', observed['preset_identity']) or
@@ -201,7 +205,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
             if observed.get(key) != value:
                 raise ValueError(f'workload manifest does not match: {key}')
     if observed['kind'] == 'traversal':
-        if traversal is None or observed['script'] != Path(traversal).read_bytes().decode('utf-8'):
+        if traversal is None or observed['script'] != read_bytes(Path(traversal).parent, Path(traversal)).decode('utf-8'):
             raise ValueError('traversal manifest does not match --traversal')
         manifest = traversal_manifest(observed['script'])
         for key in ('duration_seconds', 'tick_rate', 'speed_mps', 'seed', 'preset', 'preset_revision', 'preset_identity', 'content_identity', 'expected_ticks', 'cold_cache'):

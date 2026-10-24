@@ -4,28 +4,25 @@ from pathlib import Path
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import ci_paths as gate
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import importlib.util
+
+SPEC = importlib.util.spec_from_file_location("ci_paths", Path(__file__).with_name("ci_paths.py"))
+gate = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(gate)
+from ci_shell import bash_executable
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def bash_executable() -> str:
-    # Prefer Git Bash over the Windows WSL launcher. CI's shell: bash uses
-    # this same Git installation; native paths work with its MSYS tools.
-    git = shutil.which("git")
-    if git:
-        bash = Path(git).resolve().parent.parent / "bin/bash.exe"
-        if bash.is_file():
-            return str(bash)
-    return "bash"
+BASH = bash_executable()
 
 
 def run_block(workflow: str, step: str) -> str:
@@ -40,6 +37,20 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_asan_shard_suite_is_registered_in_every_test_entrypoint(self):
+        path = "tools/ci/test_asan_shards.py"
+        self.assertIn((path,), gate.python_test_commands(ROOT))
+        self.assertTrue(gate.needs_cpp(path))
+        self.assertTrue(gate.needs_python(path))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B\n'
+                      '    ${CMAKE_SOURCE_DIR}/' + path + ')', cmake)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 " + path, workflow)
+
+    def classify_lanes(self, root, event, base, head, repository, head_repository):
+        return gate.classify(root, event, base, head, repository, head_repository, "devel")[:2]
+
     def setUp(self):
         history = patch.object(gate.subprocess, "check_output", return_value="false\n")
         self.history = history.start()
@@ -52,7 +63,7 @@ class PathGateTests(unittest.TestCase):
                 "ci_paths.py", "classify", "--event", "push", "--output", str(output),
             ]):
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=true\nneeds_python=true\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=true\nneeds_python=true\nneeds_heavy=true\nheavy_reason=non_pr_event\n")
 
     def test_python_runner_executes_plan_and_propagates_failures(self):
         commands = [("tools/ci/test_check_docs.py",)]
@@ -66,6 +77,23 @@ class PathGateTests(unittest.TestCase):
             run.side_effect = subprocess.CalledProcessError(1, "python")
             with self.assertRaises(subprocess.CalledProcessError):
                 gate.main()
+
+    def test_runtime_and_qualification_contracts_are_in_standalone_plan(self):
+        commands = gate.python_test_commands(ROOT)
+        for path in (
+            "tools/gates/test_station_discovery.py",
+            "tools/gates/test_common_library_isa.py",
+            "test/tools/test_runtime_config_contract.py",
+            "tools/perf/test_check_gl_debug_log.py",
+            "tools/perf/test_plan_qualification.py",
+            "tools/perf/test_run_qualification.py",
+            "tools/perf/test_summarize_process_receipts.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(commands.count((path,)), 1)
+                self.assertTrue((ROOT / path).is_file())
+                self.assertTrue(gate.needs_cpp(path))
+                self.assertTrue(gate.needs_python(path))
 
     def test_docs_and_covered_python_skip_builds(self):
         for path in (
@@ -108,13 +136,13 @@ class PathGateTests(unittest.TestCase):
     def test_non_pr_events_always_run_everything_without_diff(self):
         with patch.object(gate, "changed_paths") as diff:
             for event in ("push", "workflow_dispatch", "schedule", ""):
-                self.assertEqual(gate.classify(ROOT, event, "", "", "owner/repo", "owner/repo"), (True, True))
+                self.assertEqual(self.classify_lanes(ROOT, event, "", "", "owner/repo", "owner/repo"), (True, True))
             diff.assert_not_called()
 
     def test_pr_classification_and_mixed_changes(self):
         for paths, expected in (
             (["docs/development.md"], (False, False)),
-            (["tools/audio/bank_validate.py"], (False, True)),
+            (["tools/audio/bank_validate.py"], (True, True)),
             (["tools/ci/check_docs.py"], (True, True)),
             (["src/main.cpp"], (True, False)),
             (["docs/index.md", "src/main.cpp", "tools/ci/check_docs.py"], (True, True)),
@@ -124,11 +152,11 @@ class PathGateTests(unittest.TestCase):
             (["scripts/README.md"], (True, True)),
         ):
             with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
-                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), expected)
+                self.assertEqual(self.classify_lanes(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), expected)
 
     def test_ci_changes_override_allowlist_and_force_full_native_matrix(self):
         for path in (
-            "tools/ci/ci_paths.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
+            "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
             "tools/ci/README.md", "tools/ci/nested/new_file.txt",
             ".github/workflows/ci.yml", ".github/workflows/new.yml",
             "scripts/tidy_cache.py", "scripts/README.md",
@@ -137,7 +165,7 @@ class PathGateTests(unittest.TestCase):
             with self.subTest(path=path), patch.object(gate, "changed_paths", return_value=[path]):
                 self.assertTrue(gate.needs_cpp(path))
                 self.assertTrue(gate.needs_python(path))
-                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
+                self.assertEqual(self.classify_lanes(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
 
     def test_every_workflow_script_entrypoint_requires_native_builds(self):
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):
@@ -147,7 +175,7 @@ class PathGateTests(unittest.TestCase):
                     self.assertTrue(gate.needs_cpp(path))
 
     def test_workflow_bootstrap_uses_base_and_fails_open_without_executing_head(self):
-        for name in ("ci", "asan", "performance"):
+        for name in ("ci", "asan", "performance", "ucrt-attribution"):
             workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
             script = run_block(workflow, "Classify merge-base diff (all lanes for non-PR events)")
             for sensitive, missing, failed in ((False, False, False), (True, False, False),
@@ -176,16 +204,19 @@ class PathGateTests(unittest.TestCase):
                     head.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n", encoding="utf-8")
                     output = root / "output"
                     env = dict(os.environ,
-                               CI_EVENT="pull_request", CI_REPOSITORY="owner/repo",
+                               CI_EVENT="pull_request", CI_BASE_REF="devel", CI_REPOSITORY="owner/repo",
                                CI_HEAD_REPOSITORY="owner/repo", CI_BASE_SHA="base", CI_HEAD_SHA="head",
                                RUNNER_TEMP=root.as_posix(), GITHUB_WORKSPACE=root.as_posix(), GITHUB_OUTPUT=output.as_posix(),
                                FAKE_BASE_SCRIPT=base.as_posix(), FAKE_PYTHON=Path(sys.executable).as_posix(),
                                FAKE_SENSITIVE=str(sensitive).lower(),
                                FAKE_MISSING=str(missing).lower(), FAKE_FAILED=str(failed).lower())
-                    subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
+                    subprocess.run([BASH, "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     self.assertFalse(marker.exists())
-                    expected = "needs_cpp=true\nneeds_python=true\n" if sensitive or missing or failed else "needs_cpp=false\nneeds_python=true\n"
+                    # The two-field base fixture predates heavy policy; every
+                    # consumer must fail open instead of publishing partial data.
+                    expected = ("needs_cpp=true\nneeds_python=true\nneeds_heavy=true\n"
+                                "heavy_reason=classification_uncertain\n")
                     self.assertEqual(output.read_text(encoding="utf-8"), expected)
 
     def test_required_jobs_run_python_plan_on_mixed_changes_and_publish_route(self):
@@ -219,7 +250,7 @@ class PathGateTests(unittest.TestCase):
                     root = Path(directory)
                     env = dict(os.environ, NEEDS_CPP=cpp, GITHUB_OUTPUT=(root / "output").as_posix(),
                                GITHUB_STEP_SUMMARY=(root / "summary").as_posix())
-                    result = subprocess.run([bash_executable(), "-e", "-c", script], env=env, check=True,
+                    result = subprocess.run([BASH, "-e", "-c", script], env=env, check=True,
                                             stdout=subprocess.PIPE, text=True)
                     self.assertEqual((root / "output").read_text(encoding="utf-8"), f"route={route}\n")
                     self.assertEqual((root / "summary").read_text(encoding="utf-8"), result.stdout)
@@ -239,7 +270,11 @@ class PathGateTests(unittest.TestCase):
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
-            ("asan", "asan", "guarded-native"),
+            ("ci", "linux-result", "required-aggregate"),
+            ("ci", "windows-msvc-result", "required-aggregate"),
+            ("ci", "windows-ucrt64-result", "required-aggregate"),
+            ("asan", "asan-shard", "guarded-native"),
+            ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
         )
         for workflow, job, route in routes:
@@ -252,8 +287,10 @@ class PathGateTests(unittest.TestCase):
                     for cpp in ("true", "false", ""):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
-                            if route == "aggregate":
-                                expected = ready
+                            if route == "required-aggregate":
+                                expected = not cancelled
+                            elif route == "aggregate":
+                                expected = not cancelled and ready
                             elif route == "guarded-python":
                                 expected = not cancelled
                             elif route == "guarded-native":
@@ -262,18 +299,52 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled and ready and (
                                     route == "ready-python" or cpp != "false"
                                 )
-                            actual = expression.replace(
+                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
                                 "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
                             ).replace("!cancelled()", repr(not cancelled)).replace(
                                 "always()", "True"
                             ).replace("github.event_name", repr(event)).replace(
                                 "github.event.pull_request.draft", repr(draft)
+                            ).replace("needs.changes.result", repr("success")).replace(
+                                "needs.asan-shard.result", repr("success")
+                            ).replace("needs.tidy-shard.result", repr("success")
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
                             with self.subTest(workflow=workflow, job=job, event=event,
                                               draft=draft, cpp=cpp, cancelled=cancelled):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):
+        for filename, producer, aggregate in (
+            ("ci", "linux", "linux-result"),
+            ("ci", "windows-msvc", "windows-msvc-result"),
+            ("ci", "windows-ucrt64", "windows-ucrt64-result"),
+            ("ci", "tidy-shard", "tidy"),
+            ("asan", "asan-shard", "asan"),
+        ):
+            workflow = (ROOT / f".github/workflows/{filename}.yml").read_text(encoding="utf-8")
+            body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {aggregate}:\n", 1)[1])[0]
+            condition = re.search(r"^    if: (.*)$", body, re.MULTILINE)[1]
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                    invalid = classification != "success" or result not in ("success", "skipped")
+                    for workflow_cancelled in (False, True):
+                        expression = condition.removeprefix("${{ ").removesuffix(" }}")
+                        expression = expression.replace("!cancelled()", repr(not workflow_cancelled))
+                        expression = expression.replace("always()", "True").replace("failure()", repr("failure" in (classification, result)))
+                        expression = expression.replace("needs.changes.result", repr(classification))
+                        expression = expression.replace(f"needs.{producer}.result", repr(result))
+                        # The pull-request fast lane has its own failure coverage in
+                        # test_workflow_policy; here it is a passing dependency.
+                        expression = expression.replace("needs.fast-lane.result", repr("success"))
+                        expression = expression.replace("github.event_name", repr("push"))
+                        expression = expression.replace("github.event.pull_request.draft", "False")
+                        expression = expression.replace("== false", "== False").replace("&&", "and").replace("||", "or")
+                        with self.subTest(job=aggregate, classification=classification,
+                                          result=result, cancelled=workflow_cancelled):
+                            self.assertEqual(bool(eval(expression, {"__builtins__": {}})),
+                                             not workflow_cancelled or invalid)
 
     def test_new_files_in_covered_directories_require_builds(self):
         for path in gate.PYTHON_MODULES | gate.AUTHORING_PYTHON_FILES:
@@ -295,7 +366,7 @@ class PathGateTests(unittest.TestCase):
             with self.subTest(repository=repository, head_repository=head_repository), patch.object(
                 gate, "changed_paths", return_value=["docs/development.md"]
             ) as diff:
-                self.assertEqual(gate.classify(
+                self.assertEqual(self.classify_lanes(
                     ROOT, "pull_request", "base", "head", repository, head_repository,
                 ), (True, True))
                 diff.assert_not_called()
@@ -307,7 +378,7 @@ class PathGateTests(unittest.TestCase):
             with self.subTest(outcome=outcome), patch.object(gate, "changed_paths") as diff:
                 self.history.side_effect = outcome if isinstance(outcome, Exception) else None
                 self.history.return_value = outcome
-                self.assertEqual(gate.classify(
+                self.assertEqual(self.classify_lanes(
                     ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo",
                 ), (True, True))
                 self.history.assert_called_with(
@@ -322,19 +393,29 @@ class PathGateTests(unittest.TestCase):
             output = Path(directory) / "output"
             with patch.object(sys, "argv", [
                 "ci_paths.py", "classify", "--event", "pull_request",
-                "--base", "base", "--head", "head", "--repository", "owner/repo",
+                "--base-ref", "devel", "--base", "base", "--head", "head", "--repository", "owner/repo",
                 "--head-repository", "owner/repo", "--output", str(output),
             ]):
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=false\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=false\nneeds_heavy=false\nheavy_reason=reviewed_presentation_or_docs\n")
+
+    def test_cli_uses_hosted_base_ref_for_older_workflow_callers(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(gate, "changed_paths", return_value=["README.md"]):
+            output = Path(directory) / "output"
+            with patch.dict(os.environ, {"GITHUB_BASE_REF": "devel"}, clear=True), patch.object(sys, "argv", [
+                "ci_paths.py", "classify", "--event", "pull_request", "--base", "base", "--head", "head",
+                "--repository", "owner/repo", "--head-repository", "owner/repo", "--output", str(output),
+            ]):
+                self.assertEqual(gate.main(), 0)
+            self.assertIn("needs_heavy=false\n", output.read_text())
 
     def test_unavailable_or_empty_diff_fails_open(self):
         for error in (OSError("missing git"), subprocess.CalledProcessError(1, "git")):
             with patch.object(gate, "changed_paths", side_effect=error):
-                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
+                self.assertEqual(self.classify_lanes(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
         with patch.object(gate, "changed_paths", return_value=[]):
-            self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
-        self.assertEqual(gate.classify(ROOT, "pull_request", "", "head", "owner/repo", "owner/repo"), (True, True))
+            self.assertEqual(self.classify_lanes(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
+        self.assertEqual(self.classify_lanes(ROOT, "pull_request", "", "head", "owner/repo", "owner/repo"), (True, True))
 
     def test_diff_uses_merge_base_and_preserves_deleted_and_unusual_names(self):
         with patch.object(gate.subprocess, "check_output", side_effect=[
@@ -348,24 +429,109 @@ class PathGateTests(unittest.TestCase):
                 "git", "diff", "--name-only", "--no-renames", "-z", "ancestor", "head", "--",
             ])
 
+    def test_heavy_exemptions_are_exact_reviewed_members_only(self):
+        for path in gate.HEAVY_EXEMPT_FILES:
+            with self.subTest(path=path), patch.object(gate, "changed_paths", return_value=[path]):
+                self.assertTrue((ROOT / path).is_file())
+                self.assertFalse(gate.needs_heavy(path))
+                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo",
+                                               "owner/repo", "devel")[2:],
+                                 (False, "reviewed_presentation_or_docs"))
+                self.assertTrue(gate.needs_heavy(path + ".unknown"))
+
+    def test_every_sensitive_family_unknown_and_persistence_tooling_require_full(self):
+        paths = (
+            "src/luminumbra_common/core/World.cpp", "src/luminumbra_common/new.md",
+            "src/luminumbra_server/main.cpp", "src/luminumbra_client/ui/components/game/WorldList.cpp",
+            "src/luminumbra_client/world/WorldgenOverride.cpp", "include/shared.h",
+            "test/common/SimBudgetWorldParity_test.cpp", "test/fixtures/world.json",
+            "worlds/demo.json", "data/demo.json", "config/demo.json", "vendor/new.txt",
+            "third_party/new.txt", "vcpkg/new.txt", "deps/new.txt", "vcpkg.json",
+            "CMakeLists.txt", "CMakePresets.json", "cmake/Options.cmake",
+            "tools/ci/ci_paths.py", ".github/workflows/ci.yml", "scripts/check.py",
+            "tools/persistence/save_receipt.py", "tools/persistence/test_save_receipt.py",
+            "docs/new.md", "unknown", "0", "", "../README.md",
+            *gate.CI_ENTRYPOINTS,
+        )
+        for path in paths:
+            for changes in ([path], ["README.md", path], [path, "docs/development.md"]):
+                with self.subTest(changes=changes), patch.object(gate, "changed_paths", return_value=changes):
+                    policy = gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo", "devel")
+                    self.assertTrue(policy[0])
+                    self.assertEqual(policy[2:], (True, "heavy_sensitive_paths"))
+
+    def test_full_events_and_main_or_missing_base_ignore_exempt_diff(self):
+        for event, base in (("push", "devel"), ("push", "main"), ("workflow_dispatch", "devel"),
+                            ("pull_request", "main"), ("pull_request", ""), ("pull_request", "unknown")):
+            with self.subTest(event=event, base=base), patch.object(gate, "changed_paths") as diff:
+                result = gate.classify(ROOT, event, "base", "head", "owner/repo", "owner/repo", base)
+                self.assertEqual(result[:3], (True, True, True))
+                diff.assert_not_called()
+
+    def test_fork_missing_metadata_empty_invalid_diff_keep_heavy(self):
+        for repo, head_repo, base, head, outcome in (
+                ("owner/repo", "fork/repo", "base", "head", ["README.md"]),
+                ("", "", "base", "head", ["README.md"]),
+                ("owner/repo", "owner/repo", "", "head", ["README.md"]),
+                ("owner/repo", "owner/repo", "base", "", ["README.md"]),
+                ("owner/repo", "owner/repo", "base", "head", []),
+                ("owner/repo", "owner/repo", "base", "head", OSError("diff unavailable"))):
+            with self.subTest(outcome=outcome), patch.object(gate, "changed_paths") as diff:
+                if isinstance(outcome, Exception):
+                    diff.side_effect = outcome
+                else:
+                    diff.return_value = outcome
+                self.assertTrue(gate.classify(ROOT, "pull_request", base, head, repo, head_repo, "devel")[2])
+
+    def test_moves_and_deletions_use_both_paths_with_or_semantics(self):
+        for paths in (["README.md", "src/luminumbra_common/deleted.cpp"],
+                      ["src/luminumbra_common/deleted.cpp", "README.md"],
+                      ["tools/persistence/save_receipt.py"]):
+            with patch.object(gate.subprocess, "check_output", side_effect=[
+                "false\n", "ancestor\n", b"\0".join(path.encode() for path in paths) + b"\0",
+            ]):
+                self.assertTrue(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo", "devel")[2])
+
     def test_windows_and_posix_plans_have_identical_coverage(self):
         with patch.object(gate.os, "name", "posix"):
             posix_commands = gate.python_test_commands(ROOT)
         with patch.object(gate.os, "name", "nt"):
             commands = gate.python_test_commands(ROOT)
         self.assertEqual(commands, posix_commands)
+        self.assertEqual(len(commands), len(set(commands)))
         self.assertIn(("tools/ci/test_tidy_cache.py",), commands)
         for test in gate.PYTHON_TESTS:
             self.assertIn((test,), commands)
+
+    def test_performance_lane_selects_every_registered_render_runner_case(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        cases = re.findall(r'"(Render\w+);test_\w+"', cmake)
+        self.assertTrue(cases)
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
+        body = run_block(workflow, "Test native render runner")
+        selection = re.search(r"-R '([^']+)'", body)
+        self.assertIsNotNone(selection)
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertIsNotNone(re.fullmatch(selection.group(1), case))
 
     def test_standalone_plan_covers_ctest_python_contracts_without_native_runner(self):
         commands = gate.python_test_commands(ROOT)
         for test in (
             "tools/ci/test_ci_paths.py", "tools/ci/test_qualification_capture.py",
+            "tools/ci/test_check_acceptance_matrix.py",
+            "tools/ci/test_asan_shards.py", "tools/ci/test_ctest_shards.py",
+            "tools/ci/test_workflow_policy.py",
             "tools/perf/test_capture_sim_budget.py", "tools/perf/test_foliage_evidence.py",
             "tools/perf/test_terrain_aovs.py", "tools/perf/test_render_runner_evidence.py",
             "tools/release/test_sbom.py", "tools/persistence/test_save_receipt.py",
             "tools/rendering/acceptance/test_scene_matrix.py",
+            "tools/ci/test_check_acceptance_matrix.py",
+            "tools/gates/test_station_discovery.py",
+            "tools/perf/test_check_gl_debug_log.py",
+            "tools/perf/test_plan_qualification.py",
+            "tools/perf/test_run_qualification.py",
+            "tools/perf/test_summarize_process_receipts.py",
         ):
             with self.subTest(test=test):
                 self.assertIn((test,), commands)

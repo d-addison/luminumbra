@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <string>
@@ -122,6 +123,12 @@ struct SimulationIdentityValues {
     std::uint64_t region_work_limit = std::numeric_limits<std::uint64_t>::max();
     std::uint32_t region_hold_ticks = 30;
     std::uint8_t region_reduced_shift = 1;
+    // Resolved calendar, independent of whether simulation or rendering owns it.
+    std::uint32_t day_length_ticks = 162000;
+    std::uint32_t days_per_year = 8;
+    std::uint32_t daylight_numerator = 2;
+    std::uint32_t daylight_denominator = 3;
+    std::uint32_t lunar_cycle_days = 8;
 
     SimulationIdentityValues();
     [[nodiscard]] std::string ComputeIdentity() const;
@@ -138,11 +145,16 @@ public:
     // Parse a systems.json document. Malformed/empty/blank text -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
     // Load from disk. Missing/unreadable file -> all-defaults (no throw).
-    [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);
+    [[nodiscard]] static SystemConfig LoadFromFile(const std::filesystem::path& path);
+    // Runtime defaults come only from this root, including missing/unreadable-file fallback.
+    // An optional overlay changes user settings only, as in LoadLayered.
+    [[nodiscard]] static SystemConfig
+    LoadFromRuntimeRoot(const std::filesystem::path& root,
+                        const std::filesystem::path& overlay_path = {});
     // Explicit CLI overrides must be readable JSON objects; failure leaves config unchanged.
     // Success replaces only system flags/tuning, retaining player settings and their load report.
     [[nodiscard]] static bool
-    TryLoadFromFile(const std::string& path, SystemConfig& config, std::string& error);
+    TryLoadFromFile(const std::filesystem::path& path, SystemConfig& config, std::string& error);
 
     // Replace all sim/render flags and tuning, including resetting omitted params to fallback.
     // Keep this config's player settings and load report together, so systems overrides/reloads
@@ -184,17 +196,17 @@ public:
     }
 
     // Load layering: FromJsonString(defaults file) then OverlayUserFromJsonString(overlay file).
-    [[nodiscard]] static SystemConfig LoadLayered(const std::string& defaults_path,
-                                                  const std::string& overlay_path);
+    [[nodiscard]] static SystemConfig LoadLayered(const std::filesystem::path& defaults_path,
+                                                  const std::filesystem::path& overlay_path);
 
     // Write ONLY the user.* section to `path` (atomic; creates parent dirs). Returns false on
     // I/O/validation failure, or while in Recovery (protects the original file).
     // Deterministic key order (keybinds and graphics overrides are ordered maps).
-    bool SaveUserOverlay(const std::string& path) const;
+    bool SaveUserOverlay(const std::filesystem::path& path) const;
 
     // Per-user overlay location: %APPDATA%/Luminumbra/settings.json (Windows) or
     // $XDG_CONFIG_HOME/luminumbra/settings.json (POSIX), with HOME fallbacks.
-    [[nodiscard]] static std::string DefaultUserOverlayPath();
+    [[nodiscard]] static std::filesystem::path DefaultUserOverlayPath();
 
 private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);

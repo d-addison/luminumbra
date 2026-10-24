@@ -16,6 +16,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_shell import bash_executable
+
+
+BASH = bash_executable()
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("tidy_cache", REPO_ROOT / "scripts/tidy_cache.py")
 assert SPEC and SPEC.loader
@@ -81,17 +86,23 @@ class ShardShellTests(unittest.TestCase):
         (self.root / "scripts").mkdir()
         for name in ("tidy.sh", "tidy_cache.py"):
             shutil.copyfile(REPO_ROOT / "scripts" / name, self.root / "scripts" / name)
+        (self.root / "tools/ci").mkdir(parents=True)
+        shutil.copyfile(REPO_ROOT / "tools/ci/path_safety.py", self.root / "tools/ci/path_safety.py")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         stub = self.bin / "clang-tidy-18"
         stub.write_text(
             f"#!{sys.executable}\nimport json, os, sys\n"
             "with open(os.environ['STUB_LOG'], 'a', encoding='utf-8') as log:\n"
-            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n", encoding="utf-8",
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "sys.exit(int(os.environ.get('STUB_EXIT', '0')))\n", encoding="utf-8",
         )
         stub.chmod(0o755)
         self.log = self.root / "calls.jsonl"
-        self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
+        # A closed PATH guarantees that fallback tests cannot execute a real analyzer.
+        for command in ("bash", "nproc", "dirname", "python3", "sort", "xargs", "date", "git"):
+            (self.bin / command).symlink_to(shutil.which(command))
+        self.env = dict(os.environ, PATH=str(self.bin),
                         STUB_LOG=str(self.log))
         self.files = ["src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
                       "src/luminumbra_common/net/GnsTransport.cpp",
@@ -110,7 +121,7 @@ class ShardShellTests(unittest.TestCase):
     def run_gate(self, *args):
         if self.log.exists():
             self.log.unlink()
-        result = subprocess.run(["bash", str(self.root / "scripts/tidy.sh"), "--jobs", "1", *args],
+        result = subprocess.run([BASH, str(self.root / "scripts/tidy.sh"), "--jobs", "1", *args],
                                 env=self.env, capture_output=True, text=True, check=False)
         calls = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()] \
             if self.log.exists() else []
@@ -193,6 +204,73 @@ class ShardShellTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+    def selection_file(self, data):
+        manifest = self.root / "selected.files0"
+        manifest.write_bytes(data)
+        return str(manifest)
+
+    def test_files0_preserves_unusual_names_relative_db_paths_and_tracked_config(self):
+        unusual = "test/hash # dollar $ newline\nname.cpp"
+        (self.root / unusual).write_text("fixture")
+        build = self.root / "build/tidy"
+        database = build / "compile_commands.json"
+        entries = json.loads(database.read_text())
+        entries.append({"file": "../../" + unusual, "directory": str(build)})
+        database.write_text(json.dumps(entries))
+        chosen = [self.files[0], unusual]
+        manifest = self.selection_file(b"\0".join(os.fsencode(p) for p in chosen + chosen) + b"\0")
+        result, calls = self.run_gate("--files0-from", manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_selected(calls, chosen)
+        self.assertTrue(all("-quiet" in call and "-p" in call for call in calls))
+
+    def test_files0_empty_is_explicit_success_and_missing_or_malformed_input_fails(self):
+        result, calls = self.run_gate("--files0-from", self.selection_file(b""))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [])
+        for data in (b"src/regular.cpp", b"src/regular.cpp\0\0", b"\0",
+                     b"src/missing.cpp\0", b"../outside.cpp\0", b"vendor/external.cpp\0",
+                     b"src/luminumbra_client/ui/gl3/vendor.cpp\0"):
+            with self.subTest(data=data):
+                result, calls = self.run_gate("--files0-from", self.selection_file(data))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(calls, [])
+        result, calls = self.run_gate("--files0-from", str(self.root / "absent.files0"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_files0_refuses_missing_database_entries_and_malformed_database(self):
+        manifest = self.selection_file(os.fsencode(self.root / "src/regular.cpp") + b"\0")
+        db = self.root / "build/tidy/compile_commands.json"
+        for data in ("[]", "not json", '[{"directory": null}]'):
+            db.write_text(data)
+            result, calls = self.run_gate("--files0-from", manifest)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(calls, [])
+
+    def test_files0_argument_refusals_happen_before_tidy(self):
+        manifest = self.selection_file(b"src/regular.cpp\0")
+        for args in (("--files0-from",), ("--files0-from", ""),
+                     ("--files0-from", manifest, "--changed-from", "HEAD"),
+                     ("--jobs", "0"), ("--jobs", "00"), ("--jobs", "-1")):
+            result, calls = self.run_gate(*args)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(calls, [])
+
+    def test_files0_tidy_failure_propagates_and_fallback_binary_is_supported(self):
+        manifest = self.selection_file(b"src/regular.cpp\0")
+        self.env["STUB_EXIT"] = "7"
+        result, calls = self.run_gate("--files0-from", manifest)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assert_selected(calls, ["src/regular.cpp"])
+        self.env.pop("STUB_EXIT")
+        (self.bin / "clang-tidy-18").rename(self.bin / "clang-tidy")
+        result, calls = self.run_gate("--files0-from", manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("binary clang-tidy", result.stdout)
+        self.assert_selected(calls, ["src/regular.cpp"])
+
+
 class ShardWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -217,7 +295,11 @@ class ShardWorkflowTests(unittest.TestCase):
         guard = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
         self.assertIn("    name: Static analysis / clang-tidy\n", aggregate)
         self.assertIn("    needs: [changes, tidy-shard]\n", aggregate)
-        self.assertIn("    if: always() && (" + guard + ")\n", aggregate)
+        self.assertIn("&& (" + guard + ") }}\n", aggregate)
+        self.assertIn("!cancelled()", aggregate)
+        self.assertIn("    if: ${{ (!cancelled() || needs.changes.result != 'success' || "
+                      "(needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) "
+                      "&& (" + guard + ") }}\n", aggregate)
         self.assertIn("    needs: changes\n", self.jobs["tidy-shard"])
         self.assertIn("    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + guard + ") }}\n",
                       self.jobs["tidy-shard"])
@@ -227,36 +309,50 @@ class ShardWorkflowTests(unittest.TestCase):
         self.assertIn("    timeout-minutes: 5\n", aggregate)
         self.assertIn("TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}", aggregate)
 
+    def aggregate_script(self, classification, status):
+        scripts = []
+        for step in re.split(r"(?=^      - name: )", self.jobs["tidy"], flags=re.MULTILINE)[1:]:
+            condition = re.search(r"^        if: (.*)$", step, re.MULTILINE)
+            if condition:
+                expression = condition[1].removeprefix("${{ ").removesuffix(" }}")
+                expression = expression.replace("always()", "True")
+                expression = expression.replace("needs.changes.result", repr(classification))
+                expression = expression.replace("needs.tidy-shard.result", repr(status))
+                expression = expression.replace("&&", "and").replace("||", "or")
+                if not eval(expression, {"__builtins__": {}}):
+                    continue
+            script = step.split("        run: |\n", 1)[1]
+            scripts.append("\n".join(line[10:] for line in script.splitlines()
+                                     if line.startswith("          ")))
+        return "\n".join(scripts)
+
     def test_aggregate_shell_accepts_only_success(self):
-        script = self.jobs["tidy"].split("        run: |\n", 1)[1]
-        script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
+        script = self.aggregate_script("success", "success")
         self.assertTrue(script.strip())
-        for status in ("success", "failure", "cancelled", "skipped", ""):
+        for status in ("success", "failure", "cancelled", "skipped", "", "unknown"):
             with self.subTest(status=status):
-                result = subprocess.run(["bash", "-e", "-c", script],
+                result = subprocess.run([BASH, "-e", "-c", self.aggregate_script("success", status)],
                                         env=dict(os.environ, TIDY_SHARD_RESULT=status, CI_PATHS_RESULT="success", NEEDS_CPP="true"),
                                         capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode == 0, status == "success", result.stderr)
 
     def test_routed_skip_requires_successful_explicit_non_native_classification(self):
-        script = self.jobs["tidy"].split("        run: |\n", 1)[1]
-        script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
         with tempfile.TemporaryDirectory() as directory:
             summary = Path(directory) / "summary"
-            for classification in ("success", "failure", "cancelled", "skipped", ""):
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                 for cpp in ("true", "false", ""):
-                    for status in ("success", "failure", "cancelled", "skipped", ""):
+                    for status in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                         routed = classification == "success" and cpp == "false" and status == "skipped"
                         with self.subTest(classification=classification, cpp=cpp, status=status):
                             summary.unlink(missing_ok=True)
                             result = subprocess.run(
-                                ["bash", "-e", "-c", script],
+                                [BASH, "-e", "-c", self.aggregate_script(classification, status)],
                                 env=dict(os.environ, TIDY_SHARD_RESULT=status,
                                          CI_PATHS_RESULT=classification, NEEDS_CPP=cpp,
                                          GITHUB_STEP_SUMMARY=str(summary)),
                                 capture_output=True, text=True, check=False,
                             )
-                            self.assertEqual(result.returncode == 0, status == "success" or routed,
+                            self.assertEqual(result.returncode == 0, classification == "success" and (status == "success" or routed),
                                              result.stderr)
                             self.assertEqual(summary.exists(), routed)
                             if routed:

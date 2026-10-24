@@ -8,6 +8,7 @@
 #include <memory_resource>
 #include <span>
 #include <thread>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 
@@ -104,7 +105,8 @@ struct FarVolumeQueueStats {
 
 // Generic immutable-authority CPU consumer; no saved-world producer, pristine
 // inference, GL upload or Ladder activation is supplied here. Explicit counts
-// bound tracked keys and running/untaken results; there are no shipped defaults.
+// bound tracked keys and running/untaken plus caller-reported retained results;
+// there are no shipped defaults.
 //
 // Methods and destruction belong to the constructing thread. Callbacks must
 // terminate without owner-thread service/reentrancy, remain immutable and be
@@ -134,9 +136,30 @@ public:
     // With an explicit order, ONLY its selected keys may start, in that order;
     // the owner supplies the wanted policy's coarsest/distance/key ordering.
     // Empty order retains generic descriptor order. No order storage is owned.
-    std::size_t Pump(std::size_t max_dispatches, std::span<const World::FarTileKey> order = {});
+    // Taken results retain their reservation until uploaded/discarded. Owners
+    // pass their retained count so it shares result_slots with occupied slots.
+    std::size_t Pump(std::size_t max_dispatches,
+                     std::span<const World::FarTileKey> order = {},
+                     std::size_t retained_results = 0);
+    // Constant-time admission check; call after Pump(0) to reap finished work.
+    std::size_t ResultCapacity(std::size_t retained_results = 0) const;
     void Cancel(const World::FarTileKey& key);
     void Forget(const World::FarTileKey& key);
+    // Visit each descriptor once for a transactional owner's retirement pass.
+    // The nonthrowing predicate borrows a key; it must not mutate/reenter this
+    // queue. No allocation, per-key descriptor search, or worker wait occurs.
+    // Returns visited descriptors for owner-thread work diagnostics.
+    template<class Predicate>
+    std::size_t ForgetMatching(const Predicate& predicate) {
+        static_assert(noexcept(predicate(std::declval<const World::FarTileKey&>())));
+        CheckOwner();
+        for (std::size_t index = 0; index < descriptors_.size(); ++index) {
+            const auto& desired = descriptors_[index].desired;
+            if (desired && predicate(desired->identity.key))
+                ForgetAt(index);
+        }
+        return descriptors_.size();
+    }
     // Explicit retry after wanted-set/budget change; duplicates never auto-retry.
     bool Retry(const World::FarTileKey& key);
     std::optional<FarVolumeQueueCompletion>
@@ -171,6 +194,8 @@ private:
     void CheckOwner() const;
     void Reap();
     void ClearSlot(std::size_t index);
+    void CancelAt(std::size_t index);
+    void ForgetAt(std::size_t index);
     std::optional<std::size_t> Find(const World::FarTileKey& key) const;
 
     JobSystem& jobs_;
@@ -182,6 +207,7 @@ private:
     World::FarVolumeChargedResource resource_;
     std::pmr::vector<Descriptor> descriptors_;
     std::pmr::vector<Slot> slots_;
+    std::size_t occupied_results_ = 0;
     std::uint64_t dispatched_ = 0, stale_ = 0, rejected_ = 0;
 };
 

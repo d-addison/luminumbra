@@ -9,9 +9,11 @@
 #include "../world/StructurePlacement.h"
 #include "../world/WorldgenDependencySnapshot.h"
 #include "FastNoise/FastNoise.h"
+#include "core/Profiler.h"
 #include "entt/entt.hpp"
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -22,6 +24,7 @@
 #include <optional>
 #include <set>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -33,10 +36,15 @@ namespace Luminumbra::Systems {
 class PhysicsSystem;
 class WaterSystem;
 class WeatherSystem; // Weather-driven rain passthrough.
+inline constexpr int kSurfaceSamplingRevision = 2;
 struct TerrainGenParams {
     // The preset load result carries its immutable inputs through parameter
     // adoption (including GameSession create/open). Null retains direct loading.
     std::shared_ptr<const World::WorldgenDependencySnapshot> worldgen_dependencies;
+    // Saved presets without this selector retain historical activation spans and
+    // vertex materials. New worlds record revision 2 (issue #453). This does not
+    // change generated terrain or the frozen hydraulic-erosion substrate.
+    int surface_sampling_revision = 1;
     float base_frequency = 0.01f;
     float base_amplitude = 50.0f;
     int octaves = 4;
@@ -298,7 +306,7 @@ public:
         std::size_t deferred_generation = 0;
         std::size_t meshing_candidates = 0;
         std::size_t scheduled_meshing = 0;
-        // Accepted items from this update's selected candidates, excluding
+        // Accepted items matching this update's current candidates, excluding
         // promotion refusals and stage-B dispatches from earlier selections.
         std::size_t submitted_meshing = 0;
         std::size_t deferred_meshing = 0;
@@ -334,7 +342,8 @@ public:
 
     struct StreamingTelemetryStats {
         // Queue depths include all unpublished generation/promotion/mesh items
-        // and meshing candidates not submitted in the current update.
+        // and unsubmitted candidates, including retained scheduler descriptors
+        // outside the current candidate scan.
         std::size_t peak_queue_depth = 0;
         std::size_t peak_meshing_candidates = 0;
         std::size_t cumulative_scheduled_meshing = 0;
@@ -570,7 +579,7 @@ public:
 
     // SIMD-batched material classification for a list of
     // isosurface vertex world positions (the LOD0 marching-cubes mesher emits
-    // hundreds per chunk). out[i] receives the SAME material id as
+    // hundreds per chunk). At surface_sampling_revision 2, out[i] receives the SAME material id as
     // MarchingCubes::GetTerrainMaterialAt(positions[i]) would return - the
     // shaped height and the climate channels are evaluated through FastNoise's
     // SIMD GenPositionArray2D batch entry points (bit-identical to the per-point
@@ -578,10 +587,19 @@ public:
     // collapsing the per-vertex ComputeShapedHeightSample + ComputeClimateSample
     // cost (~30 us each scalar) into one batched pass. The cave channel and the
     // final band selection stay per-vertex (cheap). positions are in WORLD
-    // space. With shaping disabled this falls back to per-vertex classification
-    // so legacy worlds are byte-unchanged.
-    void
-    ClassifyVertexMaterials(const Vec3* positions, std::size_t count, u32* out_materials) const;
+    // space. Revision 1 keeps the historical incomplete height definition so
+    // persisted mesh materials in existing worlds remain byte-unchanged.
+    // Optional per-call work diagnostic; no counters or state are retained in the world.
+    struct MaterialSamplingWork {
+        std::size_t hydro_regions = 0;
+        std::size_t lake_cells = 0;
+        std::size_t surface_break_cells = 0;
+        std::size_t shaped_columns = 0;
+    };
+    void ClassifyVertexMaterials(const Vec3* positions,
+                                 std::size_t count,
+                                 u32* out_materials,
+                                 MaterialSamplingWork* work = nullptr) const;
 
     // SIMD-batched shaped final heights at an arbitrary
     // list of world (x,z) positions. out[i] == ComputeShapedHeight(xs[i], zs[i])
@@ -590,9 +608,9 @@ public:
     // and exercised directly by the position-array parity gate.
     // apply_hydro: when true (default) and hydro is enabled, the baked
     // erosion offset is added so this matches GetTerrainHeightAt at every position
-    // (keeps the surface-span corners consistent with collision/SDF). The erosion
-    // bake passes false to sample the NO-hydro base height (and to avoid recursion)
-    // -- this is also the fast SIMD path the bake uses to build its base grid.
+    // (keeps the surface-span corners consistent with collision/SDF).
+    // Passing false returns the complete analytic surface without hydro. The
+    // erosion bake uses a private historical substrate for save compatibility.
     void ComputeShapedHeightsAtPositions(const float* xs,
                                          const float* zs,
                                          std::size_t count,
@@ -635,6 +653,9 @@ public:
     bool EnsureCollisionReadyNear(const Vec3& world_pos,
                                   PhysicsSystem* physics_system,
                                   int horizontal_radius = 1);
+    // Synchronous admission: surface/collision radii <= 12, at most 625 columns
+    // and 8192 chunks including vertical margins; refusal precedes chunk changes.
+    // Negative direct-API radii retain their historical zero normalization.
     // render_lod0_radius (default -1): the ring distance that renders at full-SDF
     // LOD0, decoupled from collision_radius. -1 keeps the historical behaviour
     // (LOD0 boundary == collision_radius) so the GAME path and world_hash are
@@ -648,6 +669,13 @@ public:
                                 int render_lod0_radius = -1);
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const {
         return m_last_streaming_budget_stats;
+    }
+
+    // Each update or blocking-drain subpass copies at most 256 KiB across all channels.
+    static constexpr std::size_t kMeshingSnapshotByteBudget = 256u * 1024u;
+    // Main-thread diagnostic for the latest update/subpass; excluded from world identity.
+    std::size_t last_meshing_snapshot_bytes() const {
+        return m_last_meshing_snapshot_bytes;
     }
 
     // Per-sub-phase timing from the latest update, retained as runtime telemetry
@@ -799,9 +827,12 @@ public:
                          PhysicsSystem* physics_system);
 
     // --- Persistence integration (runtime save/load, ) ---
-    // Blocks until in-flight generation and meshing jobs complete so chunk
-    // voxel/mesh data is stable for hashing and serialization.
+    // Settles the capped scheduler prefix, including budget-deferred requests,
+    // promotion stages and hydro callbacks, for synchronous observations.
     void wait_for_streaming_jobs();
+    // Fence and publish admitted work, including both promotion stages, without
+    // admitting budget-deferred requests. Used when replacing a worker dependency.
+    void wait_for_admitted_streaming_jobs();
     //  ( step 1): drains the sim-truth promotion lane ONLY —
     // waits any in-flight promotion generation jobs, publishes their staged
     // voxel fields on this (main) thread, and dispatches the render-mesh
@@ -830,6 +861,7 @@ public:
     // negligible. Sampling jobs never take the exclusive side, so there is no
     // ordering inversion.
     [[nodiscard]] std::shared_lock<std::shared_mutex> acquire_worldgen_sample_scope() const {
+        LUMIN_PROFILE_ZONE_N("Worldgen epoch lock wait");
         for (;;) {
             while (m_worldgen_writer_pending.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
@@ -868,8 +900,8 @@ public:
     std::int64_t current_sim_tick() const {
         return m_current_sim_tick;
     }
-    //  (activation queue ): tick-keyed activation. Publishes, in FIFO
-    // order, exactly the batches whose due_tick is at or before `tick` —
+    // Tick-keyed activation. Publishes, in stable due order,
+    // exactly the batches whose due_tick is at or before `tick` —
     // BLOCKING on a due-but-unfinished batch's jobs (K under-covering is a
     // wall-clock cost, never a schedule change) — plus the promotion lane
     // when due. Batches with due_tick -1 (dispatched with no tick, i.e. the
@@ -921,10 +953,10 @@ public:
 private:
     struct StreamingState {
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
-        //   (activation queue): per-lane BATCH FIFOs. Each streaming
-        // dispatch appends a batch record {job handles, its chunks, due_tick};
-        // publication pops FRONT batches in FIFO order (deterministic
-        // publication order = dispatch order). Under the per-tick barrier the
+        // Per-lane batches retain handles, chunks and the original due tick.
+        // Generation follows dispatch order. Meshing uses stable due order
+        // because stage B can arrive after ordinary batches due later.
+        // Publication pops front batches. Under the per-tick barrier the
         // depth never exceeds 1 and every batch publishes the tick it was
         // dispatched, so this is byte-identical structure-only change; the
         // barrier swap gives due_tick = dispatch_tick + K its meaning.
@@ -941,6 +973,12 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
             u8 transition_faces = 0;
+            // Inputs captured on the main thread; only this job touches the scratch
+            // until its handle drains. Publication then consumes its mesh outputs.
+            std::shared_ptr<::Luminumbra::Chunk> scratch;
+            u32 mesh_version = 0;
+            u32 water_mesh_version = 0;
+            u32 voxel_revision = 0;
         };
         struct MeshingBatch {
             JobHandle handle;      // Normal lane
@@ -962,6 +1000,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             int lod_level = 0;
             bool high_priority = false;
+            u8 transition_faces = 0;
         };
         std::vector<PromotionJobChunk> promotion_job_chunks; // stage A in flight
         std::vector<PromotionJobChunk>
@@ -1001,6 +1040,8 @@ private:
     void shadow_note_promotion_published(ChunkID id);
     void shadow_note_evicted(ChunkID id);
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
+    std::size_t m_last_meshing_snapshot_bytes = 0;
+    bool m_meshing_snapshot_pass_active = false;
     mutable std::atomic<std::uint64_t> m_snapshot_copies{0};
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
@@ -1115,10 +1156,25 @@ private:
         // Near-field hole-fill work rides the High job lane (see
         // MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH in the.cpp).
         bool high_priority = false;
+        u8 transition_faces = 0;
+        // Owner-thread diagnostic membership in the latest candidate scan.
+        bool current_candidate = true;
     };
-    // Return accepted items, including synchronous publication. Refusals stay
-    // candidates; this diagnostic result never changes scheduling.
-    std::size_t dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
+    struct MeshingDispatchResult {
+        std::size_t admitted = 0;
+        std::size_t consumed = 0;
+        std::size_t submitted_candidates = 0;
+    };
+    // At most one scheduler prefix (4 * MAX_CHUNKS_TO_PROCESS_PER_FRAME). Only
+    // descriptors are retained: mutable chunk buffers are copied at admission.
+    std::vector<MeshingWorkItem> m_deferred_meshing;
+    std::size_t m_deferred_meshing_cursor = 0;
+    std::int64_t m_deferred_meshing_due_tick = -1;
+    bool deferred_meshing_pending() const;
+    MeshingDispatchResult dispatch_deferred_meshing();
+    // Returns consumed and admitted counts, including current-candidate admissions.
+    MeshingDispatchResult dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunks_to_mesh,
+                                                std::int64_t due_tick);
     void process_completed_meshing_jobs(bool force);
     bool meshing_jobs_active() const;
     //  promotion lane (see StreamingState). dispatch_promotion_jobs
@@ -1127,7 +1183,8 @@ private:
     // thread and dispatches stage B. promotion_pipeline_pending covers the
     // whole pipeline (jobs in flight OR unpublished results OR stage B not yet
     // dispatched) for the scheduling gates that today read meshing activity.
-    std::size_t dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote);
+    std::size_t dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote,
+                                        std::int64_t due_tick);
     void process_completed_promotion_jobs(bool force);
     // MAIN-THREAD generation publication — flips completed
     // (pending_generation_ready) batch chunks Loading→Idle and clears the
@@ -1166,28 +1223,44 @@ private:
     void reinitialize_noise(const TerrainGenParams* params = nullptr,
                             std::optional<int> seed = std::nullopt);
 
-    // Shared terrain-height implementation.
-    // Every terrain-height consumer (GetTerrainHeightAt, SampleWorldGenLayers,
-    // GenerateChunkData full + step>1 batch loops, and the column-span cache
-    // through GetTerrainHeightAt) derives its height from this helper so the
-    // scalar and batch paths cannot diverge. All noise reads use GenSingle2D
-    // (never batch SIMD Gen* grids) when shaping is enabled, making the batch
-    // heightmap bytes EXACTLY equal to the scalar value at the same world
-    // coordinate. With shaping disabled the helper reproduces the legacy
-    // float-op sequence bit-for-bit, while GenerateChunkData keeps its
-    // GenUniformGrid2D fast path (legacy heights/hashes untouched, covered by
-    // the existing max_sdf_sample_error < 1e-4 snapshot gate).
+    // Scalar and SIMD paths share CombineShapedHeightSample's float operation
+    // order. Only their noise reads differ (GenSingle2D, GenUniformGrid2D or
+    // GenPositionArray2D); equivalence tests compare their exact float bits.
     struct ShapedHeightSample {
         float base_noise = 0.0f;        // detail FBM (at warped coords when shaping)
         float pre_island_height = 0.0f; // combined height before the island mask
         float island_noise = 0.0f;
         float island_mask = 1.0f;
-        float final_height = 0.0f;     // after the river carve
+        float final_height = 0.0f;     // after all carving and optional hydro
         float pre_carve_height = 0.0f; // final surface before the river carve
         bool island_applied = false;
     };
     ShapedHeightSample ComputeShapedHeightSample(float world_x, float world_z) const;
     float ComputeShapedHeight(float world_x, float world_z) const;
+    struct SamplingCache;
+    struct ShapingNoiseSample {
+        float continentalness = 0.0f;
+        float erosion = 0.0f;
+        float peaks_valleys = 0.0f;
+        float base_noise = 0.0f;
+        float island_noise = 0.0f;
+    };
+    // Shared float operation order for scalar, grid, position-array and material
+    // sampling. Historical shaping is reserved for revision-1 consumers and the
+    // erosion substrate; it deliberately omits relief, cliffs, lakes and rims.
+    ShapedHeightSample CombineShapedHeightSample(float world_x,
+                                                 float world_z,
+                                                 const ShapingNoiseSample& noise,
+                                                 bool complete_shaping,
+                                                 SamplingCache* cache = nullptr) const;
+    // The erosion substrate instantiates ApplyHydro=false, so the bake cannot
+    // recurse. Keep the offset before the output store to permit in-place use.
+    template<bool ApplyHydro>
+    void ComputeShapedHeightsAtPositionsImpl(const float* xs,
+                                             const float* zs,
+                                             std::size_t count,
+                                             float* out,
+                                             bool complete_shaping) const;
 
     // SIMD-batched shaped heights for a chunk-aligned
     // (size_x * size_z) column grid whose origin is the integer world position
@@ -1202,16 +1275,13 @@ private:
     // GenSingle2D loop cost ~26 us/column; the batched path is ~2 us/column.
     void ComputeShapedHeightGrid(int base_x, int base_z, int size_x, int size_z, float* out) const;
 
-    // hydraulic/thermal relief (decision a). The analytic height is
-    // computed by...Impl(apply_hydro=false); ComputeShapedHeightSample adds the
-    // baked offset when hydro_enabled, so every consumer walks the eroded
-    // surface. SampleHydroOffsetMeters baked per kHydroRegionMeters region
-    // (deterministic, cached, recompute-on-load); the bake samples the NO-hydro
-    // height (apply_hydro=false) to avoid recursion. World_hash-affecting when
-    // enabled. Halo == hydro_iterations (halo-independent interior, hydraulic erosion kernel).
+    // Hydraulic relief adds a cached, deterministic offset to the final surface.
+    // The bake intentionally uses the historical incomplete analytic substrate
+    // with hydro disabled, preserving terrain in saved worlds (issue #453).
     ShapedHeightSample
     ComputeShapedHeightSampleImpl(float world_x, float world_z, bool apply_hydro) const;
-    float SampleHydroOffsetMeters(float world_x, float world_z) const;
+    float
+    SampleHydroOffsetMeters(float world_x, float world_z, SamplingCache* cache = nullptr) const;
 
     // the five normalized climate dimensions consumed by the biome
     // lookup. continentalness/erosion/peaks_valleys REUSE the +3/+4/+5 shaping
@@ -1247,6 +1317,7 @@ private:
     // ridge/detail) — the level a lake's surface nestles at. Low-frequency so a
     // lake reads ~flat over its extent. Pure.
     float ContinentalBaseHeight(float world_x, float world_z) const;
+    float LakeSurfaceLevel(float world_x, float world_z, SamplingCache* cache) const;
     // FLAT lake surface: ContinentalBaseHeight sampled at a coarse-snapped position
     // so the surface is constant over a lake (a smoothly-varying surface reads as a
     // concave/tilted lake). The carve + water mesh both use this so basin + surface
@@ -1262,7 +1333,8 @@ private:
     // when surface_breaks disabled. Folded into all three height paths
     // (ComputeShapedHeightSampleImpl, ComputeShapedHeightGrid, GetTerrainHeightAtCoarse)
     // so near/far/coarse stay byte-identical.
-    float SurfaceBreakRimDepression(float world_x, float world_z) const;
+    float
+    SurfaceBreakRimDepression(float world_x, float world_z, SamplingCache* cache = nullptr) const;
     // the ONE shared surface-break sampler. Returns the per-column effective
     // cap (18 outside any feature, lowered toward entrance_min_cap inside a
     // cave-mouth/doline where the interior-proximity probe shows the cave noise is
@@ -1275,7 +1347,9 @@ private:
         float effective_cap;
         float carve;
     };
-    SurfaceBreakSample sample_surface_breaks(const Vec3& world_pos, float surface_h) const;
+    SurfaceBreakSample sample_surface_breaks(const Vec3& world_pos,
+                                             float surface_h,
+                                             SamplingCache* cache = nullptr) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.
@@ -1336,7 +1410,9 @@ private:
     // kHydroCacheMaxRegions entries the farthest region from the latest request
     // is evicted (see offset_at), so long exploration cannot grow this without
     // limit; eviction only ever costs a byte-identical re-bake.
-    mutable std::map<std::pair<std::int64_t, std::int64_t>, std::vector<float>> m_hydro_cache;
+    mutable std::map<std::pair<std::int64_t, std::int64_t>,
+                     std::shared_ptr<const std::vector<float>>>
+        m_hydro_cache;
     // shared_mutex: warm-cache lookups take a SHARED lock (concurrent across the
     // multithreaded chunk-gen jobs); only the one-time per-region bake takes the
     // exclusive lock, and the bake itself runs OUTSIDE any lock (pure function).
@@ -1350,6 +1426,14 @@ private:
     // so const-correctness is preserved (no world_hash-affecting state changes).
     mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
     mutable std::mutex m_hydro_prefetch_mutex;
+    // One prefetch batch owns all queued/running hydro callbacks. Serializing
+    // admission and fences keeps handle storage O(1); workers use the other mutex.
+    mutable std::mutex m_hydro_prefetch_dispatch_mutex;
+    mutable JobHandle m_hydro_prefetch_handle;
+    mutable std::condition_variable m_hydro_prefetch_finished;
+    // Owner-thread reset/teardown drains queued bakes before taking the epoch
+    // exclusively or releasing this world. Never wait while holding the epoch.
+    void wait_for_hydro_prefetch_jobs() const;
 
 public:
     // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of

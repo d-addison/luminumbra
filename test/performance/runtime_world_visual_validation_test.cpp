@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -26,6 +27,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include "core/JobSystem.h"
+#include "luminumbra_client/core/RuntimeScenarioConfig.h"
 #include "luminumbra_client/core/RuntimeScenarioHarness.h"
 #include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -36,6 +38,27 @@ namespace fs = std::filesystem;
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
+
+TEST(SurfaceWorkAdmission, DirectScenarioConfigsRefuseBeforeWorldMutation) {
+    using namespace Client::ScenarioHarness;
+    for (const bool collision : {false, true}) {
+        for (const int radius : {-1, 13, 10000, std::numeric_limits<int>::max()}) {
+            NetworkedSessionDriver::Config network;
+            network.surface_radius = collision ? 12 : radius;
+            network.collision_radius = collision ? radius : 4;
+            NetworkedSessionDriver driver;
+            // No live client is necessary: radius admission precedes even the
+            // client-null check and all host jobs, world creation and output.
+            EXPECT_FALSE(driver.Begin(nullptr, network));
+            EXPECT_EQ(driver.failure_reason(), "surface_radius_unsupported");
+            RuntimeScenarioConfig persistence;
+            persistence.horizon_radius = network.surface_radius;
+            persistence.collision_radius = network.collision_radius;
+            const auto result = RunPersistenceRoundtripSavePhase(persistence, nullptr);
+            EXPECT_EQ(result.failure_reason, "surface_radius_unsupported");
+        }
+    }
+}
 
 TEST(PrecipitationAnalysis, CrosswindRaisesSlantWithoutLengtheningStreaks) {
     constexpr int width = 160;
@@ -1061,4 +1084,27 @@ TEST(RuntimeWorldVisualValidationTest, JoinReadinessKeepsCollisionBudgetNearFiel
     EXPECT_EQ(horizon.collision_chunks, 81u);
     EXPECT_GE(horizon.mesh_chunks, 600u);
     EXPECT_GT(horizon.mesh_chunks, horizon.collision_chunks);
+}
+
+TEST(NetworkedSessionDriverTest, MissingOrFailedSessionsCannotAdvertiseCleanDisconnect) {
+    for (const bool begin_failure : {false, true}) {
+        SCOPED_TRACE(begin_failure);
+        Client::ScenarioHarness::NetworkedSessionDriver driver;
+        if (begin_failure) {
+            EXPECT_FALSE(driver.Begin(nullptr, {}));
+            EXPECT_EQ(driver.failure_reason(), "client_session_null");
+        }
+        driver.Disconnect();
+        driver.Disconnect();
+        const TestSupport::ScopedTempFile artifact_file("networked-session-closure", ".json");
+        const auto artifact_dir = artifact_file.Path().parent_path();
+        EXPECT_FALSE(driver.WriteArtifact(artifact_dir, 0.0));
+        std::ifstream input(artifact_dir / "networked-session-analysis.json");
+        ASSERT_TRUE(input.is_open());
+        nlohmann::json artifact;
+        input >> artifact;
+        EXPECT_FALSE(artifact.at("clean_disconnect").get<bool>());
+        EXPECT_FALSE(artifact.at("passed").get<bool>());
+        input.close();
+    }
 }

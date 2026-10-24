@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
+#include "../AttributedGl.h"
 #include "../FoliageEvidence.h"
 #include "../FoliageGroundWork.h"
 #include "../FoliageSurfaceSlots.h"
@@ -517,8 +518,8 @@ private:
     std::unique_ptr<EvidenceQueries> m_evidence_queries;
     std::array<std::size_t, 2> m_phase_query_counts{};
     std::size_t m_last_draw_calls = 0;
-    u32 m_compute_prog = 0;
-    u32 m_prefix_prog = 0;
+    AttributedGl::Program m_compute_prog{};
+    AttributedGl::Program m_prefix_prog{};
     struct ScatterUniforms {
         int chunk_count = -1;
         int archetype_count = -1;

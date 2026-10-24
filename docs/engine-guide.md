@@ -18,7 +18,7 @@ fallback, including when obsolete artifacts coexist with current region files.
 | Region container | `chunks/region/r.<rx>.<rz>.lmr`: `LMR1` magic, little-endian `u16` container version `2`, `u16` record count, record headers and LZ4 payloads |
 | World manifest | `chunks/region/world-manifest.json`: `schema: "luminumbra.persistence.world_manifest.v1"`, `container: "LMR1"`, `container_version: 2` |
 | Far-LOD record payload | `FSD2` magic, payload version `3` inside the LMR1 container |
-| Terrain preset | New presets use integer `schema_rev: 7`; revision `6` and omitted revisions retain historical missing-field semantics |
+| Terrain preset | New presets use integer `schema_rev: 8` with sampling revision `2`; revision `6` and omitted revisions retain historical missing-field semantics |
 
 The manifest schema is still v1; it is distinct from container v2, FSD2 payload
 v3, and project version 0.3.0. Lod-0 records retain the canonical
@@ -80,65 +80,138 @@ No measured caps or distant system consumers are activated by this foundation.
 The regional plants/water continuation stack (issue #242) is planned for v0.3.1;
 performance/default enablement remains v0.4.0 (issue #320).
 
-### Simulation clock metadata
+### Simulation clock metadata {#simulation-clock-metadata}
 
-The hashed `sim.active_regions` key is enabled by default for v0.3.0. When enabled, every
-successful persistent `GameSession` save writes three additional keys in
-`world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
-temporary-file and atomic replacement path:
+The hashed `sim.active_regions` key is enabled by default for v0.3.0. When
+enabled, each successful persistent `GameSession` save writes the resolved clock
+in `world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
+temporary-file and atomic replacement path. The container remains version 2:
 
 ```json
 "simulationTick": 317,
-"calendar": { "dayLengthTicks": 216000, "daysPerYear": 8 },
+"calendar": {
+  "version": 2,
+  "dayLengthTicks": 162000,
+  "daysPerYear": 8,
+  "daylightNumerator": 2,
+  "daylightDenominator": 3,
+  "lunarCycleDays": 8
+},
 "ambientFieldAnchor": { "x": 8.0, "y": 100.0, "z": 8.0 }
 ```
 
-`simulationTick` is the absolute completed host tick; there is no wall-clock
-progression while a world is closed. Tick zero is midnight on day zero in
-midwinter. At 30 Hz the default day lasts two hours (about one hour of daylight) and
-the eight-day year lasts 16 hours. Plants and circadian activity use the midnight
-phase directly; migration, stimulus seasons and the sky's seasonal sine offset the year by three quarters
-to their spring-equinoctial origin. Sky geometry offsets the day by half a cycle
-because its existing zero is noon. An explicit render day-length override and
-photo/scenario time pins remain presentation controls.
+`simulationTick` is the absolute completed host tick, with no progression while
+closed. Tick zero is midnight on day zero in midwinter. New worlds have a
+162,000-tick day: 90 minutes at 30 Hz, with 108,000 ticks (60 minutes) of
+geometric daylight and 54,000 ticks (30 minutes) of night. Sunrise is tick
+27,000 (15 minutes), noon 81,000 (45 minutes), sunset 135,000 (75 minutes).
+Existing twilight blends extend beyond the geometric daylight interval. The
+eight-day year and independent eight-day lunar month each last 1,296,000 ticks
+(12 hours). Seasons change peak solar elevation, without moving the horizon
+crossings or varying daylight duration.
 
-| Metadata condition | Open / write behavior |
+| Saved calendar form | Resolved calendar |
 |---|---|
-| `simulationTick` absent | Tick zero |
-| `calendar` absent | Pinned defaults: 216,000 ticks/day, 8 days/year |
-| `simulationTick` present | JSON unsigned integer in `[0, 2^62)` |
-| `calendar` present | Object containing exactly `dayLengthTicks` and `daysPerYear` |
+| Absent in an existing save or explicit snapshot | Pinned 216,000 ticks/day, 8 days/year, daylight 1/2, lunar month 8 days |
+| Unversioned object with exactly `dayLengthTicks`, `daysPerYear` | Recorded day/year; daylight 1/2; lunar month 8 days |
+| Complete version 2 object | All five recorded values |
+| Newly created world | 162,000 / 8 / 2 / 3 / 8 |
+
+Loading and catalog inspection never rewrite metadata. A successful explicit
+save writes the original two-field calendar for daylight 1/2 with an eight-day
+lunar cycle; other calendars use version 2. Imported 36,000- and 216,000-tick
+calendars remain authoritative. There is no rescaling of ticks,
+indices, entities, ledger timestamps or weather history.
+
+| Field / condition | Validation |
+|---|---|
+| `simulationTick` | JSON unsigned integer in `[0, 2^62)`; absent means zero |
+| Version 2 calendar | Exactly `version`, `dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator`, `lunarCycleDays`; version is integer 2 |
 | `dayLengthTicks` | JSON integer in `[1, 2^31)` |
 | `daysPerYear` | JSON integer in `[1, 366]` |
-| `ambientFieldAnchor` present in a clock save | Object containing finite numeric `x`, `y`, `z` coordinates |
-| `ambientFieldAnchor` absent | Use the saved spawn point, or the initialized spawn if metadata has none |
-| Invalid clock type, null, negative/out-of-range clock number, fractional/exponent clock number, incomplete calendar, unknown calendar member or arithmetic overflow | Corrupt world metadata; refuse before generation or writing |
-| Either clock key present with `sim.active_regions` off | Incompatible configuration; refuse without modifying disk bytes |
+| Daylight fraction | Integer `0 < numerator < denominator <= 65535`, reduced by greatest common divisor |
+| `lunarCycleDays` | JSON integer in `[1, 366]`, independent of `daysPerYear` |
+| `ambientFieldAnchor` in a clock save | Exactly finite numeric `x`, `y`, `z`; absent uses saved or initialized spawn |
+| Missing/extra members, unknown versions, invalid bounds, redundant fractions, floats/exponents, bools, nulls, strings, huge integers | Corrupt metadata; refuse before generation or writing |
+| Clock metadata with `sim.active_regions` disabled | Incompatible configuration; refuse without changing disk bytes |
+| `renderCalendar` together with `calendar`, `simulationTick` or an active-region ledger | Competing authorities; refuse |
 
-Day × year and tick + the catch-up bound are checked before use. Validation
-also applies to initialized saves with no chunk directory, catalog inspection,
-explicit snapshot directories, and saves over existing metadata. The catalog
-reports valid clock metadata without selecting a runtime configuration; opening
-checks the feature requirement. Presence of either clock key marks the save as
-requiring `sim.active_regions`; metadata writes cannot remove both keys from an
-initialized clock save. Save calls inside a simulation catch-up batch are
-refused; successful snapshots observe a completed tick boundary.
-Enabled transient sessions can read explicit snapshots, but saving them is
-refused before creating a directory or writing any member, just as their
-canonical saves are refused.
+These checks apply to metadata-only initialized worlds, catalogs, normal and
+explicit snapshot loads, and every save writer. Products promote operands to
+`uint64_t` before multiplication. Solar branch comparisons and local offsets use
+integer `2 * denominator * remainder` against `day * (denominator ± numerator)`
+and `day * denominator`. These products are below 2^49 and convert exactly to
+double; only the local ratios and cubic evaluation use floating point, under the
+engine's pinned floating-point contract. The symmetric 1/2 path returns the
+original `day_phase()` calculation, preserving its arithmetic. No simulation
+timing uses a floating accumulator or library transcendental.
 
-Saves with an explicit calendar retain it, including older 36,000-tick days.
-Saves without the calendar key adopt the 216,000-tick default; no migration is
-needed to load them.
+`day_phase()`, day/year indices, annual temperature and season phases stay
+linear. `solar_phase()` is a midnight-origin, monotonic cubic Hermite mapping:
+midnight 0, sunrise 1/4, noon 1/2, sunset 3/4. For daylight fraction `f = n/d`,
+the elapsed-day knots are `0, (1-f)/2, 1/2, (1+f)/2, 1`. Each interval has solar
+span 1/4 and elapsed span `L` (either `(1-f)/2` or `f/2`). With local coordinate
+`t` in `[0,1]` and `a = 4L`, its solar offset is
+`[t + (a-1)t(1-t)(1-2t)]/4`. Afternoon quarters reflect the morning quarters.
+Its normalized derivative is `a + 6(1-a)t(1-t)`: for every valid fraction,
+`0 < a < 2`, so this derivative is positive (at least `a` for `a <= 1`, and
+`(3-a)/2` otherwise). The rate with respect to elapsed-day phase is exactly 1
+at both ends of every quarter. Thus angle and rate join continuously at dawn,
+noon, dusk and the midnight wrap, with no additional fraction bounds. Integer
+horizon ticks return exactly 1/4 and 3/4; nonintegral horizons lie between ticks.
 
-With the key off, saves omit all three keys and loads restart at zero; simulation
-consumers retain their legacy periods and hash bytes. The renderer uses the shared
-two-hour default day even on the legacy path. With it on, clock canonical bytes fold
-into the existing ecology hash slot without changing the top-level hash order.
-The canonical clock section is ASCII `world_clock:v1:` followed by little-endian
-`u64 simulationTick`, `u32 dayLengthTicks`, and `u32 daysPerYear` (16 payload
-bytes). It excludes frame accumulators and telemetry. Calendar and tick changes
-therefore affect the hash even when the entity roster is empty.
+Plant daily light, circadian activity, and stimulus time-of-day, daily temperature
+and fallback light consume this solar phase at enabled calendar call sites.
+Ambient-light and precipitation overrides keep precedence. Migration and
+stimulus/sky seasons retain the spring-equinoctial offset of 3/4 year. Weather,
+storms, wind and aether retain absolute tick periods.
+
+Clock-disabled **new** worlds instead write `renderCalendar`, containing the same
+complete version 2 calendar object, with no persisted tick and no enabled-clock
+hash contribution. It is presentation persistence bookkeeping. Unmarked existing
+disabled worlds keep the pinned 216,000-tick symmetric rendering calendar and
+continue omitting the marker on save. Markers survive normal saves and explicit
+snapshots, including metadata-only snapshots. Loading an explicit snapshot
+replaces the resolved rendering calendar even when it has no metadata. A
+transient disabled preview can export a marked explicit snapshot. Enabled
+transient sessions can read snapshots but cannot save them.
+
+The renderer keeps unwarped elapsed phase separate from solar angle. Wall-clock
+pacing derives from the selected calendar and canonical tick rate (5,400 seconds
+for new worlds). World-clock inputs have a midnight origin; the legacy tick API
+and clock-disabled rendering retain their noon-at-zero origin. Sky geometry
+receives `wrap(solar_phase + 0.5)`. Direct `set_time_of_day()` values remain solar
+pins; a fixed 56-step bisection of the same smooth curve initializes fallback
+elapsed time for a continuous resume. Photo hold wins over automatic advancement,
+and later scenario pins keep frame-order precedence. Both legacy clock setters clear world-clock authority.
+A day-length debug override changes only solar pacing: saved season and lunar
+periods retain their selected calendar. `[`, `]`, and `\` still adjust simulation
+speed, from pause through 16×, with the existing catch-up batching. At ideal 16×,
+a new day lasts 337.5 real seconds (225 daylight, 112.5 night).
+
+Lunar phase uses `tick % (uint64(dayLengthTicks) * lunarCycleDays)` divided by
+that independent month, without solar warping or resetting at year boundaries.
+Tick zero is full moon, default day four reaches the 0.08 new-moon floor, and
+day eight is full again. Imported 36,000- and 216,000-tick days yield months of
+288,000 and 1,728,000 ticks; imported moon brightness can therefore change.
+`LUMIN_MOON` precedes the explicit override, which precedes automatic phase,
+with clamping preserved. A wall-only preview can keep its static celestial tick.
+The moon remains opposite the sun; the visible disc does not depict phase.
+
+With the feature disabled, simulation daily/annual periods and hash bytes stay
+legacy, independently of the presentation marker. With it enabled, clock bytes
+fold into the ecology slot without changing top-level hash ordering. Canonical
+bytes preserve ASCII `world_clock:v1:` followed by LE `u64 simulationTick`,
+LE `u32 dayLengthTicks` and LE `u32 daysPerYear` (16 payload bytes) for daylight
+1/2 with an eight-day lunar cycle. Other calendars use `world_clock:v2:` and
+append three LE `u32` fields: `daylightNumerator`, `daylightDenominator`,
+`lunarCycleDays` (28 payload bytes). They encode resolved values independently
+of source JSON. Representable legacy calendars preserve their enabled-clock
+hash bytes. The calendar change leaves container v2, LMR1, ARL1 and entity/chunk
+formats unchanged. Lockstep and LREC1 use version 3 for configuration and preset
+identity binding; see the [identity contract](development/system-config-identity.md).
+Save calls inside a simulation catch-up batch remain refused; successful
+snapshots observe completed tick boundaries.
 
 C1 persists the ambient grid's anchor separately from the player respawn
 `spawnPoint`. It is initialized from the spawn when creating or importing a
@@ -289,10 +362,140 @@ resolved preset-content identities before admitting state or stepping ticks. The
 content identity binds canonical preset JSON and a sorted manifest of exact biome
 and structure dependency bytes; generation uses that immutable snapshot. Runtime
 and soak TCP slots release peers that fail to complete a matching Hello within
-10 seconds (issue #315). Lockstep protocol and LREC1 replay layout are version 3;
-versions 1 and 2 are refused. See the
+10 seconds (issue #315). The shared networking Hello is version 4; LREC1 replay
+uses version 3 for complete streams and version 4 for diagnostic suffixes with
+an elided prefix. Readers accept both; older Hello layouts are refused. See the
 [identity contract](development/system-config-identity.md) for the effective
 SystemConfig/presentation split, refusal rules and dependency encoding.
+
+Lockstep is a direct two-peer protocol: Hello must match the configured remote
+client slot, and a peer can submit only its own inputs. Hello exchanges start,
+minimum and maximum horizons, checkpoint cadence, transport frame size, and
+retention budget settings. Local and received settings must satisfy
+`0 < horizon_min <= horizon_start <= horizon_max` before any input scheduling.
+Both sides must use identical horizon, cadence and budget settings; incompatibility
+fails before input scheduling with an explicit `handshake_error`. The frame size is the minimum of both transports and each side's
+`max_frame_payload_bytes` setting; callbacks can inspect the result through the
+const `AdmissionStatus().frame_limit` diagnostic.
+Inputs must be newer than the consumed tick and no more than twice the maximum
+configured horizon ahead. Hashes must be cadence checkpoints within that lookahead
+and newer than the contiguous confirmed checkpoint prefix; delayed hashes for executed ticks still participate in desync detection.
+
+Retention is derived, rather than dropping reliable messages when a container
+fills. Let `L = 2 * horizon_max`, `C = ceil(L / cadence)` and
+`W = kReceiveQueueFrameLimit + C + 1` (with no hash slots when cadence is zero).
+The sender pauses simulation after `W` unconfirmed checkpoints while continuing
+to receive; only the oldest unconfirmed tick advances the confirmation prefix.
+The receiver reserves `L` input slots and `W + C` hash slots, including remote
+lead and the next checkpoint needed for confirmation regardless of arrival order.
+Multiplying these slots by the negotiated maximum frame size gives the encoded
+byte bound; overflow is rejected before scheduling. The single remote's per-peer
+and aggregate bounds are identical. Zero `peer_retained_byte_limit` and
+`peer_retained_message_limit` select these derived bounds; explicit budgets must
+fit all negotiated traffic or handshake fails. A tick within the negotiated
+window is never discarded for capacity. Invalid slot, stale/future, malformed,
+conflicting or oversized messages are dropped and counted in session status.
+These rules apply above Loopback, TCP (Windows/POSIX), GNS and Steam transports.
+
+Each `Handshake`, `PumpTick` or `Disconnect` call owns one receive-work budget,
+shared with nested input/hash sends, retry refusals and closure drains. It permits
+at most 1024 receive polls, including empty or malformed frames and unsuccessful
+polls, and stops polling once delivered payload bytes reach 256 KiB. One final
+frame can cross the byte threshold; its payload is bounded by the existing
+64 MiB transport maximum. Transport queues and read-ahead retain their existing
+bounds. Saturation leaves subsequent frames queued and allows an available
+agreed tick to advance; it does not change input bytes, ordering or hashes.
+`Finished` waits for an empty receive poll. A saturated local disconnect stops
+simulation immediately and defers transport close and storage release; its owner
+keeps the session and transport alive and calls `Disconnect` or `PumpTick` again
+until status becomes terminal. A finite backlog drains over successive calls.
+A continuously refilling peer can prolong draining, but cannot monopolize one
+call or grow retained storage beyond the negotiated bounds.
+
+Replication server/client public receive and send calls share the same 1024-poll
+and 256 KiB threshold, including nested refusal and close drains. Admission
+control frames consume that budget; a control-batch yield is distinguished from
+an empty source. Closing links and transports stay alive until draining finishes,
+so queued commands, ACKs and authoritative snapshots precede terminal close.
+Server receive pumping rotates its first client after each call. Transport send
+and receive capacities may differ; receive validation and snapshot reconstruction
+use the receive capacity, and adapters forward both caps without raising either.
+The loopback scenario driver uses fixed default horizons of 3–10 ticks and empty
+input payloads, with no configurable backlog injection. Its clean-disconnect
+artifact requires both session ends to be terminal and free of desync, including
+checkpoints processed during disconnect. Registered regressions require native
+execution before qualification is claimed.
+
+On `Bye(T)`, the survivor compares queued hashes and drains buffered inputs only
+through the sender's final executed tick T. Pre-scheduled inputs after T are
+then discarded. Pending outbound retries cannot cut this drain short; closure
+is reported before retained input/hash storage is released.
+
+Consumed inputs and confirmed peer hashes are pruned. An out-of-order hash that
+already matches its local checkpoint releases all peer strings and retains only
+a confirmation marker. Local hashes retain only
+unconfirmed checkpoints plus the latest `kReceiveQueueFrameLimit` diagnostic
+ticks. Applied input diagnostics retain at most `kReceiveQueueFrameLimit` ticks
+and `kMaxFramePayloadBytes` payload bytes, using a deque. Storage therefore depends
+on the negotiated limits rather than session duration. The only internal history
+consumer is desync export; save-game state does not consume this history.
+Every `LockstepSession` automatically streams merged inputs and local checkpoints
+to a `QueuedReplayRecorder` backed by `BoundedReplayRecorder`, including the
+server lockstep mode, client network driver, and scenario/test drivers. No hook
+installation is required. Handshake performs recorder setup and starts one
+worker through the existing `JobSystem`. Each tick only enqueues shared references
+to immutable, already-encoded merged inputs and local checkpoint strings; it
+performs no recorder I/O, replay encoding, or digest scans. A single ordered
+consumer performs those operations, including segment rotation and pruning.
+Recording uses buffered disk segments beside the dump destination; no per-tick
+flush is performed. Segments hold at most 1024 ticks or 64 MiB, with a larger individual
+tick occupying its own segment. Confirmed segments rotate once the retained
+suffix exceeds 1024 ticks or 64 MiB. All unconfirmed ticks remain pinned, so even
+a delayed mismatch retains the divergent tick and its input bytes. Each segment
+is closed before deletion, including on Windows. Destruction or completed clean
+disconnection removes the working segments; an in-sync session emits no dump.
+
+Outstanding recorder work, including the active tick, is limited to 4096 ticks
+and `max(64 MiB, T)` bytes, plus count-bounded queue metadata. Byte accounting
+charges retained input/string capacities as well as encoded sizes. Queue admission
+reuses preallocated ring slots, takes constant time, and does not wait for the sink.
+On overload it latches the first
+failure and stops accepting further ticks. Accepted ticks still drain in order;
+the recorder never silently drops or resumes a gapped recording. Desync
+finalization returns failure and writes `<dump destination>.incomplete` with the
+first failed tick and a clear reason. Sink failures use the same policy. Recorder
+progress and failure never change simulation outcomes, input scheduling, hashes,
+or session pacing. `LockstepStatus::replay_error` reports a detected recorder
+failure without performing tick-path logging. `FlushReplayRecorder` is an explicit blocking persistence
+barrier; it is not part of `PumpTick`. Desync finalization and shutdown drain all
+accepted work before finalizing or removing working files. Complete artifacts
+keep the existing paths, wire bytes, checkpoint cutoff, and incremental FNV-1a
+prefix digest. Clean shutdown publishes no dump or incomplete companion.
+
+The disk bound is checked at handshake with overflow-safe arithmetic. With
+negotiated maximum frame size `F`, maximum horizon `H`, checkpoint cadence `D`,
+and the checkpoint window `W` above, define `T = 3F + 46` (maximum encoded tick),
+`U = WD + 2H + D` (zero when hashes are disabled), and
+`M = max(64 MiB, T)`. Working segments retain at most `B = UT + 3M` bytes,
+independent of session duration. Actual usage follows retained record sizes;
+the bound is not preallocated. Finalization streams through a fixed 64 KiB
+buffer. The final artifact is bounded by `B + 64 MiB + T + 53` bytes including
+the header, prefix metadata, and trailer; temporary disk usage while finalizing
+is at most `2B + 64 MiB + T + 53`. I/O failures are logged and never change
+simulation or hash results; a failed artifact is never reported as successful.
+
+On desync, the recorder finalizes LREC1 at the configured dump destination and
+populates the existing `LockstepStatus::dump_path` (the server's peer destination
+still appends `.peer`). It keeps every retained input and the local checkpoints
+through the divergence. When the prefix has rotated away, the header is version 4 and an `ElidedPrefix`
+record contains its last tick and a rolling FNV-1a digest of its exact encoded
+record bytes. `ReadReplay` exposes `elided_through_tick` and
+`elided_prefix_digest`; these artifacts support diagnostics, and `--replay`
+explicitly refuses to replay them from the seed. Recordings with no elided
+prefix keep the byte-identical version-3 LREC1 contents. The optional
+`LockstepHooks::record_replay_tick` remains available for additional bounded,
+caller-owned recording; the buffering `ReplayWriter` must not be used as an
+unbounded full-session sink.
 
 The shared `NetSocketsTransport` implements reliable and unreliable delivery for
 both GNS and Steam sockets. Loopback and TCP always deliver reliably and ignore
@@ -620,9 +823,22 @@ the scan before any reads. Resolver exceptions, including JSON serialization
 failures, return diagnostics without publishing an identity or dependency snapshot;
 failed create/load leaves the live world unchanged.
 
-Protocol-v3 Hello and LREC1-v3 headers retain their layouts. A species mismatch
-refuses TCP admission, lockstep handshake and replay verification before simulation
-advances. Existing content-mismatch diagnostics apply; lockstep and replay name
+The foliage `SpeciesRegistry::LoadFromDirectory` appends valid templates in UTF-8
+filename order and skips malformed names or JSON with diagnostics. It returns
+the appended count; scan or file I/O failure returns zero and rolls back every
+append from that attempt. The optional `io_failed` output is reset on entry and
+set only for those failures, distinguishing them from a successful empty load.
+The errors vector retains previous entries and appends new diagnostics. Callers
+stop retrying after success to avoid duplicate appends. The interactive farming
+cache retries I/O failures at five-second intervals using the existing frame
+clock, logs only changed failure diagnostics and recovery, and caches successful
+loads (including empty directories and valid neighbours of malformed JSON).
+
+Hello v4 carries negotiated lockstep admission limits; complete LREC1 streams use
+version 3 and elided diagnostic suffixes use version 4. Binding species does not
+change those layouts. A species mismatch refuses TCP admission, lockstep handshake
+and replay verification before simulation advances. Existing content-mismatch
+diagnostics apply; lockstep and replay name
 `preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
 species records are present, in either engine direction, following the existing
 preset dependency compatibility rule. With no species directory, no new records
@@ -669,13 +885,21 @@ five minutes at the canonical 30 Hz clock, to avoid saving every second during
 normal play. Smoke fixtures explicitly use 30 ticks to exercise saves at ticks
 30/60/90; explicit zero suppresses autosaves, including recorder fixtures.
 
-New preset revision 7 resolves omitted island masks, surface breaks, biomes,
+Preset revisions 7 and 8 resolve omitted island masks, surface breaks, biomes,
 biome relief, cliffs, rivers, lakes, structures and hydraulic/thermal erosion on.
 The biome table is `common/biomes.json`; structures resolve under the data root.
 Revision 6 and unversioned presets retain their historical omitted-field choices.
 Explicit false and an empty biome table remain off. New saves embed resolved
 choices; neutral knobs and UI controls use the same versioned resolver. Existing
 saved presets are read without rewriting their choices.
+
+Schema 8 gates `generation_params.terrain.surface_sampling_revision: 2`
+(issue #453). New worlds and the shipping catalog select revision 2, so activation
+height samples and vertex materials use the complete heightmap shaping sequence.
+Older readers reject schema 8. Explicit sampling revision 1 is preserved;
+historical presets without the selector keep revision 1 and their original
+identity bytes. Its canonical identity remains at schema 7. Erosion continues to
+bake its historical substrate, preserving generated terrain in existing worlds.
 
 The ordinary hills world is `worlds/atlas/presets/default.json`: its island mask
 is now on, alongside its already-enabled terrain features. Amplified, archipelago,
@@ -689,11 +913,11 @@ relief and cliffs are on, and hydraulic/thermal erosion uses four iterations
 instead of eight, matching the retuned Caverns terrain. Its denser cave tuning
 is preserved: cave threshold `0.54`, surface-break density `0.55`, maximum feature
 radius `52` m. Its canonical preset identity changes from `e70158a4777ee36b`
-(frozen revision 6) to `5d081f382b2d5d0d` (shipping revision 7). The frozen copy
+(frozen revision 6) to `a9296ce03a5d9f33` (shipping revision 8). The frozen copy
 has SHA-256 `5eff891c8d9f654ada480abf27b9cf9781cc86798fec60844bf28b1a7a4ae5e0`;
 the shipping copy has SHA-256
-`4b7c31ac3354db8921aea738749488525da6cb4d122a982c556a797b4ec82a1b`.
+`416c5a8d847c31e240fe3d103ed73e769131e3488a9ef1096076f01235d67a18`.
 Existing saves without an embedded preset use the frozen copy. The game
 repository's cave-dense qualification fixture and identity sidecar must select
 the intended revision: retaining the old fixture matches the frozen bytes;
-using shipping revision 7 requires updating both the fixture and its pins.
+using shipping revision 8 requires updating both the fixture and its pins.

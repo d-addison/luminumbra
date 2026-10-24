@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <entt/entt.hpp>
+#include <entt/entity/registry.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 

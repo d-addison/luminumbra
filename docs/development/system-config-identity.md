@@ -9,19 +9,19 @@ Missing identities on either side always fail compatibility, including two empty
 
 The fields are the simulation keys and owned parameters in `ConfigSchema.json`, plus
 `render.circadian` amplitude, which reaches `RunCircadianOnTick`, and the session options
-for finite hydrology, weather rain scale and region scheduler configuration. The five
-registry gates are hydrology weather, weather events, aether state, water resolution and
-active regions.
+for finite hydrology, weather rain scale, region scheduler configuration and the resolved
+calendar. The five registry gates are hydrology weather, weather events, aether state,
+water resolution and active regions.
 Other key slots are normalized to enabled: their config flags select compiled fallback
 tuning rather than disable the session system; erosion has no session gate. Disabling
 such an override with default tuning therefore leaves the effective identity unchanged.
 Parameters come from current session storage, including clamped plant mutation and the
 integer reproduction counts resolved by `ApplySystemConfig`. Scheduler values come
-directly from the live active-region ledger's effective `config()`. Presentation and user
-settings are excluded. This contract covers effective session rules, rather than world
+directly from the live active-region ledger's effective `config()`. Other presentation and
+user settings are excluded. This contract covers effective session rules, rather than world
 content, initial rosters or per-tick inputs.
 
-Canonical bytes start with ASCII `system-config:v3:`. In generated schema order, each
+Canonical bytes start with ASCII `system-config:v4:`. In generated schema order, each
 included key emits its `SysKey` id as u8, then its effective enabled flag as u8. Each owned
 parameter emits its `SysParam` id as u8, then a scalar type tag and little-endian value:
 
@@ -30,11 +30,19 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 - Tag 2: IEEE binary64 for the three foraging values.
 - Tag 3: u32 for reproduction maturity, cooldown and courtship tick counts.
 
-After the registry slots, v3 appends these fixed-width little-endian values without
+After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
 work limit (u64), hold ticks (u32) and reduced cadence shift (u8). All five values are
 included even when their associated feature is disabled. No float conversion loses
 adjacent integer values. The defaults append `0119000000ffffffffffffffff1e00000001`.
+Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
+`dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator` and
+`lunarCycleDays`. Epoch v1 means tick zero is midnight on day zero in midwinter,
+with lunar phase zero. This epoch is fixed by WorldClock, rather than configurable in
+metadata. A future epoch change must change the tag. All resolved calendar fields enter
+the identity, including presentation calendars when active regions are disabled. The
+current simulation tick is mutable state and is excluded. Calendar encoding versions
+are excluded: equivalent resolved legacy/v2 calendars identify equally.
 The domain version changes so older identities cannot be mistaken for this encoding.
 This configuration encoding is independent of the resolved preset hash below.
 
@@ -43,7 +51,7 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
+to **335 bytes → `49f694fd70645bcc`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
 `struct.pack('<f' / '<d' / '<I', value)`, and folds each byte as
@@ -51,8 +59,10 @@ SystemConfig does, applies effective fallback/clamping/count conversion, encodes
 
 ## Setter audit and pins
 
-`GameSession` supplies the current finite-hydrology boolean, signed rain scale, and all
-three live ledger `RegionSchedulerConfig` fields to the core encoder. The scheduler's work limit,
+`GameSession` supplies the current finite-hydrology boolean, signed rain scale, all
+three live ledger `RegionSchedulerConfig` fields and its resolved calendar to the core encoder.
+With active regions enabled, the clock supplies the calendar; otherwise a render marker
+supplies it, falling back to the legacy calendar when absent. The scheduler's work limit,
 hold ticks and reduced shift affect which regions tick or freeze; the server can override
 them through `--sim-budget-profile`. Runtime Hello construction and replay boot apply the
 same scheduler override as the runner. High-resolution water, weather rain/events,
@@ -78,12 +88,14 @@ Deliberate exclusions from the setter audit:
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
 The shipping pins in `SystemConfig_test.cpp`, `GameSessionHeadlessWorld_test.cpp`, this
-document and the independent Python encoder change from `da24cea9dbc5159b` to
-`60ab3c242d54ce89` because of the v3 domain and 18 appended bytes. Hardening tests' Hello
-and desync-record identity literals use the same new shipping value; their codec and
+document and the independent Python encoder change from `60ab3c242d54ce89` to
+`49f694fd70645bcc` because of the v4 domain, epoch tag and five calendar fields. Hardening
+tests' Hello and desync-record identity literals use the same new shipping value; their codec and
 record assertions are unchanged. `historical-defaults-off.json` contains configuration,
 not an identity pin, and needs no edit: its effective identity is now
-`74f285c5fa387d66`, with the independent session options still at their defaults.
+`1aaa90fa5312b089` before world boot, with the independent session options still at their
+defaults and the unmarked legacy presentation calendar. Newly created worlds record the
+new render calendar even when active regions are disabled, so identity follows that marker.
 The identity encoding change updates no world-state, terrain, water or replay checkpoint pins.
 
 The scheduler load correction changes no identity pins: compiled/default schedulers
@@ -96,8 +108,10 @@ Preserving an override on an absent-ledger load can change nondefault scheduling
 derived world/replay hashes compared with the previous default-substitution bug; no pins
 for that incorrect behavior are retained or introduced.
 
-Lockstep protocol and LREC1 layout versions are 3. Hello and replay headers carry
-length-prefixed configuration identity and `preset_content_hash` strings. Versions 1
+Lockstep Hello is version 4. Complete LREC1 streams use version 3; diagnostic suffixes
+with an elided prefix use version 4. Replay readers accept both versions. Hello and
+replay headers carry length-prefixed configuration identity and `preset_content_hash`
+strings. Versions 1
 and 2 are explicitly rejected because they cannot bind resolved preset content.
 Desync replay dumps include both identities captured at handshake. TCP (including
 runtime/soak modes) hosts validate the same Hello compatibility fields before adding a
@@ -186,17 +200,20 @@ within the registry, including for client metadata callers. Registry order uses
 the same generic UTF-8 filename order, including when native UTF-16 path order
 would differ.
 
-The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
-NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
-will mismatch the expanded identity and refuse admission/verification. The existing
+The same string continues through protocol-v4 Hello, replay-header-v3 (or v4 for
+elided diagnostic suffixes), server modes and NetworkedSessionDriver. Hello v4
+appends negotiated lockstep admission limits; the configuration identity encoding
+and complete replay layout are unchanged. Earlier JSON-only identities will
+mismatch the expanded identity and refuse admission/verification. The existing
 content-mismatch diagnostics apply; lockstep and replay explicitly identify
-`preset/species` content. No additional identity field or wire version is introduced.
+`preset/species` content. Binding species introduces no additional identity field
+or wire version.
 The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.
 
 The GNS and Steam transports are optional and disabled by default. Both use the
 unconditionally compiled `Luminumbra::Net` replication admission gate from issue #278.
-A connected joiner sends the existing v3 Hello reliably. The host checks its assigned
+A connected joiner sends the existing v4 Hello reliably. The host checks its assigned
 client ID and `HelloMatches` compatibility (protocol, seed, preset, tick rate, nonempty
 SystemConfig identity and resolved preset content hash). Host identities come from the
 booted runner session, replacing the two identity fields constructed by
@@ -220,22 +237,23 @@ progress and callback or replication loop iteration counts. The host starts at
 connection establishment; the joiner starts when its Hello is successfully enqueued.
 Expiry is at elapsed tick `>= 150`. Each admission pump drains at most 32 frames, so
 continuous traffic cannot postpone deadline checks. The connection-establishment limit
-remains separately 30 seconds. The separate runtime TCP policy
-`kRuntimeTcpHelloTimeoutTicks` introduced by issue #315 is also 150 ticks / approximately
-5 seconds; the constants remain separately named. This optional-transport gate does not
-alter TCP admission or add a TCP acknowledgement.
+remains separately 30 seconds. Runtime and soak TCP slots use their separate
+10-second `RuntimeTcpClientSlot::kHelloTimeout` steady-clock deadline. This
+optional-transport gate does not alter TCP admission or add a TCP acknowledgement.
 
 Hello and user commands share tag `0x01`. Admission validates the complete outer frame
 length first: exactly `kUsercmdPayloadBytes = 19` payload bytes (24 total) identifies a
 command, even when its tick starts with `LSTP1`. Other frames with this tag must carry
 the Hello magic and satisfy `DecodeHello(frame, hello) && EncodeHello(hello) == frame`.
-Failed Hello decoding never falls back to command decoding. The general Hello decoder
-keeps its existing permissive TCP/lockstep behavior. `DecodeUsercmd` now rejects trailing
-extensions, including those whose outer length was adjusted to include the extra bytes.
-All valid encoder output is unchanged: lockstep protocol 3, replication protocol 1 and
-LREC1 layout 3 remain unchanged, as do TCP wire bytes, replay and hash layouts. Hello
-versions 1 and 2 remain rejected. Older optional joiners cannot admit through commands;
-new joiners discard older hosts' snapshots until acknowledgement timeout.
+Failed Hello decoding never falls back to command decoding. The shared Hello decoder
+requires the complete v4 identity and admission fields; replication admission's
+exact re-encoding check rejects trailing bytes.
+`DecodeUsercmd` rejects trailing extensions, including those whose outer length was
+adjusted to include the extra bytes. Replication protocol 1 and complete LREC1 layout 3
+remain unchanged; Hello v4 and diagnostic LREC1 suffix version 4 follow the version
+rules above. Hello versions 1, 2 and 3 are rejected. Older optional joiners cannot
+admit through commands; new joiners discard older hosts' snapshots until
+acknowledgement timeout.
 
 The command-length compatibility audit found one production command encoder,
 `EncodeUsercmd`, writing exactly `u64 tick + u32 player_id + 3 * i16 + u8 = 19` bytes,

@@ -171,7 +171,9 @@ protected:
         for (const auto& entry : fs::recursive_directory_iterator(directory)) {
             if (!entry.is_regular_file())
                 continue;
-            const std::ifstream input(entry.path(), std::ios::binary);
+            // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+            std::ifstream input;
+            input.open(entry.path(), std::ios::binary);
             std::ostringstream bytes;
             bytes << input.rdbuf();
             result.emplace(entry.path().lexically_relative(directory).generic_string(),
@@ -226,10 +228,12 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
                   << " telemetry=" << config.sim_budget << " world_hash=" << hash << '\n';
         if (pass == 0) {
             untraced_hash = hash;
-            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage())
+            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage()) {
                 EXPECT_TRUE(samples.empty());
-            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().WorkItems())
+            }
+            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().WorkItems()) {
                 EXPECT_TRUE(samples.empty());
+            }
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();

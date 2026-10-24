@@ -98,7 +98,7 @@ ScenarioRunner::InGameDrive ScenarioRunnerImpl::onGameStateInGame(float deltaTim
         driveLodBoundaryOscillation() || driveLodSeamArrival() || drivePlayerView() ||
         driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
         driveCreatureSlice(deltaTime) || driveNetworkedSession()) {
-        return InGameDrive::kHandled;
+        return scenario_failed ? InGameDrive::kBreakCase : InGameDrive::kHandled;
     }
     return InGameDrive::kFallThrough;
 }
@@ -156,8 +156,13 @@ bool ScenarioRunnerImpl::driveLodGround() {
         // already Ready at the required LOD, so steady-state frames
         // (camera already settled) pay nothing.
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-            gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                g_camera->Position, gameSession->GetPhysicsSystem(), 4, 1);
+            if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                    g_camera->Position, gameSession->GetPhysicsSystem(), 4, 1)) {
+                scenario_failed = true;
+                scenario_failure_reason = "surface_preparation_refused";
+                glfwSetWindowShouldClose(window, true);
+                return true;
+            }
         }
         return true;
     }
@@ -1082,10 +1087,15 @@ bool ScenarioRunnerImpl::driveSkinnedMeshVisual(float deltaTime) {
             // The shoreline can be hundreds of metres from spawn; stream the scene
             // region in now so terrain + water are meshed before the first capture.
             if (ws && gameSession->GetPhysicsSystem()) {
-                ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(mid.x, mid.y, mid.z),
-                                           gameSession->GetPhysicsSystem(),
-                                           scenario_config.horizon_radius,
-                                           scenario_config.collision_radius);
+                if (!ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(mid.x, mid.y, mid.z),
+                                                gameSession->GetPhysicsSystem(),
+                                                scenario_config.horizon_radius,
+                                                scenario_config.collision_radius)) {
+                    scenario_failed = true;
+                    scenario_failure_reason = "surface_preparation_refused";
+                    glfwSetWindowShouldClose(window, true);
+                    return true;
+                }
             }
             wildlife_setup = true;
             LUMINUMBRA_CORE_INFO("wildlife: water-edge ({:.1f},{:.1f}), animal "
@@ -1138,11 +1148,16 @@ bool ScenarioRunnerImpl::driveSkinnedMeshVisual(float deltaTime) {
             // The walking-row showcase moves the camera, so it streams each frame.
             const bool skip = scenario_config.wildlife && (wildlife_stream_tick++ % 30 != 0);
             if (!skip) {
-                gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                    g_camera->Position,
-                    gameSession->GetPhysicsSystem(),
-                    scenario_config.horizon_radius,
-                    scenario_config.collision_radius);
+                if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                        g_camera->Position,
+                        gameSession->GetPhysicsSystem(),
+                        scenario_config.horizon_radius,
+                        scenario_config.collision_radius)) {
+                    scenario_failed = true;
+                    scenario_failure_reason = "surface_preparation_refused";
+                    glfwSetWindowShouldClose(window, true);
+                    return true;
+                }
             }
         }
         return true;

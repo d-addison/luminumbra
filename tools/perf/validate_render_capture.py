@@ -11,8 +11,11 @@ import json
 import math
 from pathlib import Path
 import struct
+
+from fixture_paths import read_text
 import render_budget
 import render_contract
+import perf
 
 
 def finite_vector(value, count, label):
@@ -191,12 +194,15 @@ def validate(data, args):
                    if getattr(args, name, None) is None]
         if missing:
             raise ValueError('v2 capture requires missing arguments: ' + ', '.join(missing))
+    if schema == 'luminumbra.render_benchmark.v2':
+        perf.validate_far_world_reporting(data, getattr(args, 'ladder_baseline', False))
     measurement = None
     if schema == render_contract.SCHEMA:
         manifest_path = getattr(args, 'workload_manifest', None)
-        workload = json.loads(Path(manifest_path).read_text(encoding='utf-8')) if manifest_path else None
+        workload = json.loads(read_text(Path(manifest_path).parent, Path(manifest_path))) if manifest_path else None
         measurement = render_contract.validate(data, getattr(args, 'qualified_renderer', None),
-            getattr(args, 'qualified_vendor', None), getattr(args, 'traversal', None), workload)
+            getattr(args, 'qualified_vendor', None), getattr(args, 'traversal', None), workload,
+            ladder_baseline=getattr(args, 'ladder_baseline', False))
         if args.position is None:
             if any(value is not None for value in (args.yaw, args.pitch, args.tod, args.fov)) or any(
                     getattr(args, name, False) for name in ('require_controller', 'require_distinct_controller',
@@ -325,6 +331,8 @@ def main():
     parser.add_argument('--require-distinct-controller', action='store_true')
     parser.add_argument('--require-geometry', action='store_true')
     parser.add_argument('--require-settled', action='store_true')
+    parser.add_argument('--ladder-baseline', action='store_true',
+                        help='Require every measured frame to be settled, unsuppressed Ladder')
     parser.add_argument('--require-camera-chunk', action='store_true')
     parser.add_argument('--qualified-renderer', help='Exact GL_RENDERER required for v3 qualification')
     parser.add_argument('--qualified-vendor', help='Optional exact GL_VENDOR')
@@ -346,7 +354,7 @@ def main():
     if args.verdict_out is not None and not args.enforce_floor:
         parser.error('--verdict-out requires --enforce-floor')
     try:
-        data = json.loads(args.artifact.read_text(encoding='utf-8-sig'))
+        data = json.loads(read_text(args.artifact.parent, args.artifact, encoding='utf-8-sig'))
         result = validate(data, args)
         if args.enforce_floor:
             if data.get('schema') != render_contract.SCHEMA:

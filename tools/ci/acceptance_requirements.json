@@ -1017,92 +1017,86 @@
     {
       "id": "dw.calendar.002",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "Day length is 216,000 ticks (two hours at 30 Hz) and a year is 8 days (16 hours) for calendar consumers and the rendered sky.",
-      "text": "Day length is 216,000 ticks (two hours at 30 Hz) and a year is 8 days (16 hours) for calendar consumers and the rendered sky."
+      "quote": "New worlds use a 162,000-tick day (90 minutes at 30 Hz): about 60 minutes of geometric daylight and 30 minutes of night, set by the reduced fraction 2/3.",
+      "text": "New worlds use a 162,000-tick day (90 minutes at 30 Hz): about 60 minutes of geometric daylight and 30 minutes of night, set by the reduced fraction 2/3."
     },
     {
       "id": "dw.calendar.003",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "shorter render days remain available as debug overrides.",
-      "text": "shorter render days remain available as debug overrides."
+      "quote": "Debug day length changes only solar pacing.",
+      "text": "Debug day length changes only solar pacing."
     },
     {
       "id": "dw.calendar.004",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "| Plant light (`GameSession.cpp`) | 36,000-tick day | Calendar day |",
-      "text": "| Plant light (`GameSession.cpp`) | 36,000-tick day | Calendar day |"
+      "quote": "| Plant daily light | 36,000-tick day | Midnight-origin solar phase |",
+      "text": "| Plant daily light | 36,000-tick day | Midnight-origin solar phase |"
     },
     {
       "id": "dw.calendar.005",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "| Plant season (`GameSession.cpp`) | 288,000-tick year (8 days) | Calendar year |",
-      "text": "| Plant season (`GameSession.cpp`) | 288,000-tick year (8 days) | Calendar year |"
+      "quote": "| Plant annual temperature | 288,000-tick year | Linear calendar year |",
+      "text": "| Plant annual temperature | 288,000-tick year | Linear calendar year |"
     },
     {
       "id": "dw.calendar.006",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "| Circadian slot (`GameSession.cpp`) | 36,000-tick day | Calendar day |",
-      "text": "| Circadian slot (`GameSession.cpp`) | 36,000-tick day | Calendar day |"
+      "quote": "| Circadian activity | 36,000-tick day | Midnight-origin solar phase |",
+      "text": "| Circadian activity | 36,000-tick day | Midnight-origin solar phase |"
     },
     {
       "id": "dw.calendar.007",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "| Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |",
-      "text": "| Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |"
+      "quote": "| Migration | 108,000-tick year | Calendar spring phase |",
+      "text": "| Migration | 108,000-tick year | Calendar spring phase |"
     },
     {
       "id": "dw.calendar.008",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "| Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |",
-      "text": "| Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |"
+      "quote": "| Stimulus time-of-day, daily temperature, fallback light | 7,200-tick day | Midnight-origin solar phase |",
+      "text": "| Stimulus time-of-day, daily temperature, fallback light | 7,200-tick day | Midnight-origin solar phase |"
     },
     {
       "id": "dw.calendar.009",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 216,000-tick day, 432,000-tick season | Calendar day and year |",
-      "text": "| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 216,000-tick day, 432,000-tick season | Calendar day and year |"
+      "quote": "| Rendered sun | Selected rendering calendar;",
+      "text": "| Rendered sun | Selected rendering calendar;"
     },
     {
       "id": "dw.calendar.010",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "One physical origin governs every consumer: tick zero is midnight of day zero in midwinter, which is the origin the plant and circadian formulas use today;",
-      "text": "One physical origin governs every consumer: tick zero is midnight of day zero in midwinter, which is the origin the plant and circadian formulas use today;"
+      "quote": "The solar phase warps the elapsed day continuously through midnight 0, sunrise 1/4, noon 1/2 and sunset 3/4, using integer comparisons and ratios before conversion to double.",
+      "text": "The solar phase warps the elapsed day continuously through midnight 0, sunrise 1/4, noon 1/2 and sunset 3/4, using integer comparisons and ratios before conversion to double."
     },
     {
       "id": "dw.calendar.011",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "the rendered sky, migration and stimulus channels adopt the same origin with explicit per-consumer offsets, and a test asserts that sky, plant and circadian phases agree at a set of pinned ticks.",
-      "text": "the rendered sky, migration and stimulus channels adopt the same origin with explicit per-consumer offsets, and a test asserts that sky, plant and circadian phases agree at a set of pinned ticks."
+      "quote": "Seasons keep the midwinter origin for annual plant temperature and spring offset for migration, stimulus and sky.",
+      "text": "Seasons keep the midwinter origin for annual plant temperature and spring offset for migration, stimulus and sky."
     },
     {
       "id": "dw.calendar.012",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "The clock metadata (`simulationTick`, `calendar`) is validated strictly: absent keys mean tick zero and the pinned defaults;",
-      "text": "The clock metadata (`simulationTick`, `calendar`) is validated strictly: absent keys mean tick zero and the pinned defaults;"
+      "quote": "An absent calendar in an existing save or snapshot resolves to pinned 216,000 / 8 / 1 / 2 / 8.",
+      "text": "An absent calendar in an existing save or snapshot resolves to pinned 216,000 / 8 / 1 / 2 / 8."
     },
     {
       "id": "dw.calendar.013",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;",
-      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;"
+      "quote": "Day ticks are in `[1, 2^31)`, year and lunar days in `[1, 366]`, and the daylight fraction satisfies `0 < n < d <= 65535` in reduced form.",
+      "text": "Day ticks are in `[1, 2^31)`, year and lunar days in `[1, 366]`, and the daylight fraction satisfies `0 < n < d <= 65535` in reduced form."
     },
     {
       "id": "dw.calendar.014",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "anything else refuses the world as corrupt metadata.",
-      "text": "anything else refuses the world as corrupt metadata."
+      "quote": "Missing/extra members, unknown versions and noninteger values refuse before generation or writing.",
+      "text": "Missing/extra members, unknown versions and noninteger values refuse before generation or writing."
     },
     {
       "id": "dw.calendar.015",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "Calendar phase origins equal today's formulas (phase = tick modulo period from tick zero), so the plant season still starts at its cold minimum.",
-      "text": "Calendar phase origins equal today's formulas (phase = tick modulo period from tick zero), so the plant season still starts at its cold minimum."
-    },
-    {
-      "id": "dw.calendar.016",
-      "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "Snapshots are taken only on tick boundaries, never inside a batched client catch-up.",
-      "text": "Snapshots are taken only on tick boundaries, never inside a batched client catch-up."
+      "quote": "Linear day/year phases and indices remain elapsed time.",
+      "text": "Linear day/year phases and indices remain elapsed time."
     },
     {
       "id": "dw.persistence.001",
@@ -1617,8 +1611,8 @@
     {
       "id": "ar.scope.003",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Explicit false selects the legacy clock path.",
-      "text": "Explicit false selects the legacy clock path."
+      "quote": "Explicitly disabling it retains the legacy simulation periods and hash behavior.",
+      "text": "Explicitly disabling it retains the legacy simulation periods and hash behavior."
     },
     {
       "id": "ar.scope.004",
@@ -1995,8 +1989,8 @@
     {
       "id": "ar.activation.060",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "No callback consumer or catch-up is installed.",
-      "text": "No callback consumer or catch-up is installed."
+      "quote": "no callback consumer or catch-up is installed.",
+      "text": "no callback consumer or catch-up is installed."
     },
     {
       "id": "ar.file.001",
@@ -2043,8 +2037,8 @@
     {
       "id": "ar.file.008",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Clock/ledger pair saves are synchronous and non-reentrant on the process's host thread.",
-      "text": "Clock/ledger pair saves are synchronous and non-reentrant on the process's host thread."
+      "quote": "Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process.",
+      "text": "Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process."
     },
     {
       "id": "ar.file.009",
@@ -2073,26 +2067,26 @@
     {
       "id": "ar.file.013",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "No overlapping production pair writers were found, including across sessions in one process.",
-      "text": "No overlapping production pair writers were found, including across sessions in one process."
+      "quote": "Public persistence APIs permit overlapping calls with stable caller-owned inputs.",
+      "text": "Public persistence APIs permit overlapping calls with stable caller-owned inputs."
     },
     {
       "id": "ar.file.014",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The call sites state this ownership contract, and a debug-only atomic assertion guards the whole pair writer against concurrent or reentrant calls.",
-      "text": "The call sites state this ownership contract, and a debug-only atomic assertion guards the whole pair writer against concurrent or reentrant calls."
+      "quote": "A process-wide recursive mutex guards region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup.",
+      "text": "A process-wide recursive mutex guards region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup."
     },
     {
       "id": "ar.file.015",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "It does not serialize saves;",
-      "text": "It does not serialize saves;"
+      "quote": "It serializes writers through reclamation and replacement;",
+      "text": "It serializes writers through reclamation and replacement;"
     },
     {
       "id": "ar.file.016",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "there is no production locking scheme.",
-      "text": "there is no production locking scheme."
+      "quote": "nested calls retain ownership until the outer call returns.",
+      "text": "nested calls retain ownership until the outer call returns."
     },
     {
       "id": "ar.file.017",
@@ -2145,14 +2139,14 @@
     {
       "id": "ar.file.025",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "loading and later saves ignore it, and the next successful ledger save reclaims it, so repeated interruptions cannot accumulate ledger copies until the volume is exhausted.",
-      "text": "loading and later saves ignore it, and the next successful ledger save reclaims it, so repeated interruptions cannot accumulate ledger copies until the volume is exhausted."
+      "quote": "loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim it.",
+      "text": "loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim it."
     },
     {
       "id": "ar.file.026",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Reclamation is safe because saves are serialized per destination by construction, so a staging file that already exists was abandoned by a process that is no longer writing it.",
-      "text": "Reclamation is safe because saves are serialized per destination by construction, so a staging file that already exists was abandoned by a process that is no longer writing it."
+      "quote": "Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer.",
+      "text": "Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer."
     },
     {
       "id": "ar.file.027",
@@ -2971,46 +2965,46 @@
       "text": "Neither artifact grants permission to alter another checkout."
     },
     {
+      "id": "dw.calendar.016",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Snapshots are taken only on tick boundaries, never inside a batched client catch-up.",
+      "text": "Snapshots are taken only on tick boundaries, never inside a batched client catch-up."
+    },
+    {
       "id": "dw.calendar.017",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "With `sim.active_regions` off, the tick counter restarts at zero on load and simulation consumers retain the legacy periods above.",
-      "text": "With `sim.active_regions` off, the tick counter restarts at zero on load and simulation consumers retain the legacy periods above."
+      "quote": "With `sim.active_regions` disabled, opening a world restarts the tick counter at zero and biological consumers retain their legacy periods.",
+      "text": "With `sim.active_regions` disabled, opening a world restarts the tick counter at zero and biological consumers retain their legacy periods."
     },
     {
       "id": "dw.calendar.018",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "Explicit calendars retain their saved pacing;",
-      "text": "Explicit calendars retain their saved pacing;"
+      "quote": "Unversioned two-field calendars retain their recorded day/year with symmetric 1/2 daylight and lunar month eight days.",
+      "text": "Unversioned two-field calendars retain their recorded day/year with symmetric 1/2 daylight and lunar month eight days."
     },
     {
       "id": "dw.calendar.019",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "With it on, the saved clock governs their day and year phases.",
-      "text": "With it on, the saved clock governs their day and year phases."
+      "quote": "Complete version 2 calendars retain all recorded values.",
+      "text": "Complete version 2 calendars retain all recorded values."
     },
     {
       "id": "dw.calendar.020",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "Wind and weather retain independent tick-based update periods.",
-      "text": "Wind and weather retain independent tick-based update periods."
+      "quote": "| Weather, storms, wind, aether | Absolute tick periods | Unchanged absolute tick periods |",
+      "text": "| Weather, storms, wind, aether | Absolute tick periods | Unchanged absolute tick periods |"
     },
     {
       "id": "dw.calendar.021",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "The renderer's lunar cycle is still fixed at 54,000 ticks (30 minutes): four full cycles per default day, including two during a night.",
-      "text": "The renderer's lunar cycle is still fixed at 54,000 ticks (30 minutes): four full cycles per default day, including two during a night."
+      "quote": "The lunar period is independent of year length and solar phase.",
+      "text": "The lunar period is independent of year length and solar phase."
     },
     {
       "id": "dw.calendar.022",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "Its brightness therefore changes within a night rather than between nights;",
-      "text": "Its brightness therefore changes within a night rather than between nights;"
-    },
-    {
-      "id": "dw.calendar.023",
-      "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "a calendar-relative lunar period needs a separate pacing decision.",
-      "text": "a calendar-relative lunar period needs a separate pacing decision."
+      "quote": "Imported 36,000- and 216,000-tick days have lunar months of 288,000 and 1,728,000 ticks, so imported moon brightness can change.",
+      "text": "Imported 36,000- and 216,000-tick days have lunar months of 288,000 and 1,728,000 ticks, so imported moon brightness can change."
     },
     {
       "id": "dw.mappings.001",
@@ -3459,8 +3453,8 @@
     {
       "id": "dw.vertical.010",
       "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
-      "quote": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7;",
-      "text": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7;"
+      "quote": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8;",
+      "text": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8;"
     },
     {
       "id": "dw.vertical.011",
@@ -3501,8 +3495,8 @@
     {
       "id": "dw.persistence.058",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content;",
-      "text": "Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content;"
+      "quote": "Lockstep Hello is version 4;",
+      "text": "Lockstep Hello is version 4;"
     },
     {
       "id": "dw.persistence.059",
@@ -3549,8 +3543,272 @@
     {
       "id": "ar.file.119",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
-      "text": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback."
+      "quote": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "text": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback."
+    },
+    {
+      "id": "dw.calendar.024",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Sunrise, noon and sunset occur at ticks 27,000, 81,000 and 135,000.",
+      "text": "Sunrise, noon and sunset occur at ticks 27,000, 81,000 and 135,000."
+    },
+    {
+      "id": "dw.calendar.025",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The eight-day year and independent eight-day lunar month each last 1,296,000 ticks (12 hours).",
+      "text": "The eight-day year and independent eight-day lunar month each last 1,296,000 ticks (12 hours)."
+    },
+    {
+      "id": "dw.calendar.026",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Seasonal tilt changes peak elevation while horizon times remain fixed.",
+      "text": "Seasonal tilt changes peak elevation while horizon times remain fixed."
+    },
+    {
+      "id": "dw.calendar.027",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "| Stimulus season | 432,000-tick year | Calendar spring phase |",
+      "text": "| Stimulus season | 432,000-tick year | Calendar spring phase |"
+    },
+    {
+      "id": "dw.calendar.028",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "legacy noon origin | Solar phase shifted by 1/2 to sky noon origin |",
+      "text": "legacy noon origin | Solar phase shifted by 1/2 to sky noon origin |"
+    },
+    {
+      "id": "dw.calendar.029",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "| Rendered season | 432,000-tick year | Calendar spring phase |",
+      "text": "| Rendered season | 432,000-tick year | Calendar spring phase |"
+    },
+    {
+      "id": "dw.calendar.030",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "| Rendered moon | Selected rendering calendar month | Calendar day length \u00d7 independent lunar days |",
+      "text": "| Rendered moon | Selected rendering calendar month | Calendar day length \u00d7 independent lunar days |"
+    },
+    {
+      "id": "dw.calendar.031",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "| Resume cap | No enabled scheduler | One recorded calendar day |",
+      "text": "| Resume cap | No enabled scheduler | One recorded calendar day |"
+    },
+    {
+      "id": "dw.calendar.032",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The symmetric 1/2 path retains the original arithmetic.",
+      "text": "The symmetric 1/2 path retains the original arithmetic."
+    },
+    {
+      "id": "dw.calendar.033",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Simulation uses no wall-clock accumulation for these curves.",
+      "text": "Simulation uses no wall-clock accumulation for these curves."
+    },
+    {
+      "id": "dw.calendar.034",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Calendar version 2 records five integer parameters: day ticks, year days, daylight numerator/denominator and lunar days.",
+      "text": "Calendar version 2 records five integer parameters: day ticks, year days, daylight numerator/denominator and lunar days."
+    },
+    {
+      "id": "dw.calendar.035",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Products promote to `uint64_t` first.",
+      "text": "Products promote to `uint64_t` first."
+    },
+    {
+      "id": "dw.calendar.036",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The saved absolute tick is an unsigned integer below `2^62`.",
+      "text": "The saved absolute tick is an unsigned integer below `2^62`."
+    },
+    {
+      "id": "dw.calendar.037",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The [engine guide](@ref simulation-clock-metadata) specifies the complete schema, canonical bytes and refusal rules.",
+      "text": "The [engine guide](@ref simulation-clock-metadata) specifies the complete schema, canonical bytes and refusal rules."
+    },
+    {
+      "id": "dw.calendar.038",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Reads never rewrite anything.",
+      "text": "Reads never rewrite anything."
+    },
+    {
+      "id": "dw.calendar.039",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Successful explicit saves preserve the two-field calendar for symmetric 1/2 daylight with an eight-day lunar cycle;",
+      "text": "Successful explicit saves preserve the two-field calendar for symmetric 1/2 daylight with an eight-day lunar cycle;"
+    },
+    {
+      "id": "dw.calendar.040",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "other calendars use version 2.",
+      "text": "other calendars use version 2."
+    },
+    {
+      "id": "dw.calendar.041",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Simulation ticks and state are never rescaled.",
+      "text": "Simulation ticks and state are never rescaled."
+    },
+    {
+      "id": "dw.calendar.042",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Enabled clock canonical bytes preserve `world_clock:v1:` and its 16-byte payload for those legacy-representable calendars;",
+      "text": "Enabled clock canonical bytes preserve `world_clock:v1:` and its 16-byte payload for those legacy-representable calendars;"
+    },
+    {
+      "id": "dw.calendar.043",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "other calendars use `world_clock:v2:` and a 28-byte payload.",
+      "text": "other calendars use `world_clock:v2:` and a 28-byte payload."
+    },
+    {
+      "id": "dw.calendar.044",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Imported legacy calendars retain the enabled clock's canonical hash contribution.",
+      "text": "Imported legacy calendars retain the enabled clock's canonical hash contribution."
+    },
+    {
+      "id": "dw.calendar.045",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The calendar change does not alter replay layouts;",
+      "text": "The calendar change does not alter replay layouts;"
+    },
+    {
+      "id": "dw.calendar.046",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "the current configuration and preset identity contract is described below.",
+      "text": "the current configuration and preset identity contract is described below."
+    },
+    {
+      "id": "dw.calendar.047",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Explicit snapshot loads retain the running simulation tick.",
+      "text": "Explicit snapshot loads retain the running simulation tick."
+    },
+    {
+      "id": "dw.calendar.048",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "New disabled worlds carry a presentation-only `renderCalendar` marker with the complete version 2 object;",
+      "text": "New disabled worlds carry a presentation-only `renderCalendar` marker with the complete version 2 object;"
+    },
+    {
+      "id": "dw.calendar.049",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "it neither requires active regions nor contributes to the disabled simulation hash.",
+      "text": "it neither requires active regions nor contributes to the disabled simulation hash."
+    },
+    {
+      "id": "dw.calendar.050",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Existing unmarked disabled worlds retain symmetric 216,000-tick rendering and omit the marker on saves.",
+      "text": "Existing unmarked disabled worlds retain symmetric 216,000-tick rendering and omit the marker on saves."
+    },
+    {
+      "id": "dw.calendar.051",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Markers survive normal saves and explicit snapshots;",
+      "text": "Markers survive normal saves and explicit snapshots;"
+    },
+    {
+      "id": "dw.calendar.052",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "explicit loads replace the rendering calendar even if metadata is absent.",
+      "text": "explicit loads replace the rendering calendar even if metadata is absent."
+    },
+    {
+      "id": "dw.calendar.053",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Competing marker/clock authorities are refused.",
+      "text": "Competing marker/clock authorities are refused."
+    },
+    {
+      "id": "dw.calendar.054",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Tick zero is full moon;",
+      "text": "Tick zero is full moon;"
+    },
+    {
+      "id": "dw.calendar.055",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "default day four is the new-moon illumination floor 0.08 and day eight is full again.",
+      "text": "default day four is the new-moon illumination floor 0.08 and day eight is full again."
+    },
+    {
+      "id": "dw.calendar.056",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Environment and direct illumination overrides retain precedence and clamping.",
+      "text": "Environment and direct illumination overrides retain precedence and clamping."
+    },
+    {
+      "id": "dw.calendar.057",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The moon stays opposite the sun;",
+      "text": "The moon stays opposite the sun;"
+    },
+    {
+      "id": "dw.calendar.058",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "the disc's visible phase and shaders are unchanged.",
+      "text": "the disc's visible phase and shaders are unchanged."
+    },
+    {
+      "id": "dw.calendar.059",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Renderer fallbacks advance elapsed time and then warp solar angle.",
+      "text": "Renderer fallbacks advance elapsed time and then warp solar angle."
+    },
+    {
+      "id": "dw.calendar.060",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The default wall-clock day derives to 5,400 seconds.",
+      "text": "The default wall-clock day derives to 5,400 seconds."
+    },
+    {
+      "id": "dw.calendar.061",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Direct solar pins use the inverse mapping for smooth release;",
+      "text": "Direct solar pins use the inverse mapping for smooth release;"
+    },
+    {
+      "id": "dw.calendar.062",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "photo hold and later scenario pins retain precedence.",
+      "text": "photo hold and later scenario pins retain precedence."
+    },
+    {
+      "id": "dw.calendar.063",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Simulation speed hotkeys retain their existing batching and pause\u201316\u00d7 range;",
+      "text": "Simulation speed hotkeys retain their existing batching and pause\u201316\u00d7 range;"
+    },
+    {
+      "id": "dw.calendar.064",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "ideal 16\u00d7 gives a 337.5-second day.",
+      "text": "ideal 16\u00d7 gives a 337.5-second day."
+    },
+    {
+      "id": "ar.activation.065",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "New calendars cap at 162,000 ticks (90 minutes), while imported calendars retain their recorded day, including 36,000 or 216,000 ticks.",
+      "text": "New calendars cap at 162,000 ticks (90 minutes), while imported calendars retain their recorded day, including 36,000 or 216,000 ticks."
+    },
+    {
+      "id": "ar.activation.066",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "The daylight fraction changes solar phase without changing this elapsed cap.",
+      "text": "The daylight fraction changes solar phase without changing this elapsed cap."
+    },
+    {
+      "id": "ar.activation.067",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "ARL1 bytes and timestamps are unchanged;",
+      "text": "ARL1 bytes and timestamps are unchanged;"
     },
     {
       "id": "dw.station.001",
@@ -4181,6 +4439,24 @@
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "quote": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs.",
       "text": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs."
+    },
+    {
+      "id": "dw.persistence.061",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix.",
+      "text": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix."
+    },
+    {
+      "id": "dw.persistence.062",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "Both replay versions bind effective configuration plus resolved preset/dependency content;",
+      "text": "Both replay versions bind effective configuration plus resolved preset/dependency content;"
+    },
+    {
+      "id": "dw.calendar.023",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The lunar month follows the selected calendar's recorded day length and lunar-day count.",
+      "text": "The lunar month follows the selected calendar's recorded day length and lunar-day count."
     }
   ],
   "exclusions": [

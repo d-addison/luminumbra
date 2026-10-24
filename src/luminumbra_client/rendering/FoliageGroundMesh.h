@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -58,7 +59,7 @@ public:
             const int z1 = bin(std::max({a.position.z, b.position.z, c.position.z}));
             for (int z = z0; z <= z1; ++z)
                 for (int x = x0; x <= x1; ++x)
-                    m_bins[z * kBins + x].push_back(slot);
+                    m_bins[static_cast<std::size_t>(z * kBins + x)].push_back(slot);
         }
     }
 
@@ -68,7 +69,7 @@ public:
         Hit hit;
         if (x < 0 || z < 0 || x > CHUNK_SIZE_X || z > CHUNK_SIZE_Z)
             return hit;
-        for (u32 slot : m_bins[bin(z) * kBins + bin(x)]) {
+        for (u32 slot : m_bins[static_cast<std::size_t>(bin(z) * kBins + bin(x))]) {
             const auto& t = m_triangles[slot];
             const float dx = x - t.a.x;
             const float dz = z - t.a.z;

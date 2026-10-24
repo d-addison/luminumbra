@@ -20,6 +20,7 @@
 // counts) must be parsed as an integer (get<std::uint32_t>), never via a float round-trip.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -102,7 +103,7 @@ ParseCreatureSpecies(const nlohmann::json& j, CreatureSpecies& out, std::string&
     }
     if (j.contains("base_color") && j.at("base_color").is_array() &&
         j.at("base_color").size() >= 3) {
-        for (int i = 0; i < 3; ++i)
+        for (std::size_t i = 0; i < 3; ++i)
             out.base_color[i] = j.at("base_color")[i].get<float>();
     }
     if (j.contains("biomes") && j.at("biomes").is_array()) {

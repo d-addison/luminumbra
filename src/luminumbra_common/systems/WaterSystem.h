@@ -233,7 +233,8 @@ public:
     // derived window. At Medium it retains the historical flat rotation byte-for-byte. At High it
     // drives the fair-share portion of the deterministic activity-priority budget. It stays in
     // sorted CHUNK-INDEX space and is persisted as world_info.json waterSimCursor, so a loaded
-    // session resumes the same selection sequence from the same water state. Not itself hashed.
+    // session resumes the same selection sequence from the same water state. Nonzero cursors
+    // participate in the authoritative world hash and the water checkpoint.
     [[nodiscard]] std::size_t GetSimWindowCursor() const {
         return m_water_sim_cursor;
     }

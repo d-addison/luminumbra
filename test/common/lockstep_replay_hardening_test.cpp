@@ -27,6 +27,7 @@
 // Hermetic: every stream is written to a unique temp file and removed; no real
 // sockets (LoopbackTransport only).
 
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -45,19 +46,10 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// ----------------------------------------------------------------------------
-// Hermetic temp dir (common_tests does NOT define LUMINUMBRA_TEST_ARTIFACT_DIR,
-// so fall back to the system temp dir -- matches the sibling suites' fallback).
-// ----------------------------------------------------------------------------
 fs::path HardeningTempDir() {
-#ifdef LUMINUMBRA_TEST_ARTIFACT_DIR
-    fs::path dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "lockstep-replay-hardening";
-#else
-    fs::path dir = fs::temp_directory_path() / "luminumbra-lockstep-replay-hardening";
-#endif
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    return dir;
+    // Keep the same exclusive ownership and shutdown lifetime as the sibling suites.
+    static const Luminumbra::TestSupport::ScopedTempFile workspace("replay_harden_", ".unused");
+    return workspace.Path().parent_path();
 }
 
 fs::path UniquePath(const std::string& stem) {
@@ -130,7 +122,7 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
     c.tick_rate_hz = 30;
     c.local_client_id = local_id;
     c.peer_client_id = peer_id;
-    c.system_config_identity = "60ab3c242d54ce89";
+    c.system_config_identity = "49f694fd70645bcc";
     c.preset_content_hash = "7b9a3017d9cab0c3";
     return c;
 }
@@ -139,7 +131,7 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
 // both ends. Returns true iff BOTH handshakes succeed.
 bool HandshakeBoth(net::LockstepSession& a, net::LockstepSession& b, net::LoopbackTransport* tb) {
     net::HelloMsg bh;
-    bh.system_config_identity = "60ab3c242d54ce89";
+    bh.system_config_identity = "49f694fd70645bcc";
     bh.preset_content_hash = "7b9a3017d9cab0c3";
     bh.seed = 424242;
     bh.preset = "default";
@@ -208,7 +200,7 @@ replay::ReplayHeader RichHeader() {
 
 TEST(LockstepCodecHardening, HelloRoundtripAdversarial) {
     net::HelloMsg in;
-    in.system_config_identity = "60ab3c242d54ce89";
+    in.system_config_identity = "49f694fd70645bcc";
     in.preset_content_hash = "7b9a3017d9cab0c3";
     in.protocol_version = net::kLockstepProtocolVersion;
     in.seed = 0xFFFFFFFFFFFFFFFFULL;                    // max u64
@@ -229,7 +221,7 @@ TEST(LockstepCodecHardening, HelloRoundtripAdversarial) {
 
 TEST(LockstepCodecHardening, HelloEmptyPresetRoundtrips) {
     net::HelloMsg in;
-    in.system_config_identity = "60ab3c242d54ce89";
+    in.system_config_identity = "49f694fd70645bcc";
     in.preset_content_hash = "7b9a3017d9cab0c3";
     in.preset = ""; // zero-length string is a valid boundary
     net::HelloMsg out;
@@ -240,7 +232,7 @@ TEST(LockstepCodecHardening, HelloEmptyPresetRoundtrips) {
 TEST(LockstepCodecHardening, HelloPresetWithEmbeddedNulRoundtrips) {
     // Length-prefixed strings must be NUL-transparent (a C-string would truncate).
     net::HelloMsg in;
-    in.system_config_identity = "60ab3c242d54ce89";
+    in.system_config_identity = "49f694fd70645bcc";
     in.preset_content_hash = "7b9a3017d9cab0c3";
     in.preset = std::string("a\0b\0c", 5);
     ASSERT_EQ(in.preset.size(), 5u);
@@ -267,7 +259,7 @@ TEST(LockstepCodecHardening, InputRoundtripMaxTickAndAllByteValues) {
     in.tick = 0xFFFFFFFFFFFFFFFFULL; // max u64 tick
     in.client_id = 0xFFFFFFFFu;
     in.inputs.resize(256);
-    for (int i = 0; i < 256; ++i)
+    for (std::size_t i = 0; i < 256; ++i)
         in.inputs[i] = static_cast<std::uint8_t>(i);
     net::InputMsg out;
     ASSERT_TRUE(net::DecodeInput(net::EncodeInput(in), out));
@@ -369,7 +361,7 @@ TEST(LockstepCodecHardening, DecodeIsIdempotent) {
 TEST(LockstepCodecHardening, DecodeHelloRejectsTruncatedFrame) {
     auto frame = net::EncodeHello([] {
         net::HelloMsg m;
-        m.system_config_identity = "60ab3c242d54ce89";
+        m.system_config_identity = "49f694fd70645bcc";
         m.preset_content_hash = "7b9a3017d9cab0c3";
         m.preset = "default";
         m.seed = 7;
@@ -474,7 +466,7 @@ TEST(LockstepCodecHardening, DecodeRejectsTypeMismatch) {
 TEST(LockstepCodecHardening, DecodeHelloRejectsBadMagic) {
     auto frame = net::EncodeHello([] {
         net::HelloMsg m;
-        m.system_config_identity = "60ab3c242d54ce89";
+        m.system_config_identity = "49f694fd70645bcc";
         m.preset_content_hash = "7b9a3017d9cab0c3";
         m.preset = "default";
         return m;
@@ -700,7 +692,7 @@ TEST(ReplayRoundtripHardening, FutureVersionStreamIsRefused) {
     {
         replay::ReplayWriter w;
         replay::ReplayHeader h = RichHeader();
-        h.version = static_cast<std::uint16_t>(replay::kLrec1Version + 1); // future
+        h.version = static_cast<std::uint16_t>(replay::kLrec1ElidedVersion + 1); // future
         ASSERT_TRUE(w.Open(path.string(), h));
         w.RecordInput(1, {});
         ASSERT_TRUE(w.Finalize(1));
@@ -891,7 +883,7 @@ TEST(LockstepReplayHardening, DroppedPeerInputStallsDeterministically) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     // NOTE: no b session and no b inputs are ever sent -> a's peer inputs never arrive.
     net::HelloMsg bh;
-    bh.system_config_identity = "60ab3c242d54ce89";
+    bh.system_config_identity = "49f694fd70645bcc";
     bh.preset_content_hash = "7b9a3017d9cab0c3";
     bh.seed = 424242;
     bh.preset = "default";
@@ -1040,7 +1032,7 @@ TEST(LockstepReplayHardening, HandshakeRejectsTickRateMismatch) {
     FakeWorld wa{0, "agree", 0};
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::HelloMsg bad;
-    bad.system_config_identity = "60ab3c242d54ce89";
+    bad.system_config_identity = "49f694fd70645bcc";
     bad.preset_content_hash = "7b9a3017d9cab0c3";
     bad.seed = 424242;
     bad.preset = "default";
@@ -1057,7 +1049,7 @@ TEST(LockstepReplayHardening, HandshakeRejectsProtocolVersionMismatch) {
     FakeWorld wa{0, "agree", 0};
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::HelloMsg bad;
-    bad.system_config_identity = "60ab3c242d54ce89";
+    bad.system_config_identity = "49f694fd70645bcc";
     bad.preset_content_hash = "7b9a3017d9cab0c3";
     bad.protocol_version = static_cast<std::uint16_t>(net::kLockstepProtocolVersion + 1);
     bad.seed = 424242;

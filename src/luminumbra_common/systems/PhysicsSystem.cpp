@@ -13,6 +13,7 @@
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/PhysicsMaterial.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
@@ -23,9 +24,13 @@
 
 #include "../core/Log.h"
 #include <algorithm>
+#include <exception>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <limits>
 #include <mutex>
+#include <stdexcept>
+#include <thread>
 
 using namespace JPH;
 
@@ -110,7 +115,22 @@ namespace {
 struct JoltRuntimeState {
     std::mutex mutex;
     std::size_t users = 0;
+    Factory* factory = nullptr;
     bool owns_factory = false;
+    RefConst<PhysicsMaterial> prior_material;
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+    bool allocators_used = false;
+    AllocateFunction used_allocate = nullptr;
+    ReallocateFunction used_reallocate = nullptr;
+    FreeFunction used_free = nullptr;
+    AlignedAllocateFunction used_aligned_allocate = nullptr;
+    AlignedFreeFunction used_aligned_free = nullptr;
+#endif
+};
+
+struct JoltRuntimeIdentity {
+    Factory* factory;
+    bool owned;
 };
 
 JoltRuntimeState& GetJoltRuntimeState() {
@@ -118,28 +138,141 @@ JoltRuntimeState& GetJoltRuntimeState() {
     return state;
 }
 
-void AcquireJoltRuntime() {
-    auto& state = GetJoltRuntimeState();
-    std::lock_guard lock(state.mutex);
-    if (state.users == 0 && Factory::sInstance == nullptr) {
-        RegisterDefaultAllocator();
-        Factory::sInstance = new Factory();
-        RegisterTypes();
-        state.owns_factory = true;
+void CheckJoltAllocators(JoltRuntimeState& state) {
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+    const bool any = Allocate || Reallocate || Free || AlignedAllocate || AlignedFree;
+    const bool complete = Allocate && Reallocate && Free && AlignedAllocate && AlignedFree;
+    if ((any && !complete) ||
+        (!any && (state.allocators_used || state.users != 0 || Factory::sInstance != nullptr))) {
+        throw std::logic_error("Incomplete Jolt allocator callbacks");
     }
-    ++state.users;
+    if (state.allocators_used && any &&
+        (Allocate != state.used_allocate || Reallocate != state.used_reallocate ||
+         Free != state.used_free || AlignedAllocate != state.used_aligned_allocate ||
+         AlignedFree != state.used_aligned_free)) {
+        throw std::logic_error("Jolt allocator callbacks changed after use");
+    }
+    if (!any) {
+        RegisterDefaultAllocator();
+    }
+    // RTTI retains process-static allocations even after registration fails.
+    // Never reset these callbacks to null or replace the set already in use.
+    state.allocators_used = true;
+    state.used_allocate = Allocate;
+    state.used_reallocate = Reallocate;
+    state.used_free = Free;
+    state.used_aligned_allocate = AlignedAllocate;
+    state.used_aligned_free = AlignedFree;
+#else
+    static_cast<void>(state);
+#endif
 }
 
-void ReleaseJoltRuntime() {
+JoltRuntimeIdentity AcquireJoltRuntime() {
     auto& state = GetJoltRuntimeState();
     std::lock_guard lock(state.mutex);
-    if (--state.users == 0 && state.owns_factory) {
-        UnregisterTypes();
-        delete Factory::sInstance;
-        Factory::sInstance = nullptr;
-        state.owns_factory = false;
+    if ((state.users != 0 && (state.factory == nullptr || state.factory != Factory::sInstance)) ||
+        (state.users == 0 && (state.factory != nullptr || state.owns_factory))) {
+        throw std::logic_error("Jolt factory ownership changed during a lease");
     }
+    if (state.users == (std::numeric_limits<std::size_t>::max)()) {
+        throw std::overflow_error("Jolt runtime lease count overflow");
+    }
+    // Refuse inconsistent external ownership before changing allocator state.
+    if (state.users == 0 && Factory::sInstance != nullptr &&
+        (PhysicsMaterial::sDefault == nullptr ||
+         Factory::sInstance->Find("PhysicsMaterialSimple") == nullptr)) {
+        throw std::logic_error("External Jolt factory is not initialized");
+    }
+    CheckJoltAllocators(state);
+    if (state.users == 0) {
+        if (Factory::sInstance == nullptr) {
+            const auto prior_material = PhysicsMaterial::sDefault;
+            auto factory = std::make_unique<Factory>();
+            // RegisterTypes requires a published factory. This temporary
+            // publication belongs exclusively to this cold acquisition.
+            Factory::sInstance = factory.get();
+            try {
+                RegisterTypes();
+            } catch (...) {
+                if (Factory::sInstance != factory.get()) {
+                    std::terminate();
+                }
+                PhysicsMaterial::sDefault = prior_material;
+                if (Factory::sInstance != factory.get()) {
+                    std::terminate();
+                }
+                Factory::sInstance = nullptr;
+                // The local owner destroys both partially populated maps.
+                throw;
+            }
+            state.prior_material = prior_material;
+            state.factory = factory.release();
+            state.owns_factory = true;
+        } else {
+            // The external owner must keep its initialized factory and
+            // compatible allocators alive until every borrowed lease ends.
+            state.factory = Factory::sInstance;
+            state.owns_factory = false;
+        }
+    }
+    ++state.users;
+    return {state.factory, state.owns_factory};
 }
+
+void ReleaseJoltRuntime(JoltRuntimeIdentity identity) noexcept {
+    auto& state = GetJoltRuntimeState();
+    std::lock_guard lock(state.mutex);
+    if (state.users == 0 || state.factory != identity.factory ||
+        state.owns_factory != identity.owned || Factory::sInstance != identity.factory) {
+        // A lifetime-contract violation cannot safely unregister any factory.
+        std::terminate();
+    }
+    if (--state.users != 0) {
+        return;
+    }
+    if (state.owns_factory) {
+        UnregisterTypes();
+        PhysicsMaterial::sDefault = state.prior_material;
+        state.prior_material = nullptr;
+        if (Factory::sInstance != identity.factory) {
+            std::terminate();
+        }
+        Factory::sInstance = nullptr;
+        delete state.factory;
+    }
+    state.factory = nullptr;
+    state.owns_factory = false;
+}
+} // namespace
+
+class JoltRuntimeLease {
+public:
+    JoltRuntimeLease() {
+        const auto identity = AcquireJoltRuntime();
+        m_factory = identity.factory;
+        m_owned = identity.owned;
+    }
+    ~JoltRuntimeLease() {
+        ReleaseJoltRuntime({m_factory, m_owned});
+    }
+    JoltRuntimeLease(const JoltRuntimeLease&) = delete;
+    JoltRuntimeLease& operator=(const JoltRuntimeLease&) = delete;
+
+private:
+    Factory* m_factory = nullptr;
+    bool m_owned = false;
+};
+
+namespace {
+struct PendingPhysicsResources {
+    // Reverse destruction joins/releases jobs before their dependencies and
+    // keeps the independent lease alive through every construction failure.
+    std::unique_ptr<JoltRuntimeLease> lease;
+    std::unique_ptr<TempAllocator> temp;
+    std::unique_ptr<JPH::PhysicsSystem> physics;
+    std::unique_ptr<JPH::JobSystem> jobs;
+};
 } // namespace
 
 // --- PhysicsSystem implementation -------------------------------------------
@@ -154,26 +287,34 @@ void PhysicsSystem::startup() {
         return;
     }
 
-    AcquireJoltRuntime();
-    m_temp_allocator = std::make_unique<TempAllocatorImpl>(10 * 1024 * 1024);
-    const uint hardware_threads = std::thread::hardware_concurrency();
-    const uint num_worker_threads = hardware_threads > 1 ? hardware_threads - 1 : 1;
-    m_jolt_job_system = std::make_unique<JobSystemThreadPool>(
-        cMaxPhysicsJobs, cMaxPhysicsBarriers, num_worker_threads);
-    m_jolt_system = std::make_unique<JPH::PhysicsSystem>();
+    PendingPhysicsResources pending;
+    pending.lease = std::make_unique<JoltRuntimeLease>();
+    pending.temp = std::make_unique<TempAllocatorImpl>(10 * 1024 * 1024);
+    pending.physics = std::make_unique<JPH::PhysicsSystem>();
     static BPLayerInterfaceImpl broad_phase_layer_interface;
     static ObjectVsBroadPhaseLayerFilterImpl object_vs_broadphase_layer_filter;
     static ObjectLayerPairFilterImpl object_vs_object_layer_filter;
-    m_jolt_system->Init(10240,
-                        0,
-                        10240,
-                        10240,
-                        broad_phase_layer_interface,
-                        object_vs_broadphase_layer_filter,
-                        object_vs_object_layer_filter);
-    m_body_interface = &m_jolt_system->GetBodyInterface();
-    m_started = true;
+    pending.physics->Init(10240,
+                          0,
+                          10240,
+                          10240,
+                          broad_phase_layer_interface,
+                          object_vs_broadphase_layer_filter,
+                          object_vs_object_layer_filter);
+    const uint hardware_threads = std::thread::hardware_concurrency();
+    const uint num_worker_threads = hardware_threads > 1 ? hardware_threads - 1 : 1;
+    pending.jobs = std::make_unique<JobSystemThreadPool>(
+        cMaxPhysicsJobs, cMaxPhysicsBarriers, num_worker_threads);
+    auto* const body_interface = &pending.physics->GetBodyInterface();
     LUMINUMBRA_CORE_INFO("Jolt Physics System Initialized.");
+
+    // Publication is nonthrowing; no borrowed interface escapes preparation.
+    m_runtime_lease.swap(pending.lease);
+    m_temp_allocator.swap(pending.temp);
+    m_jolt_system.swap(pending.physics);
+    m_jolt_job_system.swap(pending.jobs);
+    m_body_interface = body_interface;
+    m_started = true;
 }
 
 void PhysicsSystem::shutdown() {
@@ -181,6 +322,9 @@ void PhysicsSystem::shutdown() {
         return;
     }
 
+    // Owner-thread lifecycle: no update or new producer may overlap shutdown.
+    // Barrier completion alone does not release queue-owned job captures.
+    m_jolt_job_system.reset();
     if (m_body_interface) {
         for (const auto& [chunk_id, collision] : m_chunk_bodies) {
             (void)chunk_id;
@@ -190,16 +334,15 @@ void PhysicsSystem::shutdown() {
     }
     m_chunk_bodies.clear();
     m_player_character.reset();
-    m_avatar_characters.clear(); // Release server avatars before the Jolt system.
+    clear_avatar_characters(); // Release server avatars before the Jolt system.
     // Properly release the reference-counted shapes
     m_player_stand_shape = nullptr;
     m_player_crouch_shape = nullptr;
     m_avatar_shape = nullptr;
     m_body_interface = nullptr;
     m_jolt_system.reset();
-    m_jolt_job_system.reset();
     m_temp_allocator.reset();
-    ReleaseJoltRuntime();
+    m_runtime_lease.reset();
     m_started = false;
 }
 
@@ -239,8 +382,8 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     float max_h = -99999.0f;
 
     for (int i = 0; i < resolution * resolution; ++i) {
-        float h = chunk.heightmap_data[i];
-        height_samples[i] = h;
+        float h = chunk.heightmap_data[static_cast<std::size_t>(i)];
+        height_samples[static_cast<std::size_t>(i)] = h;
         if (h < min_h)
             min_h = h;
         if (h > max_h)
@@ -251,7 +394,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     const float chunk_min_y = static_cast<float>(cc.y) * static_cast<float>(CHUNK_SIZE_Y);
     const float chunk_max_y = static_cast<float>(cc.y + 1) * static_cast<float>(CHUNK_SIZE_Y);
     const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
-    const float center_height = chunk.heightmap_data[center_index];
+    const float center_height = chunk.heightmap_data[static_cast<std::size_t>(center_index)];
     if (center_height < chunk_min_y || center_height >= chunk_max_y) {
         return;
     }
@@ -754,7 +897,8 @@ float PhysicsSystem::calculate_audio_occlusion(const glm::vec3& source,
     }
 
     // Reduce occlusion if we have alternative paths
-    float path_factor = 1.0f - (static_cast<float>(clear_paths) / offsets.size() * 0.6f);
+    float path_factor =
+        1.0f - (static_cast<float>(clear_paths) / static_cast<float>(offsets.size()) * 0.6f);
     total_occlusion *= path_factor;
 
     return std::clamp(total_occlusion, 0.0f, 0.95f); // Max 95% occlusion
