@@ -1,6 +1,8 @@
 #include "Rml_Interfaces.h"
 #include "app/FrameAttribution.h"
 #include "core/Profiler.h"
+#include "luminumbra_client/core/PresentationClock.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/AttributedGl.h"
 #include <GLFW/glfw3.h> // For glfwGetTime
 #include <SOIL2/SOIL2.h>
@@ -12,7 +14,7 @@ namespace Luminumbra::Client {
 
 // --- RmlSystem Implementation ---
 double RmlSystem::GetElapsedTime() {
-    return glfwGetTime();
+    return presentation_clock.now(glfwGetTime);
 }
 
 // Fixed: The base class virtual function returns a bool.
@@ -44,6 +46,8 @@ RmlFileInterface::RmlFileInterface(const std::string& root_path)
 
 Rml::FileHandle RmlFileInterface::Open(const Rml::String& path) {
     std::string full_path = m_root + path;
+    if (!Filesystem::capture_content_paths.allows(full_path))
+        return 0;
     FILE* fp = fopen(full_path.c_str(), "rb");
     if (!fp) {
         LUMINUMBRA_CORE_ERROR("[RmlUi] Failed to open file: {}", full_path);
@@ -240,6 +244,9 @@ Rml::TextureHandle RmlRenderer::LoadTexture(Rml::Vector2i& texture_dimensions,
     // OLD LINE WITH TYPO:
     // GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str, SOIL_LOAD_AUTO,
     // SOIL_CREATE_NEW_ID, SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
+
+    if (!Filesystem::capture_content_paths.allows(full_path))
+        return 0;
 
     // CORRECTED LINE:
     GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str(),

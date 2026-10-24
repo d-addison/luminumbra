@@ -519,6 +519,15 @@
           "kind": "script",
           "ref": "tools/perf/far_settle_check.py",
           "planned": "far ladder settle evidence (90 s limit) is not yet in the artifact or validator; owner: fw"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderCrashCapturePython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md",
+          "detail": "V4 qualification requires a nonempty named graphics preset; RenderContractPython rejects null presets and not_exposed status for every scripted workload. Cave qualification awaits live Ladder activation. Frame evidence uses bounded records serialized after measurement; RenderResolvedConfiguration checks record bounds and workload option forms. RenderSavedAuthorityTampering and HostSchedulerFault cover verified snapshots and refusal without save replacement. Windows failure diagnostics retain bounded matching images and exception dumps before fixture cleanup; RenderCrashCapturePython checks event ownership, refusal/success, crash, timeout, identity, bounds and CI upload wiring. Native crash resolution remains pending matching CI evidence. Save/load drains streaming at a fixed script pose until all gates settle, with a 300-pass no-progress watchdog over resident chunks, ready chunks, admitted meshes and foliage generation. The reload report includes a positive settling_passes count; RenderContractPython checks missing, malformed and long-progress counts. RenderReloadInterval and RenderMeasurementGpuQueries register long-progress, stalled, oscillating, empty and partial-timer regressions; native execution remains pending. Per-pass query segments accumulate without growing storage or accepting incomplete segments. Extra residency passes pause loaded water, restore live stepping on success or failure, and do not present additional frames. FrameAttributionWiringPython checks the shared reload drain wiring. Capture galleries omit optional personal ratings without reading them or clearing required thumbnail containment; the public UI regression and RenderContractPython cover that boundary. Windows-only RenderCrashCaptureWindows smoke entries require real debug events, bounded minidumps and retained executable identity; their native execution remains pending."
         }
       ],
       "requirements": [
@@ -5420,7 +5429,7 @@
     {
       "id": "render.benchmark-far-frame-storage",
       "source": "docs/render-benchmark.md#compatibility-and-commands",
-      "statement": "Both benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. Only v3 issues additional GL queries.",
+      "statement": "All three benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. V3 and v4 issue additional GL queries.",
       "status": "covered",
       "evidence": [
         {
@@ -5436,7 +5445,7 @@
     {
       "id": "render.benchmark-output-completion",
       "source": "docs/render-benchmark.md#compatibility-and-commands",
-      "statement": "Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
+      "statement": "All three benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
       "status": "covered",
       "evidence": [
         {
@@ -5462,11 +5471,53 @@
       ]
     },
     {
+      "id": "render.benchmark-residency-fixture",
+      "source": "docs/render-benchmark.md#scripted-workloads-issue-403",
+      "statement": "Schema v4 accepts an explicit diagnostic streaming radius of 0..12 chunks, with 0 preserving uncapped streaming, and other schemas refuse the option. The cap applies before surface preparation on both creation and reload and remains a declared override bound to capture identity. Both save/load integration variants use startup, collision and streaming radii of 4 and a 0.4-second, 12-tick traversal at 30 Hz, saving at tick 1 and reloading at tick 2. The camera holds through tick 6 and resumes through tick 12. The 81 prepared columns retain the unchanged readiness minima of 64 renderable chunks and nine collision chunks. Every reload settle gate, loader, action and identity assertion remains required. Committed qualification traversals are unchanged; native rendering and timing verification remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderRunnerEvidencePython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderWorkloadSaveLoadIntegrated",
+          "planned": "native rendering and timing verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderWorkloadNoAudioIntegrated",
+          "planned": "native rendering and timing verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkStreamRadiusRefusal",
+          "planned": "native admission verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesInvalidRadiiAndAcceptsBoundariesInBothSpellings",
+          "planned": "native boundary and refusal verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesBeforeCreatingSaveRootInEitherArgumentOrder",
+          "planned": "native write-order verification; owner: ac"
+        }
+      ]
+    },
+    {
       "id": "content.foliage-directory-recovery",
       "source": "docs/engine-guide.md#shipping-defaults",
       "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",
       "status": "covered",
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderContentReferenceContainment",
+          "detail": "Foliage and creature directory loaders refuse directories and entries outside capture content trees, report failure with or without an optional output flag, and preserve previously loaded templates. Native execution remains pending."
+        },
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours"
@@ -5524,7 +5575,7 @@
     {
       "id": "render.ladder-content-identity",
       "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
-      "statement": "Both benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+      "statement": "The v2, v3 and v4 benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
       "status": "covered",
       "evidence": [
         {

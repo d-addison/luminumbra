@@ -184,6 +184,20 @@ class FrameAttributionWiring(unittest.TestCase):
         cls.header = read(CLIENT / "app/FrameAttribution.h")
         cls.collector = read(CLIENT / "app/FrameAttribution.cpp")
 
+    def test_preview_restore_precedes_reload_and_gameplay_foliage(self):
+        restore = self.main.index("if (worldgenPreview->active() &&")
+        reload = self.main.index("const auto settle_workload_reload =")
+        scatter = [match.start() for match in re.finditer(
+            re.escape("UpdateFoliageScatter(g_app,"), self.main)]
+        self.assertEqual(len(scatter), 2)
+        self.assertLess(restore, reload)
+        for position in scatter:
+            self.assertLess(restore, position)
+        self.assertLess(restore, self.main.index("RenderMenuScreens(g_app,"))
+        self.assertIn("UpdateFoliageScatter(g_app,", block(self.main,
+                      "const auto settle_workload_reload ="))
+        self.assertLess(reload, self.main.index("if (!settle_workload_reload())"))
+
     def test_render_bucket_receives_exclusive_time_and_feeds_outputs(self):
         main = compact(self.main)
         self.assertIn("rb_render_bucket_ms = Attribution::exclusive_parent_ms("
@@ -229,6 +243,39 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_reload_drains_all_gates_before_resuming_script(self):
+        load = block(self.main, 'const auto settle_workload_reload =')
+        for fragment in ('const Measurement::ReloadWaterPause water_pause(*world);',
+                         'Measurement::ReloadSettlingWatchdog watchdog;',
+                         'world->update(', 'UpdateFoliageScatter(',
+                         'renderPipeline.render_frame(', 'benchmark_queries->checkpoint_passes();',
+                         'glfwPollEvents();',
+                         'Measurement::reload_residency_observed(reload_settling_passes,',
+                         'budget.update_interval_frames)',
+                         'streaming.quiescent()', 'uploads.terrain_upload_candidates == 0',
+                         'uploads.water_upload_candidates == 0',
+                         '(!foliage || !foliage->build_pending())',
+                         'gameSession->GetRegionSchedulerFault()',
+                         'watchdog.waiting(', 'watchdog.failed()'):
+            self.assertIn(fragment, load)
+        self.assertIn('reload_settling_pending = reload && !scenario_failed;', self.main)
+        self.assertLess(self.main.index('switch (currentState)'),
+                        self.main.index('if (reload_settling_pending)'))
+        self.assertLess(self.main.index('if (reload_settling_pending)'),
+                        self.main.index('if (currentState != GameState::WORLD_LOADING)'))
+        self.assertNotIn('TickSimulation(', load)
+        self.assertNotIn('glfwSwapBuffers(', load)
+        self.assertNotIn('workload_frame_records.append', load)
+        writer = read(CLIENT / 'app/RenderBenchmarkReport.h')
+        self.assertIn('workload_observation_json', writer)
+        self.assertIn('{"settling_passes", reload_settling_passes}', self.main)
+
+    def test_const_scope_token_keeps_registered_observations_mutable(self):
+        scope = compact(block(self.header, "class FoliageFrameScope"))
+        self.assertIn("mutable FoliageFrame m_frame{};", scope)
+        self.assertIn("current_foliage_frame() = enabled ? &m_frame : nullptr;", self.collector)
+        self.assertIn("const Attribution::FoliageFrameScope foliage_scope", self.main)
+
     def test_const_scope_observations_have_mutable_storage(self):
         # Writes through the registered pointer must remain defined for const
         # scope tokens; runtime assertions alone cannot reliably expose this UB.
@@ -267,12 +314,13 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("interactive = true;", block(menu, "if (previewState.dragging)"))
 
     def test_poll_attribution_keeps_ownership_refresh_and_registered_overlays(self):
-        poll = self.main[self.main.index("const auto _rb_poll_t0"):
-                         self.main.index("glfwPollEvents();")]
+        start = self.main.index("const auto _rb_poll_t0")
+        poll_end = self.main.index("glfwPollEvents();", start)
+        poll = self.main[start:poll_end]
         self.assertIn("poll_phases_before = Attribution::phase_total_ms();", poll)
         self.assertIn("poll_foliage_before = foliage_scope.snapshot().rebuild_ms;", poll)
         self.assertIn("RefreshInputOwnership(window);", poll)
-        after_poll = compact(self.main[self.main.index("glfwPollEvents();"):])
+        after_poll = compact(self.main[poll_end:])
         self.assertTrue(after_poll.startswith("glfwPollEvents(); RefreshInputOwnership(window);"))
         self.assertIn("developerConsole.Draw(developerFrame);", self.main)
         self.assertNotIn("DrawFrameStatusOverlays(", self.main)
@@ -282,6 +330,21 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"menuPreviewState.last_menu_frame = \{\}; "
                          r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
                          r"DrawCreatureNameplates\(")
+
+    def test_capture_day_phase_uses_calendar_without_frame_drift(self):
+        update = block(read(CLIENT / "rendering/RenderPipeline.cpp"),
+                       "void RenderPipeline::update_time_of_day(")
+        advance = compact(block(update, "if (!m_timeOfDayHold && !m_todTickDriven)"))
+        self.assertIn("m_dayLengthOverride ? m_dayLengthTicks : "
+                      "m_renderClock.calendar().dayLengthTicks", advance)
+        self.assertRegex(advance, r"if \(const auto& seconds = "
+                         r"Client::presentation_clock.capture_seconds\(\)\) "
+                         r"m_elapsedDayPhase = std::fmod\(\*seconds / m_dayDurationSeconds, 1.0\); "
+                         r"else m_elapsedDayPhase = std::fmod\(m_elapsedDayPhase \+ "
+                         r"deltaTime / m_dayDurationSeconds, 1.0\);")
+        self.assertIn("m_timeOfDay = Rendering::SolarTimeFromNoonElapsed("
+                      "m_elapsedDayPhase, m_renderClock);", advance)
+        self.assertIn("m_todTickDriven = false;", update)
 
     def test_disabled_timers_do_not_read_clocks(self):
         constructor = compact(block(self.header, "explicit StageTimer("))
@@ -706,9 +769,13 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIsNotNone(bounded)
         numerator, denominator = map(float, bounded.groups())
         ceiling = numerator / denominator
-        shipping = re.search(r"deltaTime = std::min\(deltaTime, ([\d.]+)f / ([\d.]+)f\);", self.main)
+        shipping = re.search(
+            r"deltaTime = benchmark_v4 \? ([\d.]+)f / ([\d.]+)f : "
+            r"std::min\(deltaTime, ([\d.]+)f / ([\d.]+)f\);", self.main)
         self.assertIsNotNone(shipping)
-        self.assertEqual(ceiling, float(shipping[1]) / float(shipping[2]))
+        capture_delta = float(shipping[1]) / float(shipping[2])
+        self.assertEqual(capture_delta, 1.0 / 30.0)
+        self.assertEqual(ceiling, float(shipping[3]) / float(shipping[4]))
         self.assertEqual(ceiling, 0.05)
         # Evaluate the scalar operation extracted above, without native execution.
         for elapsed, expected in ((0, 0), (0.001, 0.001), (0.033, 0.033),

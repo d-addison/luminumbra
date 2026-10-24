@@ -13,6 +13,9 @@
 namespace Luminumbra::Client::ScenarioHarness {
 
 bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag);
+// Value-taking options accept both --option value and --option=value, including
+// an empty assignment so validation cannot confuse it with an absent option.
+bool HasCommandLineOption(int argc, char* argv[], const std::string& flag);
 std::string
 GetCommandLineOption(int argc, char* argv[], const std::string& flag, const std::string& fallback);
 int GetCommandLineIntOption(int argc, char* argv[], const std::string& flag, int fallback);
@@ -95,6 +98,8 @@ struct RuntimeScenarioConfig {
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
     int collision_radius = 4;
+    // Explicit diagnostic residency bound for schema-v4 captures; 0 = uncapped.
+    int benchmark_stream_radius = 0;
     int coverage_radius = 3;
     size_t min_renderable_chunks = 64;
     size_t min_collision_chunks = 9;

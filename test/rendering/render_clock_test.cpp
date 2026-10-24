@@ -1,3 +1,4 @@
+#include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 
@@ -19,6 +20,55 @@ struct RenderClockTestPeer {
     }
 };
 } // namespace Luminumbra::Rendering
+
+namespace {
+// Capture time drives elapsed phase through the retained calendar, independently
+// of frame pacing. Holds, authoritative ticks and explicit day lengths still win.
+void ExpectCaptureTimeDrivesCalendarPhase(Luminumbra::Rendering::RenderPipeline& pipeline) {
+    using namespace Luminumbra;
+    struct CaptureLifetime {
+        ~CaptureLifetime() {
+            Client::presentation_clock.use_wall_clock();
+        }
+    } capture_lifetime;
+    pipeline.set_time_of_day_hold(false);
+    Rendering::RenderClockTestPeer::Update(pipeline, 0.0f);
+    for (const auto calendar : {world::WorldCalendar{}, world::WorldCalendar::Legacy()}) {
+        pipeline.set_render_calendar(calendar);
+        pipeline.set_day_length_ticks(calendar.dayLengthTicks);
+        for (const std::uint64_t tick : {0u, 27000u, 81000u, 162000u, 324000u}) {
+            Client::presentation_clock.set_capture_tick(tick, 30);
+            Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+            const auto phase =
+                static_cast<double>(tick % calendar.dayLengthTicks) / calendar.dayLengthTicks;
+            EXPECT_FLOAT_EQ(pipeline.get_time_of_day(),
+                            Rendering::SolarTimeFromNoonElapsed(phase, calendar));
+            const float captured_time = pipeline.get_time_of_day();
+            Rendering::RenderClockTestPeer::Update(pipeline, 999.0f);
+            EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), captured_time);
+        }
+    }
+    pipeline.set_day_length_ticks(60);
+    Client::presentation_clock.set_capture_tick(15, 30);
+    Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .25f);
+    pipeline.set_time_of_day(.3f);
+    pipeline.set_time_of_day_hold(true);
+    Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .3f);
+    pipeline.set_time_of_day_hold(false);
+    pipeline.set_time_of_day_tick(30);
+    Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .5f);
+    pipeline.set_world_clock(world::WorldClock(15, world::WorldCalendar::Legacy()));
+    Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .75f);
+    pipeline.set_world_clock(world::WorldClock(15, world::WorldCalendar::Legacy()));
+    pipeline.set_time_of_day(.3f);
+    Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .3f);
+}
+} // namespace
 
 TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
     ASSERT_TRUE(glfwInit());
@@ -218,4 +268,5 @@ TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
         EXPECT_EQ(pipeline.get_season_tick(), retained.tick());
         EXPECT_EQ(pipeline.get_lunar_period_ticks(), retained.lunar_period_ticks());
     }
+    ExpectCaptureTimeDrivesCalendarPhase(pipeline);
 }

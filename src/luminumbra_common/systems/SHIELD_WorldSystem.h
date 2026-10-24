@@ -350,6 +350,18 @@ public:
         std::size_t cumulative_deferred_meshing = 0;
         uint64_t max_deferred_age_frames = 0;
         std::size_t last_queue_depth = 0;
+        // Latest post-dispatch snapshot, including completed but unpublished work.
+        // A zero candidate backlog alone does not imply streaming quiescence.
+        std::size_t generation_batches = 0;
+        std::size_t meshing_batches = 0;
+        std::size_t pending_lod_chunks = 0;
+        bool promotion_pending = false;
+
+        bool quiescent() const {
+            return last_queue_depth == 0 && generation_batches == 0 && meshing_batches == 0 &&
+                   pending_lod_chunks == 0 && !promotion_pending;
+        }
+
         //  the SETTLED backlog floor — the minimum
         // queue depth observed across the trailing activation window
         // (STREAMING_ACTIVATION_INTERVAL_FRAMES). Chunk activation runs only
@@ -821,6 +833,11 @@ public:
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
+    // Host-thread preparation for bounded scripted edits (radius <= 16 m,
+    // coordinates within +/-32000 m). Drains streaming, then supplies full SDF
+    // lattices throughout the edit AABB, including chunks below the surface.
+    // False means unavailable/malformed terrain, never an already-air no-op.
+    bool PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m);
     int EditTerrainVoxel(const Vec3& world_pos,
                          float radius_m,
                          bool fill,

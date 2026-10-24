@@ -3,7 +3,9 @@
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
+#include "luminumbra_client/app/RenderConfiguration.h"
 #include "luminumbra_client/app/SessionExit.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
@@ -363,6 +365,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     bool failed_spawn_captured = false;
     Luminumbra::Client::SaveSessionOnExit(
         &session,
+        true,
         [&] { failed_spawn_captured = true; },
         [] { FAIL() << "A failed state save must not be reported as successful"; });
     EXPECT_TRUE(failed_spawn_captured);
@@ -375,6 +378,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     const Luminumbra::Vec3 exit_spawn(19.0f, 23.0f, -17.0f);
     Luminumbra::Client::SaveSessionOnExit(
         &session,
+        true,
         [&] {
             // The complete save must still be pending when the spawn is captured.
             EXPECT_TRUE(chunk->is_voxel_data_dirty());
@@ -395,6 +399,122 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     // GLFW loop exit and renderer reader draining remain NEEDS-NATIVE. This
     // test covers the production quit/save decisions without simulating a window.
     ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
+}
+
+TEST_F(HostSchedulerFault, CapturePersistencePolicy) {
+    for (const bool capture_active : {false, true}) {
+        for (const int exit_code : {0, 2, 3}) {
+            for (const bool scenario_failed : {false, true}) {
+                for (const bool content_refused : {false, true}) {
+                    const bool allowed = Luminumbra::Client::SessionPersistenceAllowed(
+                        capture_active, exit_code, scenario_failed, content_refused);
+                    if (capture_active && (exit_code != 0 || scenario_failed || content_refused)) {
+                        EXPECT_FALSE(allowed);
+                    } else {
+                        EXPECT_TRUE(allowed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(HostSchedulerFault, RefusedCapturePreservesReplacementSave) {
+    namespace Measurement = Luminumbra::Client::Measurement;
+    // Exercise both persistence modes through the public session/save APIs.
+    for (const bool active_regions : {false, true}) {
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        std::filesystem::path directory;
+        std::map<std::filesystem::path, std::string> replacement;
+        const auto contents = [&] {
+            std::map<std::filesystem::path, std::string> files;
+            for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+                if (entry.is_regular_file())
+                    files.emplace(entry.path().lexically_relative(directory),
+                                  ReadHostFile(entry.path()));
+            }
+            return files;
+        };
+        {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.generic_string() + "/");
+            session.SetActiveRegionsEnabled(active_regions);
+            ASSERT_TRUE(session.CreateWorld("Capture original", "1337", "default"));
+            ASSERT_TRUE(session.SaveWorld());
+            directory = session.GetWorldSaveDir();
+            const auto recorded = Measurement::saved_world_digest(directory);
+            const auto metadata_path = directory / "world_info.json";
+            auto metadata = nlohmann::json::parse(ReadHostFile(metadata_path));
+            metadata["name"] = "Capture replaced";
+            metadata["spawnPoint"]["x"] = 321.0f;
+            const auto stamp = fs::last_write_time(metadata_path);
+            WriteHostFile(metadata_path, metadata.dump(4) + "\n");
+            fs::last_write_time(metadata_path, stamp);
+            ASSERT_TRUE(
+                Luminumbra::Persistence::InspectSavedWorld(root, session.GetMetadata().worldId)
+                    .error.empty());
+            ASSERT_EQ(session.GetMetadata().name, "Capture original");
+            replacement = contents();
+            bool refused = false;
+            try {
+                const Measurement::VerifiedSaveSnapshot snapshot(
+                    directory, recorded, session.GetMetadata().worldId);
+            } catch (const std::runtime_error& error) {
+                EXPECT_STREQ(error.what(), "workload saved authority changed before reload");
+                refused = true;
+            }
+            ASSERT_TRUE(refused);
+            // The client records this refusal as scenario_failed before shutdown.
+            const bool allowed =
+                Luminumbra::Client::SessionPersistenceAllowed(true, 0, refused, false);
+            Luminumbra::Client::SaveSessionOnExit(
+                &session,
+                allowed,
+                [] { FAIL() << "A refused capture must not update spawn metadata"; },
+                [] { FAIL() << "A refused capture must not report a save"; });
+            EXPECT_EQ(contents(), replacement);
+        }
+        // Destruction also leaves every file and byte of the refused save intact.
+        EXPECT_EQ(contents(), replacement);
+        jobs.shutdown();
+    }
+}
+
+TEST_F(HostSchedulerFault, VerifiedSnapshotLoadsOriginalAfterLiveSaveReplacement) {
+    namespace Measurement = Luminumbra::Client::Measurement;
+    for (const bool active_regions : {false, true}) {
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.generic_string() + "/");
+            session.SetActiveRegionsEnabled(active_regions);
+            ASSERT_TRUE(session.CreateWorld("Snapshot original", "1337", "default"));
+            ASSERT_TRUE(session.SaveWorld());
+            const auto directory = session.GetWorldSaveDir();
+            const auto recorded = Measurement::saved_world_digest(directory);
+            const auto id = session.GetMetadata().worldId;
+            const auto authority = LiveAuthoritativeContents(session);
+            const Measurement::VerifiedSaveSnapshot snapshot(directory, recorded, id);
+            const auto metadata_path = directory / "world_info.json";
+            auto metadata = nlohmann::json::parse(ReadHostFile(metadata_path));
+            metadata["name"] = "Snapshot replaced";
+            WriteHostFile(metadata_path, metadata.dump(4) + "\n");
+            const auto replacement = ReadHostFile(metadata_path);
+            ASSERT_TRUE(session.LoadWorldFrom(id, snapshot.root()));
+            EXPECT_EQ(session.GetMetadata().name, "Snapshot original");
+            EXPECT_EQ(session.GetWorldSaveDir(), directory);
+            EXPECT_EQ(LiveAuthoritativeContents(session), authority);
+            EXPECT_EQ(ReadHostFile(metadata_path), replacement);
+            // Normal callers still read the configured live root.
+            ASSERT_TRUE(session.LoadWorld(id));
+            EXPECT_EQ(session.GetMetadata().name, "Snapshot replaced");
+        }
+        jobs.shutdown();
+    }
 }
 
 TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRetry) {
@@ -436,6 +556,7 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     bool failed_spawn_captured = false;
     Luminumbra::Client::SaveSessionOnExit(
         &session,
+        true,
         [&] { failed_spawn_captured = true; },
         [] { FAIL() << "A failed state save must not be reported as successful"; });
     EXPECT_TRUE(failed_spawn_captured);
@@ -465,6 +586,7 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     const auto retained_metadata = directory / "retained-metadata";
     Luminumbra::Client::SaveSessionOnExit(
         &session,
+        true,
         [&] {
             EXPECT_TRUE(chunk->is_voxel_data_dirty());
             session.SetSpawnPoint(exit_spawn);
@@ -502,7 +624,7 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     EXPECT_TRUE(retry.saved);
     EXPECT_FALSE(chunk->is_voxel_data_dirty());
     Luminumbra::Client::SaveSessionOnExit(
-        &session, [&] { session.SetSpawnPoint(exit_spawn); }, [&] { saved_reported = true; });
+        &session, true, [&] { session.SetSpawnPoint(exit_spawn); }, [&] { saved_reported = true; });
     EXPECT_TRUE(saved_reported);
     const auto retried_metadata =
         nlohmann::json::parse(ReadHostFile(directory / "world_info.json"));

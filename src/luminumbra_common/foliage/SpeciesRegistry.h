@@ -11,6 +11,7 @@
 // the sampled genes are clamped to [0,1]. Loading is pure file I/O; the sim/world_hash is
 // unaffected until a sampled plant is actually spawned (plants are opt-in via PlantTag).
 
+#include "../core/CaptureContentPaths.h"
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -157,6 +158,10 @@ public:
             errors.push_back(message);
             m_species.resize(original_size);
         };
+        if (!Luminumbra::Filesystem::capture_content_paths.allows(dir)) {
+            fail("species directory escapes inventoried trees");
+            return 0;
+        }
         try {
             std::error_code ec;
             if (!std::filesystem::is_directory(dir, ec) || ec) {
@@ -207,6 +212,10 @@ public:
             });
             std::size_t loaded = 0;
             for (const auto& [filename, file] : files) {
+                if (!Luminumbra::Filesystem::capture_content_paths.allows(file)) {
+                    fail("species file escapes inventoried trees");
+                    return 0;
+                }
                 std::ifstream in(file, std::ios::binary);
                 if (!in) {
                     fail("cannot open species file: " + filename);

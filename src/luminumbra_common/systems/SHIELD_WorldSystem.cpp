@@ -3585,11 +3585,15 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
+    m_streaming_telemetry_stats.pending_lod_chunks = 0;
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         (void)id;
         if (!chunk_ptr) {
             continue;
         }
+
+        if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0)
+            ++m_streaming_telemetry_stats.pending_lod_chunks;
 
         const ChunkState state = chunk_ptr->get_state();
         if (state == ChunkState::Ready) {
@@ -3606,6 +3610,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
     }
 
+    m_streaming_telemetry_stats.generation_batches = m_streaming_state.generation_batches.size();
+    m_streaming_telemetry_stats.meshing_batches = m_streaming_state.meshing_batches.size();
+    m_streaming_telemetry_stats.promotion_pending = promotion_pipeline_pending();
     // Pending items leave the candidate set at dispatch, even when their
     // active mesh keeps them Ready. Count them through publication, plus
     // candidates not submitted this frame (including a backpressured lane).
@@ -4758,6 +4765,45 @@ std::size_t SHIELD_WorldSystem::GetWaterSimWindowCursor() const {
 void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
     if (m_water_system)
         m_water_system->SetSimWindowCursor(cursor);
+}
+
+bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m) {
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > 16.0f ||
+        !std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z) ||
+        std::abs(world_pos.x) > 32000.0f || std::abs(world_pos.y) > 32000.0f ||
+        std::abs(world_pos.z) > 32000.0f)
+        return false;
+
+    wait_for_streaming_jobs();
+    if (promotion_pipeline_pending())
+        return false;
+    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m));
+    const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m));
+    const auto worldgen_scope = acquire_worldgen_sample_scope();
+    // The validated bounds above cover at most 27 chunks of 17^3 samples.
+    // Generate synchronously before editing; never replace saved/edited SDFs.
+    for (int cz = lo.z; cz <= hi.z; ++cz)
+        for (int cy = lo.y; cy <= hi.y; ++cy)
+            for (int cx = lo.x; cx <= hi.x; ++cx) {
+                const IVec3 coords(cx, cy, cz);
+                const ChunkID id = Chunk::calculate_id(coords);
+                auto iterator = m_streaming_state.chunks.find(id);
+                if (iterator == m_streaming_state.chunks.end())
+                    iterator = m_streaming_state.chunks
+                                   .emplace(id, std::make_shared<Luminumbra::Chunk>(coords))
+                                   .first;
+                auto& chunk = iterator->second;
+                if (!chunk)
+                    return false;
+                if (chunk->sdf_data.empty()) {
+                    GenerateChunkData(*chunk, 1);
+                    chunk->current_lod.store(-1, std::memory_order_release);
+                    chunk->set_state(ChunkState::Idle);
+                }
+                if (chunk->sdf_data.size() != kFullSdfLattice)
+                    return false;
+            }
+    return true;
 }
 
 // PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
