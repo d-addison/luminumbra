@@ -23,6 +23,10 @@ public:
         root_ = LexicallyNormalPath(AbsolutePath(root));
         root_.make_preferred();
         const auto canonical_root = WeaklyCanonicalPath(root_);
+        std::error_code error;
+        const auto lexical_root = LongNamePath(root_, error);
+        if (error)
+            throw std::filesystem::filesystem_error("expand content root names", root_, error);
         // The shared resolver uses Win32 handles for junctions, short names and UNC roots.
         for (std::size_t index = 0; index < trees_.size(); ++index) {
             const auto tree = (root_ / kCaptureContentTrees[index]).make_preferred();
@@ -32,8 +36,8 @@ public:
                 (!absent_audio && !std::filesystem::is_directory(tree)))
                 throw std::runtime_error("unsupported capture content tree");
             trees_[index] = WeaklyCanonicalPath(tree);
-            lexical_trees_[index] = tree;
-            if (trees_[index] != canonical_root / kCaptureContentTrees[index])
+            lexical_trees_[index] = lexical_root / kCaptureContentTrees[index];
+            if (!PathSpellingEqual(trees_[index], canonical_root / kCaptureContentTrees[index]))
                 throw std::runtime_error("redirected capture content tree");
         }
         active_ = true;
@@ -55,12 +59,16 @@ public:
         std::error_code error;
         const auto absolute = AbsolutePath(path, error);
         if (!error) {
-            const auto lexical = LexicallyNormalPath(absolute);
+            const auto lexical = LongNamePath(LexicallyNormalPath(absolute), error);
+            if (error) {
+                refused_.store(true, std::memory_order_relaxed);
+                return false;
+            }
             const auto resolved = WeaklyCanonicalPath(absolute, error);
             if (!error) {
                 for (std::size_t index = 0; index < trees_.size(); ++index)
-                    // Retain the selected root's spelling as well as its
-                    // canonical spelling (including Windows short-name aliases).
+                    // Expand short names on both lexical sides without resolving
+                    // links: an external redirect into an allowed tree still fails.
                     if ((within(lexical, lexical_trees_[index]) ||
                          within(lexical, trees_[index])) &&
                         within(resolved, trees_[index]))
@@ -75,7 +83,7 @@ private:
     static bool within(const std::filesystem::path& path, const std::filesystem::path& tree) {
         auto component = path.begin();
         for (const auto& parent : tree) {
-            if (component == path.end() || *component != parent)
+            if (component == path.end() || !PathSpellingEqual(*component, parent))
                 return false;
             ++component;
         }

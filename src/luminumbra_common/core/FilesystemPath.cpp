@@ -1,14 +1,16 @@
 #include "FilesystemPath.h"
 
-#include <algorithm>
-#include <array>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <utility>
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <utility>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -41,6 +43,14 @@ bool IsAbsolutePath(const std::filesystem::path& path) noexcept {
 namespace {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
+std::filesystem::path OrdinaryWindowsPath(std::wstring resolved) {
+    if (resolved.starts_with(LR"(\\?\UNC\)"))
+        resolved = LR"(\\)" + resolved.substr(8);
+    else if (resolved.starts_with(LR"(\\?\)"))
+        resolved.erase(0, 4);
+    return std::filesystem::path(std::move(resolved));
+}
+
 std::filesystem::path NormalizeUncPath(const std::filesystem::path& path, std::error_code& error) {
     // GCC 15's absolute(), lexically_normal() and generic_string() can discard
     // the UNC prefix. Native Win32 normalization accepts both slash directions,
@@ -92,18 +102,84 @@ FinalWindowsPath(HANDLE handle, bool require_directory, std::error_code& error) 
         error = std::error_code(static_cast<int>(failure), std::system_category());
         return {};
     }
-    std::wstring resolved(buffer.data(), length);
-    if (resolved.starts_with(LR"(\\?\UNC\)"))
-        resolved = LR"(\\)" + resolved.substr(8);
-    else if (resolved.starts_with(LR"(\\?\)"))
-        resolved.erase(0, 4);
     error.clear();
-    return std::filesystem::path(resolved);
+    return OrdinaryWindowsPath(std::wstring(buffer.data(), length));
 }
 
 #endif
 
 } // namespace
+
+std::filesystem::path LongNamePath(const std::filesystem::path& path, std::error_code& error) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (path.native().size() > 32767) {
+        error = std::make_error_code(std::errc::filename_too_long);
+        return {};
+    }
+    auto ancestor = path;
+    ancestor.make_preferred();
+    std::filesystem::path suffix;
+    // Extended Win32 path bound, including the terminator. Each missing lookup
+    // removes one component; every intermediate spelling is bounded to 32767 characters.
+    std::array<wchar_t, 32768> buffer{};
+    while (!ancestor.empty()) {
+        const DWORD length =
+            GetLongPathNameW(ancestor.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length > 0 && length < buffer.size()) {
+            const auto expanded = OrdinaryWindowsPath(std::wstring(buffer.data(), length));
+            if (!suffix.empty()) {
+                const auto separator = expanded.has_filename() ? 1u : 0u;
+                const auto remaining = 32767 - expanded.native().size();
+                if (suffix.native().size() > remaining ||
+                    separator > remaining - suffix.native().size()) {
+                    error = std::make_error_code(std::errc::filename_too_long);
+                    return {};
+                }
+            }
+            error.clear();
+            return suffix.empty() ? expanded : LexicallyNormalPath(expanded / suffix);
+        }
+        const DWORD failure = length == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER;
+        const auto parent = ancestor.parent_path();
+        if ((failure != ERROR_FILE_NOT_FOUND && failure != ERROR_PATH_NOT_FOUND) ||
+            parent == ancestor) {
+            error = std::error_code(static_cast<int>(failure), std::system_category());
+            return {};
+        }
+        suffix = suffix.empty() ? ancestor.filename() : ancestor.filename() / suffix;
+        ancestor = parent;
+    }
+    error = std::make_error_code(std::errc::no_such_file_or_directory);
+    return {};
+#else
+    error.clear();
+    return path;
+#endif
+}
+
+bool PathSpellingEqual(const std::filesystem::path& left, const std::filesystem::path& right) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    auto component = left.begin();
+    for (const auto& other : right) {
+        if (component == left.end())
+            return false;
+        const auto& first = component->native();
+        const auto& second = other.native();
+        constexpr auto max_length = static_cast<std::size_t>(std::numeric_limits<int>::max());
+        if (first != second && (first.size() > max_length || second.size() > max_length ||
+                                CompareStringOrdinal(first.data(),
+                                                     static_cast<int>(first.size()),
+                                                     second.data(),
+                                                     static_cast<int>(second.size()),
+                                                     TRUE) != CSTR_EQUAL))
+            return false;
+        ++component;
+    }
+    return component == left.end();
+#else
+    return left == right;
+#endif
+}
 
 std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path,
                                           std::error_code& error) {

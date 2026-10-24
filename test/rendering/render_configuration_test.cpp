@@ -976,6 +976,43 @@ void content_references() {
     short_policy.enable(short_alias);
     require(short_policy.allows(short_alias / "data/texture.ltex"));
     require(short_policy.allows(content.root() / "data/texture.ltex"));
+    const auto canonical_root = Luminumbra::Filesystem::WeaklyCanonicalPath(content.root());
+    const auto mixed_alias = short_alias.parent_path() / content.root().filename();
+    // Case changes exercise the mismatch even when the volume disables 8.3 names.
+    auto case_name = content.root().filename().native();
+    case_name.front() = L'R';
+    const auto case_root = content.root().parent_path() / case_name;
+    for (const auto& selected : {short_alias, mixed_alias, canonical_root, case_root}) {
+        Luminumbra::Filesystem::CaptureContentPaths spelling_policy;
+        spelling_policy.enable(selected);
+        for (const auto& queried :
+             {content.root(), short_alias, mixed_alias, canonical_root, case_root}) {
+            require(spelling_policy.allows(queried / "data/texture.ltex"));
+            require(spelling_policy.allows(queried / "DATA/TEXTURE.LTEX"));
+            require(spelling_policy.allows(queried / "DATA/MISSING/asset.json"));
+        }
+        require(!spelling_policy.refused());
+        require(!spelling_policy.allows(selected / "DATA/../external.ltex"));
+        require(spelling_policy.refused());
+    }
+    // Stored directory case also participates in enable()'s redirect check.
+    const TemporaryContent case_content;
+    require(std::filesystem::remove(case_content.root() / "assets/audio"));
+    require(std::filesystem::create_directory(case_content.root() / "assets/AUDIO"));
+    case_content.write("assets/AUDIO/included.ogg", "audio bytes");
+    Luminumbra::Filesystem::CaptureContentPaths case_policy;
+    case_policy.enable(case_content.root());
+    require(case_policy.allows(case_content.root() / "assets/audio/included.ogg"));
+    require(case_policy.allows(case_content.root() / "assets/audio/missing.ogg"));
+    require(!case_policy.refused());
+    for (const auto& invalid_suffix : {std::filesystem::path("data/<invalid>"),
+                                       std::filesystem::path("data/texture.ltex/child"),
+                                       std::filesystem::path("data") / std::wstring(32768, L'x')}) {
+        Luminumbra::Filesystem::CaptureContentPaths invalid_policy;
+        invalid_policy.enable(short_alias);
+        require(!invalid_policy.allows(short_alias / invalid_suffix));
+        require(invalid_policy.refused());
+    }
     const auto native_root = std::filesystem::path(content.root()).make_preferred();
     if (!Luminumbra::Filesystem::IsWindowsUncPath(native_root)) {
         const std::filesystem::path extended_root(LR"(\\?\)" + native_root.native());
@@ -1035,6 +1072,9 @@ void content_references() {
     require(aliased_policy.allows(alias / "data/texture.ltex"));
     require(aliased_policy.allows(content.root() / "data/texture.ltex"));
     require(!aliased_policy.refused());
+    // Resolving names for lexical comparison must not resolve an unselected link.
+    require(!policy.allows(alias / "data/texture.ltex"));
+    require(!policy.allows(alias / "data/missing/asset.json"));
     require(workload_content(alias) == workload_content(content.root()));
     require(std::filesystem::remove(alias));
 }
