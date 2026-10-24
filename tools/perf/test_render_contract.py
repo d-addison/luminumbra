@@ -842,6 +842,17 @@ def workload_artifact(kind, script):
             'assets/audio/music/themes/main_menu_theme.mp3',
             'game-assets/tree-small-02/1.0.0/data/models/trees/tree.lmesh',
             'inputs/systems_config.json', 'inputs/preset.json', 'inputs/user_settings.json')}
+    content = data['settings']['content_files']
+    # Match the native recursive inventories; their scan roots are not entries.
+    # These 12 fixture files have at most six parent components each.
+    roots = ('data', 'res', 'config', 'game-assets', 'assets/audio', 'inputs')
+    for name in tuple(content):
+        components = name.split('/')
+        for count in range(len(components) - 1, 0, -1):
+            parent = '/'.join(components[:count])
+            if parent in roots:
+                break
+            content[parent + '/'] = None
     data['render_identity'] = contract.render_identity(data['settings'])
     foliage = dict(instances=12, candidates=2048, candidate_slots=4096, backend='gpu', observation='window_end')
     warm = perf.summarize([1.0, 2.0], 'ms')
@@ -986,7 +997,9 @@ class ScriptedWorkloadTests(unittest.TestCase):
         original_identity = data['render_identity']
         content = data['settings']['content_files']
         audio_path = 'assets/audio/music/themes/main_menu_theme.mp3'
-        del content[audio_path]
+        for path in tuple(content):
+            if path.startswith('assets/audio/'):
+                del content[path]
         content['assets/audio'] = None
         data['render_identity'] = contract.render_identity(data['settings'])
         self.assertNotEqual(data['render_identity'], original_identity)
@@ -1011,6 +1024,59 @@ class ScriptedWorkloadTests(unittest.TestCase):
         data['render_identity'] = contract.render_identity(data['settings'])
         with self.assertRaisesRegex(ValueError, 'absent audio tree'):
             capture.validate(data, args(traversal=script))
+        del content[audio_path]
+        content['assets/audio/empty/'] = None
+        data['render_identity'] = contract.render_identity(data['settings'])
+        with self.assertRaisesRegex(ValueError, 'absent audio tree'):
+            capture.validate(data, args(traversal=script))
+
+    def test_empty_content_directories_change_identity_and_restore_after_removal(self):
+        script = self.scripts['edit']
+        original = workload_artifact('edit', script)
+        reference = Path(self.directory.name) / 'reference.json'
+        reference.write_text(json.dumps(original), encoding='utf-8')
+        pair_args = args(traversal=script, reference_capture=reference)
+        for tree in ('data', 'res', 'config', 'game-assets', 'assets/audio'):
+            with self.subTest(tree=tree):
+                data = copy.deepcopy(original)
+                content = data['settings']['content_files']
+                path = tree + '/empty \u2603/'
+                content[path] = None
+                data['render_identity'] = contract.render_identity(data['settings'])
+                self.assertNotEqual(data['render_identity'], original['render_identity'])
+                self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+                with self.assertRaisesRegex(ValueError, 'identity differs'):
+                    capture.validate(data, pair_args)
+                data['settings']['content_files'] = dict(reversed(list(content.items())))
+                self.assertEqual(contract.render_identity(data['settings']), data['render_identity'])
+                self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+                del data['settings']['content_files'][path]
+                data['render_identity'] = contract.render_identity(data['settings'])
+                self.assertEqual(data['render_identity'], original['render_identity'])
+                self.assertEqual(capture.validate(data, pair_args)['verdict'], 'PASS')
+
+    def test_content_directory_markers_are_canonical_and_bounded(self):
+        script = self.scripts['edit']
+        # The slash is part of the 4096-byte key bound, including UTF-8 bytes.
+        longest = 'data/' + '\u2603' * 1363 + 'x/'
+        self.assertEqual(len(longest.encode('utf-8')), 4096)
+        data = workload_artifact('edit', script)
+        data['settings']['content_files'][longest] = None
+        data['render_identity'] = contract.render_identity(data['settings'])
+        self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+        for path, marker in ((longest[:-1] + 'x/', None),
+                             ('data/empty/', 'fnv1a64:0000000000000000'),
+                             ('data/empty/', False), ('data/empty', None),
+                             ('data/empty//', None), ('data//empty/', None),
+                             ('data/./empty/', None), ('data/../empty/', None),
+                             ('data/empty\\child/', None), ('data/c:/', None),
+                             ('inputs/empty/', None), ('assets/private/', None)):
+            with self.subTest(path=path, marker=marker):
+                invalid = workload_artifact('edit', script)
+                invalid['settings']['content_files'][path] = marker
+                invalid['render_identity'] = contract.render_identity(invalid['settings'])
+                with self.assertRaisesRegex(ValueError, 'invalid workload content digest'):
+                    capture.validate(invalid, args(traversal=script))
 
     def test_all_new_required_fields_are_enforced(self):
         script = self.scripts['save_load']
@@ -1177,6 +1243,8 @@ class ScriptedWorkloadTests(unittest.TestCase):
             if field == 'simulation_identity':
                 data['settings'][field] = ('1111111111111111' if name == 'sim.water_high_res'
                                            else '2222222222222222')
+            elif name.endswith('/'):
+                data['settings'][field][name + 'empty/'] = None
             else:
                 data['settings'][field][name] = 'fnv1a64:1111111111111111'
             data['render_identity'] = contract.render_identity(data['settings'])

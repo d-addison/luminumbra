@@ -5508,6 +5508,23 @@
       ]
     },
     {
+      "id": "render.content-directory-identity",
+      "source": "docs/render-benchmark.md#scripted-workloads-issue-403",
+      "statement": "Schema v4 content manifests include every scanned subdirectory, including empty ones, as a null entry keyed by its portable relative path with a trailing slash. Directory entries share the 65,536-entry, 4096-byte key and depth-64 bounds. Adding an empty directory changes render identity, removing it restores identity, and identical trees have identical identities regardless of enumeration order. Malformed directory markers and content beneath an absent audio tree are refused.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderResolvedConfiguration",
+          "planned": "native directory identity verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+        }
+      ]
+    },
+    {
       "id": "content.foliage-directory-recovery",
       "source": "docs/engine-guide.md#shipping-defaults",
       "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",

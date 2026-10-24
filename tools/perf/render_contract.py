@@ -228,20 +228,26 @@ def validate_render_identity(data):
                      'config/game-asset-packs.json'):
         if required not in content:
             raise ValueError('missing workload content digest')
-    if not any(path.startswith('res/') for path in content):
+    if not any(path.startswith('res/') and isinstance(digest, str)
+               for path, digest in content.items()):
         raise ValueError('missing workload resource digests')
-    if not any(path.startswith('game-assets/') for path in content):
+    if not any(path.startswith('game-assets/') and isinstance(digest, str)
+               for path, digest in content.items()):
         raise ValueError('missing workload asset pack digests')
     for path, digest in content.items():
         if path == 'assets/audio' and digest is None:
             if any(isinstance(name, str) and name.startswith('assets/audio/') for name in content):
                 raise ValueError('absent audio tree contains workload content')
             continue
+        directory = isinstance(path, str) and path.endswith('/')
+        components = path[:-1] if directory else path
         if (not isinstance(path, str) or len(path.encode('utf-8')) > 4096 or
             not path.startswith(('data/', 'res/', 'config/', 'game-assets/', 'assets/audio/', 'inputs/')) or
             '\\' in path or ':' in path or
-            any(part in ('', '.', '..') for part in path.split('/')) or
-            not isinstance(digest, str) or not re.fullmatch(r'fnv1a64:[0-9a-f]{16}', digest)):
+            any(part in ('', '.', '..') for part in components.split('/')) or
+            (directory and (digest is not None or path.startswith('inputs/'))) or
+            (not directory and (not isinstance(digest, str) or
+                                not re.fullmatch(r'fnv1a64:[0-9a-f]{16}', digest)))):
             raise ValueError('invalid workload content digest')
     systems = settings['effective_render']['systems']
     registry = render_registry()

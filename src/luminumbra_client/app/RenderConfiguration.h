@@ -373,8 +373,9 @@ inline nlohmann::json workload_content(const std::filesystem::path& root) {
     Filesystem::CaptureContentPaths containment;
     containment.enable(root);
     nlohmann::json result = nlohmann::json::object();
-    // Bound manifest storage to 65536 entries with 4096-byte relative paths;
-    // also bound directory depth to 64, independently of filesystem traversal order.
+    // Bound manifest storage to 65536 entries with 4096-byte relative paths
+    // (including directory markers); directories count toward the same bound.
+    // Bound directory depth to 64, independently of filesystem traversal order.
     std::size_t entries = 0;
     for (const char* tree : Filesystem::kCaptureContentTrees) {
         // Public packages omit audio. Record absence so an empty or populated
@@ -404,7 +405,12 @@ inline nlohmann::json workload_content(const std::filesystem::path& root) {
                 throw std::runtime_error("unsupported workload content path");
             if (entry.is_regular_file())
                 result[path] = content_digest(entry.path());
-            else if (!entry.is_directory())
+            else if (entry.is_directory()) {
+                if (path.size() == 4096)
+                    throw std::runtime_error("unsupported workload content path");
+                // A file key cannot end in '/', so empty directories are unambiguous.
+                result[path + '/'] = nullptr;
+            } else
                 throw std::runtime_error("unsupported workload content file");
         }
     }

@@ -241,8 +241,44 @@ void content_configuration() {
         require(output.good());
     }
     const auto original = workload_content(root);
-    require(original.size() == files.size());
+    const std::array directories = {"data/common/",
+                                    "data/common/foliage/",
+                                    "data/common/creatures/",
+                                    "data/common/creatures/species/",
+                                    "data/ui/",
+                                    "res/shaders/",
+                                    "assets/audio/music/",
+                                    "assets/audio/music/themes/",
+                                    "game-assets/tree-small-02/",
+                                    "game-assets/tree-small-02/1.0.0/",
+                                    "game-assets/tree-small-02/1.0.0/data/",
+                                    "game-assets/tree-small-02/1.0.0/data/models/",
+                                    "game-assets/tree-small-02/1.0.0/data/models/trees/"};
+    require(original.size() == files.size() + directories.size());
+    for (const auto* directory : directories)
+        require(original.at(directory).is_null());
     const auto identity = render_identity(original);
+    const TemporaryContent reordered;
+    for (auto file = files.rbegin(); file != files.rend(); ++file)
+        reordered.write(*file, "original\r\n");
+    require(workload_content(reordered.root()) == original);
+    require(render_identity(workload_content(reordered.root())) == identity);
+    for (const auto* tree : Luminumbra::Filesystem::kCaptureContentTrees) {
+        const auto directory = std::string(tree) + "/empty";
+        require(std::filesystem::create_directory(root / directory));
+        const auto with_empty_directory = workload_content(root);
+        require(with_empty_directory.size() == original.size() + 1);
+        require(with_empty_directory.at(directory + '/').is_null());
+        require(render_identity(with_empty_directory) != identity);
+        require(std::filesystem::create_directory(reordered.root() / directory));
+        require(workload_content(reordered.root()) == with_empty_directory);
+        require(render_identity(workload_content(reordered.root())) ==
+                render_identity(with_empty_directory));
+        require(std::filesystem::remove(root / directory));
+        require(std::filesystem::remove(reordered.root() / directory));
+        require(workload_content(root) == original);
+        require(render_identity(workload_content(root)) == identity);
+    }
     for (const auto* file : files) {
         require(original.at(file) == content_digest(root / file));
         {
@@ -938,6 +974,7 @@ void content_references() {
     }
     require(policy.allows(content.root() / "data/../res/included.json"));
     require(policy.allows(content.root() / "data/missing/asset.json"));
+    require(policy.allows(content.root() / "data/missing~/asset.json"));
     // An existing file cannot be used as an ancestor of a missing asset.
     std::error_code resolution_error;
     require(Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / "data/texture.ltex/child",
@@ -948,7 +985,7 @@ void content_references() {
     require_refusal([&] {
         Luminumbra::Filesystem::WeaklyCanonicalPath(content.root() / "data/texture.ltex/child");
     });
-    for (const auto* suffix : {"child", "missing/child"}) {
+    for (const auto* suffix : {"child", "missing/child", "missing~"}) {
         Luminumbra::Filesystem::CaptureContentPaths invalid_policy;
         invalid_policy.enable(content.root());
         require(!invalid_policy.allows(content.root() / "data/texture.ltex" / suffix));
@@ -1058,9 +1095,10 @@ void content_references() {
 
     // Both command arguments include generic separators and shell-sensitive characters.
     content.write("outside & (target)!/nested/included.json", "{}");
+    content.write("data/linked/included.json", "{}");
     const auto link = content.root() / "data/redirected & (link)!";
     const auto outside = content.root() / "outside & (target)!/nested";
-    link_directory(link, content.root() / "res");
+    link_directory(link, content.root() / "data/linked");
     require(policy.allows(link / "included.json"));
     require(policy.allows(link / "missing.json"));
     require(std::filesystem::remove(link));
