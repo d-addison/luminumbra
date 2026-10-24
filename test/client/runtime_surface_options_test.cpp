@@ -76,14 +76,14 @@ TEST(RuntimeSurfaceOptionsTest, RefusesBeforeCreatingSaveRootInEitherArgumentOrd
             else
                 arguments.insert(arguments.end(), {"--render-benchmark-stream-radius", "1"});
             EXPECT_THROW(ParsePaths(arguments), std::invalid_argument);
-            EXPECT_FALSE(fs::exists(save_root));
+            EXPECT_FALSE(fs::exists(save_root)) << "schema refusal created the save root";
         }
     }
     EXPECT_THROW(
         ParsePaths(
             {"client", "--save-root", save_root.string(), "--render-benchmark-stream-radius", "0"}),
         std::invalid_argument);
-    EXPECT_FALSE(fs::exists(save_root));
+    EXPECT_FALSE(fs::exists(save_root)) << "stream-radius refusal created the save root";
     const auto accepted = ParsePaths({"client",
                                       "--save-root",
                                       save_root.string(),
