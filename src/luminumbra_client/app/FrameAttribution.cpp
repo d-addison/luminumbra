@@ -1,6 +1,7 @@
 #include "FrameAttribution.h"
 #include "../rendering/UploadBudget.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -145,6 +146,11 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.hashed_bytes += rebuild.hashed_bytes;
     total.uploaded_bytes += rebuild.uploaded_bytes;
     total.dirty_columns += rebuild.dirty_columns;
+    total.worker_dispatched += rebuild.worker_dispatched;
+    total.worker_completed += rebuild.worker_completed;
+    total.worker_stale_rejected += rebuild.worker_stale_rejected;
+    total.worker_queue_age_frames =
+        std::max(total.worker_queue_age_frames, rebuild.worker_queue_age_frames);
     total.uploads += rebuild.uploads;
     total.stale_results += rebuild.stale_results;
     total.scratch_bytes += rebuild.scratch_bytes;
@@ -259,7 +265,8 @@ void write_csv_header(std::ostream& out) {
            "water_adopted,water_work_bytes,water_byte_overshoot,water_pending";
     for (std::size_t index = 0; index < kPhaseCount; ++index)
         out << ',' << phase_name(static_cast<Phase>(index)) << "_ms";
-    out << ",dirty_columns\n";
+    out << ",dirty_columns,worker_dispatched,worker_completed,worker_stale_rejected,"
+           "worker_queue_age_frames\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -300,7 +307,9 @@ bool write_csv_row(std::ostream& out,
     append_uploads(uploads.water, uploads.water_pending);
     for (const double value : phases.milliseconds())
         out << ',' << value;
-    out << ',' << foliage.dirty_columns << '\n';
+    out << ',' << foliage.dirty_columns << ',' << foliage.worker_dispatched << ','
+        << foliage.worker_completed << ',' << foliage.worker_stale_rejected << ','
+        << foliage.worker_queue_age_frames << '\n';
     return out.good();
 }
 bool finalize_csv(std::ofstream& out) {

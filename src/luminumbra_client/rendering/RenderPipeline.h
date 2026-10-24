@@ -855,8 +855,8 @@ public:
     }
 
     // --- Far-LOD region rendering ---
-    // Far tile builds run on the attached JobSystem's Normal lane; without an
-    // attached job system the far-LOD path stays inert.
+    // Far tile and foliage ground builds use the attached JobSystem's Normal
+    // lane. Without it, far-LOD stays inert and foliage prepares synchronously.
     void attach_farlod_job_system(JobSystem* job_system);
     // Drains in-flight far tile builds (they sample the world system). MUST
     // run before the currently bound world is destroyed/recreated.

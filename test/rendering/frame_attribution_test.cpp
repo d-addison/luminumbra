@@ -110,6 +110,10 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
     foliage.uploaded_bytes = 4096;
     foliage.scratch_bytes = 8192;
     foliage.dirty_columns = 2;
+    foliage.worker_dispatched = 3;
+    foliage.worker_completed = 2;
+    foliage.worker_stale_rejected = 1;
+    foliage.worker_queue_age_frames = 5;
     foliage.backlog = true;
     foliage.path = FoliagePath::Cpu;
     foliage.fallback = FallbackReason::ColumnCapacity;
@@ -129,7 +133,8 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
         "water_adopted,water_work_bytes,water_byte_overshoot,water_pending,"
         "ui_update_ms,ui_render_ms,ui_filters_ms,menu_scene_ms,preview_adoption_ms,"
         "document_load_ms,texture_load_ms,shader_load_ms,shader_first_use_ms,"
-        "world_create_callback_ms,world_load_callback_ms,dirty_columns\n");
+        "world_create_callback_ms,world_load_callback_ms,dirty_columns,worker_dispatched,worker_"
+        "completed,worker_stale_rejected,worker_queue_age_frames\n");
     std::ostringstream unknown;
     write_csv_row(unknown, 401, 60, buckets, foliage, 262144, false, 262144, 7);
     EXPECT_EQ(unknown.str(),
@@ -139,30 +144,36 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
               "2048,4096,8192,1,cpu,column_capacity,262144,,,"
               "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,"
               "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,"
-              "0.000000,0.000000,0.000000,0.000000,2\n");
+              "0.000000,0.000000,0.000000,0.000000,2,3,2,1,5\n");
     EXPECT_EQ(fields(header.str()).size(), fields(unknown.str()).size());
     std::ostringstream known;
     write_csv_row(known, 402, 60, buckets, foliage, 262144, true, 123, 7);
-    EXPECT_EQ(known.str(),
-              "402,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
-              "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
-              "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
-              "2048,4096,8192,1,cpu,column_capacity,262144,123,7,"
-              "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0.000000,"
-              "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,2\n");
+    EXPECT_EQ(
+        known.str(),
+        "402,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
+        "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
+        "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
+        "2048,4096,8192,1,cpu,column_capacity,262144,123,7,"
+        "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0.000000,"
+        "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,2,3,2,1,5\n");
     EXPECT_EQ(fields(known.str()).size(), fields(header.str()).size());
     EXPECT_EQ(fields(known.str()).at(35), "123");
     EXPECT_EQ(fields(known.str()).at(36), "7");
-    EXPECT_EQ(fields(known.str()).at(51 + kPhaseCount), "2\n");
+    EXPECT_EQ(fields(known.str()).at(51 + kPhaseCount), "2");
+    EXPECT_EQ(fields(known.str()).at(52 + kPhaseCount), "3");
+    EXPECT_EQ(fields(known.str()).at(53 + kPhaseCount), "2");
+    EXPECT_EQ(fields(known.str()).at(54 + kPhaseCount), "1");
+    EXPECT_EQ(fields(known.str()).at(55 + kPhaseCount), "5\n");
     std::ostringstream zero;
     write_csv_row(zero, 403, 60, buckets, foliage, 262144, true, 0, 8);
-    EXPECT_EQ(zero.str(),
-              "403,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
-              "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
-              "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
-              "2048,4096,8192,1,cpu,column_capacity,262144,0,8,"
-              "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0.000000,"
-              "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,2\n");
+    EXPECT_EQ(
+        zero.str(),
+        "403,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
+        "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
+        "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
+        "2048,4096,8192,1,cpu,column_capacity,262144,0,8,"
+        "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0.000000,"
+        "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,2,3,2,1,5\n");
     EXPECT_EQ(fields(zero.str()).at(35), "0");
 }
 
@@ -171,7 +182,7 @@ TEST(FrameAttribution, CsvRecordsShortFramesPastTheSlowFrameWindow) {
     write_csv_row(out, 9000, 1, {}, {}, 262144, false, 0, 0);
     EXPECT_EQ(out.str().substr(0, 14), "9000,1.000000,");
     EXPECT_NE(out.str().find(",not_called,none,262144,,,0.000000"), std::string::npos);
-    EXPECT_EQ(fields(out.str()).at(51 + kPhaseCount), "0\n");
+    EXPECT_EQ(fields(out.str()).at(51 + kPhaseCount), "0");
 }
 
 TEST(FrameAttribution, UploadCountersAccumulateAcrossRenderAndMenuAndResetEveryFrame) {
@@ -202,7 +213,7 @@ TEST(FrameAttribution, UploadCountersAccumulateAcrossRenderAndMenuAndResetEveryF
         EXPECT_EQ(columns.at(44), "1.500000");
         EXPECT_EQ(columns.at(50), "2");
         EXPECT_EQ(columns.at(51), "3.000000");
-        EXPECT_EQ(columns.size(), 52u + kPhaseCount);
+        EXPECT_EQ(columns.size(), 56u + kPhaseCount);
     }
     record_render_uploads({1, 1, 10, 0, 1, 0}, false, 10);
     FoliageFrameScope next(true);
@@ -246,6 +257,10 @@ TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFram
     gpu.stale_results = 1;
     gpu.scratch_bytes = 400;
     gpu.dirty_columns = 2;
+    gpu.worker_dispatched = 4;
+    gpu.worker_completed = 3;
+    gpu.worker_stale_rejected = 1;
+    gpu.worker_queue_age_frames = 7;
     gpu.backlog = true;
     {
         FoliageFrameScope frame(true);
@@ -276,6 +291,10 @@ TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFram
         EXPECT_EQ(first.rebuild.stale_results, 2u);
         EXPECT_EQ(first.rebuild.scratch_bytes, 800u);
         EXPECT_EQ(first.rebuild.dirty_columns, 4u);
+        EXPECT_EQ(first.rebuild.worker_dispatched, 8u);
+        EXPECT_EQ(first.rebuild.worker_completed, 6u);
+        EXPECT_EQ(first.rebuild.worker_stale_rejected, 2u);
+        EXPECT_EQ(first.rebuild.worker_queue_age_frames, 7u);
         EXPECT_TRUE(first.rebuild.backlog);
         EXPECT_DOUBLE_EQ(first.rebuild_ms, 80);
         EXPECT_TRUE(first.count_known);
@@ -731,7 +750,7 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     std::string line;
     ASSERT_TRUE(std::getline(input, line));
     const auto header = fields(line);
-    ASSERT_EQ(header.size(), 52u + kPhaseCount);
+    ASSERT_EQ(header.size(), 56u + kPhaseCount);
     EXPECT_EQ(header.at(34), "instance_capacity");
     EXPECT_EQ(header.at(35), "generated_count");
     EXPECT_EQ(header.at(36), "count_generation");
@@ -748,13 +767,14 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
         "water_adopted,water_work_bytes,water_byte_overshoot,water_pending,"
         "ui_update_ms,ui_render_ms,ui_filters_ms,menu_scene_ms,preview_adoption_ms,"
         "document_load_ms,texture_load_ms,shader_load_ms,shader_first_use_ms,"
-        "world_create_callback_ms,world_load_callback_ms,dirty_columns");
+        "world_create_callback_ms,world_load_callback_ms,dirty_columns,worker_dispatched,worker_"
+        "completed,worker_stale_rejected,worker_queue_age_frames");
     EXPECT_EQ(header.at(51 + kPhaseCount), "dirty_columns");
     std::string last;
     std::size_t rows = 1;
     while (std::getline(input, line)) {
         // Pin every existing value and field at its original index, with the
-        // dirty-column field last, for every buffered short frame.
+        // dirty-column and worker fields appended, for every buffered short frame.
         EXPECT_EQ(
             line,
             std::to_string(rows) +
@@ -768,8 +788,8 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
                 "," + (rows % 3 == 0 ? std::string{} : std::to_string(rows)) + "," +
                 "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0."
                 "000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000," +
-                std::to_string(rows));
-        EXPECT_EQ(fields(line).size(), 52u + kPhaseCount);
+                std::to_string(rows) + ",0,0,0,0");
+        EXPECT_EQ(fields(line).size(), 56u + kPhaseCount);
         last = line;
         const auto columns = fields(line);
         ASSERT_EQ(columns.size(), header.size());
@@ -788,6 +808,8 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
         EXPECT_EQ(columns.at(51 + kPhaseCount), std::to_string(rows));
         for (std::size_t index = 51; index < 51 + kPhaseCount; ++index)
             EXPECT_EQ(columns.at(index), "0.000000");
+        for (std::size_t index = 52 + kPhaseCount; index < 56 + kPhaseCount; ++index)
+            EXPECT_EQ(columns.at(index), "0");
         ++rows;
     }
     EXPECT_TRUE(input.eof());

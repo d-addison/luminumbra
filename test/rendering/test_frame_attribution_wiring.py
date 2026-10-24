@@ -211,9 +211,9 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("foliage_frame.rebuild_ms, rb_menu_ms, rb_ui_ms,", slow)
         self.assertIn('"foliage={:.1f} menu={:.1f} ui={:.1f} | "', slow)
         self.assertIn("foliage-split:", slow)
-        self.assertIn('"scratch_bytes={} backlog={} path={} fallback={} dirty_columns={}",', slow)
+        self.assertIn('"scratch_bytes={} backlog={} path={} fallback={} dirty_columns={} "', slow)
         self.assertIn("Attribution::fallback_name(foliage_attribution.fallback), "
-                      "foliage_attribution.dirty_columns);", slow)
+                      "foliage_attribution.dirty_columns,", slow)
 
     def test_collection_and_split_log_require_explicit_opt_in(self):
         main = compact(self.main)
@@ -1130,6 +1130,102 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
 
+    def test_worker_counters_reach_frame_totals_csv_and_split_log(self):
+        for name in ("worker_dispatched", "worker_completed", "worker_stale_rejected",
+                     "worker_queue_age_frames"):
+            self.assertIn(f"std::uint64_t {name} = 0;", self.header)
+            self.assertIn(f"total.{name}", self.collector)
+            self.assertIn(f"foliage.{name}", self.collector)
+            self.assertIn(f"foliage_attribution.{name}", self.main)
+            self.assertIn(f"m_rebuild_attribution.{name}", self.foliage)
+        self.assertIn("std::max(total.worker_queue_age_frames, rebuild.worker_queue_age_frames)",
+                      compact(self.collector))
+
+    def test_worker_budget_follows_every_rendered_frame_including_nested_loops(self):
+        self.assertNotIn("foliage->begin_ground_frame();", self.main)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        constructor = block(pipeline, "RenderPipeline::RenderPipeline()")
+        self.assertIn("m_foliage_pass->begin_ground_frame();", constructor)
+        render = block(pipeline, "void RenderPipeline::render_frame(")
+        self.assertEqual(render.count("m_foliage_pass->begin_ground_frame();"), 1)
+        self.assertGreater(render.index("m_foliage_pass->begin_ground_frame();"),
+                           render.index("dispatch_stages(camera);"))
+        self.assertTrue(compact(render).endswith("m_foliage_pass->begin_ground_frame();"))
+        # Every nested loop uses this common boundary, including callers that do
+        # not rebuild foliage themselves (survey, boot metrics, menu screenshots).
+        for path in ("main_client.cpp", "world/WorldgenPreview.cpp",
+                     "rendering/SceneSurvey.cpp", "app/MenuScreens.cpp",
+                     "core/ScenarioRunnerCapture.cpp"):
+            self.assertIn("render_frame(", read(CLIENT / path))
+        self.assertEqual(self.foliage.count("prepare_ground_samples(chunk)"), 2)
+        self.assertIn("if (!m_ground_frame_driven) m_ground_queue.begin_frame(); "
+                      "else m_ground_queue.clear_stats();", compact(self.foliage))
+        queue = read(CLIENT / "rendering/FoliageGroundWork.h")
+        self.assertIn("kInFlight = 8;", queue)
+        self.assertIn("kPerFrame = 4;", queue)
+        self.assertNotIn("std::function", queue)
+        self.assertNotIn("glBind", queue)
+        self.assertNotIn("JobSystem::wait", self.foliage)
+        self.assertIn("m_ground_queue.invalidate(key);", self.foliage)
+        self.assertIn("m_ground_queue.invalidate();", self.foliage)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        self.assertIn("m_foliage_pass->attach_job_system(job_system);", pipeline)
+
+    def test_preview_rebuilds_current_support_even_with_cached_scatter_inputs(self):
+        preview = read(CLIENT / "world/WorldgenPreview.cpp")
+        rebuild = block(preview, "void WorldgenPreview::rebuild_foliage_if_needed(")
+        cached = block(rebuild, "if (m_last_foliage_generation != m_rebuild_generation)")
+        self.assertIn("m_foliage_scatter.clear();", cached)
+        self.assertNotIn("return;", cached.split("for (", 1)[0])
+        self.assertNotIn("rebuild_instances(", cached)
+        self.assertNotIn("m_last_foliage_generation == m_rebuild_generation", rebuild)
+        self.assertIn("Rendering::FoliagePass::Preparation::Complete", rebuild)
+        self.assertEqual(rebuild.count("rebuild_instances("), 1)
+        for entry in ("bool WorldgenPreview::render(", "bool WorldgenPreview::render_to_backbuffer("):
+            self.assertIn("rebuild_foliage_if_needed(pipeline);", block(preview, entry))
+
+    def test_sweep_qualification_and_capture_callers_require_complete_preparation(self):
+        sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
+        self.assertEqual(sweep.count("rebuild_instances("), 2)
+        self.assertEqual(sweep.count("FoliagePass::Preparation::Complete"), 2)
+        drive = block(read(CLIENT / "core/ScenarioRunnerDrive.cpp"),
+                      "bool ScenarioRunnerImpl::onPreRenderFoliage()")
+        self.assertIn("FoliagePass::Preparation::Complete", drive)
+        update = block(self.main, "static void UpdateFoliageScatter(")
+        preparation = block(self.main, "static bool CompleteFoliagePreparation(")
+        self.assertIn("CompleteFoliagePreparation(g_app, scenario_config, photo_mode_active)",
+                      compact(update))
+        for mode in ("scenario_config.active()", "capture.scene_active",
+                     "capture.render_benchmark_path.empty()", "capture.frame_scan_active",
+                     "capture.render_parity_active", "capture.timelapse_frames > 0",
+                     "capture.survey_active", "photo_mode_active"):
+            self.assertIn(mode, preparation)
+        self.assertIn("g_playerController->photo_mode_active()", self.main)
+        self.assertIn("FoliagePass::Preparation::Complete", update)
+        self.assertIn("FoliagePass::Preparation::Deferred", update)
+        rebuild = compact(block(self.foliage, "void FoliagePass::rebuild_instances("))
+        self.assertIn("if (preparation == Preparation::Complete) m_worker_ground_active = false;",
+                      rebuild)
+        self.assertIn("preparation == Preparation::Complete ? std::numeric_limits<int>::max() : 4;",
+                      rebuild)
+        gpu = compact(block(self.foliage, "bool FoliagePass::rebuild_instances_gpu("))
+        self.assertIn("m_readback_enabled || preparation == Preparation::Complete", gpu)
+
+    def test_worker_polling_preserves_generation_safe_gpu_readback(self):
+        rebuild = block(self.foliage, "void FoliagePass::rebuild_instances(")
+        signature = rebuild.index("std::uint64_t sig =")
+        self.assertLess(rebuild.index("poll_ground_builds(chunks, camera_pos);"), signature)
+        # Frozen and unchanged inputs may drain their matching snapshots. A
+        # changed input must advance its generation before consuming GPU output.
+        before_signature = rebuild[:signature]
+        frozen = block(before_signature, "if (m_qualification.frozen_inputs)")
+        self.assertEqual(before_signature.count("poll_foliage_readback();"),
+                         frozen.count("poll_foliage_readback();"))
+        changed = rebuild[rebuild.index("m_uploaded_input_hash.reset();", signature):]
+        self.assertLess(changed.index("++m_build_generation;"),
+                        changed.index("poll_foliage_readback();"))
+        self.assertLess(changed.index("m_gpu_generated_count.reset();"),
+                        changed.index("poll_foliage_readback();"))
     def test_metadata_replacement_does_not_upload_a_redundant_command(self):
         gpu = block(self.foliage, "bool FoliagePass::rebuild_instances_gpu(")
         self.assertIn("const bool initialize_command = !m_metadata_valid;", gpu)
@@ -1164,7 +1260,8 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact("for (std::size_t index" + phase_header),
                          "for (std::size_t index = 0; index < kPhaseCount; ++index) "
                          "out << ',' << phase_name(static_cast<Phase>(index)) << \"_ms\"; "
-                         'out << ",dirty_columns\\n";')
+                         'out << ",dirty_columns,worker_dispatched,worker_completed,worker_stale_rejected," '
+                         '"worker_queue_age_frames\\n";')
         self.assertEqual(encoded.rstrip("\n").split(","), [
             "frame", "frame_ms", "sim_ms", "stream_ms", "render_ms", "present_ms",
             "foliage_ms", "scatter_ms", "rebake_ms", "poll_ms", "menu_ms", "ui_ms", "other_ms",
@@ -1185,14 +1282,21 @@ class FrameAttributionWiring(unittest.TestCase):
             "document_load", "texture_load", "shader_load", "shader_first_use",
             "world_create_callback", "world_load_callback",
         ])
-        columns = encoded.split(",") + [name + "_ms" for name in phase_names] + ["dirty_columns"]
-        self.assertEqual(len(columns), 63)
+        columns = encoded.split(",") + [name + "_ms" for name in phase_names] + [
+            "dirty_columns", "worker_dispatched", "worker_completed",
+            "worker_stale_rejected", "worker_queue_age_frames",
+        ]
+        self.assertEqual(len(columns), 67)
         self.assertEqual(columns[62], "dirty_columns")
         documentation = read(ROOT / "docs/render-benchmark.md")
-        self.assertIn("The CSV has 63 fields.", documentation)
+        self.assertIn("The CSV has 67 fields.", documentation)
         documented = []
         for first, last, names in re.findall(r"^\| (\d+)–(\d+) \| (.*?) \|$",
                                               documentation, re.M):
+            if first == "63":
+                self.assertEqual(last, "66")
+                worker_names = re.findall(r"`([a-z_]+)`", names)
+                continue
             if first == "51":
                 self.assertEqual(last, "61")
                 continue
@@ -1203,6 +1307,7 @@ class FrameAttributionWiring(unittest.TestCase):
         phase_table = documentation.split("| Column | Work measured |", 1)[1].split("\n\n", 1)[0]
         documented.extend(re.findall(r"^\| `([a-z_]+)` \|", phase_table, re.M))
         documented.append("dirty_columns")
+        documented.extend(worker_names)
         self.assertIn("| 62 | `dirty_columns` |", documentation)
         self.assertEqual(documented, columns)
         row = compact(block(self.collector, "bool write_csv_row("))
@@ -1210,7 +1315,9 @@ class FrameAttributionWiring(unittest.TestCase):
                       "if (count_known) out << count_generation;", row)
         self.assertTrue(row.endswith("for (const double value : phases.milliseconds()) "
                                     "out << ',' << value; "
-                                    "out << ',' << foliage.dirty_columns << '\\n'; "
+                                    "out << ',' << foliage.dirty_columns << ',' << foliage.worker_dispatched << ',' "
+                                    "<< foliage.worker_completed << ',' << foliage.worker_stale_rejected << ',' "
+                                    "<< foliage.worker_queue_age_frames << '\\n'; "
                                     "return out.good();"))
         self.assertEqual(row.count("foliage.dirty_columns"), 1)
 
@@ -1253,7 +1360,9 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("append_uploads(uploads.terrain, uploads.terrain_pending); "
                       "append_uploads(uploads.water, uploads.water_pending); "
                       "for (const double value : phases.milliseconds()) out << ',' << value; "
-                      "out << ',' << foliage.dirty_columns << '\\n';",
+                      "out << ',' << foliage.dirty_columns << ',' << foliage.worker_dispatched << ',' "
+                      "<< foliage.worker_completed << ',' << foliage.worker_stale_rejected << ',' "
+                      "<< foliage.worker_queue_age_frames << '\\n';",
                       writer)
         append = compact(block(writer, "const auto append_uploads ="))
         self.assertEqual(append, "out << ',' << work.elapsed_ms << ',' << work.overshoot_ms "
@@ -1265,6 +1374,8 @@ class FrameAttributionWiring(unittest.TestCase):
         for target, source in (
             ("common_tests", "common/DeterministicWorkBudget_test.cpp"),
             ("pass_context_test", "rendering/foliage_rebuild_test.cpp"),
+            ("pass_context_test", "rendering/foliage_invalidation_test.cpp"),
+            ("foliage_ground_work_test", "rendering/foliage_ground_work_test.cpp"),
         ):
             sources = re.search(r"add_executable\(" + target + r"\s+(.*?)^\)",
                                 cmake, re.S | re.M)
