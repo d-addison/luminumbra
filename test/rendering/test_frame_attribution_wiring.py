@@ -301,6 +301,16 @@ class FrameAttributionWiring(unittest.TestCase):
         for arguments in timers:
             self.assertTrue(compact(arguments).endswith(", collect_attribution"))
 
+    def test_water_subzones_share_the_opt_in_frame_and_csv(self):
+        main = compact(self.main)
+        self.assertIn("WaterAttribution::FrameScope water_scope(frame_attribution_enabled);", main)
+        self.assertIn("foliage_frame.uploads, water_scope.snapshot())", main)
+        self.assertRegex(main, r'const auto& water = water_scope.snapshot\(\); '
+                              r'LUMINUMBRA_CORE_WARN\( " water-split:')
+        for column in ("water_seed_inputs_ms", "water_initialization_ms", "water_sim_ms",
+                       "water_seam_ms", "water_bookkeeping_ms", "water_fallback_columns"):
+            self.assertIn(column, self.collector)
+
     def test_const_frame_scopes_allow_callback_collection(self):
         scope = block(self.header, "class FoliageFrameScope")
         self.assertIn("mutable FoliageFrame m_frame{};", scope)
@@ -398,7 +408,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
         self.assertIn("foliage_frame.capacity, foliage_frame.count_known, "
-                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot(), foliage_frame.uploads)", main)
+                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot(), foliage_frame.uploads, water_scope.snapshot())", main)
         scope = compact(block(self.foliage, "~RebuildAttributionScope()"))
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)
@@ -411,7 +421,7 @@ class FrameAttributionWiring(unittest.TestCase):
             self.assertIn(f"Attribution::phase_total_ms() - {parent}_phases_before", main)
         self.assertIn("buckets.other(_wallMs, phase_scope.snapshot())", main)
         self.assertIn("buckets.other(frame_ms, phases)", compact(self.collector))
-        self.assertIn("count_generation, phases, uploads)",
+        self.assertIn("count_generation, phases, uploads, water)",
                       compact(block(self.collector, "bool FrameRecorder::record(")))
         self.assertIn("Phase::WorldCreateCallback", block(self.main, "auto start_world_creation ="))
         self.assertIn("Phase::WorldLoadCallback", block(self.main, "auto start_world_load ="))
@@ -1164,7 +1174,10 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact("for (std::size_t index" + phase_header),
                          "for (std::size_t index = 0; index < kPhaseCount; ++index) "
                          "out << ',' << phase_name(static_cast<Phase>(index)) << \"_ms\"; "
-                         'out << ",dirty_columns\\n";')
+                         'out << ",dirty_columns,water_selection_ms," '
+                         '"water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms," '
+                         '"water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns," '
+                         '"water_stale_columns\\n";')
         self.assertEqual(encoded.rstrip("\n").split(","), [
             "frame", "frame_ms", "sim_ms", "stream_ms", "render_ms", "present_ms",
             "foliage_ms", "scatter_ms", "rebake_ms", "poll_ms", "menu_ms", "ui_ms", "other_ms",
@@ -1185,24 +1198,28 @@ class FrameAttributionWiring(unittest.TestCase):
             "document_load", "texture_load", "shader_load", "shader_first_use",
             "world_create_callback", "world_load_callback",
         ])
-        columns = encoded.split(",") + [name + "_ms" for name in phase_names] + ["dirty_columns"]
-        self.assertEqual(len(columns), 63)
+        water_columns = ["water_selection_ms", "water_seed_inputs_ms", "water_initialization_ms",
+                         "water_sim_ms", "water_seam_ms", "water_bookkeeping_ms",
+                         "water_precomputed_columns", "water_fallback_columns", "water_stale_columns"]
+        columns = encoded.split(",") + [name + "_ms" for name in phase_names] + ["dirty_columns"] + water_columns
+        self.assertEqual(len(columns), 72)
         self.assertEqual(columns[62], "dirty_columns")
         documentation = read(ROOT / "docs/render-benchmark.md")
-        self.assertIn("The CSV has 63 fields.", documentation)
+        self.assertIn("The CSV has 72 fields.", documentation)
+        phase_table = documentation.split("| Column | Work measured |", 1)[1].split("\n\n", 1)[0]
+        phase_columns = re.findall(r"^\| `([a-z_]+)` \|", phase_table, re.M)
+        self.assertEqual(phase_columns, [name + "_ms" for name in phase_names])
         documented = []
-        for first, last, names in re.findall(r"^\| (\d+)–(\d+) \| (.*?) \|$",
+        for first, last, names in re.findall(r"^\| (\d+)(?:–(\d+))? \| (.*?) \|$",
                                               documentation, re.M):
+            self.assertEqual(int(first), len(documented))
             if first == "51":
                 self.assertEqual(last, "61")
-                continue
-            names = re.findall(r"`([a-z_]+)`", names)
-            self.assertEqual(len(names), int(last) - int(first) + 1)
-            self.assertEqual(int(first), len(documented))
+                names = phase_columns
+            else:
+                names = re.findall(r"`([a-z_]+)`", names)
+            self.assertEqual(len(names), int(last or first) - int(first) + 1)
             documented.extend(names)
-        phase_table = documentation.split("| Column | Work measured |", 1)[1].split("\n\n", 1)[0]
-        documented.extend(re.findall(r"^\| `([a-z_]+)` \|", phase_table, re.M))
-        documented.append("dirty_columns")
         self.assertIn("| 62 | `dirty_columns` |", documentation)
         self.assertEqual(documented, columns)
         row = compact(block(self.collector, "bool write_csv_row("))
@@ -1210,7 +1227,11 @@ class FrameAttributionWiring(unittest.TestCase):
                       "if (count_known) out << count_generation;", row)
         self.assertTrue(row.endswith("for (const double value : phases.milliseconds()) "
                                     "out << ',' << value; "
-                                    "out << ',' << foliage.dirty_columns << '\\n'; "
+                                    "out << ',' << foliage.dirty_columns; "
+                                    "out << ',' << water.selection_ms << ',' << water.seed_inputs_ms << ',' "
+                                    "<< water.initialization_ms << ',' << water.sim_ms << ',' << water.seam_ms << ',' "
+                                    "<< water.bookkeeping_ms << ',' << water.precomputed_columns << ',' << water.fallback_columns "
+                                    "<< ',' << water.stale_columns << '\\n'; "
                                     "return out.good();"))
         self.assertEqual(row.count("foliage.dirty_columns"), 1)
 
@@ -1253,7 +1274,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("append_uploads(uploads.terrain, uploads.terrain_pending); "
                       "append_uploads(uploads.water, uploads.water_pending); "
                       "for (const double value : phases.milliseconds()) out << ',' << value; "
-                      "out << ',' << foliage.dirty_columns << '\\n';",
+                      "out << ',' << foliage.dirty_columns;",
                       writer)
         append = compact(block(writer, "const auto append_uploads ="))
         self.assertEqual(append, "out << ',' << work.elapsed_ms << ',' << work.overshoot_ms "
@@ -1308,6 +1329,222 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertLess(self.main.index("if (!frame_recorder.finish())"),
                         self.main.index('trace_shutdown("query_cleanup_started")'))
         self.assertIn("return exit_code;", self.main)
+
+
+    def test_boot_seed_preparation_is_bounded_owned_and_owner_published(self):
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        boot = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        self.assertIn("kBootSeedBatch = 64", boot)
+        self.assertIn("m_boot_settle_mode && m_job_system", boot)
+        self.assertIn("std::min(kBootSeedBatch, pending.size() - begin)", boot)
+        self.assertIn("pending.subspan(begin, count)", boot)
+        self.assertIn("prepare_high_water_seed_inputs(to_init, parallel_boot)", boot)
+        self.assertIn("[task = std::move(task)] { task->compute(); }", boot)
+        self.assertLess(boot.index("dispatch_batch(jobs)"), boot.index("wait(handle)"))
+        self.assertLess(boot.index("jobs.clear()"), boot.index("wait(handle)"))
+        self.assertLess(boot.index("fence->load(std::memory_order_acquire)"),
+                        boot.index("seed_chunk_water("))
+        self.assertLess(boot.index("inputs->ready_for(m_sim_resolution)"),
+                        boot.index("seed_chunk_water("))
+        task = compact(block(water, "struct BootWaterSeedTask"))
+        self.assertIn("std::shared_ptr<const SHIELD_WorldSystem> sampler", task)
+        self.assertNotRegex(task, r"Chunk\s*[*&]|WaterSystem\s*[*&]|\[this")
+        self.assertNotIn("seed_chunk_water", task)
+        release = compact(block(water, "~BootWaterSeedTask()"))
+        self.assertLess(release.index("inputs.reset()"), release.index("memory_order_release"))
+        self.assertLess(release.index("sampler.reset()"), release.index("memory_order_release"))
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        capture = compact(block(world, "SHIELD_WorldSystem::capture_water_seed_sampler() const"))
+        self.assertIn("acquire_worldgen_sample_scope()", capture)
+        self.assertIn("new SHIELD_WorldSystem(*this, WaterSeedSamplerTag{})", capture)
+        constructor = compact(block(world, "SHIELD_WorldSystem::SHIELD_WorldSystem("
+                                    "const SHIELD_WorldSystem& source"))
+        self.assertIn("hydro_lock(source.m_hydro_mutex)", constructor)
+        self.assertIn("m_hydro_cache = source.m_hydro_cache", constructor)
+        self.assertIn("m_job_system(nullptr)", world)
+        self.assertIn("m_params(source.m_params)", world)
+        self.assertIn("m_seed(source.m_seed)", world)
+        for node in ("terrain", "cave", "spaghetti", "worley", "island_mask",
+                     "continentalness", "erosion", "peaks", "warp", "temperature",
+                     "humidity", "river"):
+            self.assertIn(f"m_{node}_generator(source.m_{node}_generator)", world)
+
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        common = re.search(r"add_executable\(common_tests\s+(.*?)^\)", cmake, re.S | re.M)
+        self.assertIsNotNone(common)
+        self.assertIn("common/WaterSeedInputs_test.cpp", common.group(1))
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for name in ("BootMediumAndHighFallbackQueueBoundedInputsBeforeOwnerPublication",
+                     "BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory",
+                     "RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing",
+                     "DetachedSamplerSurvivesSourceResetPrefetchAndDestruction",
+                     "BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain",
+                     "RejectedResolutionBootAndLiveKeepConfiguredGridAndInlineHash",
+                     "UnpublishedPartialAndWrongResolutionInputsFallBackInBootAndLive",
+                     "LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash",
+                     "InvalidSessionResolutionsLeaveTheConfiguredGridUnchanged",
+                     "SavedUltraChunkRestoresAndMigratesWithoutSelectingUltraSession",
+                     "BootSurfaceAndGenerationJobsRespectPresetAndResolutionEligibility",
+                     "ReadinessRequiresPublishedSupportedAndMatchingResolution"):
+            self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
+
+    def test_water_seed_inputs_require_supported_preset_and_matching_publication(self):
+        header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
+        self.assertIn("static constexpr bool supports_resolution(", header)
+        self.assertIn("bool ready_for(", header)
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", text).group(1))
+                     for name, text in (("kResolution", header), ("CHUNK_SIZE_X", types),
+                                        ("CHUNK_SIZE_Z", types))}
+        supported = compact(block(header, "static constexpr bool supports_resolution("))
+        supported = re.fullmatch(r"return (.*);", supported).group(1)
+        readiness = compact(block(header, "bool ready_for("))
+        readiness = re.fullmatch(r"return (.*);", readiness).group(1)
+        readiness = readiness.replace("supports_resolution(cells_per_side)", "supported")
+        readiness = readiness.replace("ready.load(std::memory_order_acquire)", "published")
+        for requested in (-1, 0, 1, 2, 3, 4, 8, 16, 17, 32, 2**31 - 1):
+            accepts = cpp_expression(supported, cells_per_side=requested, **constants)
+            self.assertEqual(accepts, requested in (2, 4, 8, 16))
+            for published in (False, True):
+                for resolution in (0, 2, 4, 8, 16, 32):
+                    self.assertEqual(
+                        cpp_expression(readiness, supported=accepts, published=published,
+                                       resolution=resolution, cells_per_side=requested,
+                                       true=True, false=False),
+                        accepts and published and resolution == requested,
+                    )
+        # The empty default span is outside the function body.
+        compute = compact(block(header.replace("std::span<const float> terrain = {}",
+                                               "std::span<const float> terrain"),
+                                "void ComputeWaterSeedInputs("))
+        self.assertIn("if (!HighWaterSeedInputs::supports_resolution(resolution)) return;", compute)
+        self.assertIn("if (!terrain.empty() && terrain.size() != cells) return;", compute)
+        self.assertLess(compute.index("inputs.resolution = resolution;"),
+                        compute.index("inputs.ready.store(true, std::memory_order_release);"))
+
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        boot = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        eligibility = re.search(r"const bool use_seed_inputs = (.*?);", boot).group(1)
+        eligibility = eligibility.replace(
+            "HighWaterSeedInputs::supports_resolution(m_sim_resolution)", "supported")
+        for accepts in (False, True):
+            for lakes in (False, True):
+                self.assertEqual(
+                    cpp_expression(eligibility, supported=accepts,
+                                   **{"m_shield_system->get_params().lakes_enabled": lakes}),
+                    accepts and lakes,
+                )
+        self.assertIn("const bool parallel_boot = use_seed_inputs && "
+                      "m_boot_settle_mode && m_job_system;", boot)
+        self.assertIn("auto high_seed_inputs = use_seed_inputs ? "
+                      "prepare_high_water_seed_inputs(to_init, parallel_boot) : "
+                      "std::vector<std::shared_ptr<HighWaterSeedInputs>>{};", boot)
+        parallel = compact(block(water, "if (parallel_boot)"))
+        self.assertIn("std::make_shared<HighWaterSeedInputs>()", parallel)
+        self.assertIn("ComputeWaterSeedInputs(*inputs,", parallel)
+        self.assertIn("if (!use_seed_inputs || m_sim_resolution != "
+                      "HighWaterSeedInputs::kResolution) "
+                      "to_init[i]->stage_water_seed_inputs({});", boot)
+        self.assertIn("seed_chunk_water(to_init[i], terrain_seed[i], "
+                      "inputs && inputs->ready_for(m_sim_resolution) ? inputs : nullptr);", boot)
+        live = compact(block(water, "WaterSystem::prepare_high_water_seed_inputs("))
+        self.assertIn("if (inputs && inputs->ready_for(m_sim_resolution))", live)
+        consumer = compact(block(water, "void WaterSystem::seed_chunk_water("))
+        guard = "if (inputs && !inputs->ready_for(initial_resolution)) inputs = nullptr;"
+        self.assertIn(guard, consumer)
+        self.assertLess(consumer.index(guard), consumer.index("inputs->rest[cell]"))
+        self.assertLess(consumer.index(guard), consumer.index("inputs->terrain[cell]"))
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        request = compact(block(world, "SHIELD_WorldSystem::request_water_seed_inputs("))
+        self.assertIn("!m_params.lakes_enabled", request)
+        self.assertIn("m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution", request)
+        self.assertLess(request.index("return {};"),
+                        request.index("std::make_shared<HighWaterSeedInputs>()"))
+
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        regression = compact(block(native, "TEST(WaterSeedInputs, "
+                                   "RejectedResolutionBootAndLiveKeepConfiguredGridAndInlineHash)"))
+        self.assertIn("for (const int resolution : {2, 4, 8, 16})", regression)
+        self.assertIn("for (const bool boot : {false, true})", regression)
+        self.assertIn("accelerated.water().SetBootSettleMode(boot);", regression)
+        self.assertIn("accelerated.water().SetSimResolution(32);", regression)
+        self.assertIn("inputs->resolution = 32;", regression)
+        for fixture in ("accelerated", "inline_path"):
+            self.assertIn(f"{fixture}.water().SetSimResolution(resolution);", regression)
+            self.assertIn(f"ASSERT_EQ({fixture}.water().sim_resolution(), resolution);", regression)
+            self.assertIn(f"ExpectInlineSeed({fixture}, resolution);", regression)
+        self.assertIn("ExpectSameWater(accelerated, inline_path);", regression)
+        oracle = compact(block(native, "void ExpectInlineSeed("))
+        self.assertIn("EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);", oracle)
+
+    def test_water_resolution_setter_retains_integral_cell_contract(self):
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        setter = block(water, "void WaterSystem::SetSimResolution(")
+        # Pin the complete mutation/refusal path, including short circuiting before
+        # modulo zero. This is the original contract for every possible int value.
+        self.assertEqual(compact(re.sub(r"//[^\n]*", "", setter)),
+                         "if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 || "
+                         "CHUNK_SIZE_Z % cells_per_side != 0) { return; } "
+                         "m_sim_resolution = cells_per_side;")
+        refusal = re.search(r"if \((.*?)\) \{", compact(setter)).group(1)
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", types).group(1))
+                     for name in ("CHUNK_SIZE_X", "CHUNK_SIZE_Z")}
+        for requested in (-(2**31), -1, *range(66), 2**31 - 1):
+            for configured in (2, 4, 8, 16):
+                rejected = cpp_expression(refusal, cells_per_side=requested, **constants)
+                actual = configured if rejected else requested
+                self.assertEqual(actual, requested if requested in (2, 4, 8, 16) else configured)
+
+    def test_water_seed_defensive_predicates_directly_refuse_unreachable_grids(self):
+        # Use the existing scalar production-expression seam: no setter bypass or
+        # runtime route to an unsupported session grid is needed. This evaluates
+        # the actual consumer guard, independently of upstream input filtering.
+        header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", text).group(1))
+                     for name, text in (("kResolution", header), ("CHUNK_SIZE_X", types),
+                                        ("CHUNK_SIZE_Z", types))}
+        supported = re.fullmatch(r"return (.*);", compact(block(
+            header, "static constexpr bool supports_resolution("))).group(1)
+        readiness = re.fullmatch(r"return (.*);", compact(block(
+            header, "bool ready_for("))).group(1)
+        readiness = readiness.replace("supports_resolution(cells_per_side)", "supported")
+        readiness = readiness.replace("ready.load(std::memory_order_acquire)", "published")
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        initialize = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        eligibility = re.search(r"const bool use_seed_inputs = (.*?);", initialize).group(1)
+        eligibility = eligibility.replace(
+            "HighWaterSeedInputs::supports_resolution(m_sim_resolution)", "supported")
+        consumer = compact(block(water, "void WaterSystem::seed_chunk_water("))
+        guard_match = re.search(r"if \((.*?)\) inputs = nullptr;", consumer)
+        self.assertIsNotNone(guard_match, "consumer must independently reject invalid payloads")
+        guard = guard_match.group(1)
+        guard = guard.replace("inputs->ready_for(initial_resolution)", "ready_for")
+        # Both payload reads must remain behind the guard.
+        for field in ("rest", "terrain"):
+            self.assertLess(consumer.index("inputs = nullptr;"),
+                            consumer.index(f"inputs->{field}[cell]"))
+        for requested in (-(2**31), -1, 0, 1, 2, 3, 4, 8, 16, 17, 32, 2**31 - 1):
+            accepts = cpp_expression(supported, cells_per_side=requested, **constants)
+            for lakes in (False, True):
+                eligible = cpp_expression(
+                    eligibility, supported=accepts, true=True, false=False,
+                    **{"m_shield_system->get_params().lakes_enabled": lakes})
+                self.assertEqual(eligible, lakes and requested in (2, 4, 8, 16))
+            for present in (False, True):
+                for published in (False, True):
+                    # Zero metadata covers partial/uncomputed and unknown payloads;
+                    # the other values cover matching and mismatched publications.
+                    for resolution in (0, 2, 4, 8, 16, 32):
+                        ready = cpp_expression(
+                            readiness, supported=accepts, published=published,
+                            resolution=resolution, cells_per_side=requested, true=True, false=False)
+                        discarded = cpp_expression(guard, inputs=present, ready_for=ready,
+                                                   true=True, false=False)
+                        consumes = present and not discarded
+                        self.assertEqual(consumes, present and published and
+                                         requested in (2, 4, 8, 16) and resolution == requested)
 
 
 if __name__ == "__main__":
