@@ -6311,20 +6311,9 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     // This capture runs after the owner thread's normal streaming publication
     // point. Copying here is the ownership boundary: workers receive only the
     // owned value vectors below, never a Chunk or a borrowed vector span.
-    auto authoritative = snapshot_authoritative_chunks();
-    std::set<ChunkID> captured;
-    for (const auto& chunk : authoritative)
-        if (chunk)
-            captured.insert(chunk->get_id());
-    for (const auto& [id, coords] : m_durable_chunks)
-        if (!captured.contains(id) && coords.x >= min_chunk_x && coords.x <= max_chunk_x &&
-            coords.z >= min_chunk_z && coords.z <= max_chunk_z) {
-            const auto chunk = read_committed_chunk(coords);
-            if (!chunk)
-                return nullptr;
-            authoritative.push_back(chunk);
-        }
-    for (const auto& chunk : authoritative) {
+    // Disk-only authority is read by BuildFarLodWorkerTile from its bounded 3x3 region set.
+    // Reading it here would reload and hash an entire region once per chunk on the render thread.
+    for (const auto& chunk : snapshot_authoritative_chunks()) {
         if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize ||
             (!chunk->material_data.empty() && chunk->material_data.size() != kFullSdfLatticeSize)) {
             continue;
@@ -6369,13 +6358,20 @@ bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot
     // Eviction is safe because snapshot owns its bytes. A still-resident
     // chunk with a changed local revision/provenance, however, supersedes it.
     for (const FarLodSdfSnapshotEntry& entry : snapshot.entries) {
-        const auto current = find_authoritative_chunk(entry.coords);
+        // The snapshot owns evicted bytes. Durable replacements invalidate the authority
+        // revision above; checking copied entries must never reload disk-only chunks per frame.
+        auto current = find_streamed_chunk(entry.coords);
+        if (!current) {
+            const auto parked = m_parked.find(Chunk::calculate_id(entry.coords));
+            if (parked != m_parked.end())
+                current = parked->second.chunk;
+        }
         if (current && (current->voxel_revision() != entry.voxel_revision ||
                         current->sdf_provenance() != entry.provenance)) {
             return false;
         }
     }
-    return !m_durable_read_failed;
+    return true;
 }
 
 std::shared_ptr<Luminumbra::Chunk>

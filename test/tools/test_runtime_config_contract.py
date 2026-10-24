@@ -299,6 +299,26 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
             self.assertIn("WriteDurableRegionTemp(staging,", write)
 
+    def test_far_snapshot_owner_paths_leave_durable_reads_to_the_worker(self):
+        world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                            .read_text(encoding="utf-8"))
+        start = world.index("SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
+        end = world.index("SHIELD_WorldSystem::find_streamed_chunk(", start)
+        owner_paths = world[start:end]
+        for disk_lookup in ("read_committed_chunk(", "find_authoritative_chunk(",
+                            "m_durable_chunk_loader(", "m_durable_chunks"):
+            self.assertNotIn(disk_lookup, owner_paths)
+        self.assertIn("snapshot_authoritative_chunks()", owner_paths)
+        self.assertIn("snapshot.authority_revision!=", owner_paths)
+        worker = compact_cpp((ROOT / "src/luminumbra_client/rendering/FarLodSystem.cpp")
+                             .read_text(encoding="utf-8"))
+        start = worker.index("FarLodWorkerBuildOutcomeBuildFarLodWorkerTile(")
+        durable_read = worker.index("read_authoritative_region_chunks(", start)
+        worker = worker[start:worker.index("returnoutcome;", durable_read)]
+        self.assertIn("neighbor_z=rz-1;neighbor_z<=rz+1;", worker)
+        self.assertIn("neighbor_x=rx-1;neighbor_x<=rx+1;", worker)
+        self.assertIn("read_authoritative_region_chunks(", worker)
+
     def test_session_save_owns_validation_payloads_metadata_and_acknowledgement(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
                               .read_text(encoding="utf-8"))

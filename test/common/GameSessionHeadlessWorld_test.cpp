@@ -1347,6 +1347,7 @@ TEST(GameSessionHeadlessWorldTest, CatalogResolvesPackagedPresetsUnderRuntimeRoo
         session.SetJobSystem(&jobs);
         session.SetRootPath(assets.root_string());
         session.SetSaveRootPath(storage.path());
+        session.SetActiveRegionsEnabled(false);
         ASSERT_TRUE(session.CreateWorld("PackagedPreset", "12345", "default"));
         const auto world_id = session.GetMetadata().worldId;
         const auto metadata = session.GetWorldSaveDir() / "world_info.json";
@@ -1774,8 +1775,13 @@ void PreparePendingSnapshot(GameSession& session,
     auto* energy = session.GetEnergyFieldState();
     ASSERT_NE(energy, nullptr);
     energy->SetAnchorCell(0, 0);
-    energy->QueueDeposit(1, 0, 0, 0, 60000);
-    energy->Tick(0);
+    if (session.ActiveRegionsEnabled()) {
+        ASSERT_TRUE(energy->QueueRegionalDeposit(1, 0, 0, 0, 60000));
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    } else {
+        energy->QueueDeposit(1, 0, 0, 0, 60000);
+        energy->Tick(0);
+    }
     if (existing_snapshot) {
         ASSERT_TRUE(session.SaveWorldState());
         ASSERT_FALSE(chunk->is_voxel_data_dirty());
@@ -1784,22 +1790,32 @@ void PreparePendingSnapshot(GameSession& session,
     chunk->heightmap_data.front() = 42.0f;
     chunk->mark_voxel_data_dirty();
     registry.get<C::PlantGrowthComponent>(plant).growth_points = 123;
-    energy->QueueDeposit(2, 0, 0, 0, 1000);
-    energy->Tick(0);
+    if (session.ActiveRegionsEnabled()) {
+        ASSERT_TRUE(energy->QueueRegionalDeposit(2, 0, 0, 0, 1000));
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    } else {
+        energy->QueueDeposit(2, 0, 0, 0, 1000);
+        energy->Tick(0);
+    }
 }
 
 class PendingSnapshotState {
 public:
     explicit PendingSnapshotState(const GameSession& session)
         : plant_hash(session.ComputePlantSubHash())
-        , energy_bytes(session.GetEnergyFieldState()->CanonicalBytes()) {}
+        , energy_bytes((session.ActiveRegionsEnabled()
+                            ? session.GetEnergyFieldState()->CanonicalRegionalBytes()
+                            : session.GetEnergyFieldState()->CanonicalBytes())) {}
 
     void ExpectUnchanged(const GameSession& session, const Luminumbra::Chunk& chunk) const {
         SCOPED_TRACE("pending snapshot state");
         EXPECT_TRUE(chunk.is_voxel_data_dirty());
         EXPECT_FLOAT_EQ(chunk.heightmap_data.front(), 42.0f);
         EXPECT_EQ(session.ComputePlantSubHash(), plant_hash);
-        EXPECT_EQ(session.GetEnergyFieldState()->CanonicalBytes(), energy_bytes);
+        EXPECT_EQ((session.ActiveRegionsEnabled()
+                       ? session.GetEnergyFieldState()->CanonicalRegionalBytes()
+                       : session.GetEnergyFieldState()->CanonicalBytes()),
+                  energy_bytes);
     }
 
     const std::string& PlantHash() const {
@@ -1827,7 +1843,10 @@ void SavedWorldPresetTest::ExpectSnapshotReloaded(const PendingSnapshotState& pe
     ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
     EXPECT_EQ(loaded.ComputePlantSubHash(), pending.PlantHash());
     ASSERT_NE(loaded.GetEnergyFieldState(), nullptr);
-    EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), pending.EnergyBytes());
+    EXPECT_EQ((loaded.ActiveRegionsEnabled()
+                   ? loaded.GetEnergyFieldState()->CanonicalRegionalBytes()
+                   : loaded.GetEnergyFieldState()->CanonicalBytes()),
+              pending.EnergyBytes());
     Luminumbra::WorldStreamingState restored;
     std::vector<std::string> errors;
     ASSERT_TRUE(P::WorldSaveService{}.load_world(restored, save, errors));
@@ -1844,12 +1863,12 @@ TEST_P(SavedWorldPresetTest, OpenSessionPresetChangeRefusesBeforeSnapshotWritesA
         if (HasFatalFailure())
             return;
         const auto save = session.GetWorldSaveDir();
-        const SnapshotPresetFiles preset_files(save);
 
         std::shared_ptr<Luminumbra::Chunk> chunk;
         PreparePendingSnapshot(session, chunk, existing_snapshot);
         if (HasFatalFailure())
             return;
+        const SnapshotPresetFiles preset_files(save);
         const PendingSnapshotState pending(session);
 
         for (const auto* changed : {"preset", "identity", "both"}) {
@@ -2115,7 +2134,7 @@ TEST_P(SavedWorldPresetTest, NormalCreationRefusalsRetainDirtySessionAndExitSave
             GameSession reopened;
             Configure(reopened);
             ASSERT_TRUE(reopened.LoadWorld(id)) << reopened.GetWorldOpenError();
-            EXPECT_EQ(reopened.GetSimulationTickCount(), GetParam() ? 3u : 0u);
+            EXPECT_EQ(reopened.GetSimulationTickCount(), GetParam() ? 5u : 0u);
             if (GetParam()) {
                 EXPECT_EQ(reopened.GetActiveRegionLedger().encode(),
                           session.GetActiveRegionLedger().encode());
@@ -2299,8 +2318,7 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
         SCOPED_TRACE(with_chunks);
         fs::remove_all(snapshot);
         ASSERT_TRUE(fs::create_directories(snapshot));
-        fs::copy_file(source_save / "world_info.json", snapshot / "world_info.json");
-        fs::copy_file(source_save / "preset.json", snapshot / "preset.json");
+        fs::copy(source_save, snapshot, fs::copy_options::recursive);
         if (with_chunks) {
             Luminumbra::WorldStreamingState state;
             auto chunk = state.get_or_create_chunk(Luminumbra::IVec3(0, 0, 0));
@@ -2315,14 +2333,14 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
 
         auto metadata = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
         ASSERT_EQ(metadata.erase("waterSimCursor"), 1u);
-        ASSERT_NO_FATAL_FAILURE(WriteSavedPresetTestJson(snapshot / "world_info.json", metadata));
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), snapshot));
         reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
         before = SavedPresetTestDiskBytes(snapshot);
         ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
         EXPECT_EQ(SavedPresetTestDiskBytes(snapshot), before);
 
-        ASSERT_TRUE(fs::remove(snapshot / "world_info.json"));
+        ASSERT_TRUE(P::WorldSaveService::remove_member(snapshot, "world_info.json"));
         reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
         ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
@@ -3085,7 +3103,7 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
         session->SetAetherStateEnabled(true);
-        session->SetActiveRegionsEnabled(session != &legacy);
+        session->SetActiveRegionsEnabled(false);
     }
     ASSERT_TRUE(legacy.CreateWorld("Legacy energy", "1337", "default"));
     const double dt = legacy.GetSimulationClock().fixed_dt();
@@ -3145,6 +3163,7 @@ TEST(GameSessionHeadlessWorldTest, LegacyEnergyImportPreservesNonAlignedCadence)
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
         session->SetAetherStateEnabled(true);
+        session->SetActiveRegionsEnabled(false);
     }
     ASSERT_TRUE(legacy.CreateWorld("Legacy energy", "1337", "default"));
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
@@ -3202,6 +3221,7 @@ TEST(GameSessionHeadlessWorldTest, EnabledLoadingRefusesPhaseBearingLegacyEnergy
         session->SetAetherStateEnabled(true);
     }
     enabled.SetActiveRegionsEnabled(true);
+    legacy.SetActiveRegionsEnabled(false);
     ASSERT_TRUE(legacy.CreateWorld("Legacy refusal", "1337", "default"));
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
     chunk->set_state(Luminumbra::ChunkState::Idle);
@@ -3480,6 +3500,39 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAnd
     ASSERT_TRUE(loaded.LoadWorld(m.worldId));
     EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
     EXPECT_EQ(ReadClockTestFile(path), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, UnchangedLegacyCursorPreservesOpaqueMetadataBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    session.SetAetherStateEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy cursor bytes", "1337", "default"));
+    const auto save = root.path() / "legacy-cursor";
+    const auto path = save / "world_info.json";
+    for (const std::string cursor : {"", ",\"waterSimCursor\":0", ",\"waterSimCursor\":65"}) {
+        SCOPED_TRACE(cursor);
+        const std::string bytes =
+            "{\r\n \"container_version\":2,\"extension\":{\"unknown\":\"\\u00e9\"}" + cursor +
+            "\r\n}\r\n";
+        ASSERT_TRUE(P::WorldSaveService::write_file_durably(path, bytes));
+        ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+        for (const bool full_snapshot : {false, true}) {
+            ASSERT_TRUE(session.SaveWorldStateTo(save, nullptr, full_snapshot));
+            EXPECT_EQ(ReadClockTestFile(path), bytes);
+        }
+        session.GetWorldSystem()->SetWaterSimWindowCursor(66);
+        ASSERT_TRUE(session.SaveWorldStateTo(save));
+        const auto changed = ReadClockTestFile(path);
+        EXPECT_EQ(nlohmann::json::parse(changed).at("waterSimCursor"), 66);
+        EXPECT_EQ(nlohmann::json::parse(changed).at("extension").at("unknown"), "\xc3\xa9");
+        ASSERT_TRUE(session.SaveWorldStateTo(save));
+        EXPECT_EQ(ReadClockTestFile(path), changed);
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, RenderCalendarMarkerLifecycleAndSnapshotReplacement) {
@@ -5336,6 +5389,7 @@ TEST(GameSessionHeadlessWorldTest, SnapshotFlagOnSaveWritesIndexAndMarkerAndFlag
     GameSession plain;
     plain.SetRootPath(plain_root.root_string());
     plain.SetJobSystem(&jobs);
+    plain.SetActiveRegionsEnabled(false);
     ASSERT_TRUE(plain.CreateWorld("Snapshot off", "1337", "default"));
     ASSERT_TRUE(plain.SaveWorldState());
     const auto plain_save = plain.GetWorldSaveDir();
@@ -5567,6 +5621,7 @@ TEST(GameSessionHeadlessWorldTest, FlagOffSpawnIsInertAndLeavesSaveHashAndReject
     for (auto* s : {&session, &expected}) {
         s->SetRootPath(root.root_string());
         s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(false);
         ASSERT_TRUE(s->CreateWorld("Ground off", "1337", "default"));
         ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(*s, 0));
     }
@@ -5813,6 +5868,7 @@ TEST(GameSessionHeadlessWorldTest, FieldPagesFlagOffLeavesNoFileAndNoPages) {
     GameSession session;
     session.SetRootPath(root.root_string());
     session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
     ASSERT_TRUE(session.CreateWorld("Field off", "1337", "default"));
     ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(session, 0));
     ASSERT_NO_FATAL_FAILURE(TickOnce(session));
@@ -6091,7 +6147,11 @@ TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAn
     ASSERT_TRUE(refused.CreateTransientWorld("Refused", "1337", "default"));
     EXPECT_FALSE(refused.LoadWorldStateFrom(destination));
     EXPECT_TRUE(refused.GetWorldSystem()->snapshot_streamed_chunks().empty());
-    // loaded remains disk-only at destination: rehydration latches a fault and cannot generate.
+    // Save-as retains loaded's canonical backing source. Remove that source too so the
+    // disk-only rehydration below actually observes missing authority.
+    const auto canonical_region =
+        P::WorldSaveService::region_file_path(loaded.GetWorldSaveDir(), 40, -40);
+    ASSERT_TRUE(fs::remove(canonical_region));
     EXPECT_TRUE(loaded.GetWorldSystem()->restore_authoritative_chunk(distant));
     EXPECT_TRUE(loaded.GetRegionSchedulerFault().has_value());
     EXPECT_FALSE(loaded.GetWorldSystem()->find_streamed_chunk(distant));
@@ -6191,6 +6251,7 @@ void SeedRegionalWaterFixture(RegionalWaterScenario& scenario,
     // A legacy generator supplies the pristine baseline for this provenance fixture.
     // The enabled streaming caller only binds query storage; fixed ticks own evolution.
     Luminumbra::Systems::WaterSystem baseline_seed(nullptr, session.GetWorldSystem());
+    session.SetWaterHighResEnabled(false);
     baseline_seed.update(session.GetRegistry(), scenario.water_chunks);
     session.GetWaterSystem()->update(session.GetRegistry(), scenario.water_chunks);
     ASSERT_TRUE(chunk->has_water_sim.load());
@@ -7316,6 +7377,7 @@ TEST(GameSessionHeadlessWorldTest, EmptyRegionalEnergyAgeWorkReachesNextSchedule
     jobs.startup(1);
     GameSession energy, baseline;
     energy.SetAetherStateEnabled(true);
+    baseline.SetAetherStateEnabled(false);
     CreateGroundWorld(energy, root, jobs, "Empty energy work");
     CreateGroundWorld(baseline, root, jobs, "Empty energy work baseline");
     TickOnce(energy);

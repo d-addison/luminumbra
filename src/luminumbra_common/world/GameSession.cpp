@@ -986,7 +986,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
                         const float tod01 =
                             m_activeRegionsEnabled
-                                ? static_cast<float>(m_worldClock.day_phase(current_tick))
+                                ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                                 : static_cast<float>(current_tick % kTicksPerDay) /
                                       static_cast<float>(kTicksPerDay);
                         const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
@@ -2548,6 +2548,12 @@ bool GameSession::ReconcileWorldStateMetadataTo(const fs::path& save_dir) {
         metadata = nlohmann::json::parse(input, nullptr, false);
         if (!metadata.is_object())
             return false;
+        // Missing cursors load as zero. Preserve legacy extensions and formatting when the
+        // evolution state is unchanged; only calendar removal requires a metadata rewrite.
+        if (!metadata.contains("renderCalendar") &&
+            ((!metadata.contains("waterSimCursor") && cursor == 0) ||
+             (metadata.contains("waterSimCursor") && metadata.at("waterSimCursor") == cursor)))
+            return true;
     }
     metadata.erase("renderCalendar");
     metadata["waterSimCursor"] = cursor;
