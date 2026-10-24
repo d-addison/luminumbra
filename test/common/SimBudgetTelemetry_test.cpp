@@ -1,7 +1,10 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+
 #include <gtest/gtest.h>
 #include <iterator>
 #include <memory>
@@ -27,9 +30,8 @@ using luminumbra::simulation::SimBudgetTelemetry;
 
 TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
     namespace fs = std::filesystem;
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const fs::path output =
-        fs::temp_directory_path() / ("smoke_artifact_" + std::to_string(stamp) + ".json");
+    const Luminumbra::TestSupport::ScopedTempFile file("smoke_artifact_", ".json");
+    const fs::path& output = file.Path();
     for (int scenario = 0; scenario != 3; ++scenario) {
         SCOPED_TRACE(scenario);
         ServerCliOptions options;
@@ -62,13 +64,15 @@ TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
 #endif
         EXPECT_EQ(actual, baseline);
     }
-    fs::remove(output);
 }
 
 TEST(SimBudgetTelemetry, WaterWorkIsZeroAfterEmptyAndPausedUpdates) {
     using namespace Luminumbra;
-    Systems::SHIELD_WorldSystem world(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
+    Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
     Systems::WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
     entt::registry registry;
     auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
     chunk->has_water_sim = true;
@@ -402,10 +406,8 @@ TEST(SimBudgetTelemetry, EnforcementIsByteNeutralWithoutEnabledCollector) {
 }
 
 TEST(SimBudgetTelemetry, SmokeFailsOnlyWhenBudgetProfileStageIsExceeded) {
-    namespace fs = std::filesystem;
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const fs::path output =
-        fs::temp_directory_path() / ("smoke_budget_profile_" + std::to_string(stamp) + ".json");
+    const Luminumbra::TestSupport::ScopedTempFile profile_file("smoke_budget_profile_", ".json");
+    const auto& output = profile_file.Path();
     for (const std::uint64_t cap : {std::uint64_t{5}, std::uint64_t{9}}) {
         SCOPED_TRACE(cap);
         ServerCliOptions options;
@@ -427,6 +429,5 @@ TEST(SimBudgetTelemetry, SmokeFailsOnlyWhenBudgetProfileStageIsExceeded) {
         EXPECT_EQ(block.at("no_violation").get<bool>(), !violated);
         EXPECT_EQ(block.at("profile_bytes"), 123);
     }
-    fs::remove(output);
 }
 } // namespace

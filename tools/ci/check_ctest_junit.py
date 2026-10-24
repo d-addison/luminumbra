@@ -26,6 +26,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("report", type=Path)
     parser.add_argument("--minimum-tests", type=int, default=1)
+    parser.add_argument(
+        "--require-test",
+        action="append",
+        default=[],
+        help="Require an exact registered CTest name (repeat for multiple targets)",
+    )
     args = parser.parse_args()
 
     if not args.report.is_file():
@@ -42,9 +48,21 @@ def main() -> int:
         )
         return 1
 
+    registered = {case.get("name") for case in cases}
+    missing = sorted(set(args.require_test) - registered)
+    if missing:
+        print("Required CTest cases are missing:", file=sys.stderr)
+        for name in missing:
+            print(f"  - {name}", file=sys.stderr)
+        return 1
+
     unexpected: list[str] = []
     approved_skips = 0
     for case in cases:
+        if (case.get("status") not in (None, "run")
+                or case.get("result") not in (None, "completed")):
+            unexpected.append(case.get("name", "<unnamed>"))
+            continue
         if case.find("skipped") is None:
             continue
         if skip_is_allowed(case):

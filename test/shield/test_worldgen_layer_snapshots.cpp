@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/Environment.h"
+#include "core/FilesystemPath.h"
 #include "core/JobSystem.h"
 #include "entt/entt.hpp"
 #include "nlohmann/json.hpp"
@@ -128,8 +129,24 @@ fs::path ArtifactRoot() {
     return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "worldgen_layers";
 }
 
-TerrainGenParams TerrainLayerParams() {
+TerrainGenParams SyntheticTerrainParams() {
     TerrainGenParams params;
+    params.surface_breaks_enabled = false;
+    params.island_mask_enabled = false;
+    params.biomes_enabled = false;
+    params.biome_relief_enabled = false;
+    params.cliffs_enabled = false;
+    params.rivers_enabled = false;
+    params.lakes_enabled = false;
+    params.structures_enabled = false;
+    params.hydro_enabled = false;
+    params.biome_table_path.clear();
+    params.structures_data_dir.clear();
+    return params;
+}
+
+TerrainGenParams TerrainLayerParams() {
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.035f;
     params.base_amplitude = 8.0f;
     params.octaves = 5;
@@ -152,7 +169,7 @@ TerrainGenParams CaveLayerParams() {
 }
 
 TerrainGenParams WaterLayerParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.02f;
     params.base_amplitude = 1.0f;
     params.height_offset = -4.0f;
@@ -703,7 +720,7 @@ TEST(WorldGenLayerSnapshotTest, ExportsLayerMetricsAndImages) {
 }
 
 TEST(WorldGenLayerSnapshotTest, GeneratedSpawnCollisionPreventsFallThrough) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -746,7 +763,7 @@ TEST(WorldGenLayerSnapshotTest, GeneratedSpawnCollisionPreventsFallThrough) {
 // sea level. The user hit a 0xC0000005 here. This drives that EXACT sequence so a regression
 // segfaults the suite (and proves the fix). No GL needed -> CPU build/mesh path only.
 TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 24.0f;
     params.octaves = 4;
@@ -777,7 +794,7 @@ TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
 }
 
 TEST(WorldGenLayerSnapshotTest, SpawnCollisionBootstrapPreparesWalkingStart) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -868,7 +885,7 @@ TEST(WorldGenLayerSnapshotTest, DefaultWalkingSpawnRemainsSupportedAtClampedFram
 }
 
 TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborhood) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -948,7 +965,7 @@ TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborho
 }
 
 TEST(WorldGenLayerSnapshotTest, SpawnReadyNeighborhoodMeshesBroadSurfaceArea) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -987,7 +1004,7 @@ TEST(WorldGenLayerSnapshotTest, SpawnReadyNeighborhoodMeshesBroadSurfaceArea) {
 }
 
 TEST(WorldGenLayerSnapshotTest, LodRemeshKeepsPreviousMeshRenderableWhilePending) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -1073,7 +1090,7 @@ TEST(WorldGenLayerSnapshotTest, ExplicitEnsureSurfaceReadyNearMakesTeleportNearF
     // field fully renderable (async), but an explicit EnsureSurfaceReadyNear
     // call does - 49/49 renderable, no holes - which is exactly what the
     // pre-capture call provides to the LodGround coverage gate.
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -1135,7 +1152,7 @@ TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
     // surface scan immediately re-candidated - a churn loop that left holes
     // on mountain summits. Chunks inside their column's surface band must be
     // exempt from the vertical test; chunks far off the surface still unload.
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 0.0f;  // flat world...
     params.height_offset = 200.0f; //... with its surface in chunk-Y 12
@@ -1172,7 +1189,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudg
     // gate checks the live budget on the shipped preset at runtime). The
     // count mirrors update_chunk_activation's candidate rule: every chunk-Y
     // in the column span at every ring, plus the +-1 stack inside ring 12.
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.008f;
     params.base_amplitude = 120.0f;
     params.octaves = 6;
@@ -1349,7 +1366,7 @@ constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gc
 std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     std::vector<DefaultShapingHeightFixture> fixtures;
 
-    TerrainGenParams default_params;
+    TerrainGenParams default_params = SyntheticTerrainParams();
     default_params.base_frequency = 0.01f;
     default_params.base_amplitude = 12.0f;
     default_params.octaves = 4;
@@ -1362,7 +1379,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         default_params,
                         ToolchainHeightHash(0x5b1177b7f0cd121full, 0xaec140c43a735f9eull)});
 
-    TerrainGenParams flat_params;
+    TerrainGenParams flat_params = SyntheticTerrainParams();
     flat_params.base_frequency = 0.02f;
     flat_params.base_amplitude = 10.0f;
     flat_params.octaves = 2;
@@ -1375,7 +1392,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         flat_params,
                         ToolchainHeightHash(0x499fac5a81a7784bull, 0x6b50de342336674aull)});
 
-    TerrainGenParams mountains_params;
+    TerrainGenParams mountains_params = SyntheticTerrainParams();
     mountains_params.base_frequency = 0.008f;
     mountains_params.base_amplitude = 120.0f;
     mountains_params.octaves = 6;
@@ -1388,7 +1405,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         mountains_params,
                         ToolchainHeightHash(0x1373155178dab3c8ull, 0xd8f3adb6564f52d4ull)});
 
-    TerrainGenParams archipelago_params;
+    TerrainGenParams archipelago_params = SyntheticTerrainParams();
     archipelago_params.base_frequency = 0.009f;
     archipelago_params.base_amplitude = 110.0f;
     archipelago_params.octaves = 6;
@@ -1403,7 +1420,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         archipelago_params,
                         ToolchainHeightHash(0x7f4ee46cde9fe0d4ull, 0xc4110e0446935b91ull)});
 
-    TerrainGenParams forest_params;
+    TerrainGenParams forest_params = SyntheticTerrainParams();
     forest_params.base_frequency = 0.008f;
     forest_params.base_amplitude = 50.0f;
     forest_params.octaves = 6;
@@ -1472,8 +1489,12 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     // self-affine gates below still pass (land_h_p95 7.85>6; spectral beta 2.70 in
     // [1.8,3]). 0x940d621a2e3c0436 -> 0xf26e830fb364b045. Visual-QA clean
     // (WorldVisualSweep 0 flags); FarLodHorizon/PlayerView/WaterfallVisual pass.
+    // Defaults-on enables authored rivers/lakes/cliffs and biome relief. Archipelago
+    // remains in its coastal realism band (CI beta=2.67673). GCC/UCRT64 before:
+    // 0xd28a6e2408dd073f; after: 0x0fcae21e66b660ea (both HEAD CI logs).
+    // MSVC before: 0x1bc4be90440f9130; after: 0x6fa5f56b0a31f91d (CI log).
     constexpr std::uint64_t kArchipelagoShapedHash =
-        ToolchainHeightHash(0x1bc4be90440f9130ull, 0xd28a6e2408dd073full);
+        ToolchainHeightHash(0x6fa5f56b0a31f91dull, 0x0fcae21e66b660eaull);
     EXPECT_EQ(hash, kArchipelagoShapedHash)
         << "shipped archipelago preset terrain drifted; if intentional, bump "
         << "kArchipelagoShapedHash deliberately and document before/after in "
@@ -1485,7 +1506,7 @@ namespace {
 // Synthetic shaping params for the  parity/determinism gates (engine
 // tests must not depend on game preset data choices).
 TerrainGenParams ShapingTestParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.008f;
     params.base_amplitude = 60.0f;
     params.octaves = 5;
@@ -1704,7 +1725,8 @@ TEST(WorldGenLayerSnapshotTest, BatchedVertexMaterialsMatchPerVertexClassificati
     {
         TerrainGenParams biome_params = ShapingTestParams();
         biome_params.biomes_enabled = true;
-        biome_params.biome_table_path = (SourceRoot() / "data" / "common" / "biomes.json").string();
+        biome_params.biome_table_path = Luminumbra::Filesystem::GenericUtf8PathString(
+            SourceRoot() / "data" / "common" / "biomes.json");
         biome_params.temperature_frequency = 0.003f;
         biome_params.humidity_frequency = 0.004f;
         run(biome_params);
@@ -1762,7 +1784,7 @@ fs::path BiomeTablePath() {
 TerrainGenParams BiomeEnabledParams() {
     TerrainGenParams params = ShapingTestParams();
     params.biomes_enabled = true;
-    params.biome_table_path = BiomeTablePath().string();
+    params.biome_table_path = Luminumbra::Filesystem::GenericUtf8PathString(BiomeTablePath());
     params.temperature_frequency = 0.003f;
     params.humidity_frequency = 0.004f;
     return params;
@@ -2060,7 +2082,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
             ++total_columns;
             if (influence > 0.0f) {
                 ++river_columns;
-                river_cell[static_cast<std::size_t>(zi) * side + xi] = 1;
+                river_cell[static_cast<std::size_t>(zi) * side + static_cast<std::size_t>(xi)] = 1;
                 // The carve only sinks columns that started above the channel
                 // floor; the channel center (influence ~1) must reach water.
                 if (height < SEA_LEVEL) {
@@ -2082,7 +2104,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
     for (int zi = 0; zi < side; ++zi) {
         int run = 0;
         for (int xi = 0; xi < side; ++xi) {
-            if (river_cell[static_cast<std::size_t>(zi) * side + xi]) {
+            if (river_cell[static_cast<std::size_t>(zi) * side + static_cast<std::size_t>(xi)]) {
                 ++run;
                 longest_run = std::max(longest_run, run);
             } else {
@@ -2264,15 +2286,15 @@ SlopeHistogramMetrics ComputeSlopeHistogram(const std::string& preset_name,
 
     metrics.samples = slopes.size();
     const double count = static_cast<double>(metrics.samples);
-    metrics.flat_fraction = flat / count;
-    metrics.normal_slope_fraction = normal_slope / count;
-    metrics.walkable_fraction = walkable / count;
-    metrics.steep_fraction = steep / count;
-    metrics.cliff_fraction = cliff / count;
-    metrics.normal_land_fraction = normal_land / count;
+    metrics.flat_fraction = static_cast<double>(flat) / count;
+    metrics.normal_slope_fraction = static_cast<double>(normal_slope) / count;
+    metrics.walkable_fraction = static_cast<double>(walkable) / count;
+    metrics.steep_fraction = static_cast<double>(steep) / count;
+    metrics.cliff_fraction = static_cast<double>(cliff) / count;
+    metrics.normal_land_fraction = static_cast<double>(normal_land) / count;
 
     metrics.land_samples = land;
-    metrics.land_fraction = land / count;
+    metrics.land_fraction = static_cast<double>(land) / count;
     if (land > 0) {
         metrics.land_walkable_fraction =
             static_cast<double>(land_walkable) / static_cast<double>(land);
@@ -2570,48 +2592,64 @@ double SpectralBeta(const std::vector<float>& field, int grid) {
         return 0.0; // require power of two
 
     // Mean-remove + separable Hann window.
-    std::vector<double> win(n);
+    std::vector<double> win(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
-        win[i] = 0.5 * (1.0 - std::cos(2.0 * kPi * i / (n - 1)));
+        win[static_cast<std::size_t>(i)] = 0.5 * (1.0 - std::cos(2.0 * kPi * i / (n - 1)));
     }
     double mean = 0.0;
     for (float v : field)
         mean += static_cast<double>(v);
     mean /= static_cast<double>(field.size());
 
-    std::vector<double> re(static_cast<std::size_t>(n) * n);
-    std::vector<double> im(static_cast<std::size_t>(n) * n, 0.0);
+    std::vector<double> re(static_cast<std::size_t>(n) * static_cast<std::size_t>(n));
+    std::vector<double> im(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < n; ++i) {
-            re[static_cast<std::size_t>(j) * n + i] =
-                (static_cast<double>(field[static_cast<std::size_t>(j) * n + i]) - mean) * win[i] *
-                win[j];
+            re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] =
+                (static_cast<double>(
+                     field[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                           static_cast<std::size_t>(i)]) -
+                 mean) *
+                win[static_cast<std::size_t>(i)] * win[static_cast<std::size_t>(j)];
         }
     }
 
     // FFT rows, then columns.
-    std::vector<double> rr(n), ri(n);
+    std::vector<double> rr(static_cast<std::size_t>(n)), ri(static_cast<std::size_t>(n));
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < n; ++i) {
-            rr[i] = re[static_cast<std::size_t>(j) * n + i];
-            ri[i] = im[static_cast<std::size_t>(j) * n + i];
+            rr[static_cast<std::size_t>(i)] =
+                re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
+            ri[static_cast<std::size_t>(i)] =
+                im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
         }
         Fft1D(rr, ri);
         for (int i = 0; i < n; ++i) {
-            re[static_cast<std::size_t>(j) * n + i] = rr[i];
-            im[static_cast<std::size_t>(j) * n + i] = ri[i];
+            re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = rr[static_cast<std::size_t>(i)];
+            im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = ri[static_cast<std::size_t>(i)];
         }
     }
-    std::vector<double> cr(n), ci(n);
+    std::vector<double> cr(static_cast<std::size_t>(n)), ci(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j) {
-            cr[j] = re[static_cast<std::size_t>(j) * n + i];
-            ci[j] = im[static_cast<std::size_t>(j) * n + i];
+            cr[static_cast<std::size_t>(j)] =
+                re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
+            ci[static_cast<std::size_t>(j)] =
+                im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                   static_cast<std::size_t>(i)];
         }
         Fft1D(cr, ci);
         for (int j = 0; j < n; ++j) {
-            re[static_cast<std::size_t>(j) * n + i] = cr[j];
-            im[static_cast<std::size_t>(j) * n + i] = ci[j];
+            re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = cr[static_cast<std::size_t>(j)];
+            im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+               static_cast<std::size_t>(i)] = ci[static_cast<std::size_t>(j)];
         }
     }
 
@@ -2623,9 +2661,14 @@ double SpectralBeta(const std::vector<float>& field, int grid) {
         const int kv = (j <= half) ? j : j - n;
         for (int i = 0; i < n; ++i) {
             const int ku = (i <= half) ? i : i - n;
-            const double p =
-                re[static_cast<std::size_t>(j) * n + i] * re[static_cast<std::size_t>(j) * n + i] +
-                im[static_cast<std::size_t>(j) * n + i] * im[static_cast<std::size_t>(j) * n + i];
+            const double p = re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                static_cast<std::size_t>(i)] *
+                                 re[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                    static_cast<std::size_t>(i)] +
+                             im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                static_cast<std::size_t>(i)] *
+                                 im[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) +
+                                    static_cast<std::size_t>(i)];
             const int r = static_cast<int>(std::lround(
                 std::sqrt(static_cast<double>(ku) * ku + static_cast<double>(kv) * kv)));
             if (r >= 0 && r <= half) {
@@ -2681,7 +2724,8 @@ RealismMetrics ComputeRealismMetrics(const std::string& preset_name,
         for (int i = 0; i < lattice; ++i) {
             const float x = origin + static_cast<float>(i) * spacing;
             const float z = origin + static_cast<float>(j) * spacing;
-            heights[static_cast<std::size_t>(j) * lattice + i] = world.GetTerrainHeightAt(x, z);
+            heights[static_cast<std::size_t>(j) * lattice + static_cast<std::size_t>(i)] =
+                world.GetTerrainHeightAt(x, z);
         }
     }
 
@@ -2693,7 +2737,7 @@ RealismMetrics ComputeRealismMetrics(const std::string& preset_name,
     float hmin = std::numeric_limits<float>::max();
     float hmax = std::numeric_limits<float>::lowest();
     const auto at = [&](int ii, int jj) {
-        return heights[static_cast<std::size_t>(jj) * lattice + ii];
+        return heights[static_cast<std::size_t>(jj) * lattice + static_cast<std::size_t>(ii)];
     };
     for (int j = 1; j <= kRealismGrid; ++j) {
         for (int i = 1; i <= kRealismGrid; ++i) {
@@ -2720,10 +2764,10 @@ RealismMetrics ComputeRealismMetrics(const std::string& preset_name,
     }
 
     const double count = static_cast<double>(slopes.size());
-    m.frac_lt5 = lt5 / count;
-    m.frac_lt15 = lt15 / count;
-    m.frac_lt25 = lt25 / count;
-    m.frac_gt35 = gt35 / count;
+    m.frac_lt5 = static_cast<double>(lt5) / count;
+    m.frac_lt15 = static_cast<double>(lt15) / count;
+    m.frac_lt25 = static_cast<double>(lt25) / count;
+    m.frac_gt35 = static_cast<double>(gt35) / count;
     std::sort(slopes.begin(), slopes.end());
     m.slope_p50 = PercentileOfSorted(slopes, 0.50);
     m.slope_p95 = PercentileOfSorted(slopes, 0.95);
@@ -2817,11 +2861,12 @@ void WriteRealismReliefPpm(const RealismMetrics& m, const fs::path& path) {
     if (static_cast<int>(m.relief_field.size()) != n * n)
         return;
     const float range = std::max(0.001f, m.relief_max - m.relief_min);
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(n) * n * 3u);
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(n) * static_cast<std::size_t>(n) *
+                                      3u);
     const auto at = [&](int x, int z) {
         const int cx = std::clamp(x, 0, n - 1);
         const int cz = std::clamp(z, 0, n - 1);
-        return m.relief_field[static_cast<std::size_t>(cz) * n + cx];
+        return m.relief_field[static_cast<std::size_t>(cz) * n + static_cast<std::size_t>(cx)];
     };
     for (int z = 0; z < n; ++z) {
         for (int x = 0; x < n; ++x) {
@@ -2854,7 +2899,8 @@ void WriteRealismReliefPpm(const RealismMetrics& m, const fs::path& path) {
             const float dzdy = at(x, z + 1) - at(x, z - 1);
             float shade = 0.5f + 0.5f * std::clamp((-dzdx - dzdy) * 0.15f, -1.0f, 1.0f);
             shade = 0.55f + 0.45f * shade;
-            const std::size_t p = (static_cast<std::size_t>(z) * n + x) * 3u;
+            const std::size_t p =
+                (static_cast<std::size_t>(z) * n + static_cast<std::size_t>(x)) * 3u;
             pixels[p] = ToByte(std::clamp(r * shade, 0.0f, 1.0f) * 255.0f);
             pixels[p + 1] = ToByte(std::clamp(g * shade, 0.0f, 1.0f) * 255.0f);
             pixels[p + 2] = ToByte(std::clamp(b * shade, 0.0f, 1.0f) * 255.0f);

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -32,6 +33,12 @@ inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
+    // Playback preserves historical omission; fresh worlds select current sampling.
+    world::TerrainPresetUse preset_use = world::TerrainPresetUse::NewWorld;
+    // Playback rechecks dependencies before creating any save directory.
+    std::string required_preset_content_hash;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).
@@ -49,12 +56,14 @@ struct ServerWorldRunnerConfig {
     int test_streaming_radius_cap = 0;
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
-    std::uint64_t autosave_interval_ticks = 0;
+    std::uint64_t autosave_interval_ticks = 9000;
     // When true and autosave_interval_ticks == 0 and sim.active_regions is on, autosave every
     // kDefaultActiveRegionsAutosaveTicks ticks. Only the plain server mode sets it.
     bool autosave_default_when_unset = false;
     // Parked-chunk byte limit applied to the session (sim.active_regions only). 0 = unlimited.
     std::uint64_t parked_bytes_limit = 256ull * 1024ull * 1024ull;
+    // Explicit workload override, applied before world creation or loading.
+    bool finite_hydrology = true;
     //  number of deterministic player avatars to spawn at
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the
@@ -110,7 +119,8 @@ struct ServerWorldRunnerConfig {
     bool water_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
-    // takes effect for the fresh world Boot() creates. Empty = session default.
+    // takes effect for the fresh world Boot() creates. A loaded ledger must match an explicit
+    // override; empty restores persisted settings, or defaults when no ledger exists.
     std::optional<Luminumbra::world::RegionSchedulerConfig> region_scheduler;
 };
 
@@ -203,13 +213,13 @@ public:
     // quiesce). Returns the per-run report. Requires Boot to have succeeded.
     ServerTickReport RunFixedTicks(std::uint64_t tick_count);
 
-    // Deterministic hash over the in-memory streamed-chunk snapshot
+    // Deterministic hash over the in-memory streamed-chunk snapshot and water cursor
     // (WorldSaveService::world_hash; format-independent persistence hash).
     std::string ComputeWorldHash();
 
     // per-system sub-hashes over the SAME streamed-chunk snapshot, for
-    // desync localization. The top-level ComputeWorldHash above is unchanged;
-    // these are additive. entities hashes the deterministic avatar snapshot
+    // desync localization, including water/cursor when only the cursor differs.
+    // Zero cursors preserve legacy hashes. entities hashes the deterministic avatar snapshot
     // (empty only when no avatars are configured). Creature ecology and plants
     // have their own sub-hashes in the composite world hash.
     Persistence::WorldStreamingStateSubHashes ComputeWorldSubHashes();
@@ -224,10 +234,12 @@ public:
                                       Persistence::WorldStreamingStateSubHashes& out_sub);
 
     //  heavy oracle support: persists the COMPLETE in-memory streamed-
-    // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated
-    // GameSession::SaveWorldState, which writes nothing for a never-edited
-    // world). Used so a freshly loaded session adopts exactly this chunk set and
-    // the save/load round-trip is comparable. Returns the chunk count written.
+    // chunk snapshot via WorldSaveService::save_world, regardless of the voxel
+    // dirty flags used by GameSession::SaveWorldState. Used so a freshly loaded
+    // session adopts exactly this chunk set and
+    // the save/load round-trip is comparable. Returns the chunk count written,
+    // or zero if any required writer fails. Preset/identity refusal preserves disk bytes
+    // and pending state; dirty chunks are acknowledged only after metadata, plants and energy.
     std::size_t SaveFullSnapshot();
 
     std::size_t StreamedChunkCount();

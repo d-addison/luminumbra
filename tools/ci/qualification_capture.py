@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
 import sys
@@ -16,6 +17,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
+_SHARD_SPEC = importlib.util.spec_from_file_location("ctest_shards", ROOT / "tools/ci/ctest_shards.py")
+_SHARDS = importlib.util.module_from_spec(_SHARD_SPEC)
+_SHARD_SPEC.loader.exec_module(_SHARDS)
 REPO = "d-addison/luminumbra"
 SCHEMA = "luminumbra.ci_qualification_capture.v1"
 LANES = {
@@ -72,7 +76,8 @@ def module(name):
 
 
 def command(argv):
-    result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False)
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, encoding="utf-8", timeout=120, check=False)
     require(result.returncode == 0, f"command failed: {argv[0]}")
     return result.stdout.strip()
 
@@ -137,8 +142,14 @@ def ambient_receipt(path):
             require(len(lines) <= 1, "duplicate receipt lines in one representation")
             values.extend(lines)
         if values:
-            require(not any(child.tag in ("failure", "error", "skipped") for child in testcase), "ambient testcase failed or skipped")
-            require(testcase.get("name", "").endswith("AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"), "receipt from an unexpected testcase")
+            require(testcase.get("status") in (None, "run")
+                    and testcase.get("result") in (None, "completed")
+                    and not any(child.tag in ("failure", "error", "skipped") for child in testcase),
+                    "ambient testcase failed or skipped/unevaluated")
+            require(testcase.get("name") == "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+                    or (testcase.get("classname") == "AmbientDeterminismReceipt"
+                        and testcase.get("name") == "EmitsConstructorAndEvolvedHashes"),
+                    "receipt from an unexpected testcase")
             require(len(set(values)) == 1, "conflicting ambient representations")
             producers.append(values[0])
     for element in root.iter():
@@ -160,6 +171,51 @@ def successful_producers(lane, outcomes):
     require(all(value == "success" for value in outcomes.values()), "producer failed, skipped, cancelled or missing")
 
 
+def asan_shard_ids():
+    return _SHARDS.shard_ids("asan")
+
+
+def asan_producers(binding, records):
+    expected = list(asan_shard_ids())
+    require(isinstance(records, list) and len(records) == len(expected) and
+            all(isinstance(item, dict) and type(item.get("shard")) is int for item in records) and
+            [item["shard"] for item in records] == expected,
+            f"exactly {len(expected)} ordered ASan shard records required")
+    for record in records:
+        require(all(record[key] == binding[key] for key in binding if key != "run_attempt"),
+                "ASan shard identity differs")
+        # Partial reruns reuse successful shards from earlier attempts of this run.
+        require(type(record["run_attempt"]) is int and 1 <= record["run_attempt"] <= binding["run_attempt"],
+                "ASan shard attempt is invalid or newer than the aggregate")
+        successful_producers("asan", record["producers"])
+        require(re.fullmatch(r"[0-9a-f]{64}", record["binary_sha256"])
+                and re.fullmatch(r"[0-9a-f]{64}", record["junit_sha256"]), "ASan shard digest missing")
+    require(all(record["binary_sha256"] == records[0]["binary_sha256"] for record in records),
+            "ASan shard binary digests differ")
+    receipts = [record for record in records if "ambient" in record]
+    require(len(receipts) == 1, "exactly one ASan shard must produce the ambient receipt")
+    return receipts[0]
+
+
+def write_asan_shard(args):
+    require(args.lane == "asan", "ASan shard requires the ASan lane")
+    require(type(args.shard) is int and args.shard in asan_shard_ids(), "invalid ASan shard")
+    binding = source_identity("asan", args.expected_sha)
+    outcomes = json.loads(os.environ.get("QUALIFICATION_PRODUCERS", "{}"))
+    successful_producers("asan", outcomes)
+    record = dict(binding, shard=args.shard, producers=outcomes,
+                  binary_sha256=digest(args.binary), junit_sha256=digest(args.junit))
+    cases = ET.parse(args.junit).getroot().iter("testcase")
+    if any(case.get("name") == "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+           or (case.get("classname") == "AmbientDeterminismReceipt"
+               and case.get("name") == "EmitsConstructorAndEvolvedHashes")
+           for case in cases):
+        record["ambient"] = ambient_receipt(args.junit)
+    with args.output.open("x", encoding="utf-8") as stream:
+        json.dump(record, stream, sort_keys=True, indent=2)
+        stream.write("\n")
+
+
 def capture_contract(directory, expected, fixture, binary_hash, producer_root):
     loaded = module("sim_budget_io").load_capture(directory)
     manifest = loaded["manifest"]
@@ -167,16 +223,17 @@ def capture_contract(directory, expected, fixture, binary_hash, producer_root):
     require(manifest["fixture_hash"] == fixture and manifest["binary_sha256"] == binary_hash, "capture fixture/binary identity differs")
     require(all(manifest[key] == value and type(manifest[key]) is type(value) for key, value in PARAMETERS.items()), "capture parameters differ")
     require(tuple(run["preset"] for run in manifest["runs"]) == PRESETS, "exact three ordered presets required")
-    root = Path(producer_root)
+    # This is producer metadata; its filesystem syntax can differ from ours.
+    root = PureWindowsPath(producer_root) if PureWindowsPath(producer_root).drive else PurePosixPath(producer_root)
     require(root.is_absolute() and str(root) == producer_root, "producer source root missing or malformed")
     binary = root / SERVER_BINARY
     for run in manifest["runs"]:
         require(run["artifact"] == f"{run['preset']}.json", "capture artifact path differs")
         argv = run.get("command")
-        require(isinstance(argv, list) and len(argv) == 20, "capture command missing or malformed")
+        require(isinstance(argv, list) and len(argv) == 22, "capture command missing or malformed")
         artifact = root / "build/qualification/sim-budget-capture" / run["artifact"]
         expected_argv = module("capture_sim_budget").command(binary, root, artifact, run["preset"], "1337", 600, 1, 1)
-        require(argv == expected_argv and Path(argv[-1]).name == run["artifact"], "capture command flags/identity differ")
+        require(argv == expected_argv and type(root)(argv[-1]).name == run["artifact"], "capture command flags/identity differ")
     return loaded
 
 
@@ -194,10 +251,24 @@ def write_manifest(args):
     try:
         binding = source_identity(args.lane, args.expected_sha)
         outcomes = json.loads(os.environ.get("QUALIFICATION_PRODUCERS", "{}"))
+        if args.lane == "asan":
+            require(outcomes == {"tests": "success"}, "ASan aggregate checks did not succeed")
+            records = []
+            for shard in asan_shard_ids():
+                source = args.asan_shards / f"shard-{shard}"
+                record = read_json(source / "qualification-shard.json")
+                require(record["junit_sha256"] == digest(source / "ctest.junit.xml"), "ASan shard JUnit digest differs")
+                records.append(record)
+            producer = asan_producers(binding, records)
+            require(producer["ambient"] == ambient_receipt(args.junit), "merged ASan receipt differs")
+            document["asan_shards"] = records
+            outcomes = dict.fromkeys(LANES["asan"][2], "success")
+            document["binary_sha256"] = producer["binary_sha256"]
+        else:
+            require(args.binary is not None and args.binary.is_file(), "producer binary missing")
+            document["binary_sha256"] = digest(args.binary)
         document.update(binding, producers=outcomes)
         successful_producers(args.lane, outcomes)
-        require(args.binary.is_file(), "producer binary missing")
-        document["binary_sha256"] = digest(args.binary)
         if args.lane == "server-capture":
             require(args.binary.resolve() == ROOT / SERVER_BINARY, "server binary path differs")
             require(digest(args.baseline) == digest(BASELINE), "baseline is not from this candidate")
@@ -219,7 +290,7 @@ def write_manifest(args):
         for path in files:
             path = path.resolve()
             require(path.is_relative_to(parent), "manifest artifacts must be contained beside the manifest")
-            artifacts[str(path.relative_to(parent))] = digest(path)
+            artifacts[path.relative_to(parent).as_posix()] = digest(path)
         document["files"] = artifacts
         document["status"] = "complete"
     except (ValueError, OSError, KeyError, TypeError, AttributeError, ImportError, UnicodeError, zipfile.BadZipFile, ET.ParseError, subprocess.SubprocessError) as error:
@@ -257,6 +328,23 @@ def verify_producer(document):
     else:
         raise ValueError("producer job pagination did not terminate")
     matches = [job for job in jobs if job["name"] == document["job_name"]]
+    # Native qualification remains a single full producer with the original
+    # binary-bound manifest. New runs also have a required-name aggregate.
+    full = [job for job in jobs if job["name"] == document["job_name"] + " full qualification"]
+    if document["lane"] in ("linux-gcc", "windows-msvc", "windows-ucrt64"):
+        if full:
+            require(len(matches) == 1 and matches[0]["status"] == "completed" and
+                    matches[0]["conclusion"] == "success", "qualification aggregate not successful")
+            matches = full
+        else:
+            # Older full captures used the required name for the producer itself.
+            # Prove its native steps so a new aggregate alone cannot stand in.
+            required = ("Configure, build, and test",) if document["lane"] == "windows-msvc" else ("Configure", "Build", "Test")
+            require(len(matches) == 1, "full qualification producer missing")
+            for name in required:
+                native = [step for step in matches[0].get("steps", []) if step["name"] == name]
+                require(len(native) == 1 and native[0]["status"] == "completed" and
+                        native[0]["conclusion"] == "success", "full qualification native step missing or unsuccessful")
     require(len(matches) == 1 and matches[0]["status"] == "completed" and matches[0]["conclusion"] == "success", "producer job not independently successful")
     return {"job_id": matches[0]["id"], "completed_at": matches[0]["completed_at"]}
 
@@ -284,6 +372,12 @@ def validate_chain(expected, paths):
                 and document["job_name"] == LANES[lane][1], "workflow/job declaration differs")
         require(document["source_dirty"] is False and document["fixture_scope"] == "headless-server", "dirty source or fixture definition mismatch")
         successful_producers(lane, document["producers"])
+        if lane == "asan":
+            binding = {**identity(lane, expected, env, document["candidate_sha"]),
+                       "source_dirty": False, "fixture_scope": "headless-server", "fixture_hash": fixture}
+            producer = asan_producers(binding, document["asan_shards"])
+            require(producer["binary_sha256"] == document["binary_sha256"]
+                    and producer["ambient"] == document["ambient"], "ASan producer binding differs")
         require(re.fullmatch(r"[0-9a-f]{64}", document["binary_sha256"]), "binary identity missing")
         require(document["files"], "manifest has no evidence files")
         for name, value in document["files"].items():
@@ -406,18 +500,21 @@ def validate_archives(expected, selections):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="mode", required=True)
-    for name in ("preflight", "write"):
+    for name in ("preflight", "write", "asan-shard"):
         sub = commands.add_parser(name)
         sub.add_argument("--lane", choices=tuple(LANES), required=True)
         sub.add_argument("--expected-sha", required=True)
-        if name == "write":
-            sub.add_argument("--binary", type=Path, required=True)
+        if name in ("write", "asan-shard"):
+            sub.add_argument("--binary", type=Path, required=name == "asan-shard")
             sub.add_argument("--output", type=Path, required=True)
             sub.add_argument("--junit", type=Path)
             sub.add_argument("--capture", type=Path)
             sub.add_argument("--proposal", type=Path)
             sub.add_argument("--check", type=Path)
             sub.add_argument("--baseline", type=Path)
+            sub.add_argument("--asan-shards", type=Path)
+        if name == "asan-shard":
+            sub.add_argument("--shard", type=int, choices=asan_shard_ids(), required=True)
     sub = commands.add_parser("validate-chain")
     sub.add_argument("--expected-sha", required=True)
     sub.add_argument("--artifact", nargs=4, action="append", required=True,
@@ -429,6 +526,8 @@ def main(argv=None):
             preflight(args.lane, args.expected_sha)
         elif args.mode == "write":
             write_manifest(args)
+        elif args.mode == "asan-shard":
+            write_asan_shard(args)
         else:
             result = validate_archives(args.expected_sha, args.artifact)
             with args.output.open("x", encoding="utf-8") as stream:

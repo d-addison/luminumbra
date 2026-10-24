@@ -127,19 +127,24 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 // cross-chunk flux, which needs neighbour chunks' boundary cells to align cell-for-cell.
 // Chunks are 16 m across, so Medium (8x8) is 2 m cells and High (16x16 -> 1 m cells)
 // resolves a river channel. Visual mesh LOD, if wanted, stays a separate  concern.
-// The resolution lives in m_sim_resolution (default Medium); sim.water_high_res
-// raises a session to High ONCE at construction via SetSimResolution — never mid-run.
-// Perf: High (16) was ~4x and spiked the moving water phase to ~130ms; Medium is ~4x cheaper (~32ms
-// worst) and still uniform+deterministic. Cross-chunk flux REQUIRES a uniform resolution (boundary
-// cells must align). A mixed-resolution variant would require explicit seam resampling.
+// The resolution lives in m_sim_resolution (default High); explicit sim.water_high_res=false
+// selects Medium at construction via SetSimResolution — never mid-run.
+// At uniform resolution, live solver steps are bounded by the 4096-cell budget:
+// 16 chunks at High, 64 at Medium.
+// High first-time grid seeding costs about 4x per chunk, amortized at six chunks per live tick;
+// live grid migration resizes one chunk per tick. Steady-state solver time is a few percent higher
+// (see docs/known-limitations.md). These caps do not bound resident-chunk scans or activity
+// scoring; boot settle seeds and simulates the full backlog, and world load migrates all mismatched
+// grids in one pass. Cross-chunk flux REQUIRES a uniform resolution (boundary cells must align). A
+// mixed-resolution variant would require explicit seam resampling.
 
 // Per-tick rotating sim-window length in CHUNKS, derived from the cell budget at the single
 // uniform sim resolution. Medium (8x8 = 64 cells/chunk) -> 4096/64 = 64 chunks, identical to the
 // historical fixed 64-chunk window, so the persisted waterSimCursor semantics and the hashed
 // trajectory are untouched; only a resolution change re-derives it (High: 4096/256 = 16 chunks).
-// Derived at runtime from m_sim_resolution in update() — at the Medium default the
+// Derived at runtime from m_sim_resolution in update() — with explicit Medium the
 // values (64 cells/chunk, 64-chunk window) and arithmetic are identical to the old
-// constexpr pair, so the default trajectory is byte-identical.
+// constexpr pair, so the explicit Medium trajectory is byte-identical.
 
 namespace {
 
@@ -258,7 +263,7 @@ void StepChunkWaterFixed(Chunk& c,
         static_cast<int>(c.water_bed_mm.size()) != n)
         return;
     if (static_cast<int>(c.water_edge_flux.size()) != 2 * n) {
-        c.water_edge_flux.assign(2 * n, 0);
+        c.water_edge_flux.assign(static_cast<std::size_t>(2 * n), 0);
         c.mark_water_state_dirty();
     }
 
@@ -270,7 +275,7 @@ void StepChunkWaterFixed(Chunk& c,
     const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
     const std::int32_t sea_mm = 0; // SEA_LEVEL == 0
     auto IDX = [res](int x, int z) {
-        return z * res + x;
+        return static_cast<std::size_t>(z * res + x);
     };
 
     // (Step 3) reuse scratch storage across calls (single-threaded, non-recursive sim) — fully
@@ -295,17 +300,19 @@ void StepChunkWaterFixed(Chunk& c,
         // the consumed result is BYTE-IDENTICAL to the per-tick computation (run==replay /
         // host==peer).
         if (static_cast<int>(c.water_src_mm.size()) != n) {
-            c.water_src_mm.assign(n, 0);
+            c.water_src_mm.assign(static_cast<std::size_t>(n), 0);
             for (int z = 0; z < res; ++z)
                 for (int x = 0; x < res; ++x) {
-                    const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                    const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                    const float wx = static_cast<float>(cc.x * CHUNK_SIZE_X) +
+                                     (static_cast<float>(x) + 0.5f) * cw_x;
+                    const float wz = static_cast<float>(cc.z * CHUNK_SIZE_Z) +
+                                     (static_cast<float>(z) + 0.5f) * cw_z;
                     if (shield.RiverInfluenceAt(wx, wz) >= RIVER_SOURCE_THRESHOLD) {
                         c.water_src_mm[IDX(x, z)] = RIVER_DISCHARGE_MM;
                     }
                 }
         }
-        for (int i = 0; i < n; ++i) {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(n); ++i) {
             depth[i] += c.water_src_mm[i]; // += 0 for non-source cells (byte-identical)
             out_src += c.water_src_mm[i];
         }
@@ -314,7 +321,7 @@ void StepChunkWaterFixed(Chunk& c,
     // precipitation). It lands on every column; the flux below carries it to the low spots, so
     // rainfall pools into puddles -> ponds -> lakes and runs off slopes toward the sea.
     if (rain_mm > 0) {
-        for (int i = 0; i < n; ++i)
+        for (std::size_t i = 0; i < static_cast<std::size_t>(n); ++i)
             depth[i] += rain_mm;
         out_src += static_cast<std::int64_t>(rain_mm) * n;
     }
@@ -327,8 +334,10 @@ void StepChunkWaterFixed(Chunk& c,
     if (weather_rain != nullptr && weather_scale_mm > 0) {
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float p = weather_rain->PrecipitationAt(Vec3(wx, 0.0f, wz));
                 const std::int32_t r =
                     static_cast<std::int32_t>(p * static_cast<float>(weather_scale_mm) + 0.5f);
@@ -344,14 +353,14 @@ void StepChunkWaterFixed(Chunk& c,
     // (Step 3) thread_local scratch, resize-without-shrink; all n entries written below, so
     // byte-identical to a fresh value-initialized vector.
     thread_local std::vector<std::int64_t> surf;
-    surf.resize(n);
-    for (int i = 0; i < n; ++i)
+    surf.resize(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < static_cast<std::size_t>(n); ++i)
         surf[i] = static_cast<std::int64_t>(bed[i]) + depth[i];
     // Per-edge constants at THIS chunk's resolution (see the resolution-scaling block above).
     // At the Medium default these are the exact historical integers -> byte-identical.
     const std::int64_t k_accel = KAccelForResolution(res);
     const std::int32_t min_flow_mm = MinFlowForResolution(res);
-    auto compute_edge = [&](int i, int j, int eidx) {
+    auto compute_edge = [&](std::size_t i, std::size_t j, std::size_t eidx) {
         const std::int64_t dSurf = surf[i] - surf[j];
         std::int64_t q = static_cast<std::int64_t>(flux[eidx]) + ((k_accel * dSurf) >> FLOW_SHIFT);
         q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
@@ -365,7 +374,7 @@ void StepChunkWaterFixed(Chunk& c,
     };
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x) {
-            const int i = IDX(x, z);
+            const std::size_t i = IDX(x, z);
             if (x + 1 < res)
                 compute_edge(i, IDX(x + 1, z), 2 * i + 0);
             else
@@ -383,7 +392,7 @@ void StepChunkWaterFixed(Chunk& c,
     // order-independent.
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x) {
-            const int i = IDX(x, z);
+            const std::size_t i = IDX(x, z);
             std::int32_t* e[4];
             std::int32_t sgn[4];
             int ne = 0;
@@ -419,7 +428,7 @@ void StepChunkWaterFixed(Chunk& c,
     // --- : APPLY (symmetric: same int subtracted from P, added to N -> exact, order-free) ---
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x) {
-            const int i = IDX(x, z);
+            const std::size_t i = IDX(x, z);
             if (x + 1 < res) {
                 const std::int32_t q = flux[2 * i + 0];
                 depth[i] -= q;
@@ -439,7 +448,7 @@ void StepChunkWaterFixed(Chunk& c,
     const bool have_mirror = (static_cast<int>(c.water_level_data.size()) == n);
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x) {
-            const int i = IDX(x, z);
+            const std::size_t i = IDX(x, z);
             if (depth[i] < 0)
                 depth[i] = 0;       // defensive; the K-clamp should already guarantee this
             if (bed[i] <= sea_mm) { // ocean is an infinite SINK: settle the surface at sea level
@@ -683,7 +692,7 @@ void WaterSystem::update(entt::registry& registry,
     // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell
     // (~16ms/frame, profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the
     // heightmap the mesher already computed into heightmap_data (proven by the EXPECT_EQ parity
-    // gate, commit 8348e0e9), so REUSE it — a cheap array read instead of a ~125us multi-octave
+    // gate), so REUSE it — a cheap array read instead of a ~125us multi-octave
     // sample. Read it HERE on the MAIN THREAD: an active chunk's LIVE heightmap_data is only ever
     // (re)written by the main-thread LOD publish (process_completed_meshing_jobs); off-thread
     // meshing writes scratch/pending, never the live array. So this read cannot race, and the
@@ -720,15 +729,15 @@ void WaterSystem::update(entt::registry& registry,
                 continue;
             if (static_cast<int>(cp->heightmap_data.size()) != hm_stride * hm_stride)
                 continue;
-            terrain_seed[i].resize(static_cast<std::size_t>(res) * res);
+            terrain_seed[i].resize(static_cast<std::size_t>(res) * static_cast<std::size_t>(res));
             for (int z = 0; z < res; ++z) {
                 for (int x = 0; x < res; ++x) {
                     // Water cell centre is chunk-local (step*x + step/2, step*z + step/2) — an
                     // integer heightmap node (2x+1 at Medium's step 2), and heightmap[node] ==
                     // GetTerrainHeightAt(node) to the BIT (parity gate) -> byte-exact.
-                    terrain_seed[i][static_cast<std::size_t>(z) * res + x] =
-                        cp->heightmap_data[(hm_step * x + hm_step / 2) +
-                                           (hm_step * z + hm_step / 2) * hm_stride];
+                    terrain_seed[i][static_cast<std::size_t>(z * res + x)] =
+                        cp->heightmap_data[static_cast<std::size_t>(
+                            (hm_step * x + hm_step / 2) + (hm_step * z + hm_step / 2) * hm_stride)];
                 }
             }
         }
@@ -739,7 +748,8 @@ void WaterSystem::update(entt::registry& registry,
         // camera-driven resize -> the hashed grid is uniform + stable on every peer).
         const int initial_resolution = m_sim_resolution;
         cp->current_water_resolution.store(initial_resolution);
-        const size_t sim_size = static_cast<size_t>(initial_resolution) * initial_resolution;
+        const size_t sim_size =
+            static_cast<size_t>(initial_resolution) * static_cast<size_t>(initial_resolution);
         cp->water_level_data.assign(sim_size, SEA_LEVEL);
         cp->water_flow_data.assign(sim_size, Vec2(0.0f));
         cp->water_sim_terrain_height.resize(sim_size);
@@ -756,9 +766,11 @@ void WaterSystem::update(entt::registry& registry,
             (terrain.size() == sim_size); // main thread pre-read the heightmap
         for (int z = 0; z < initial_resolution; ++z) {
             for (int x = 0; x < initial_resolution; ++x) {
-                float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
-                float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
-                const int cell = z * initial_resolution + x;
+                float world_x = static_cast<float>(c_coords.x * CHUNK_SIZE_X) +
+                                (static_cast<float>(x) + 0.5f) * cell_width_x;
+                float world_z = static_cast<float>(c_coords.z * CHUNK_SIZE_Z) +
+                                (static_cast<float>(z) + 0.5f) * cell_width_z;
+                const std::size_t cell = static_cast<std::size_t>(z * initial_resolution + x);
                 // Seed the resting surface from worldgen: sea level, raised to the local lake
                 // surface inside basins so perched lakes start (and stay) filled.
                 const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
@@ -857,13 +869,13 @@ void WaterSystem::update(entt::registry& registry,
             // sim-relevant float mutation the mm solver never saw.
             const std::int32_t add_mm = static_cast<std::int32_t>(water_added * 1000.0f + 0.5f);
             if (add_mm > 0 && index < static_cast<int>(chunk.water_depth_mm.size())) {
-                chunk.water_depth_mm[index] += add_mm;
+                chunk.water_depth_mm[static_cast<std::size_t>(index)] += add_mm;
                 m_debug_source_injected_mm += add_mm; // water-source diagnostics
                 if (index < static_cast<int>(chunk.water_level_data.size()) &&
                     index < static_cast<int>(chunk.water_bed_mm.size())) {
-                    chunk.water_level_data[index] =
-                        static_cast<float>(chunk.water_bed_mm[index] +
-                                           chunk.water_depth_mm[index]) /
+                    chunk.water_level_data[static_cast<std::size_t>(index)] =
+                        static_cast<float>(chunk.water_bed_mm[static_cast<std::size_t>(index)] +
+                                           chunk.water_depth_mm[static_cast<std::size_t>(index)]) /
                         1000.0f;
                 }
                 // WAKE UP: An internal event occurred in this chunk.
@@ -1117,14 +1129,14 @@ void WaterSystem::update(entt::registry& registry,
                 return;
             const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
             for (int t = 0; t < res; ++t) {
-                int ai, bi, slot;
+                std::size_t ai, bi, slot;
                 if (isX) {
-                    ai = t * res + (res - 1);
-                    bi = t * res + 0;
+                    ai = static_cast<std::size_t>(t * res + (res - 1));
+                    bi = static_cast<std::size_t>(t * res + 0);
                     slot = 2 * ai + 0;
                 } else {
-                    ai = (res - 1) * res + t;
-                    bi = 0 * res + t;
+                    ai = static_cast<std::size_t>((res - 1) * res + t);
+                    bi = static_cast<std::size_t>(0 * res + t);
                     slot = 2 * ai + 1;
                 }
                 const std::int64_t surfA =
@@ -1229,8 +1241,8 @@ f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
     float local_x = world_x - base_pos.x;
     float local_z = world_z - base_pos.z;
 
-    float sim_xf = (local_x / CHUNK_SIZE_X) * resolution - 0.5f;
-    float sim_zf = (local_z / CHUNK_SIZE_Z) * resolution - 0.5f;
+    float sim_xf = (local_x / CHUNK_SIZE_X) * static_cast<float>(resolution) - 0.5f;
+    float sim_zf = (local_z / CHUNK_SIZE_Z) * static_cast<float>(resolution) - 0.5f;
 
     int x0 = static_cast<int>(sim_xf);
     int z0 = static_cast<int>(sim_zf);
@@ -1238,13 +1250,13 @@ f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
     x0 = std::clamp(x0, 0, resolution - 2);
     z0 = std::clamp(z0, 0, resolution - 2);
 
-    float tx = sim_xf - x0;
-    float tz = sim_zf - z0;
+    float tx = sim_xf - static_cast<float>(x0);
+    float tz = sim_zf - static_cast<float>(z0);
 
-    float h00 = chunk.water_level_data[z0 * resolution + x0];
-    float h10 = chunk.water_level_data[z0 * resolution + (x0 + 1)];
-    float h01 = chunk.water_level_data[(z0 + 1) * resolution + x0];
-    float h11 = chunk.water_level_data[(z0 + 1) * resolution + (x0 + 1)];
+    float h00 = chunk.water_level_data[static_cast<std::size_t>(z0 * resolution + x0)];
+    float h10 = chunk.water_level_data[static_cast<std::size_t>(z0 * resolution + (x0 + 1))];
+    float h01 = chunk.water_level_data[static_cast<std::size_t>((z0 + 1) * resolution + x0)];
+    float h11 = chunk.water_level_data[static_cast<std::size_t>((z0 + 1) * resolution + (x0 + 1))];
 
     float h_z0 = glm::mix(h00, h10, tx);
     float h_z1 = glm::mix(h01, h11, tx);
@@ -1274,13 +1286,13 @@ Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
     float local_x = world_x - base_pos.x;
     float local_z = world_z - base_pos.z;
 
-    float sim_xf = (local_x / CHUNK_SIZE_X) * resolution;
-    float sim_zf = (local_z / CHUNK_SIZE_Z) * resolution;
+    float sim_xf = (local_x / CHUNK_SIZE_X) * static_cast<float>(resolution);
+    float sim_zf = (local_z / CHUNK_SIZE_Z) * static_cast<float>(resolution);
 
     int x0 = static_cast<int>(sim_xf);
     int z0 = static_cast<int>(sim_zf);
-    float tx = sim_xf - x0;
-    float tz = sim_zf - z0;
+    float tx = sim_xf - static_cast<float>(x0);
+    float tz = sim_zf - static_cast<float>(z0);
 
     x0 = std::clamp(x0, 0, resolution - 2);
     z0 = std::clamp(z0, 0, resolution - 2);
@@ -1288,10 +1300,10 @@ Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
     int z1 = z0 + 1;
 
     const auto& flow_data = chunk.water_flow_data;
-    const Vec2& f00 = flow_data[z0 * resolution + x0];
-    const Vec2& f10 = flow_data[z0 * resolution + x1];
-    const Vec2& f01 = flow_data[z1 * resolution + x0];
-    const Vec2& f11 = flow_data[z1 * resolution + x1];
+    const Vec2& f00 = flow_data[static_cast<std::size_t>(z0 * resolution + x0)];
+    const Vec2& f10 = flow_data[static_cast<std::size_t>(z0 * resolution + x1)];
+    const Vec2& f01 = flow_data[static_cast<std::size_t>(z1 * resolution + x0)];
+    const Vec2& f11 = flow_data[static_cast<std::size_t>(z1 * resolution + x1)];
 
     Vec2 f_z0 = glm::lerp(f00, f10, tx);
     Vec2 f_z1 = glm::lerp(f01, f11, tx);
@@ -1320,8 +1332,10 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
     Vec3 base_chunk_pos = Vec3(chunk_coords * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z));
     float local_x = world_pos.x - base_chunk_pos.x;
     float local_z = world_pos.z - base_chunk_pos.z;
-    int center_sim_x = static_cast<int>((local_x / CHUNK_SIZE_X) * source_resolution);
-    int center_sim_z = static_cast<int>((local_z / CHUNK_SIZE_Z) * source_resolution);
+    int center_sim_x =
+        static_cast<int>((local_x / CHUNK_SIZE_X) * static_cast<float>(source_resolution));
+    int center_sim_z =
+        static_cast<int>((local_z / CHUNK_SIZE_Z) * static_cast<float>(source_resolution));
 
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
@@ -1344,13 +1358,15 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                 }
 
                 int final_sim_x =
-                    std::clamp(static_cast<int>(((source_cell_x + 0.5f) / source_resolution) *
-                                                target_resolution),
+                    std::clamp(static_cast<int>(((static_cast<float>(source_cell_x) + 0.5f) /
+                                                 static_cast<float>(source_resolution)) *
+                                                static_cast<float>(target_resolution)),
                                0,
                                target_resolution - 1);
                 int final_sim_z =
-                    std::clamp(static_cast<int>(((source_cell_z + 0.5f) / source_resolution) *
-                                                target_resolution),
+                    std::clamp(static_cast<int>(((static_cast<float>(source_cell_z) + 0.5f) /
+                                                 static_cast<float>(source_resolution)) *
+                                                static_cast<float>(target_resolution)),
                                0,
                                target_resolution - 1);
 
@@ -1373,12 +1389,14 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                 const std::int32_t add_mm =
                     static_cast<std::int32_t>(add_m * 1000.0f + (add_m >= 0.0f ? 0.5f : -0.5f));
                 if (add_mm != 0 && index < static_cast<int>(target_chunk.water_depth_mm.size())) {
-                    std::int32_t& d = target_chunk.water_depth_mm[index];
+                    std::int32_t& d = target_chunk.water_depth_mm[static_cast<std::size_t>(index)];
                     d = std::max(0, d + add_mm);
                     if (index < static_cast<int>(target_chunk.water_level_data.size()) &&
                         index < static_cast<int>(target_chunk.water_bed_mm.size())) {
-                        target_chunk.water_level_data[index] =
-                            static_cast<float>(target_chunk.water_bed_mm[index] + d) / 1000.0f;
+                        target_chunk.water_level_data[static_cast<std::size_t>(index)] =
+                            static_cast<float>(
+                                target_chunk.water_bed_mm[static_cast<std::size_t>(index)] + d) /
+                            1000.0f;
                     }
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
@@ -1416,12 +1434,14 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
         bool edited = false;
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float dx = wx - world_pos.x;
                 const float dz = wz - world_pos.z;
                 if (dx * dx + dz * dz <= r2) {
-                    c.water_bed_mm[z * res + x] += delta_mm;
+                    c.water_bed_mm[static_cast<std::size_t>(z * res + x)] += delta_mm;
                     edited = true;
                     ++edited_total;
                 }
@@ -1464,7 +1484,7 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
     // seam cells align cell-for-cell (see SetSimResolution's header contract). Reject
     // anything else and keep the current resolution — the caller wires this once from
     // sim.water_high_res before the first update, so a rejected value simply leaves
-    // the byte-identical Medium default in place.
+    // the current session resolution in place.
     if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 ||
         CHUNK_SIZE_Z % cells_per_side != 0) {
         return;
@@ -1530,7 +1550,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         can_interpolate && old_depth_mm.size() >= GetWaterCellCount(current_resolution);
 
     // Resize arrays
-    const size_t new_sim_size = new_resolution * new_resolution;
+    const size_t new_sim_size = static_cast<size_t>(new_resolution * new_resolution);
     chunk.water_level_data.resize(new_sim_size);
     chunk.water_flow_data.resize(new_sim_size);
     chunk.water_sim_terrain_height.resize(new_sim_size);
@@ -1542,30 +1562,38 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
 
     for (int z = 0; z < new_resolution; ++z) {
         for (int x = 0; x < new_resolution; ++x) {
-            int idx = z * new_resolution + x;
-            float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
-            float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
+            std::size_t idx = static_cast<std::size_t>(z * new_resolution + x);
+            float world_x = static_cast<float>(c_coords.x * CHUNK_SIZE_X) +
+                            (static_cast<float>(x) + 0.5f) * cell_width_x;
+            float world_z = static_cast<float>(c_coords.z * CHUNK_SIZE_Z) +
+                            (static_cast<float>(z) + 0.5f) * cell_width_z;
             chunk.water_sim_terrain_height[idx] =
                 m_shield_system->GetTerrainHeightAt(world_x, world_z);
 
             // Bilinear interpolation from old grid
             if (can_interpolate) {
-                float old_x = (x / (float)(new_resolution - 1)) * (current_resolution - 1);
-                float old_z = (z / (float)(new_resolution - 1)) * (current_resolution - 1);
+                float old_x = (static_cast<float>(x) / (float)(new_resolution - 1)) *
+                              static_cast<float>(current_resolution - 1);
+                float old_z = (static_cast<float>(z) / (float)(new_resolution - 1)) *
+                              static_cast<float>(current_resolution - 1);
 
                 int x0 = (int)std::floor(old_x);
                 int z0 = (int)std::floor(old_z);
                 int x1 = std::min(x0 + 1, current_resolution - 1);
                 int z1 = std::min(z0 + 1, current_resolution - 1);
 
-                float fx = old_x - x0;
-                float fz = old_z - z0;
+                float fx = old_x - static_cast<float>(x0);
+                float fz = old_z - static_cast<float>(z0);
 
                 // Sample old grid
-                float w00 = old_water_levels[z0 * current_resolution + x0];
-                float w10 = old_water_levels[z0 * current_resolution + x1];
-                float w01 = old_water_levels[z1 * current_resolution + x0];
-                float w11 = old_water_levels[z1 * current_resolution + x1];
+                float w00 =
+                    old_water_levels[static_cast<std::size_t>(z0 * current_resolution + x0)];
+                float w10 =
+                    old_water_levels[static_cast<std::size_t>(z0 * current_resolution + x1)];
+                float w01 =
+                    old_water_levels[static_cast<std::size_t>(z1 * current_resolution + x0)];
+                float w11 =
+                    old_water_levels[static_cast<std::size_t>(z1 * current_resolution + x1)];
 
                 // Bilinear interpolation
                 float w0 = w00 * (1.0f - fx) + w10 * fx;
@@ -1573,10 +1601,10 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
                 chunk.water_level_data[idx] = w0 * (1.0f - fz) + w1 * fz;
 
                 // Similar interpolation for flow data
-                Vec2 f00 = old_flow_data[z0 * current_resolution + x0];
-                Vec2 f10 = old_flow_data[z0 * current_resolution + x1];
-                Vec2 f01 = old_flow_data[z1 * current_resolution + x0];
-                Vec2 f11 = old_flow_data[z1 * current_resolution + x1];
+                Vec2 f00 = old_flow_data[static_cast<std::size_t>(z0 * current_resolution + x0)];
+                Vec2 f10 = old_flow_data[static_cast<std::size_t>(z0 * current_resolution + x1)];
+                Vec2 f01 = old_flow_data[static_cast<std::size_t>(z1 * current_resolution + x0)];
+                Vec2 f11 = old_flow_data[static_cast<std::size_t>(z1 * current_resolution + x1)];
 
                 Vec2 f0 = f00 * (1.0f - fx) + f10 * fx;
                 Vec2 f1 = f01 * (1.0f - fx) + f11 * fx;
@@ -1604,7 +1632,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     chunk.water_edge_flux.assign(2 * new_sim_size, 0);
     for (int z = 0; z < new_resolution; ++z) {
         for (int x = 0; x < new_resolution; ++x) {
-            const int idx = z * new_resolution + x;
+            const std::size_t idx = static_cast<std::size_t>(z * new_resolution + x);
             const float terr = chunk.water_sim_terrain_height[idx];
             chunk.water_bed_mm[idx] =
                 static_cast<std::int32_t>(std::lround(terr * static_cast<float>(MM_PER_M)));
@@ -1614,24 +1642,30 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
                 // 16-bit weight product. Integer end to end.
                 const float old_x =
                     (new_resolution > 1)
-                        ? (x / static_cast<float>(new_resolution - 1)) * (current_resolution - 1)
+                        ? (static_cast<float>(x) / static_cast<float>(new_resolution - 1)) *
+                              static_cast<float>(current_resolution - 1)
                         : 0.0f;
                 const float old_z =
                     (new_resolution > 1)
-                        ? (z / static_cast<float>(new_resolution - 1)) * (current_resolution - 1)
+                        ? (static_cast<float>(z) / static_cast<float>(new_resolution - 1)) *
+                              static_cast<float>(current_resolution - 1)
                         : 0.0f;
                 const int x0 = static_cast<int>(std::floor(old_x));
                 const int z0 = static_cast<int>(std::floor(old_z));
                 const int x1 = std::min(x0 + 1, current_resolution - 1);
                 const int z1 = std::min(z0 + 1, current_resolution - 1);
-                const std::int64_t fxq =
-                    static_cast<std::int64_t>(std::lround((old_x - x0) * 256.0f));
-                const std::int64_t fzq =
-                    static_cast<std::int64_t>(std::lround((old_z - z0) * 256.0f));
-                const std::int64_t d00 = old_depth_mm[z0 * current_resolution + x0];
-                const std::int64_t d10 = old_depth_mm[z0 * current_resolution + x1];
-                const std::int64_t d01 = old_depth_mm[z1 * current_resolution + x0];
-                const std::int64_t d11 = old_depth_mm[z1 * current_resolution + x1];
+                const std::int64_t fxq = static_cast<std::int64_t>(
+                    std::lround((old_x - static_cast<float>(x0)) * 256.0f));
+                const std::int64_t fzq = static_cast<std::int64_t>(
+                    std::lround((old_z - static_cast<float>(z0)) * 256.0f));
+                const std::int64_t d00 =
+                    old_depth_mm[static_cast<std::size_t>(z0 * current_resolution + x0)];
+                const std::int64_t d10 =
+                    old_depth_mm[static_cast<std::size_t>(z0 * current_resolution + x1)];
+                const std::int64_t d01 =
+                    old_depth_mm[static_cast<std::size_t>(z1 * current_resolution + x0)];
+                const std::int64_t d11 =
+                    old_depth_mm[static_cast<std::size_t>(z1 * current_resolution + x1)];
                 const std::int64_t num = (256 - fxq) * (256 - fzq) * d00 + fxq * (256 - fzq) * d10 +
                                          (256 - fxq) * fzq * d01 + fxq * fzq * d11 + 32768;
                 const std::int64_t d = num >> 16;

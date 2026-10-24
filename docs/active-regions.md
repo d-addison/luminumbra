@@ -2,10 +2,19 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. No distant system
+`sim.active_regions` switch, enabled in compiled and packaged defaults for
+v0.3.0. Explicitly disabling it retains the legacy simulation periods and hash
+behavior. Budgets remain unlimited in shipped configuration. No distant system
 consumes this schedule yet; field pages, creature records, water shares,
 diagnostics and measured budget activation remain separate work.
+
+Indexed authority durability/rehydration, durable completed work and ground-object
+continuation, durable regional fields/weather/scent/energy, regional foliage/water
+continuation (issue #242), and strict distant policy and distant creatures (S8)
+are planned for v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0
+as [issue #320](https://github.com/d-addison/luminumbra/issues/320). These consumers
+are outside the shipping scheduler foundation. The dedicated server autosaves
+every five minutes; this does not implement those continuation consumers.
 
 ## Activation and ordering
 
@@ -63,7 +72,7 @@ history even when they contribute no frozen content. Consumed work stops owning
 records on the next tick.
 
 Invalid host input never throws out of the session. Non-finite or out-of-range
-(|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are
+(outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are
 ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
 regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
 and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
@@ -79,49 +88,52 @@ previous ambient anchor.
 `BoundedRegionResumeHook` defines an opt-in interface receiving region key,
 freeze tick, resume tick and bounded elapsed ticks. `resume_window` clamps elapsed
 ticks to both the system's explicit cap and one WorldClock calendar day; it
-refuses a resume before freeze. No callback consumer or catch-up is installed.
+refuses a resume before freeze. New calendars cap at 162,000 ticks (90 minutes),
+while imported calendars retain their recorded day, including 36,000 or 216,000
+ticks. The daylight fraction changes solar phase without changing this elapsed
+cap. ARL1 bytes and timestamps are unchanged; no callback consumer or catch-up
+is installed.
 
 ## File and compatibility
 
 The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
-not alter LMR1 v2, the world manifest, preset revision 6, EFS1, plant payloads,
-FSD2 v3, or canonical chunk serialization. An anchor-only ledger is not a chunk
+not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical
+chunk serialization. Presets now use revision 8 with revision-6 omission
+compatibility and frozen packaged-preset fallback. An anchor-only ledger is not a chunk
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
 the legacy existing-save query: a plant-only save makes later saves incremental.
 Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
 replacement primitive for the ledger, without claiming cross-file atomicity.
 
-Clock/ledger pair saves are synchronous and non-reentrant on the process's host
-thread. The client calls them during world creation, its main-thread pause-menu
+Clock/ledger pair saves are synchronous and serialize with all persistence writers in
+the process. The client calls them during world creation, its main-thread pause-menu
 quit callback, and shutdown after the main loop returns. Its explicit persistence
 scenario also runs on that thread. The server calls them synchronously from
-`RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after
-the tick loop. Job workers do not call the pair writer. No overlapping production
-pair writers were found, including across sessions in one process. The call sites
-state this ownership contract, and a debug-only atomic assertion guards the whole
-pair writer against concurrent or reentrant calls. It does not serialize saves;
-there is no production locking scheme. Independently launched processes sharing
-one save directory are outside this ownership contract.
+`RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick
+loop. Job workers do not call the pair writer. Public persistence APIs permit
+overlapping calls with stable caller-owned inputs. A process-wide recursive mutex guards
+region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup.
+It serializes writers through reclamation and replacement; nested calls retain ownership
+until the outer call returns. Independently launched processes sharing one save
+directory are outside this ownership contract.
 
-Incoming pairs are validated before either replacement. Forward saves replace
-metadata first; rewinds replace the ledger first, preserving ledger tick <= clock
-tick at every boundary. Ledger bytes are staged as unique
-`<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict
-`chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place.
-A separately mounted region directory causes replacement to fail across devices;
-no copy fallback compromises atomicity. Termination can leave staging debris in
-the save root; loading and later saves ignore it, and the next successful ledger
-save reclaims it, so repeated interruptions cannot accumulate ledger copies until
-the volume is exhausted. Reclamation is safe because saves are serialized per
-destination by construction, so a staging file that already exists was abandoned
-by a process that is no longer writing it. It is best effort: a file that cannot
-be removed is left alone and never blocks the save. Unknown files inside the region
-directory are still refused. The POSIX subprocess regression exits after the
-staging file is flushed and closed, verifies recovery while that file remains, and
-then verifies the next successful save removes it.
+Incoming pairs are validated before either replacement. Forward saves replace metadata
+first; rewinds replace the ledger first, preserving ledger tick <= clock tick at every
+boundary. Ledger bytes are staged as unique
+`<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict `chunks/` and
+`chunks/region/` scans on the save filesystem, then atomically renamed into place. A
+separately mounted region directory causes replacement to fail across devices; no copy
+fallback compromises atomicity. Termination can leave staging debris in the save root;
+loading ignores it, and every later ledger save, including an empty-ledger save,
+attempts to reclaim it. Reclamation holds the shared mutex through cleanup and
+replacement, so existing staging cannot belong to another active in-process writer. It
+is best effort: a file that cannot be removed is left alone and never blocks the save.
+Unknown files inside the region directory are still refused. The POSIX subprocess
+regression exits after the staging file is flushed and closed, verifies recovery while
+that file remains, and then verifies the next successful save removes it.
 
 An accepted partial pair can contain an older ledger than its saved clock. The
 ledger therefore carries two tick values. The canonical scheduler tick advances
@@ -339,13 +351,13 @@ expected component hashes on mismatch. Diagnostic sources, component values,
 compiler commands and predecessor source identities accompany the campaign receipt
 under `ci-investigation/`.
 
-The subsequent [ambient dispatch repair](https://github.com/d-addison/luminumbra/pull/172)
+The subsequent ambient dispatch repair
 caps both FBm and Simplex nodes in all three ambient systems at terrain's x86
 AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;
 the historical table above is not relabelled as post-repair evidence. Integrated
-and native acceptance remain tracked by [#163](https://github.com/d-addison/luminumbra/issues/163).
-The wind input-padding defect tracked by [#173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
+and native acceptance remain tracked by [issue #163](https://github.com/d-addison/luminumbra/issues/163).
+The wind input-padding defect tracked by [issue #173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies

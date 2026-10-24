@@ -91,10 +91,13 @@ endif()
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/include"
+)
+target_include_directories(luminumbra_common SYSTEM PUBLIC
     "${CMAKE_SOURCE_DIR}/vendor"
 )
 
 target_link_libraries(luminumbra_common PUBLIC
+    luminumbra_profiler
     entt
     Jolt
     nlohmann_json
@@ -113,21 +116,38 @@ if(WIN32)
     target_link_libraries(luminumbra_common PUBLIC ws2_32)
 endif()
 
+# The shared socket implementation uses one backend's headers and accessors.
+# GNS serves local/LAN play; Steamworks serves Steam qualification.
+option(LUMINUMBRA_ENABLE_GNS "Build the standalone GameNetworkingSockets UDP transport" OFF)
+option(LUMINUMBRA_ENABLE_STEAM "Build the Steamworks ISteamNetworkingSockets transport" OFF)
+if(LUMINUMBRA_ENABLE_GNS AND LUMINUMBRA_ENABLE_STEAM)
+    message(FATAL_ERROR "Select either LUMINUMBRA_ENABLE_GNS or LUMINUMBRA_ENABLE_STEAM; dual-backend support is future work")
+endif()
+
 # Steamworks SDK transport (SteamNetworkingTransport -> ISteamNetworkingSockets:
 # real UDP + reliability + encryption + SDR). OFF by default; the SDK is owner-provided
 # and NOT redistributable (vendor/steamworks/ is gitignored). When ON, link steam_api64
 # + expose the headers + define LUMINUMBRA_ENABLE_STEAM so the transport body compiles.
-option(LUMINUMBRA_ENABLE_STEAM "Build the Steamworks ISteamNetworkingSockets transport" OFF)
 set(LUMINUMBRA_STEAM_SDK_DIR "${CMAKE_SOURCE_DIR}/vendor/steamworks/sdk" CACHE PATH "Steamworks SDK root")
 if(LUMINUMBRA_ENABLE_STEAM)
     if(NOT EXISTS "${LUMINUMBRA_STEAM_SDK_DIR}/public/steam/steam_api.h")
         message(FATAL_ERROR "LUMINUMBRA_ENABLE_STEAM=ON but Steamworks SDK headers were not found at ${LUMINUMBRA_STEAM_SDK_DIR}")
     endif()
-    target_include_directories(luminumbra_common PUBLIC "${LUMINUMBRA_STEAM_SDK_DIR}/public")
+    target_include_directories(luminumbra_common SYSTEM PUBLIC "${LUMINUMBRA_STEAM_SDK_DIR}/public")
     target_compile_definitions(luminumbra_common PUBLIC LUMINUMBRA_ENABLE_STEAM)
     if(WIN32)
-        target_link_libraries(luminumbra_common PUBLIC
-            "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/win64/steam_api64.lib")
+        set(_steam_implib "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/win64/steam_api64.lib")
+        set(_steam_dll "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/win64/steam_api64.dll")
+        foreach(_steam_file IN ITEMS "${_steam_implib}" "${_steam_dll}")
+            if(NOT EXISTS "${_steam_file}" OR IS_DIRECTORY "${_steam_file}")
+                message(FATAL_ERROR "LUMINUMBRA_ENABLE_STEAM=ON requires the Steamworks win64 import library and runtime DLL; missing file: ${_steam_file}")
+            endif()
+        endforeach()
+        add_library(luminumbra_steam_api SHARED IMPORTED GLOBAL)
+        set_target_properties(luminumbra_steam_api PROPERTIES
+            IMPORTED_IMPLIB "${_steam_implib}"
+            IMPORTED_LOCATION "${_steam_dll}")
+        target_link_libraries(luminumbra_common PUBLIC luminumbra_steam_api)
     elseif(UNIX AND NOT APPLE)
         # the linux64 redistributable is a shared object; the server loads it from
         # its own directory at runtime (mirror of the win64 steam_api64.dll copy).
@@ -144,19 +164,41 @@ endif()
 # ONE machine (the Steam SDK can't, one-instance-per-app), which is exactly what
 # local dev/testing needs. OFF by default (FetchContent + a multi-minute GNS build);
 # when ON, fetch a PINNED GNS release, link the static lib, and define
-# LUMINUMBRA_ENABLE_GNS so the transport body compiles. Crypto backend: BCrypt on
-# Windows (no OpenSSL/libsodium dep); GNS's default (OpenSSL) elsewhere.
+# LUMINUMBRA_ENABLE_GNS so the transport body compiles. Both crypto selections
+# default to OpenSSL without overriding an explicit cache choice.
 # Requires protobuf + abseil + protoc on PATH (ucrt64 packages on Windows;
 # libprotobuf-dev + libssl-dev on Linux).
-option(LUMINUMBRA_ENABLE_GNS "Build the standalone GameNetworkingSockets UDP transport" OFF)
-if(LUMINUMBRA_ENABLE_GNS)
+# Function scope keeps package preferences and compatibility variables local
+# to GNS, including its fetched subdirectory.
+function(luminumbra_configure_gns)
     include(FetchContent)
-    set(GAMENETWORKINGSOCKETS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(GAMENETWORKINGSOCKETS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
+    set(protobuf_MODULE_COMPATIBLE TRUE)
+    find_package(absl CONFIG REQUIRED)
     if(WIN32)
-        # BCrypt is a Windows OS API; forcing it elsewhere breaks the build.
-        set(USE_CRYPTO "BCrypt" CACHE STRING "" FORCE)
+        find_package(Protobuf CONFIG REQUIRED)
+    else()
+        # Distribution protobuf packages used by the Linux compile probe may
+        # ship only headers/libraries. Prefer CONFIG, with the module as fallback.
+        find_package(Protobuf CONFIG QUIET)
+        if(NOT Protobuf_FOUND)
+            find_package(Protobuf MODULE REQUIRED)
+        endif()
     endif()
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+    set(USE_CRYPTO OpenSSL CACHE STRING "Networking crypto backend")
+    set(USE_CRYPTO25519 OpenSSL CACHE STRING "Networking Curve25519 backend")
+    # These generic upstream options belong only to the fetched subdirectory.
+    # CMP0077 keeps option() from replacing these normal variables with cache
+    # entries, including when the dependency resets its policy version.
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    set(BUILD_STATIC_LIB ON)
+    set(BUILD_SHARED_LIB OFF)
+    set(BUILD_TESTS OFF)
+    set(BUILD_EXAMPLES OFF)
+    # Retain the existing prefixed controls alongside the upstream controls.
+    set(GAMENETWORKINGSOCKETS_BUILD_TESTS OFF)
+    set(GAMENETWORKINGSOCKETS_BUILD_EXAMPLES OFF)
     FetchContent_Declare(
         GameNetworkingSockets
         GIT_REPOSITORY https://github.com/ValveSoftware/GameNetworkingSockets.git
@@ -166,7 +208,20 @@ if(LUMINUMBRA_ENABLE_GNS)
         GIT_TAG 2cb93a06350bb065db53abdb0d87cf297e0bfd34
     )
     FetchContent_MakeAvailable(GameNetworkingSockets)
+    # Preserve protobuf's transitive absl links and PROTOBUF_USE_DLLS definition.
+    target_link_libraries(GameNetworkingSockets_s PUBLIC protobuf::libprotobuf)
     target_link_libraries(luminumbra_common PUBLIC GameNetworkingSockets_s)
     target_compile_definitions(luminumbra_common PUBLIC LUMINUMBRA_ENABLE_GNS)
+    if(WIN32)
+        include("${CMAKE_SOURCE_DIR}/cmake/networking_runtime.cmake")
+        luminumbra_collect_gns_runtime_search_dirs()
+        if(MINGW)
+            luminumbra_collect_gns_mingw_runtime()
+        endif()
+    endif()
     message(STATUS "Standalone GameNetworkingSockets transport ENABLED (v1.6.0 pinned)")
+endfunction()
+
+if(LUMINUMBRA_ENABLE_GNS)
+    luminumbra_configure_gns()
 endif()

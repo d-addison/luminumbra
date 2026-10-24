@@ -4,6 +4,7 @@ add_executable(world_generation_test
     shield/test_meshing_determinism.cpp
     shield/worldgen_hardening_test.cpp
     shield/meshing_hardening_test.cpp
+    shield/async_water_meshing_test.cpp
 )
 
 target_include_directories(world_generation_test PRIVATE
@@ -19,9 +20,17 @@ target_compile_definitions(world_generation_test PRIVATE
     LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
 )
 
+add_executable(preset_schema_rev_test shield/preset_schema_rev_test.cpp)
+target_include_directories(preset_schema_rev_test PRIVATE ../src)
+target_compile_definitions(preset_schema_rev_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(preset_schema_rev_test PRIVATE luminumbra_common)
+luminumbra_configure_first_party_target(preset_schema_rev_test)
+add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
+
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
     shield/worldgen_layers_hardening_test.cpp
+    shield/height_sampling_equivalence_test.cpp
 )
 
 target_compile_definitions(worldgen_layer_snapshot_test PRIVATE
@@ -57,6 +66,8 @@ target_compile_definitions(asset_processor_round_trip_test PRIVATE
 target_include_directories(asset_processor_round_trip_test PRIVATE
 ../src
 ../tools
+)
+target_include_directories(asset_processor_round_trip_test SYSTEM PRIVATE
 ../vendor/cgltf
 ../third_party/cgltf
 ../third_party/meshoptimizer/src
@@ -105,6 +116,23 @@ target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshopti
 luminumbra_configure_first_party_target(morph_asset_test)
 luminumbra_pin_fp_determinism(morph_asset_test)
 
+# The preset classifier has no client, GL or world-service dependency.
+add_executable(graphics_preset_classifier_test
+    common/GraphicsPresetClassifier_test.cpp
+    ../src/luminumbra_common/core/GraphicsPresetClassifier.cpp)
+target_include_directories(graphics_preset_classifier_test PRIVATE ../src)
+target_link_libraries(graphics_preset_classifier_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(graphics_preset_classifier_test)
+
+# Exercise the production collector with deterministic GL/GLFW responses, without a GPU.
+add_executable(hardware_info_test
+    client/HardwareInfo_test.cpp
+    ../src/luminumbra_client/core/HardwareInfo.cpp
+    ../src/luminumbra_common/core/GraphicsPresetClassifier.cpp)
+target_include_directories(hardware_info_test PRIVATE support/hardware_info ../src)
+target_link_libraries(hardware_info_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(hardware_info_test)
+
 # Table-driven volume generation has no client, GL or world-service dependency.
 add_executable(far_volume_tile_test
     common/FarVolumeTile_test.cpp
@@ -135,7 +163,29 @@ target_compile_definitions(far_volume_facade_test PRIVATE
 target_link_libraries(far_volume_facade_test PRIVATE gtest_main glm::glm nlohmann_json::nlohmann_json)
 luminumbra_configure_first_party_target(far_volume_facade_test)
 
+# Focused live-field regressions use the canonical world sampler, without a client.
+add_executable(far_pristine_field_test common/FarPristineField_test.cpp)
+target_include_directories(far_pristine_field_test PRIVATE ../src)
+target_compile_definitions(far_pristine_field_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(far_pristine_field_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(far_pristine_field_test)
+luminumbra_pin_fp_determinism(far_pristine_field_test)
+
+# Compile the shared socket implementation against an isolated fake SDK, without
+# requiring either SDK or replacing SDK symbols in the engine-linked test targets.
+add_executable(net_sockets_transport_test
+    net/net_sockets_transport_test.cpp
+    ../src/luminumbra_common/net/NetSocketsTransport.cpp
+)
+target_include_directories(net_sockets_transport_test PRIVATE support/net_sockets ../src)
+target_compile_definitions(net_sockets_transport_test PRIVATE LUMINUMBRA_ENABLE_GNS)
+target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdlog)
+luminumbra_configure_first_party_target(net_sockets_transport_test)
+
 add_executable(common_tests
+    common/StationDiscoveryArguments_test.cpp
+    common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
     common/AnimationRuntime_test.cpp
@@ -143,6 +193,9 @@ add_executable(common_tests
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
+    common/GraphicsPresets_test.cpp
+    ui/graphics_settings_state_test.cpp
+    common/FrameLimiter_test.cpp
     common/PlantProcgen_test.cpp
     common/NetworkSim_test.cpp
     common/ReplicationDelta_test.cpp
@@ -151,34 +204,53 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
+    common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
+    rendering/FarWorldWaterMesh_test.cpp
     rendering/FarVolumeRenderMesh_test.cpp
     rendering/FarVolumeBuildQueue_test.cpp
     rendering/FarVolumeUpload_test.cpp
     rendering/FarVolumeGpuBackend_test.cpp
     rendering/FarVolumeResidency_test.cpp
+    rendering/FarWorldReplay_test.cpp
+    rendering/FarWorldDiagnostics_test.cpp
     rendering/FarWorldRenderer_test.cpp
+    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
+    rendering/FarWorldFog_test.cpp
+    rendering/FarWorldDepthPosition_test.cpp
     rendering/FarWorldCaveSelection_test.cpp
     rendering/FarWorldSurfaceTag_test.cpp
     rendering/ShaderSource_test.cpp
     ../src/luminumbra_client/rendering/ShaderSource.cpp
+    ../src/luminumbra_client/rendering/FarWorldDiagnostics.cpp
     ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
+    ../src/luminumbra_client/rendering/FarVolumeHandoff.cpp
+    ../src/luminumbra_client/rendering/FarWorldHandoffRenderer.cpp
+    ../src/luminumbra_client/rendering/FarWorldHandoffDiagnostics.cpp
     ../src/luminumbra_client/rendering/FarWorldOwnership.cpp
     ../src/luminumbra_client/rendering/FarWorldDepthBias.cpp
     ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
     ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
     ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp
     ../src/luminumbra_client/rendering/FarVolumeResidency.cpp
+    ../src/luminumbra_client/rendering/FarWorldWaterMesh.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
+    common/FarEditedBake_test.cpp
+    # Snapshot cursor restoration and destination refusal cases are discovered
+    # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    # Incremental cursor layout and staged-load refusal regressions use the same discovery.
+    persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    # Deterministic work ceilings and injected negative gates (issue #396).
+    common/DeterministicWorkBudget_test.cpp
     common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
@@ -194,6 +266,7 @@ add_executable(common_tests
     common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
+    common/ReplicationAdmission_test.cpp
     common/ReplicationEndpoint_test.cpp
     common/config_constant_drift_test.cpp
     common/config_hot_reload_rollback_test.cpp
@@ -214,12 +287,18 @@ add_executable(common_tests
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
+    common/AmbientDeterminismReceipt_test.cpp
+    common/AmbientInputBounds_test.cpp
     common/fields_hardening_test.cpp
     common/replication_hardening_test.cpp
     common/replication_scale_test.cpp
     common/lockstep_replay_hardening_test.cpp
     net/single_port_accept_test.cpp
+    net/tcp_frame_bounds_test.cpp
+    net/message_receive_queue_test.cpp
     net/single_port_host_client_integration_test.cpp
+    net/runtime_tcp_hello_test.cpp
+    ../src/luminumbra_server/modes/RuntimeTcpSlot.cpp
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
@@ -282,6 +361,11 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_save_fixture_support
 )
 
+# Frozen-water rendering exercises the client bridge and mesh implementation.
+add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
+target_link_libraries(far_frozen_water_mesh_test PRIVATE gtest_main luminumbra_client)
+luminumbra_configure_first_party_target(far_frozen_water_mesh_test)
+
 # File-only path contracts run without a GL context or the common-library graph.
 add_executable(filesystem_path_test
     common/FilesystemPath_test.cpp
@@ -291,6 +375,11 @@ add_executable(filesystem_path_test
 target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra_client)
 target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(filesystem_path_test PRIVATE gtest_main)
+
+# Temporary-path reservation contracts need only the filesystem and GoogleTest.
+add_executable(unique_temp_path_test support/UniqueTempPath_test.cpp)
+target_link_libraries(unique_temp_path_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(unique_temp_path_test)
 
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
 add_executable(game_assets_test
@@ -314,6 +403,12 @@ target_include_directories(tree_lod_test PRIVATE
 target_link_libraries(tree_lod_test PRIVATE
     gtest_main
 )
+
+# Rendering defaults and override parsing are pure headers (no client/GL link).
+add_executable(rendering_defaults_test rendering/RenderingDefaults_test.cpp)
+target_include_directories(rendering_defaults_test PRIVATE ../src)
+target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(rendering_defaults_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
@@ -429,6 +524,10 @@ add_executable(foliage_cache_prune_test
     rendering/foliage_cache_prune_test.cpp
 )
 
+add_executable(foliage_surface_slots_test rendering/foliage_surface_slots_test.cpp)
+target_include_directories(foliage_surface_slots_test PRIVATE ../src/luminumbra_client)
+target_link_libraries(foliage_surface_slots_test PRIVATE gtest_main)
+
 target_include_directories(foliage_cache_prune_test PRIVATE
 ../src
 ../src/luminumbra_client
@@ -442,6 +541,8 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
     rendering/FarWorldShadow_test.cpp
+    rendering/FarWorldFogGl_test.cpp
+    rendering/FarWorldWaterGl_test.cpp
     rendering/TerrainCullingTestPeer.h
 )
 
@@ -584,6 +685,11 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
+    # Evidence reuse, stable surface slots and column-local invalidation on both backends.
+    rendering/foliage_rebuild_test.cpp
+    # Includes deterministic CPU/compute work budgets, idle zero and stale results.
+    # Fresh-pass equivalence and moving horizons on both scatter backends.
+    rendering/foliage_invalidation_test.cpp
 )
 
 target_compile_definitions(pass_context_test PRIVATE
@@ -887,8 +993,10 @@ add_executable(particle_determinism_test
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
     rendering/terrain_culling_test.cpp
+    rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
+    rendering/graphics_runtime_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE
@@ -1122,8 +1230,13 @@ target_link_libraries(worldgen_probe PRIVATE
 
 luminumbra_configure_first_party_target(worldgen_probe)
 
+if(NOT Python3_EXECUTABLE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
 add_test(NAME WorldgenProbeSmoke
-    COMMAND worldgen_probe --smoke --json ${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json)
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/ci/check_worldgen_probe_smoke.py"
+            --probe "$<TARGET_FILE:worldgen_probe>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json")
 set_tests_properties(WorldgenProbeSmoke PROPERTIES LABELS "perf" TIMEOUT 120)
 
 # Manual cold-load latency diagnostic. It exercises twenty interactive loads at
@@ -1436,6 +1549,7 @@ add_executable(frontier_gates_test
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
+    persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
     persistence/SaveTransaction_test.cpp
 )
@@ -1447,6 +1561,7 @@ target_compile_definitions(frontier_gates_test PRIVATE
 
 target_include_directories(frontier_gates_test PRIVATE
 ../src
+${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(frontier_gates_test PRIVATE
@@ -1457,15 +1572,37 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
+    common/EffectivePresetIdentity_test.cpp
+    common/SurfaceWorkBudget_test.cpp
+    ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
+    persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
+    ../src/luminumbra_server/modes/Replay.cpp
 )
-target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
+target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common)
+target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
+
+# Surface admission exercises both shipping launch parsers without a device.
+add_executable(runtime_surface_options_test
+    client/runtime_surface_options_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+)
+target_include_directories(runtime_surface_options_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+target_link_libraries(runtime_surface_options_test PRIVATE
+    gtest_main
+    luminumbra_common
+    nlohmann_json
+    glm
+)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
@@ -1522,6 +1659,25 @@ target_link_libraries(audio_occlusion_test PRIVATE
     luminumbra_common
 )
 
+# Metrics regressions exercise the production propagation API without an audio device.
+add_executable(audio_propagation_metrics_test
+    audio/audio_propagation_metrics_test.cpp
+    ../src/luminumbra_client/audio/AudioPropagationSystem.cpp
+)
+target_include_directories(audio_propagation_metrics_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../src/luminumbra_common
+)
+target_link_libraries(audio_propagation_metrics_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
+)
+luminumbra_configure_first_party_target(audio_propagation_metrics_test)
+
 # prune guard — compile-sentinel that the SURVIVING audio headers still build
 # (fails if anything leans on a deleted orphan) + asserts the 7 retired bank manifests are
 # gone. Includes MiniaudioManager.h so needs the miniaudio + nlohmann_json link interface.
@@ -1543,8 +1699,8 @@ target_link_libraries(audio_prune_guard_test PRIVATE
     glm
 )
 
-# review of 2c32211: stance-independent saved spawn anchor and the shared
-# LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
+# Saved spawn anchors are stance-independent; tree impostor policy uses the
+# shared LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
 add_executable(client_policy_test
     client/client_policy_test.cpp
 )
@@ -1579,9 +1735,59 @@ target_link_libraries(audio_physics_binding_test PRIVATE
     spdlog::spdlog
 )
 
+find_package(Threads REQUIRED)
+
+# Developer foundations compile directly, without the client or graphics libraries.
+add_executable(developer_console_pure_test
+    client/developer_console_pure_test.cpp
+    ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/DeveloperWidgetRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperConsole.cpp
+    ../src/luminumbra_client/debug/DeveloperLogSink.cpp
+    ../src/luminumbra_client/app/UiInputRouter.cpp
+)
+target_include_directories(developer_console_pure_test PRIVATE
+    ../src/luminumbra_client ../src/luminumbra_common)
+target_link_libraries(developer_console_pure_test PRIVATE gtest_main Threads::Threads spdlog::spdlog)
+luminumbra_configure_first_party_target(developer_console_pure_test)
+
+# CPU-only ImGui acceptance compiles the pinned core directly, without GL backends
+# or the complete client. The ordinary imgui target also links graphics libraries.
+FetchContent_GetProperties(imgui_src SOURCE_DIR _developer_imgui_source)
+add_executable(developer_console_imgui_test
+    client/developer_console_imgui_test.cpp
+    ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/DeveloperWidgetRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperConsole.cpp
+    ../src/luminumbra_client/debug/DeveloperConsoleUi.cpp
+    ../src/luminumbra_client/debug/DeveloperLogSink.cpp
+    ../src/luminumbra_client/debug/widgets/DeveloperWidgetUi.cpp
+    ../src/luminumbra_client/debug/widgets/PassiveDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp
+    "${_developer_imgui_source}/imgui.cpp"
+    "${_developer_imgui_source}/imgui_draw.cpp"
+    "${_developer_imgui_source}/imgui_tables.cpp"
+    "${_developer_imgui_source}/imgui_widgets.cpp"
+)
+target_include_directories(developer_console_imgui_test PRIVATE
+    ../src/luminumbra_client ../src/luminumbra_common)
+target_include_directories(developer_console_imgui_test SYSTEM PRIVATE "${_developer_imgui_source}")
+target_link_libraries(developer_console_imgui_test PRIVATE gtest_main Threads::Threads)
+luminumbra_configure_first_party_target(developer_console_imgui_test)
+
+# User-overlay persistence uses common services only; no client or GL linkage.
+add_executable(developer_settings_test common/developer_settings_test.cpp)
+target_include_directories(developer_settings_test PRIVATE ../src)
+target_compile_definitions(developer_settings_test PRIVATE
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+target_link_libraries(developer_settings_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(developer_settings_test)
+
 # main-loop stall detector (pure std; no window/GL/device). Fires once per
 # stall episode, re-arms when the heartbeat resumes.
-find_package(Threads REQUIRED)
 add_executable(hang_watchdog_test
     client/hang_watchdog_test.cpp
 ../src/luminumbra_client/app/HangWatchdog.cpp
@@ -1594,6 +1800,20 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Process crash capture (core/CrashReport). Runs the child crash case by re-executing
+# this binary, so it is its own executable rather than part of common_tests.
+add_executable(crash_report_test
+    common/crash_report_test.cpp
+)
+target_include_directories(crash_report_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+)
+target_link_libraries(crash_report_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+luminumbra_configure_first_party_target(crash_report_test)
 # Bounded console sink: separate executable so the logging-stall cases can run
 # without the rest of common_tests. Fake outputs are stalled on purpose; the
 # tests release them before returning.
@@ -1720,6 +1940,18 @@ add_test(
 # timeout" during the post-build gtest_discover_tests step (no test actually ran).
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
+if(UNIX)
+    # Isolate allocation replacement used to observe alternate-stack release.
+    add_executable(crash_report_teardown_test
+        common/crash_report_teardown_test.cpp
+        ../src/luminumbra_common/core/CrashReport.cpp)
+    target_include_directories(crash_report_teardown_test PRIVATE
+        ../src
+        ../src/luminumbra_common)
+    target_link_libraries(crash_report_teardown_test PRIVATE gtest_main Threads::Threads)
+    luminumbra_configure_first_party_target(crash_report_teardown_test)
+    gtest_discover_tests(crash_report_teardown_test)
+endif()
 if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     add_executable(viewport_protocol_test static_preview/viewport_protocol_test.cpp
         ../tools/static_preview/ViewportProtocol.cpp)
@@ -1728,19 +1960,63 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     luminumbra_configure_first_party_target(viewport_protocol_test)
     gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
 endif()
+add_executable(frame_attribution_test rendering/frame_attribution_test.cpp
+    ../src/luminumbra_client/app/FrameAttribution.cpp)
+target_include_directories(frame_attribution_test PRIVATE ../src)
+target_link_libraries(frame_attribution_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(frame_attribution_test)
+
+add_executable(upload_budget_test rendering/upload_budget_test.cpp)
+target_include_directories(upload_budget_test PRIVATE ../src)
+target_link_libraries(upload_budget_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(upload_budget_test)
+
+add_executable(menu_presentation_test rendering/menu_presentation_test.cpp
+    ../src/luminumbra_client/app/FrameAttribution.cpp)
+target_include_directories(menu_presentation_test PRIVATE ../src)
+target_link_libraries(menu_presentation_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(menu_presentation_test)
+
+add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
+target_include_directories(jolt_startup_test PRIVATE ../src)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt luminumbra_common ${CMAKE_DL_LIBS})
+luminumbra_configure_first_party_target(jolt_startup_test)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(jolt_startup_test PRIVATE
+        "-Wl,--export-dynamic-symbol=pthread_create"
+        "-Wl,--export-dynamic-symbol=pthread_join"
+        "-Wl,--export-dynamic-symbol=sem_init"
+        "-Wl,--export-dynamic-symbol=sem_destroy")
+endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
+set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    upload_budget_test
+    jolt_startup_test
+    frame_attribution_test
+    menu_presentation_test
+    graphics_preset_classifier_test
+    hardware_info_test
     far_volume_tile_test
     far_volume_mesher_test
     far_volume_facade_test
+    far_pristine_field_test
+    far_frozen_water_mesh_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
     morph_asset_test
     game_assets_test
     common_tests
+    net_sockets_transport_test
     filesystem_path_test
+    unique_temp_path_test
     skinned_test_assets_test
     tree_lod_test
+    rendering_defaults_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
@@ -1753,6 +2029,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test
+    foliage_surface_slots_test
     foliage_visual_contract_test
     render_view_test
     render_smoke_test
@@ -1780,14 +2057,20 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     world_open_refusal_test
+    runtime_surface_options_test
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test
+    audio_propagation_metrics_test
     audio_prune_guard_test
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    crash_report_test
     bounded_console_sink_test
+    developer_console_pure_test
+    developer_console_imgui_test
+    developer_settings_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test
@@ -1863,12 +2146,16 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         # than shorten the run. Everything else in this target is fast; the cost of
         # the wider bound is only that a genuine hang here surfaces later.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            NO_PRETTY_VALUES
+            TEST_LIST LUMINUMBRA_WORLD_OPEN_TESTS
             PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            TEST_LIST ${_lum_gtest_target}_TESTS
             PROPERTIES RESOURCE_LOCK luminumbra_gl_context)
     else()
-        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            TEST_LIST ${_lum_gtest_target}_TESTS)
     endif()
 endforeach()
 
@@ -1876,6 +2163,9 @@ endforeach()
 # include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake")
+# GoogleTest's discovery includes must run before case labeling and COST hints.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")
 
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the
@@ -1923,6 +2213,36 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
+add_test(NAME ReplayWorkspacePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_replay_workspace.py")
+add_test(NAME UploadBudgetWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/rendering/test_upload_budget_wiring.py")
+set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
+if(MSVC)
+    list(APPEND _common_isa_compiler_args --msvc)
+endif()
+add_test(NAME CommonLibraryIsaContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_common_library_isa.py"
+        ${_common_isa_compiler_args} --cmake "${CMAKE_COMMAND}")
+set_tests_properties(CommonLibraryIsaContract PROPERTIES LABELS "world;tools" TIMEOUT 30)
+add_test(NAME StationDiscoveryContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py")
+add_test(NAME StationDiscoveryCliSmoke
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --cli "$<TARGET_FILE:luminumbra_station_discovery>")
+add_test(NAME StationDiscoveryNumericRefusals
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --numeric-cli "$<TARGET_FILE:station_discovery_numeric_environment>")
+set_tests_properties(StationDiscoveryNumericRefusals PROPERTIES LABELS "world;tools" TIMEOUT 120)
+set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
+    PROPERTIES LABELS "world;tools" TIMEOUT 120)
+
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
@@ -1937,28 +2257,32 @@ set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" 
 add_test(NAME ShieldRtTracerProfileGpu COMMAND shieldrt_tracer_profile_gpu)
 set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field ground-truth parity gate (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
 set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # far-field G-buffer raymarch (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldGbufferGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldGbufferGpu COMMAND shieldrt_far_field_gbuffer_gpu)
 set_tests_properties(ShieldRtFarFieldGbufferGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 # GPU max-mip reduction parity (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldMaxMipGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldMaxMipGpu COMMAND shieldrt_far_field_maxmip_gpu)
 set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
     LABELS "manual;perf;gpu"
-    TIMEOUT 600)
+    TIMEOUT 600
+    RESOURCE_LOCK luminumbra_gl_context)
 
 #  per-flag fixtures for the WorldVisualSweep objective
 # critique (tools/visual_critique.py). Pins every objective defect flag so a
@@ -1977,14 +2301,29 @@ else()
     find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell)
 endif()
 if(CAPTURE_VALIDATION_POWERSHELL)
+    if(Python3_FOUND)
+        add_test(NAME AcceptancePreflightContract
+            COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/gates/test_acceptance_preflight.py)
+        set_tests_properties(AcceptancePreflightContract PROPERTIES
+            LABELS "persistence;tools" TIMEOUT 120)
+    endif()
     add_test(NAME CaptureArtifactValidationContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME RenderQualificationWrapperContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-render-qualification.ps1")
+    set_tests_properties(RenderQualificationWrapperContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
     add_test(NAME FarLadderOracleContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
     set_tests_properties(FarLadderOracleContract PROPERTIES LABELS "tools" TIMEOUT 60)
+    add_test(NAME SavedWorldRoundtripArtifactsContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-saved-world-roundtrip-artifacts.ps1")
+    set_tests_properties(SavedWorldRoundtripArtifactsContract PROPERTIES
+        LABELS "persistence;tools" TIMEOUT 60)
     add_test(NAME LuaApiManifestSourceContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/validate-engine-frontier.ps1"
@@ -1992,8 +2331,11 @@ if(CAPTURE_VALIDATION_POWERSHELL)
     set_tests_properties(LuaApiManifestSourceContract PROPERTIES
         LABELS "scripting;tools" TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 else()
+    message(STATUS "PowerShell unavailable: AcceptancePreflightContract is not registered")
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: RenderQualificationWrapperContract is not registered")
     message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
+    message(STATUS "PowerShell unavailable: SavedWorldRoundtripArtifactsContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
 endif()
 
@@ -2016,6 +2358,9 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    add_test(NAME FarHorizonV2ValidatorContract
+        COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s "${CMAKE_SOURCE_DIR}/tools/gates" -p test_far_ladder_oracle.py)
+    set_tests_properties(FarHorizonV2ValidatorContract PROPERTIES LABELS "tools" TIMEOUT 60)
     if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
         add_test(NAME FoliageEvidenceContract
             COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)
@@ -2186,6 +2531,51 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 # on Windows and can exit inside the renderer without diagnostic output.
 
 # Pure CPU measurement contract, also runnable without a GL context.
+add_library(profiler_disabled_compile OBJECT core/profiler_disabled_compile.cpp)
+target_include_directories(profiler_disabled_compile PRIVATE ../src/luminumbra_common)
+luminumbra_configure_first_party_target(profiler_disabled_compile)
+# Deliberately no link to luminumbra_common/luminumbra_profiler: this target
+# checks disabled macro expansion even when the rest of the build is profiled.
+if(LUMINUMBRA_ENABLE_TRACY)
+    add_library(profiler_enabled_compile OBJECT core/profiler_enabled_compile.cpp)
+    target_include_directories(profiler_enabled_compile PRIVATE ../src/luminumbra_common)
+    target_link_libraries(profiler_enabled_compile PRIVATE luminumbra_profiler)
+    luminumbra_configure_first_party_target(profiler_enabled_compile)
+endif()
+add_test(NAME ProfilerSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/check_profiler_contract.py)
+
+# Generate from the production destructor so a shutdown reversion also changes
+# the native ordering probe. No access hooks are added to the production class.
+set(audio_shutdown_source "${CMAKE_SOURCE_DIR}/src/luminumbra_client/audio/AudioPropagationSystem.cpp")
+set(audio_shutdown_generator "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py")
+set(audio_shutdown_body "${CMAKE_CURRENT_BINARY_DIR}/audio_shutdown_body.inc")
+# Configure-only compilation consumers need the same body before any build runs.
+# Reconfigure on either input change, and retain normal build-time regeneration.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${audio_shutdown_source}" "${audio_shutdown_generator}")
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+        --emit-destructor "${audio_shutdown_body}"
+    RESULT_VARIABLE audio_shutdown_result
+    ERROR_VARIABLE audio_shutdown_error)
+if(NOT "${audio_shutdown_result}" STREQUAL "0")
+    message(FATAL_ERROR "Audio shutdown body generation failed (${audio_shutdown_result}): ${audio_shutdown_error}")
+endif()
+add_custom_command(OUTPUT "${audio_shutdown_body}"
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+        --emit-destructor "${audio_shutdown_body}"
+    DEPENDS "${audio_shutdown_source}" "${audio_shutdown_generator}"
+    VERBATIM)
+add_executable(audio_shutdown_test "audio/audio_shutdown_test.cpp" "${audio_shutdown_body}")
+target_include_directories(audio_shutdown_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(audio_shutdown_test PRIVATE Threads::Threads)
+luminumbra_configure_first_party_target(audio_shutdown_test)
+add_test(NAME AudioShutdownTransition COMMAND audio_shutdown_test)
+set_tests_properties(AudioShutdownTransition PROPERTIES TIMEOUT 15)
+add_test(NAME AudioShutdownSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py")
+
 add_executable(render_measurement_test rendering/render_measurement_test.cpp)
 target_include_directories(render_measurement_test PRIVATE ../src)
 target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
@@ -2199,6 +2589,21 @@ if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
+add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_asan_shards.py)
+set_tests_properties(AsanShardContractPython PROPERTIES TIMEOUT 60)
+add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)
+add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
+add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+add_test(NAME AudioPropagationMetricsContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_audio_propagation_metrics.py)
+add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_replay_source_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
@@ -2212,6 +2617,8 @@ set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benc
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
     "RenderBenchmarkImplicitCreationFailure;test_implicit_creation_failure"
+    "RenderBenchmarkMeasuredFrameBounds;test_v2_measured_frame_bounds"
+    "RenderBenchmarkIsolationSubmission;test_isolation_submission_reporting"
     "RenderBenchmarkOverrideCollection;test_gl_debug_override_collection"
     "RenderTraversalEmbeddedPresetRefusal;test_embedded_preset_refusal")
     list(GET case 0 test_name)
@@ -2223,5 +2630,6 @@ foreach(case IN ITEMS
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+        RESOURCE_LOCK luminumbra_gl_context)
 endforeach()

@@ -64,6 +64,152 @@ def run_document(samples: list[float], key: str = "same") -> dict:
     return document
 
 
+def far_capture():
+    rows = [dict(frame=frame, requested_mode="ladder", effective_mode="ladder", refusal="None",
+                 submission_refusal="None", suppressed=False, coverage_settled=True,
+                 content_identity="18446744073709551615",
+                 streaming=dict(generation_pending=0, meshing_pending=0, terrain_uploads_pending=0,
+                                generation_outstanding=False, meshing_outstanding=False),
+                 settings=dict(gns_compiled=True, active_regions=True,
+                               water_cells_per_side=16, grass_density_scale=1.6))
+            for frame in range(2, 6)]
+    data = dict(schema="luminumbra.render_benchmark.v3", frames=4, warmup_frames=2,
+                far_world=dict(frames=rows))
+    update_far_summary(data)
+    return data
+
+
+def update_far_summary(data):
+    rows = data['far_world']['frames']
+    summary = {key: {} for key in ('requested_mode', 'effective_mode', 'refusal', 'submission_refusal')}
+    for row in rows:
+        for key in summary:
+            summary[key][row[key]] = summary[key].get(row[key], 0) + 1
+    summary['suppressed_frames'] = sum(row['suppressed'] for row in rows)
+    summary['unsettled_frames'] = sum(not row['coverage_settled'] or any(row['streaming'].values()) for row in rows)
+    data['far_world']['summary'] = summary
+
+
+class FarModeReportingTest(unittest.TestCase):
+    def test_zero_water_resolution_is_valid_for_diagnostic_captures(self):
+        for index in range(4):
+            with self.subTest(index=index):
+                data = far_capture()
+                data['far_world']['frames'][index]['settings']['water_cells_per_side'] = 0
+                perf.validate_far_world_reporting(data)
+
+    def test_zero_water_resolution_is_refused_for_ladder_baselines(self):
+        for index in range(4):
+            with self.subTest(index=index):
+                data = far_capture()
+                data['far_world']['frames'][index]['settings']['water_cells_per_side'] = 0
+                with self.assertRaisesRegex(ValueError, 'water resolution'):
+                    perf.validate_far_world_reporting(data, ladder_baseline=True)
+                data['far_world']['frames'][index]['settings']['water_cells_per_side'] = 16
+                perf.validate_far_world_reporting(data, ladder_baseline=True)
+
+    def test_unavailable_identity_refuses_each_ladder_frame(self):
+        for index in range(4):
+            for identity in ('0', '00', '00000000000000000000'):
+                with self.subTest(index=index, identity=identity):
+                    data = far_capture()
+                    data['far_world']['frames'][index]['content_identity'] = identity
+                    perf.validate_far_world_reporting(data)
+                    with self.assertRaisesRegex(ValueError, 'Ladder baseline refused.*identity.*unavailable'):
+                        perf.validate_far_world_reporting(data, ladder_baseline=True)
+                    data['far_world']['frames'][index]['content_identity'] = '1'
+                    perf.validate_far_world_reporting(data, ladder_baseline=True)
+
+    def test_missing_or_invalid_identity_is_always_refused(self):
+        for identity in (None, '', 'unknown', '18446744073709551616', 0, False):
+            for baseline in (False, True):
+                with self.subTest(identity=identity, baseline=baseline):
+                    data = far_capture()
+                    data['far_world']['frames'][0]['content_identity'] = identity
+                    with self.assertRaisesRegex(ValueError, 'invalid far-world content identity'):
+                        perf.validate_far_world_reporting(data, ladder_baseline=baseline)
+
+    def test_ladder_positive_and_rejection_controls(self):
+        valid = far_capture()
+        perf.validate_far_world_reporting(valid, ladder_baseline=True)
+        controls = [dict(streaming=dict(generation_pending=1, meshing_pending=0, terrain_uploads_pending=0)),
+                    dict(streaming=dict(generation_pending=0, meshing_pending=1, terrain_uploads_pending=0)),
+                    dict(streaming=dict(generation_pending=0, meshing_pending=0, terrain_uploads_pending=1)),
+                    dict(effective_mode='legacy'), dict(requested_mode='legacy'),
+                    dict(refusal='ImmutableAuthorityUnavailable'), dict(suppressed=True),
+                    dict(suppressed=True, submission_refusal='LiveOwnershipIncomplete'),
+                    dict(suppressed=True, submission_refusal='LogicalStoreAdmission'),
+                    dict(suppressed=True, submission_refusal='BackendUnavailable'),
+                    dict(suppressed=True, submission_refusal='DrawRejected'),
+                    dict(suppressed=True, submission_refusal='IsolationSuppressed'),
+                    dict(streaming=dict(generation_outstanding=True)),
+                    dict(streaming=dict(meshing_outstanding=True)),
+                    dict(coverage_settled=False)]
+        for index in range(4):
+            for mutation in controls:
+                with self.subTest(index=index, mutation=mutation):
+                    data = copy.deepcopy(valid)
+                    row = data['far_world']['frames'][index]
+                    if 'streaming' in mutation:
+                        row['streaming'].update(mutation['streaming'])
+                    else:
+                        row.update(mutation)
+                    update_far_summary(data)
+                    # A diagnostic capture may faithfully report a refused frame.
+                    perf.validate_far_world_reporting(data)
+                    with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                        perf.validate_far_world_reporting(data, ladder_baseline=True)
+                    data['far_world']['frames'][index] = copy.deepcopy(valid['far_world']['frames'][index])
+                    update_far_summary(data)
+                    perf.validate_far_world_reporting(data, ladder_baseline=True)
+
+    def test_missing_malformed_and_forged_evidence(self):
+        controls = [lambda d: d['far_world']['frames'][0].pop('streaming'),
+                    lambda d: d['far_world']['frames'][0]['streaming'].update(generation_pending=False),
+                    lambda d: d['far_world']['frames'][0]['streaming'].pop('generation_outstanding'),
+                    lambda d: d['far_world']['frames'][0]['streaming'].pop('meshing_outstanding'),
+                    lambda d: d['far_world']['frames'][0]['streaming'].update(generation_outstanding=1),
+                    lambda d: d['far_world']['frames'][0]['streaming'].update(meshing_outstanding=0),
+                    lambda d: d['far_world']['frames'][0]['settings'].pop('grass_density_scale'),
+                    lambda d: d.pop('far_world'),
+                    lambda d: d['far_world']['frames'].pop(),
+                    lambda d: d['far_world']['frames'][2].update(frame=99),
+                    lambda d: d['far_world']['frames'][0].update(coverage_settled=1),
+                    lambda d: d['far_world']['frames'][0].update(suppressed=0),
+                    lambda d: d['far_world']['frames'][0].update(effective_mode='Ladder'),
+                    lambda d: d['far_world']['frames'][0].update(refusal=[]),
+                    lambda d: d['far_world']['frames'][0].update(submission_refusal='DrawRejected'),
+                    lambda d: d['far_world']['frames'][0].update(content_identity='18446744073709551616'),
+                    lambda d: d['far_world']['frames'][0]['settings'].update(gns_compiled=1),
+                    lambda d: d['far_world']['frames'][0]['settings'].update(water_cells_per_side=0),
+                    lambda d: d['far_world']['frames'][0]['settings'].update(grass_density_scale=float('nan')),
+                    lambda d: d['far_world']['summary']['effective_mode'].update(ladder=3),
+                    lambda d: d['far_world']['summary'].update(suppressed_frames=False)]
+        for mutation in controls:
+            data = far_capture()
+            mutation(data)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                perf.validate_far_world_reporting(data, ladder_baseline=True)
+        perf.validate_far_world_reporting({'frames': 4})
+
+    def test_perf_ladder_cli_rejection_and_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'capture.json'
+            # Isolated Python needs an explicit trusted local module path.
+            bootstrap = ("import runpy,sys; sys.path.insert(0,sys.argv[1]); "
+                         "sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0],run_name='__main__')")
+            command = [sys.executable, '-I', '-B', '-c', bootstrap,
+                       str(Path(perf.__file__).parent), str(Path(perf.__file__)),
+                       'validate', str(path), '--ladder-baseline']
+            for accepted in (False, True):
+                data = far_capture()
+                data['far_world']['frames'][1]['coverage_settled'] = accepted
+                update_far_summary(data)
+                path.write_text(json.dumps(data), encoding='utf-8')
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+
+
 def write_build_manifest(path: Path) -> None:
     path.write_text(
         json.dumps(
@@ -552,7 +698,7 @@ class PerfContractTest(unittest.TestCase):
                 ]
             )
             self.assertEqual(status, perf.UNEVALUATED)
-            self.assertEqual(json.loads(output.read_text())["status"], "unevaluated")
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["status"], "unevaluated")
 
 
 if __name__ == "__main__":

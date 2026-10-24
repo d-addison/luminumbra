@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // far-LOD tile store + region mesher gates.
 // - tile determinism: pristine builds are pure functions of
 //   (seed, params, tier, region); pregen hash == hash after a
@@ -7,6 +8,8 @@
 //   (seed, params_hash, tier, region); edited tiles are authoritative.
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/FarLodStore.h"
@@ -14,7 +17,6 @@
 #include "world/WorldStreamingState.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -57,7 +59,7 @@ constexpr u64 ToolchainHash(u64 msvc, u64 gcc_clang) {
 }
 
 TerrainGenParams FixtureParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.005f;
     params.base_amplitude = 40.0f;
     params.height_offset = 10.0f;
@@ -67,10 +69,9 @@ TerrainGenParams FixtureParams() {
 }
 
 std::filesystem::path MakeTempSaveDir(const std::string& tag) {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                      ("luminumbra_farlod_" + tag + "_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir);
+    const std::filesystem::path dir =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_farlod_" + tag + "_");
+
     return dir;
 }
 
@@ -1221,7 +1222,7 @@ TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {
 // Spline content/count and every frequency must invalidate pristine tiles.
 TEST(FarLodStore, TerrainParamsHashShapingFold) {
     auto make = []() {
-        TerrainGenParams p;
+        TerrainGenParams p = Luminumbra::Test::SyntheticTerrainParams();
         p.base_frequency = 0.008f;
         p.base_amplitude = 60.0f;
         p.octaves = 5;

@@ -1,4 +1,6 @@
 #include "FarLodSystem.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "Shader.h"
 #include "core/Log.h"
@@ -132,15 +134,6 @@ void BuildFarLodWaterSheet(const Luminumbra::World::FarLodTile& tile,
     }
 }
 
-bool tile_has_authoritative_bricks(const Luminumbra::World::FarLodTile& tile) {
-    return std::any_of(tile.sdf_bricks.begin(),
-                       tile.sdf_bricks.end(),
-                       [](const Luminumbra::World::FarLodSdfBrickDescriptor& brick) {
-                           return brick.source_kind ==
-                                  Luminumbra::World::FarLodBrickSourceKind::Authoritative;
-                       });
-}
-
 Luminumbra::World::FarLodTile
 rebase_authoritative_tile(const Luminumbra::Systems::SHIELD_WorldSystem& world,
                           Luminumbra::World::FarLodTile&& stale,
@@ -170,271 +163,11 @@ rebase_authoritative_tile(const Luminumbra::Systems::SHIELD_WorldSystem& world,
     return fresh;
 }
 
-bool complete_authoritative_stacks(const Luminumbra::Systems::SHIELD_WorldSystem& world,
-                                   Luminumbra::World::FarLodTile& tile,
-                                   std::string& error,
-                                   bool& changed) {
-    struct AuthorityColumn {
-        int x = 0;
-        int z = 0;
-        int min_y = 0;
-        int max_y = 0;
-    };
-    std::vector<AuthorityColumn> columns;
-    for (const auto& brick : tile.sdf_bricks) {
-        if (brick.source_kind != Luminumbra::World::FarLodBrickSourceKind::Authoritative) {
-            continue;
-        }
-        auto found =
-            std::find_if(columns.begin(), columns.end(), [&](const AuthorityColumn& column) {
-                return column.x == brick.local_chunk_x && column.z == brick.local_chunk_z;
-            });
-        if (found == columns.end()) {
-            columns.push_back(
-                {brick.local_chunk_x, brick.local_chunk_z, brick.chunk_y, brick.chunk_y});
-        } else {
-            found->min_y = std::min(found->min_y, brick.chunk_y);
-            found->max_y = std::max(found->max_y, brick.chunk_y);
-        }
-    }
-    if (columns.empty()) {
-        return true;
-    }
-
-    const int sample_step = Luminumbra::World::FarLodSampleStepMeters(tile.tier);
-    std::set<std::tuple<int, int, int>> required; // (z, x, y), canonical
-    for (const AuthorityColumn& column : columns) {
-        if (column.x <= 0 || column.x >= 31 || column.z <= 0 || column.z >= 31) {
-            error = "authoritative far-SDF column needs a cross-region halo";
-            return false;
-        }
-        int min_y = column.min_y - 1;
-        int max_y = column.max_y + 1;
-        for (int halo_z = column.z - 1; halo_z <= column.z + 1; ++halo_z) {
-            for (int halo_x = column.x - 1; halo_x <= column.x + 1; ++halo_x) {
-                const int base_x = halo_x * Luminumbra::CHUNK_SIZE_X;
-                const int base_z = halo_z * Luminumbra::CHUNK_SIZE_Z;
-                for (int local_z = 0; local_z <= Luminumbra::CHUNK_SIZE_Z; local_z += sample_step) {
-                    for (int local_x = 0; local_x <= Luminumbra::CHUNK_SIZE_X;
-                         local_x += sample_step) {
-                        const std::size_t sx =
-                            static_cast<std::size_t>((base_x + local_x) / sample_step);
-                        const std::size_t sz =
-                            static_cast<std::size_t>((base_z + local_z) / sample_step);
-                        const float height = Luminumbra::World::DequantizeFarLodHeight(
-                            tile.height_q[sx + sz * tile.samples_per_side]);
-                        const int surface_y = static_cast<int>(
-                            std::floor(height / static_cast<float>(Luminumbra::CHUNK_SIZE_Y)));
-                        min_y = std::min(min_y, surface_y - 1);
-                        max_y = std::max(max_y, surface_y + 1);
-                    }
-                }
-            }
-        }
-        for (int halo_z = column.z - 1; halo_z <= column.z + 1; ++halo_z) {
-            for (int halo_x = column.x - 1; halo_x <= column.x + 1; ++halo_x) {
-                for (int chunk_y = min_y; chunk_y <= max_y; ++chunk_y) {
-                    required.emplace(halo_z, halo_x, chunk_y);
-                }
-            }
-        }
-    }
-
-    const auto exists = [&](int x, int y, int z) {
-        return std::any_of(tile.sdf_bricks.begin(), tile.sdf_bricks.end(), [&](const auto& brick) {
-            return brick.local_chunk_x == x && brick.local_chunk_z == z && brick.chunk_y == y;
-        });
-    };
-    const auto worldgen_scope = world.acquire_worldgen_sample_scope();
-    for (const auto& [local_z, local_x, chunk_y] : required) {
-        if (exists(local_x, chunk_y, local_z)) {
-            continue;
-        }
-        const IVec3 coords(tile.rx * kChunksPerFarLodRegion + local_x,
-                           chunk_y,
-                           tile.rz * kChunksPerFarLodRegion + local_z);
-        Luminumbra::Chunk scratch(coords);
-        world.GenerateChunkData(scratch, 1);
-        Luminumbra::World::FarLodSdfSnapshot generated;
-        generated.coords = coords;
-        generated.source_kind = Luminumbra::World::FarLodBrickSourceKind::RegenerableCache;
-        generated.sdf_data = std::move(scratch.sdf_data);
-        generated.material_data = std::move(scratch.material_data);
-        std::string reduction_error;
-        const auto reduced =
-            Luminumbra::World::ReduceChunkSdfIntoFarTile(tile, generated, &reduction_error);
-        if (reduced == Luminumbra::World::FarLodSdfReduceResult::Error) {
-            error = "failed to generate far-SDF halo brick: " + reduction_error;
-            return false;
-        }
-        changed = changed || reduced != Luminumbra::World::FarLodSdfReduceResult::Unchanged;
-    }
-    return true;
-}
-
 u32 far_brick_crc(const i16* density, const u8* material, std::size_t count) {
     Luminumbra::Core::Crc32Accumulator crc;
     crc.Update(density, count * sizeof(i16));
     crc.Update(material, count);
     return crc.Value();
-}
-
-bool synchronize_regenerable_boundaries(Luminumbra::World::FarLodTile& tile,
-                                        std::string& error,
-                                        bool& changed) {
-    using Sample = std::pair<i16, u8>;
-    std::map<std::tuple<int, int, int>, Sample> authority_samples;
-    const u32 side = Luminumbra::World::FarLodSdfBrickSamplesPerSide(tile.tier);
-    const int step = Luminumbra::World::FarLodSampleStepMeters(tile.tier);
-    const std::size_t count = Luminumbra::World::FarLodSdfBrickSampleCount(tile.tier);
-    for (std::size_t brick_index = 0; brick_index < tile.sdf_bricks.size(); ++brick_index) {
-        const auto& brick = tile.sdf_bricks[brick_index];
-        if (brick.source_kind != Luminumbra::World::FarLodBrickSourceKind::Authoritative) {
-            continue;
-        }
-        const std::size_t payload = brick_index * count;
-        for (u32 z = 0; z < side; ++z) {
-            for (u32 y = 0; y < side; ++y) {
-                for (u32 x = 0; x < side; ++x) {
-                    const std::size_t sample = payload + static_cast<std::size_t>(x) +
-                                               static_cast<std::size_t>(y) * side +
-                                               static_cast<std::size_t>(z) * side * side;
-                    const auto key = std::make_tuple(
-                        static_cast<int>(brick.local_chunk_x) * Luminumbra::CHUNK_SIZE_X +
-                            static_cast<int>(x) * step,
-                        brick.chunk_y * Luminumbra::CHUNK_SIZE_Y + static_cast<int>(y) * step,
-                        static_cast<int>(brick.local_chunk_z) * Luminumbra::CHUNK_SIZE_Z +
-                            static_cast<int>(z) * step);
-                    const Sample value(tile.sdf_density_q[sample], tile.sdf_material[sample]);
-                    const auto [found, inserted] = authority_samples.emplace(key, value);
-                    if (!inserted && found->second != value) {
-                        error = "adjacent authoritative far-SDF bricks disagree on a shared sample";
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-
-    for (std::size_t brick_index = 0; brick_index < tile.sdf_bricks.size(); ++brick_index) {
-        auto& brick = tile.sdf_bricks[brick_index];
-        if (brick.source_kind != Luminumbra::World::FarLodBrickSourceKind::RegenerableCache) {
-            continue;
-        }
-        const std::size_t payload = brick_index * count;
-        bool brick_changed = false;
-        for (u32 z = 0; z < side; ++z) {
-            for (u32 y = 0; y < side; ++y) {
-                for (u32 x = 0; x < side; ++x) {
-                    const auto key = std::make_tuple(
-                        static_cast<int>(brick.local_chunk_x) * Luminumbra::CHUNK_SIZE_X +
-                            static_cast<int>(x) * step,
-                        brick.chunk_y * Luminumbra::CHUNK_SIZE_Y + static_cast<int>(y) * step,
-                        static_cast<int>(brick.local_chunk_z) * Luminumbra::CHUNK_SIZE_Z +
-                            static_cast<int>(z) * step);
-                    const auto authoritative = authority_samples.find(key);
-                    if (authoritative == authority_samples.end()) {
-                        continue;
-                    }
-                    const std::size_t sample = payload + static_cast<std::size_t>(x) +
-                                               static_cast<std::size_t>(y) * side +
-                                               static_cast<std::size_t>(z) * side * side;
-                    if (tile.sdf_density_q[sample] != authoritative->second.first ||
-                        tile.sdf_material[sample] != authoritative->second.second) {
-                        tile.sdf_density_q[sample] = authoritative->second.first;
-                        tile.sdf_material[sample] = authoritative->second.second;
-                        brick_changed = true;
-                    }
-                }
-            }
-        }
-        if (brick_changed) {
-            brick.payload_crc32 = far_brick_crc(
-                tile.sdf_density_q.data() + payload, tile.sdf_material.data() + payload, count);
-            changed = true;
-        }
-    }
-    return true;
-}
-
-bool derive_authoritative_surface_water(Luminumbra::World::FarLodTile& tile,
-                                        std::string& error,
-                                        bool& changed) {
-    const u32 side = Luminumbra::World::FarLodSdfBrickSamplesPerSide(tile.tier);
-    const int step = Luminumbra::World::FarLodSampleStepMeters(tile.tier);
-    const std::size_t count = Luminumbra::World::FarLodSdfBrickSampleCount(tile.tier);
-    std::set<std::pair<int, int>> authoritative_columns;
-    for (const auto& brick : tile.sdf_bricks) {
-        if (brick.source_kind == Luminumbra::World::FarLodBrickSourceKind::Authoritative) {
-            authoritative_columns.emplace(brick.local_chunk_x, brick.local_chunk_z);
-        }
-    }
-    for (const auto& [column_x, column_z] : authoritative_columns) {
-        for (u32 local_z = 0; local_z < side; ++local_z) {
-            for (u32 local_x = 0; local_x < side; ++local_x) {
-                std::map<int, i16> vertical;
-                for (std::size_t brick_index = 0; brick_index < tile.sdf_bricks.size();
-                     ++brick_index) {
-                    const auto& brick = tile.sdf_bricks[brick_index];
-                    if (brick.local_chunk_x != column_x || brick.local_chunk_z != column_z) {
-                        continue;
-                    }
-                    const std::size_t payload = brick_index * count;
-                    for (u32 local_y = 0; local_y < side; ++local_y) {
-                        const std::size_t sample = payload + static_cast<std::size_t>(local_x) +
-                                                   static_cast<std::size_t>(local_y) * side +
-                                                   static_cast<std::size_t>(local_z) * side * side;
-                        const int world_y = brick.chunk_y * Luminumbra::CHUNK_SIZE_Y +
-                                            static_cast<int>(local_y) * step;
-                        const auto [found, inserted] =
-                            vertical.emplace(world_y, tile.sdf_density_q[sample]);
-                        if (!inserted && found->second != tile.sdf_density_q[sample]) {
-                            error = "far-SDF water derivation found a mismatched vertical boundary "
-                                    "sample";
-                            return false;
-                        }
-                    }
-                }
-                bool found_surface = false;
-                float top_surface_y = 0.0f;
-                for (auto lower = vertical.begin(); lower != vertical.end(); ++lower) {
-                    auto upper = std::next(lower);
-                    if (upper == vertical.end()) {
-                        break;
-                    }
-                    const float d0 = Luminumbra::World::DequantizeFarLodSdf(lower->second);
-                    const float d1 = Luminumbra::World::DequantizeFarLodSdf(upper->second);
-                    if (d0 <= 0.0f && d1 > 0.0f) {
-                        const float denominator = d1 - d0;
-                        const float t = denominator > 0.0f ? -d0 / denominator : 0.0f;
-                        top_surface_y = static_cast<float>(lower->first) +
-                                        t * static_cast<float>(upper->first - lower->first);
-                        found_surface = true;
-                    }
-                }
-                if (!found_surface) {
-                    error = "far-SDF water derivation found no top solid crossing";
-                    return false;
-                }
-                const std::size_t sample_x = static_cast<std::size_t>(
-                    (column_x * Luminumbra::CHUNK_SIZE_X + static_cast<int>(local_x) * step) /
-                    step);
-                const std::size_t sample_z = static_cast<std::size_t>(
-                    (column_z * Luminumbra::CHUNK_SIZE_Z + static_cast<int>(local_z) * step) /
-                    step);
-                u8& flags = tile.flags[sample_x + sample_z * tile.samples_per_side];
-                const u8 next =
-                    top_surface_y < Luminumbra::SEA_LEVEL
-                        ? static_cast<u8>(flags | Luminumbra::World::kFarLodSampleFlagWater)
-                        : static_cast<u8>(flags & ~Luminumbra::World::kFarLodSampleFlagWater);
-                if (next != flags) {
-                    flags = next;
-                    changed = true;
-                }
-            }
-        }
-    }
-    return true;
 }
 
 using WorldBrick = Luminumbra::World::FarLodWorldSdfBrickDescriptor;
@@ -1232,7 +965,7 @@ void FarLodSystem::wait_for_builds() {
     }
     m_inflight_handles.clear();
     m_pending.clear();
-    std::lock_guard<std::mutex> lock(m_shared->mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
     m_shared->completed.clear();
 }
 
@@ -1314,7 +1047,8 @@ std::size_t FarLodSystem::total_resident_bytes() const {
 void FarLodSystem::integrate_completed_builds() {
     std::vector<BuildResult> completed;
     {
-        std::lock_guard<std::mutex> lock(m_shared->mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
         if (m_shared->completed.empty()) {
             return;
         }
@@ -1543,19 +1277,17 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
     std::vector<Wanted> wanted;
     const int camera_rx = static_cast<int>(std::floor(stream_pos.x / kRegionSize));
     const int camera_rz = static_cast<int>(std::floor(stream_pos.z / kRegionSize));
-    const int scan_radius = static_cast<int>(std::ceil(kF2OuterRangeMeters / kRegionSize)) + 1;
+    const int scan_radius = static_cast<int>(std::ceil(m_wanted_radius_m / kRegionSize)) + 1;
     for (int rz = camera_rz - scan_radius; rz <= camera_rz + scan_radius; ++rz) {
         for (int rx = camera_rx - scan_radius; rx <= camera_rx + scan_radius; ++rx) {
-            const float nearest = region_nearest_distance(rx, rz, stream_pos);
-            if (nearest > kF2OuterRangeMeters) {
+            const auto admission = region_admission(rx, rz, stream_pos);
+            if (!admission.wanted) {
                 continue;
             }
             // Retain far coverage beneath the live ring too. A camera above
             // the surface can outlive/cull its live terrain; horizontal ring
             // ownership alone must not leave an unrendered square below it.
-            const World::FarLodTier tier =
-                nearest < kF1OuterRangeMeters ? World::FarLodTier::F1 : World::FarLodTier::F2;
-            wanted.push_back({rx, rz, tier, nearest});
+            wanted.push_back({rx, rz, admission.tier, admission.nearest_m});
         }
     }
     // Nearest-first build order.
@@ -1657,7 +1389,8 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                 result.rz = rz;
                 result.authority_build_failed = !outcome.ok;
                 if (!outcome.ok) {
-                    std::lock_guard<std::mutex> lock(shared->mutex);
+                    LUMIN_PROFILE_LOCK(
+                        std::lock_guard<std::mutex>, lock, shared->mutex, "Far build lock wait");
                     shared->completed.push_back(std::move(result));
                     return;
                 }
@@ -1680,7 +1413,8 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                 BuildFarLodWaterSheet(tile, result.water_mesh);
                 result.tile = std::move(tile);
 
-                std::lock_guard<std::mutex> lock(shared->mutex);
+                LUMIN_PROFILE_LOCK(
+                    std::lock_guard<std::mutex>, lock, shared->mutex, "Far build lock wait");
                 shared->completed.push_back(std::move(result));
             }},
             JobPriority::Normal);
@@ -1791,6 +1525,28 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
     m_stats.pending_depth = m_pending.size();
 }
 
+void FarLodSystem::set_horizon(float radius_m, float outer_clip_m) {
+    // Independently narrowed double inputs can differ by one float ULP when
+    // radius and clip straddle a power of two; retain the resolver's 50 m pair.
+    if (!std::isfinite(radius_m) || radius_m < kF1OuterRangeMeters ||
+        radius_m > kF2OuterRangeMeters || !std::isfinite(outer_clip_m) ||
+        std::abs(outer_clip_m - (radius_m + 50.0f)) > 0.001f)
+        return;
+    m_wanted_radius_m = radius_m;
+    m_outer_clip_m = outer_clip_m;
+    // update() recomputes admission each frame, keeps revisions on retained
+    // tiles and evicts only derived meshes outside the new wanted set. Growing
+    // the horizon uses the same authoritative snapshot/revision checks.
+}
+
+FarLodSystem::RegionAdmission
+FarLodSystem::region_admission(int rx, int rz, const glm::vec3& anchor) const {
+    const float nearest = region_nearest_distance(rx, rz, anchor);
+    return {.nearest_m = nearest,
+            .tier = nearest < kF1OuterRangeMeters ? World::FarLodTier::F1 : World::FarLodTier::F2,
+            .wanted = nearest <= m_wanted_radius_m};
+}
+
 void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
                                 const glm::mat4& view,
                                 const glm::vec4 frustum_planes[6],
@@ -1820,7 +1576,7 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // geometry. Their readiness remains the live streaming path's responsibility.
     glEnable(GL_CLIP_DISTANCE0);
     geometry_shader.setFloat("u_farClipNearRadius", kFarClipInnerRadiusMeters);
-    geometry_shader.setFloat("u_farClipFarRadius", kFarClipOuterRadiusMeters);
+    geometry_shader.setFloat("u_farClipFarRadius", m_outer_clip_m);
     // Worldgen-preview far-field: for the external orbit camera the camera-
     // relative inner discard (u_farClipInnerRadius) + near radial clip would carve
     // a moving void disc around the camera, and the camera-region skip would drop
@@ -1874,8 +1630,11 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat4("model", model);
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.vao);
-        glDrawElements(
-            GL_TRIANGLES, static_cast<GLsizei>(region.element_count), GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                    GL_TRIANGLES,
+                                                    static_cast<GLsizei>(region.element_count),
+                                                    GL_UNSIGNED_INT,
+                                                    nullptr);
         ++draws_out;
         indices_out += region.element_count;
     }
@@ -1904,10 +1663,12 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat4("model", model);
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.water_vao);
-        glDrawElements(GL_TRIANGLES,
-                       static_cast<GLsizei>(region.water_element_count),
-                       GL_UNSIGNED_INT,
-                       nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawElements,
+            GL_TRIANGLES,
+            static_cast<GLsizei>(region.water_element_count),
+            GL_UNSIGNED_INT,
+            nullptr);
         ++draws_out;
         indices_out += region.water_element_count;
         ++water_draws;

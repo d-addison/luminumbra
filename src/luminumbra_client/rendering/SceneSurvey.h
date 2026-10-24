@@ -29,8 +29,10 @@ class Camera;
 // rendered settle frames), and writes a labelled screenshot (.ppm) + frame-scan
 // (.json) plus a survey index. Blocking headless capture; issues no sim writes
 //. Pure glue over existing engine primitives.
+// Returns false when world systems are missing or surface preparation is refused.
 // ===========================================================================
-void RunSceneSurvey(GLFWwindow* window,
+// False means the survey is incomplete; callers must report capture failure.
+bool RunSceneSurvey(GLFWwindow* window,
                     world::GameSession& session,
                     RenderPipeline& pipeline,
                     Camera& camera,

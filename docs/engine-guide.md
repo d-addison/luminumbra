@@ -18,7 +18,7 @@ fallback, including when obsolete artifacts coexist with current region files.
 | Region container | `chunks/region/r.<rx>.<rz>.lmr`: `LMR1` magic, little-endian `u16` container version `2`, `u16` record count, record headers and LZ4 payloads |
 | World manifest | `chunks/region/world-manifest.json`: `schema: "luminumbra.persistence.world_manifest.v1"`, `container: "LMR1"`, `container_version: 2` |
 | Far-LOD record payload | `FSD2` magic, payload version `3` inside the LMR1 container |
-| Terrain preset | Explicit `schema_rev` must be the integer `6`; omitted revision remains accepted by the shared parser for in-memory callers |
+| Terrain preset | New presets use integer `schema_rev: 8` with sampling revision `2`; revision `6` and omitted revisions retain historical missing-field semantics |
 
 The manifest schema is still v1; it is distinct from container v2, FSD2 payload
 v3, and project version 0.3.0. Lod-0 records retain the canonical
@@ -36,9 +36,23 @@ whether caves are generated.
 
 Content tuning remains: base noise and shaping splines/warp, cave frequency and
 carve settings, island masks, surface breaks, cliffs, rivers, lakes and structures.
-Hydraulic/thermal relief remains opt-in through `terrain.hydro.enabled`; biome
-tables, climate frequencies and biome relief retain their controls. The
+Hydraulic/thermal relief defaults on in revision 7; explicit
+`terrain.hydro.enabled: false` disables it. Revision 6 retains historical defaults.
+Biome tables, climate frequencies and biome relief retain their controls. The
 [SDF contract](shield/sdf-contract.md) describes their sampling semantics.
+
+New saves embed resolved choices in `preset.json` and write `presetFormat: 1`
+and `presetIdentity` in `world_info.json`. The identity is `StableChecksum` (FNV-1a)
+of the canonical preset JSON (`nlohmann::json::parse(...).dump()`), independent of
+whitespace and distinct from the runtime identity that includes dependencies.
+A marked save refuses a missing embedded preset, a missing or mismatched identity,
+or an unsupported preset format; it never substitutes packaged content. Refusal
+does not modify files. Only legacy saves without the marker and embedded preset
+may fall back: the eight packaged names resolve to frozen revision-6 copies in
+`worlds/atlas/presets-rev6/`, and other names retain their original atlas path.
+Any recorded legacy identity is still verified. Resaving an opened legacy world
+embeds its exact preset and records the marker and identity. This is preset
+fallback within the current container format, not obsolete-world migration.
 
 Failures are deliberately distinct. Recognized older versions receive the refusal
 above. Higher versions report `unsupported future LMR1 container version`,
@@ -63,61 +77,141 @@ byte layout, allocation limits, checksum, absent/corrupt/future refusal rules,
 activation inputs, scheduler ordering, ecology projection and replay companion
 are specified in [Active-region ledger and scheduler](active-regions.md).
 No measured caps or distant system consumers are activated by this foundation.
+The regional plants/water continuation stack (issue #242) is planned for v0.3.1;
+performance/default enablement remains v0.4.0 (issue #320).
 
-### Simulation clock metadata
+### Simulation clock metadata {#simulation-clock-metadata}
 
-The hashed `sim.active_regions` key is off by default. When enabled, every
-successful persistent `GameSession` save writes three additional keys in
-`world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
-temporary-file and atomic replacement path:
+The hashed `sim.active_regions` key is enabled by default for v0.3.0. When
+enabled, each successful persistent `GameSession` save writes the resolved clock
+in `world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
+temporary-file and atomic replacement path. The container remains version 2:
 
 ```json
 "simulationTick": 317,
-"calendar": { "dayLengthTicks": 36000, "daysPerYear": 8 },
+"calendar": {
+  "version": 2,
+  "dayLengthTicks": 162000,
+  "daysPerYear": 8,
+  "daylightNumerator": 2,
+  "daylightDenominator": 3,
+  "lunarCycleDays": 8
+},
 "ambientFieldAnchor": { "x": 8.0, "y": 100.0, "z": 8.0 }
 ```
 
-`simulationTick` is the absolute completed host tick; there is no wall-clock
-progression while a world is closed. Tick zero is midnight on day zero in
-midwinter. At 30 Hz the default day lasts 20 minutes and the year lasts eight
-days. Plants and circadian activity use the midnight phase directly; migration,
-stimulus seasons and the sky's seasonal sine offset the year by three quarters
-to their spring-equinoctial origin. Sky geometry offsets the day by half a cycle
-because its existing zero is noon. An explicit render day-length override and
-photo/scenario time pins remain presentation controls.
+`simulationTick` is the absolute completed host tick, with no progression while
+closed. Tick zero is midnight on day zero in midwinter. New worlds have a
+162,000-tick day: 90 minutes at 30 Hz, with 108,000 ticks (60 minutes) of
+geometric daylight and 54,000 ticks (30 minutes) of night. Sunrise is tick
+27,000 (15 minutes), noon 81,000 (45 minutes), sunset 135,000 (75 minutes).
+Existing twilight blends extend beyond the geometric daylight interval. The
+eight-day year and independent eight-day lunar month each last 1,296,000 ticks
+(12 hours). Seasons change peak solar elevation, without moving the horizon
+crossings or varying daylight duration.
 
-| Metadata condition | Open / write behavior |
+| Saved calendar form | Resolved calendar |
 |---|---|
-| `simulationTick` absent | Tick zero |
-| `calendar` absent | Pinned defaults: 36,000 ticks/day, 8 days/year |
-| `simulationTick` present | JSON unsigned integer in `[0, 2^62)` |
-| `calendar` present | Object containing exactly `dayLengthTicks` and `daysPerYear` |
+| Absent in an existing save or explicit snapshot | Pinned 216,000 ticks/day, 8 days/year, daylight 1/2, lunar month 8 days |
+| Unversioned object with exactly `dayLengthTicks`, `daysPerYear` | Recorded day/year; daylight 1/2; lunar month 8 days |
+| Complete version 2 object | All five recorded values |
+| Newly created world | 162,000 / 8 / 2 / 3 / 8 |
+
+Loading and catalog inspection never rewrite metadata. A successful explicit
+save writes the original two-field calendar for daylight 1/2 with an eight-day
+lunar cycle; other calendars use version 2. Imported 36,000- and 216,000-tick
+calendars remain authoritative. There is no rescaling of ticks,
+indices, entities, ledger timestamps or weather history.
+
+| Field / condition | Validation |
+|---|---|
+| `simulationTick` | JSON unsigned integer in `[0, 2^62)`; absent means zero |
+| Version 2 calendar | Exactly `version`, `dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator`, `lunarCycleDays`; version is integer 2 |
 | `dayLengthTicks` | JSON integer in `[1, 2^31)` |
 | `daysPerYear` | JSON integer in `[1, 366]` |
-| `ambientFieldAnchor` present in a clock save | Object containing finite numeric `x`, `y`, `z` coordinates |
-| `ambientFieldAnchor` absent | Use the saved spawn point, or the initialized spawn if metadata has none |
-| Invalid clock type, null, negative/out-of-range clock number, fractional/exponent clock number, incomplete calendar, unknown calendar member or arithmetic overflow | Corrupt world metadata; refuse before generation or writing |
-| Either clock key present with `sim.active_regions` off | Incompatible configuration; refuse without modifying disk bytes |
+| Daylight fraction | Integer `0 < numerator < denominator <= 65535`, reduced by greatest common divisor |
+| `lunarCycleDays` | JSON integer in `[1, 366]`, independent of `daysPerYear` |
+| `ambientFieldAnchor` in a clock save | Exactly finite numeric `x`, `y`, `z`; absent uses saved or initialized spawn |
+| Missing/extra members, unknown versions, invalid bounds, redundant fractions, floats/exponents, bools, nulls, strings, huge integers | Corrupt metadata; refuse before generation or writing |
+| Clock metadata with `sim.active_regions` disabled | Incompatible configuration; refuse without changing disk bytes |
+| `renderCalendar` together with `calendar`, `simulationTick` or an active-region ledger | Competing authorities; refuse |
 
-Day × year and tick + the catch-up bound are checked before use. Validation
-also applies to initialized saves with no chunk directory, catalog inspection,
-explicit snapshot directories, and saves over existing metadata. The catalog
-reports valid clock metadata without selecting a runtime configuration; opening
-checks the feature requirement. Presence of either clock key marks the save as
-requiring `sim.active_regions`; metadata writes cannot remove both keys from an
-initialized clock save. Save calls inside a simulation catch-up batch are
-refused; successful snapshots observe a completed tick boundary.
-Enabled transient sessions can read explicit snapshots, but saving them is
-refused before creating a directory or writing any member, just as their
-canonical saves are refused.
+These checks apply to metadata-only initialized worlds, catalogs, normal and
+explicit snapshot loads, and every save writer. Products promote operands to
+`uint64_t` before multiplication. Solar branch comparisons and local offsets use
+integer `2 * denominator * remainder` against `day * (denominator ± numerator)`
+and `day * denominator`. These products are below 2^49 and convert exactly to
+double; only the local ratios and cubic evaluation use floating point, under the
+engine's pinned floating-point contract. The symmetric 1/2 path returns the
+original `day_phase()` calculation, preserving its arithmetic. No simulation
+timing uses a floating accumulator or library transcendental.
 
-With the key off, saves omit all three keys, loads restart at zero, and every
-legacy period and hash byte stays unchanged. With it on, clock canonical bytes fold
-into the existing ecology hash slot without changing the top-level hash order.
-The canonical clock section is ASCII `world_clock:v1:` followed by little-endian
-`u64 simulationTick`, `u32 dayLengthTicks`, and `u32 daysPerYear` (16 payload
-bytes). It excludes frame accumulators and telemetry. Calendar and tick changes
-therefore affect the hash even when the entity roster is empty.
+`day_phase()`, day/year indices, annual temperature and season phases stay
+linear. `solar_phase()` is a midnight-origin, monotonic cubic Hermite mapping:
+midnight 0, sunrise 1/4, noon 1/2, sunset 3/4. For daylight fraction `f = n/d`,
+the elapsed-day knots are `0, (1-f)/2, 1/2, (1+f)/2, 1`. Each interval has solar
+span 1/4 and elapsed span `L` (either `(1-f)/2` or `f/2`). With local coordinate
+`t` in `[0,1]` and `a = 4L`, its solar offset is
+`[t + (a-1)t(1-t)(1-2t)]/4`. Afternoon quarters reflect the morning quarters.
+Its normalized derivative is `a + 6(1-a)t(1-t)`: for every valid fraction,
+`0 < a < 2`, so this derivative is positive (at least `a` for `a <= 1`, and
+`(3-a)/2` otherwise). The rate with respect to elapsed-day phase is exactly 1
+at both ends of every quarter. Thus angle and rate join continuously at dawn,
+noon, dusk and the midnight wrap, with no additional fraction bounds. Integer
+horizon ticks return exactly 1/4 and 3/4; nonintegral horizons lie between ticks.
+
+Plant daily light, circadian activity, and stimulus time-of-day, daily temperature
+and fallback light consume this solar phase at enabled calendar call sites.
+Ambient-light and precipitation overrides keep precedence. Migration and
+stimulus/sky seasons retain the spring-equinoctial offset of 3/4 year. Weather,
+storms, wind and aether retain absolute tick periods.
+
+Clock-disabled **new** worlds instead write `renderCalendar`, containing the same
+complete version 2 calendar object, with no persisted tick and no enabled-clock
+hash contribution. It is presentation persistence bookkeeping. Unmarked existing
+disabled worlds keep the pinned 216,000-tick symmetric rendering calendar and
+continue omitting the marker on save. Markers survive normal saves and explicit
+snapshots, including metadata-only snapshots. Loading an explicit snapshot
+replaces the resolved rendering calendar even when it has no metadata. A
+transient disabled preview can export a marked explicit snapshot. Enabled
+transient sessions can read snapshots but cannot save them.
+
+The renderer keeps unwarped elapsed phase separate from solar angle. Wall-clock
+pacing derives from the selected calendar and canonical tick rate (5,400 seconds
+for new worlds). World-clock inputs have a midnight origin; the legacy tick API
+and clock-disabled rendering retain their noon-at-zero origin. Sky geometry
+receives `wrap(solar_phase + 0.5)`. Direct `set_time_of_day()` values remain solar
+pins; a fixed 56-step bisection of the same smooth curve initializes fallback
+elapsed time for a continuous resume. Photo hold wins over automatic advancement,
+and later scenario pins keep frame-order precedence. Both legacy clock setters clear world-clock authority.
+A day-length debug override changes only solar pacing: saved season and lunar
+periods retain their selected calendar. `[`, `]`, and `\` still adjust simulation
+speed, from pause through 16×, with the existing catch-up batching. At ideal 16×,
+a new day lasts 337.5 real seconds (225 daylight, 112.5 night).
+
+Lunar phase uses `tick % (uint64(dayLengthTicks) * lunarCycleDays)` divided by
+that independent month, without solar warping or resetting at year boundaries.
+Tick zero is full moon, default day four reaches the 0.08 new-moon floor, and
+day eight is full again. Imported 36,000- and 216,000-tick days yield months of
+288,000 and 1,728,000 ticks; imported moon brightness can therefore change.
+`LUMIN_MOON` precedes the explicit override, which precedes automatic phase,
+with clamping preserved. A wall-only preview can keep its static celestial tick.
+The moon remains opposite the sun; the visible disc does not depict phase.
+
+With the feature disabled, simulation daily/annual periods and hash bytes stay
+legacy, independently of the presentation marker. With it enabled, clock bytes
+fold into the ecology slot without changing top-level hash ordering. Canonical
+bytes preserve ASCII `world_clock:v1:` followed by LE `u64 simulationTick`,
+LE `u32 dayLengthTicks` and LE `u32 daysPerYear` (16 payload bytes) for daylight
+1/2 with an eight-day lunar cycle. Other calendars use `world_clock:v2:` and
+append three LE `u32` fields: `daylightNumerator`, `daylightDenominator`,
+`lunarCycleDays` (28 payload bytes). They encode resolved values independently
+of source JSON. Representable legacy calendars preserve their enabled-clock
+hash bytes. The calendar change leaves container v2, LMR1, ARL1 and entity/chunk
+formats unchanged. Lockstep and LREC1 use version 3 for configuration and preset
+identity binding; see the [identity contract](development/system-config-identity.md).
+Save calls inside a simulation catch-up batch remain refused; successful
+snapshots observe completed tick boundaries.
 
 C1 persists the ambient grid's anchor separately from the player respawn
 `spawnPoint`. It is initialized from the spawn when creating or importing a
@@ -137,9 +231,16 @@ without an anchor use their saved spawn; a historical anchor already lost by
 such a snapshot cannot be recovered. The snapshot commit index, rollback
 journal, and multi-file recovery belong to C2/C3. C1 uses the existing metadata write path and is not a
 claim of atomic publication across chunk, entity, energy and metadata files.
-The feature remains default-off until those persistence slices land. LMR1 v2,
-world_manifest.v1, FSD2 v3, preset revision 6, and existing canonical chunk and
-entity serialization are unchanged.
+The shipping clock/ledger foundation is enabled by default. Indexed authority
+durability/rehydration, durable completed work and ground-object continuation,
+durable regional fields/weather/scent/energy, and regional foliage/water
+continuation are planned for v0.3.1. Five-minute dedicated-server autosave does
+not implement those persistence slices. LMR1 v2,
+world_manifest.v1, FSD2 v3, and existing canonical chunk and entity serialization
+are unchanged; preset revision 7 retains revision 6 omission compatibility.
+The additive metadata contract `presetFormat: 1` requires an embedded preset
+and its canonical-JSON checksum. It changes neither the container version nor
+the existing `StableChecksum` algorithm or runtime dependency-content hash.
 
 An absent energy record restores an empty layer with its next firing on the
 next absolute eight-tick boundary. A legacy import may carry a different
@@ -211,6 +312,13 @@ resident chunk data; far terrain uses region tiles and reduced SDF authority.
 The [SHIELD SDF contract](shield/sdf-contract.md) defines sign convention,
 sample ownership, shared borders, and LOD behavior.
 
+Legacy far snapshots track world/region authority publication separately from
+each captured chunk's voxel revision and provenance. A direct edit to a resident
+chunk's SDF followed by `mark_voxel_data_dirty()` advances the chunk revision and
+stales an earlier capture without advancing the publication counters. Shrinking
+or growing the graphics horizon changes derived mesh admission, preserving
+edited authority and rejection of stale captures.
+
 Generation and meshing may execute through `JobSystem`, which has high and
 normal priority lanes plus starvation protection. Completion timing is not
 publication timing: batches become visible in deterministic dispatch/tick order.
@@ -231,9 +339,10 @@ brains and plant growth already run in this sequence. They operate on entities
 with the relevant components. The server can boot deterministic avatar, creature
 and plant rosters; an empty default roster does not mean these systems are unwired.
 
-Optional simulation features use an off-by-default, empty-neutral contract:
+Shipping simulation features are enabled by default. Explicitly disabled features
+retain the empty-neutral contract:
 when disabled or without participants they allocate no authoritative state,
-write no save records, and contribute no hash bytes. This keeps disabled/default
+write no save records, and contribute no hash bytes. This keeps disabled
 configurations stable within the current world format.
 
 ### Persistence, replay, and networking
@@ -247,6 +356,146 @@ Networking and replication live under `net/` and `network/`. Transport delivery
 is separated from simulation activation: commands and replicated state become
 authoritative only at their assigned tick/order. Hashes localize a desync without
 making logs or timing part of the state itself.
+
+TCP admission, lockstep and replay compare effective simulation configuration and
+resolved preset-content identities before admitting state or stepping ticks. The
+content identity binds canonical preset JSON and a sorted manifest of exact biome
+and structure dependency bytes; generation uses that immutable snapshot. Runtime
+and soak TCP slots release peers that fail to complete a matching Hello within
+10 seconds (issue #315). The shared networking Hello is version 4; LREC1 replay
+uses version 3 for complete streams and version 4 for diagnostic suffixes with
+an elided prefix. Readers accept both; older Hello layouts are refused. See the
+[identity contract](development/system-config-identity.md) for the effective
+SystemConfig/presentation split, refusal rules and dependency encoding.
+
+Lockstep is a direct two-peer protocol: Hello must match the configured remote
+client slot, and a peer can submit only its own inputs. Hello exchanges start,
+minimum and maximum horizons, checkpoint cadence, transport frame size, and
+retention budget settings. Local and received settings must satisfy
+`0 < horizon_min <= horizon_start <= horizon_max` before any input scheduling.
+Both sides must use identical horizon, cadence and budget settings; incompatibility
+fails before input scheduling with an explicit `handshake_error`. The frame size is the minimum of both transports and each side's
+`max_frame_payload_bytes` setting; callbacks can inspect the result through the
+const `AdmissionStatus().frame_limit` diagnostic.
+Inputs must be newer than the consumed tick and no more than twice the maximum
+configured horizon ahead. Hashes must be cadence checkpoints within that lookahead
+and newer than the contiguous confirmed checkpoint prefix; delayed hashes for executed ticks still participate in desync detection.
+
+Retention is derived, rather than dropping reliable messages when a container
+fills. Let `L = 2 * horizon_max`, `C = ceil(L / cadence)` and
+`W = kReceiveQueueFrameLimit + C + 1` (with no hash slots when cadence is zero).
+The sender pauses simulation after `W` unconfirmed checkpoints while continuing
+to receive; only the oldest unconfirmed tick advances the confirmation prefix.
+The receiver reserves `L` input slots and `W + C` hash slots, including remote
+lead and the next checkpoint needed for confirmation regardless of arrival order.
+Multiplying these slots by the negotiated maximum frame size gives the encoded
+byte bound; overflow is rejected before scheduling. The single remote's per-peer
+and aggregate bounds are identical. Zero `peer_retained_byte_limit` and
+`peer_retained_message_limit` select these derived bounds; explicit budgets must
+fit all negotiated traffic or handshake fails. A tick within the negotiated
+window is never discarded for capacity. Invalid slot, stale/future, malformed,
+conflicting or oversized messages are dropped and counted in session status.
+These rules apply above Loopback, TCP (Windows/POSIX), GNS and Steam transports.
+
+Each `Handshake`, `PumpTick` or `Disconnect` call owns one receive-work budget,
+shared with nested input/hash sends, retry refusals and closure drains. It permits
+at most 1024 receive polls, including empty or malformed frames and unsuccessful
+polls, and stops polling once delivered payload bytes reach 256 KiB. One final
+frame can cross the byte threshold; its payload is bounded by the existing
+64 MiB transport maximum. Transport queues and read-ahead retain their existing
+bounds. Saturation leaves subsequent frames queued and allows an available
+agreed tick to advance; it does not change input bytes, ordering or hashes.
+`Finished` waits for an empty receive poll. A saturated local disconnect stops
+simulation immediately and defers transport close and storage release; its owner
+keeps the session and transport alive and calls `Disconnect` or `PumpTick` again
+until status becomes terminal. A finite backlog drains over successive calls.
+A continuously refilling peer can prolong draining, but cannot monopolize one
+call or grow retained storage beyond the negotiated bounds.
+
+Replication server/client public receive and send calls share the same 1024-poll
+and 256 KiB threshold, including nested refusal and close drains. Admission
+control frames consume that budget; a control-batch yield is distinguished from
+an empty source. Closing links and transports stay alive until draining finishes,
+so queued commands, ACKs and authoritative snapshots precede terminal close.
+Server receive pumping rotates its first client after each call. Transport send
+and receive capacities may differ; receive validation and snapshot reconstruction
+use the receive capacity, and adapters forward both caps without raising either.
+The loopback scenario driver uses fixed default horizons of 3–10 ticks and empty
+input payloads, with no configurable backlog injection. Its clean-disconnect
+artifact requires both session ends to be terminal and free of desync, including
+checkpoints processed during disconnect. Registered regressions require native
+execution before qualification is claimed.
+
+On `Bye(T)`, the survivor compares queued hashes and drains buffered inputs only
+through the sender's final executed tick T. Pre-scheduled inputs after T are
+then discarded. Pending outbound retries cannot cut this drain short; closure
+is reported before retained input/hash storage is released.
+
+Consumed inputs and confirmed peer hashes are pruned. An out-of-order hash that
+already matches its local checkpoint releases all peer strings and retains only
+a confirmation marker. Local hashes retain only
+unconfirmed checkpoints plus the latest `kReceiveQueueFrameLimit` diagnostic
+ticks. Applied input diagnostics retain at most `kReceiveQueueFrameLimit` ticks
+and `kMaxFramePayloadBytes` payload bytes, using a deque. Storage therefore depends
+on the negotiated limits rather than session duration. The only internal history
+consumer is desync export; save-game state does not consume this history.
+Every `LockstepSession` automatically streams merged inputs and local checkpoints
+to a `QueuedReplayRecorder` backed by `BoundedReplayRecorder`, including the
+server lockstep mode, client network driver, and scenario/test drivers. No hook
+installation is required. Handshake performs recorder setup and starts one
+worker through the existing `JobSystem`. Each tick only enqueues shared references
+to immutable, already-encoded merged inputs and local checkpoint strings; it
+performs no recorder I/O, replay encoding, or digest scans. A single ordered
+consumer performs those operations, including segment rotation and pruning.
+Recording uses buffered disk segments beside the dump destination; no per-tick
+flush is performed. Segments hold at most 1024 ticks or 64 MiB, with a larger individual
+tick occupying its own segment. Confirmed segments rotate once the retained
+suffix exceeds 1024 ticks or 64 MiB. All unconfirmed ticks remain pinned, so even
+a delayed mismatch retains the divergent tick and its input bytes. Each segment
+is closed before deletion, including on Windows. Destruction or completed clean
+disconnection removes the working segments; an in-sync session emits no dump.
+
+Outstanding recorder work, including the active tick, is limited to 4096 ticks
+and `max(64 MiB, T)` bytes, plus count-bounded queue metadata. Byte accounting
+charges retained input/string capacities as well as encoded sizes. Queue admission
+reuses preallocated ring slots, takes constant time, and does not wait for the sink.
+On overload it latches the first
+failure and stops accepting further ticks. Accepted ticks still drain in order;
+the recorder never silently drops or resumes a gapped recording. Desync
+finalization returns failure and writes `<dump destination>.incomplete` with the
+first failed tick and a clear reason. Sink failures use the same policy. Recorder
+progress and failure never change simulation outcomes, input scheduling, hashes,
+or session pacing. `LockstepStatus::replay_error` reports a detected recorder
+failure without performing tick-path logging. `FlushReplayRecorder` is an explicit blocking persistence
+barrier; it is not part of `PumpTick`. Desync finalization and shutdown drain all
+accepted work before finalizing or removing working files. Complete artifacts
+keep the existing paths, wire bytes, checkpoint cutoff, and incremental FNV-1a
+prefix digest. Clean shutdown publishes no dump or incomplete companion.
+
+The disk bound is checked at handshake with overflow-safe arithmetic. With
+negotiated maximum frame size `F`, maximum horizon `H`, checkpoint cadence `D`,
+and the checkpoint window `W` above, define `T = 3F + 46` (maximum encoded tick),
+`U = WD + 2H + D` (zero when hashes are disabled), and
+`M = max(64 MiB, T)`. Working segments retain at most `B = UT + 3M` bytes,
+independent of session duration. Actual usage follows retained record sizes;
+the bound is not preallocated. Finalization streams through a fixed 64 KiB
+buffer. The final artifact is bounded by `B + 64 MiB + T + 53` bytes including
+the header, prefix metadata, and trailer; temporary disk usage while finalizing
+is at most `2B + 64 MiB + T + 53`. I/O failures are logged and never change
+simulation or hash results; a failed artifact is never reported as successful.
+
+On desync, the recorder finalizes LREC1 at the configured dump destination and
+populates the existing `LockstepStatus::dump_path` (the server's peer destination
+still appends `.peer`). It keeps every retained input and the local checkpoints
+through the divergence. When the prefix has rotated away, the header is version 4 and an `ElidedPrefix`
+record contains its last tick and a rolling FNV-1a digest of its exact encoded
+record bytes. `ReadReplay` exposes `elided_through_tick` and
+`elided_prefix_digest`; these artifacts support diagnostics, and `--replay`
+explicitly refuses to replay them from the seed. Recordings with no elided
+prefix keep the byte-identical version-3 LREC1 contents. The optional
+`LockstepHooks::record_replay_tick` remains available for additional bounded,
+caller-owned recording; the buffering `ReplayWriter` must not be used as an
+unbounded full-session sink.
 
 The shared `NetSocketsTransport` implements reliable and unreliable delivery for
 both GNS and Steam sockets. Loopback and TCP always deliver reliably and ignore
@@ -376,6 +625,55 @@ than duplicated by hand. Authoritative keys are distinguished from render-only
 keys. Published non-source assets are classified and hashed in the public asset
 inventory, with licensing recorded in `THIRD_PARTY_LICENSES.md`.
 
+The far-world requested mode defaults to Ladder, including when systems.json is
+missing or the flag is absent. For an explicit Legacy opt-out, set
+`render.far_world_ladder.enabled` to `false` in `data/common/systems.json` and
+restart the client. The per-user settings overlay only reads `user.*`; this flag
+has no environment or CLI override. Effective selection still falls back to
+Legacy when Ladder cannot bind, with requested/effective mode and refusals in
+the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
+for the config example and qualification gates. Saved-world far production
+authority remains fixture-only until FW S8 (v0.3.1); the renderer reports an
+explicit unavailable/refusal diagnostic.
+
+### Developer console
+
+The ordinary and QA clients provide the same developer console in Release and
+other configurations. F1 opens its searchable widget hub by default; ordinary
+Settings provides console access and the default-on performance HUD switch.
+Visibility, resolved shortcuts and interactive panel layouts persist under
+`user.developer` without changing simulation hashes. The Controls settings section
+links to the hub for developer rebinding and hotkey help. Generated help includes
+current developer and gameplay bindings. Interactive panels share input/cursor
+ownership; passive HUDs do not capture gameplay. Opening the console does not
+pause simulation.
+
+| Default hotkey | Module / action |
+|---|---|
+| F1 | Open or close the developer hub |
+| F3 | GPU profiler panel |
+| F5 | Reload all shaders (`shader.reload`, no panel) |
+| F6 | Cycle debug views (`render.debug-cycle`) |
+| F7 | World generation preview panel |
+| F8 | Client settings panel |
+| F9 | Toggle wireframe effect (`render.wireframe-toggle`) |
+| F10 | Shader panel |
+| `[` | Slow time (`time.slower`) |
+| `]` | Speed up time (`time.faster`) |
+| `\` | Reset time scale (`time.reset`) |
+
+The hub shows every module's description and current hotkeys, including unbound
+panels and passive overlays. Debug-view, wireframe and time-control panel visibility
+is separate from their effect hotkeys. Photo mode uses `[` and `]` for aperture.
+Developer actions and rebound panel keys work while a panel owns input; focused
+text fields block them. `--no-ui`, automated captures and scenario runs suppress
+developer overlays and shortcuts without modifying saved preferences.
+
+See [Developer console](developer-console.md) for the complete inventory,
+registration API, typed commands, focus rules, save retries and capture overrides.
+The generation inspector edits an independent preview; only its explicit
+**Apply & Regenerate** button can apply changes to an ordinary local world.
+
 ### Environment controls
 
 These are the `LUMIN_*` controls read by the current client/render source. Set
@@ -393,8 +691,8 @@ variables in CMake are build options, not these runtime environment controls.
 | `LUMIN_GRADE` | `exposure,saturation,contrast,warmR,warmG,warmB`; defaults `1.12,1.30,1.42,1.06,1.0,0.92`. A parsed prefix replaces those fields; remaining fields retain defaults. A positive render-context exposure takes precedence over the grade exposure. | Once per process on first lighting use |
 | `LUMIN_MOON` | No forced illumination by default. A nonnegative float overrides moon illumination, clamped to `[0, 1]`. Negative or unparseable input falls back to the pipeline override or lunar cycle. | Once per process on first celestial update |
 | `LUMIN_MOON_WRAP_FLOOR` | Float, default `0.25`; parse failure retains the default. The C++ environment parser does not clamp it. | Once per process on first lighting use |
-| `LUMIN_CAVE_AO` | `enabled,maxDist,floor,steps,thickness`; defaults `0,24,0.06,8,1.5` (off). Parses a float prefix with an integer fourth field; unparsed fields retain defaults. This is screen-space cave/sky-visibility AO, independent of terrain cave generation. | Once per process on first lighting use |
-| `LUMIN_SCENT_DECAL` | Off when absent. Presence enables the scent ground decal, including an empty value or `0`; requires scent data to display. | Cached on first scent-decal initialization |
+| `LUMIN_CAVE_AO` | `enabled,maxDist,floor,steps,thickness`; defaults `1,24,0.06,8,1.5` (on). Parses a float prefix with an integer fourth field; unparsed fields retain defaults. This is screen-space cave/sky-visibility AO, independent of terrain cave generation. | Once per process on first lighting use |
+| `LUMIN_SCENT_DECAL` | On when absent. Exactly `0` disables the scent ground decal; other values enable it. Requires scent data to display. | Cached on first scent-decal initialization |
 | `LUMIN_FRAME_SCAN_SETTLE` | Frame-scan capture default `90` frames. A positive `atoi` result overrides the settle target; other values leave it unchanged. This diagnostic override is not set by the gates. | Client argument/capture setup |
 | `LUMIN_GL_DEBUG` | Off if absent, empty or exactly `0`. Other values install synchronous GL debug output when KHR_debug entry points exist; exactly `verbose` also enables notification messages (low/medium warnings are already enabled). | Callback installation; subsequent calls return immediately once installed |
 | `LUMIN_RHI` | Selector default `gl`; case-insensitive `gl`/`opengl`, `vulkan`/`vk`. Empty or unknown values select GL. Exposed by the RHI selector helper; the shipping client does not call it and it does not switch its renderer. | Each `SelectedBackendFromEnv()` call; no static cache |
@@ -405,7 +703,7 @@ an absent variable differ where noted above. Updating the environment after a
 cached read does not retune a running process.
 
 High-resolution water is instead the supported `sim.water_high_res` configuration
-flag, default off: Medium uses 8×8 cells per 16 m chunk (2 m cells), High uses
+flag, default on: explicit false selects Medium, with 8×8 cells per 16 m chunk (2 m cells); High uses
 16×16 (1 m cells). It changes hashed water state and must match on every peer.
 `GameSession` applies the chosen resolution at world creation/load; the underlying
 solver also supports amortized grid resizing. See the [water limits](known-limitations.md).
@@ -481,3 +779,145 @@ client and `Luminumbra::Server::ServerWorldRunner` do.
 - [Performance measurement](performance.md) for relative regression gates.
 - [Visual regression](visual-regression.md) for capture evidence.
 - [SHIELD SDF contract](shield/sdf-contract.md) for terrain invariants.
+
+## Shipping defaults
+
+All registered `sim.*` and `render.*` SystemConfig gates, including
+`render.far_world_ladder`, are enabled in both the compiled mask and
+`data/common/systems.json`. Missing or malformed enabled fields
+retain defaults; an explicit boolean false clears its bit. Simulation tuning
+selectors use the packaged tuning. `sim.erosion`, `render.moonlight` and
+`render.tree_wind` are declared gates without runtime activation consumers;
+turning them on does not add a new erosion pass, moon strength or wind system.
+The config:v1 serializer is unchanged: the default sim sub-hash is now nonempty,
+and an explicitly all-disabled sim configuration still has an empty sub-hash.
+`sim.*` is hashed when enabled; `render.*` is excluded from this diagnostic sub-hash.
+The separate effective session identity includes `render.circadian` amplitude
+because simulation consumes it, plus session options and effective scheduler
+settings. Presentation-only gates and `user.*` settings remain excluded. See the
+[identity contract](development/system-config-identity.md).
+
+Client and server apply the same GameSession resolver before Create/Load, including
+active regions/absolute clock, High water, weather rain/events, stateful aether and
+all simulation tuning. Finite hydrology is on, with existing rain scale 25 mm and
+zero constant rain/evaporation rates. Explicit false water resolution selects
+Medium; lower-level session setters can retain disabled compatibility workloads.
+Diagnostic rosters and telemetry remain opt-in.
+
+TCP Hello admission, the lockstep handshake and replay playback compare the same
+`GameSession::PresetContentHash()` alongside the effective configuration identity.
+The content hash binds the resolved preset and its biome/structure dependencies,
+plus every immediate regular `data/common/creatures/species/*.json` file, including
+inline `brain` and `genome_ranges` overrides (issue #338). Species apply even with
+biomes and structures disabled. All dependencies use one manifest: sorted generic
+UTF-8 logical paths with `/` separators and exact-byte FNV-1a-64 file hashes, folded
+with the canonical preset JSON. Absolute runtime roots and clocks are excluded.
+The loader captures the species registry from those same bytes and GameSession
+adopts it on create/load; it never rereads species after computing the hash.
+Malformed JSON warns and skips the entry while its bytes remain bound; present
+unreadable files/directories refuse resolution without replacing a running world.
+Directory-open, entry-status and iteration failures are reported by the registry
+without escaping to client metadata callers; a failed scan adds no species. Logical
+dependency names must be well-formed UTF-8, and an invalid species filename refuses
+the scan before any reads. Resolver exceptions, including JSON serialization
+failures, return diagnostics without publishing an identity or dependency snapshot;
+failed create/load leaves the live world unchanged.
+
+The foliage `SpeciesRegistry::LoadFromDirectory` appends valid templates in UTF-8
+filename order and skips malformed names or JSON with diagnostics. It returns
+the appended count; scan or file I/O failure returns zero and rolls back every
+append from that attempt. The optional `io_failed` output is reset on entry and
+set only for those failures, distinguishing them from a successful empty load.
+The errors vector retains previous entries and appends new diagnostics. Callers
+stop retrying after success to avoid duplicate appends. The interactive farming
+cache retries I/O failures at five-second intervals using the existing frame
+clock, logs only changed failure diagnostics and recovery, and caches successful
+loads (including empty directories and valid neighbours of malformed JSON).
+
+Hello v4 carries negotiated lockstep admission limits; complete LREC1 streams use
+version 3 and elided diagnostic suffixes use version 4. Binding species does not
+change those layouts. A species mismatch refuses TCP admission, lockstep handshake
+and replay verification before simulation advances. Existing content-mismatch
+diagnostics apply; lockstep and replay name
+`preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
+species records are present, in either engine direction, following the existing
+preset dependency compatibility rule. With no species directory, no new records
+are added. Current-format saves store no session content identity and adopt the
+loading installation's species content; the optional historical `presetIdentity`
+check still checks frozen preset JSON only. Older world-format refusals and save
+container versions are unchanged. See the full
+[identity contract](development/system-config-identity.md).
+
+Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
+material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,
+`LUMIN_SCENT_DECAL=0`, explicit config values and renderer setters remain available.
+User overlays contain only `user.*` plus `settings_schema_version` (currently 1,
+independent of world, save and protocol formats). Saved false vsync and saved
+volumes win over defaults. `user.graphics` owns presentation settings: a
+`base_preset`, its `preset_revision`, explicit `overrides` and optional detection
+metadata. A file without a schema version migrates to Ultra plus its explicit
+values, including `user.video.render_scale`. A malformed, unreadable or future
+version file is reported as Recovery: defaults apply for the session and saves
+are refused so the original file is never overwritten. Locations are
+`%APPDATA%/Luminumbra/settings.json`, `$XDG_CONFIG_HOME/luminumbra/settings.json`,
+or `$HOME/.config/luminumbra/settings.json`.
+
+Settings → Graphics offers Low, Medium, High and Ultra, with Custom displayed when
+overrides differ from the retained base. Reset overrides restores that base;
+selecting a preset clears overrides. Controls show session-only CLI/environment
+values and identify and disable those overridden controls. They never save those
+temporary values. Graphics edits apply together on the render thread, invalidate
+temporal history, and save after a 500 ms debounce. Save failures remain visible;
+Save graphics retries, and leaving settings or exiting flushes pending changes.
+
+Detect & Apply recollects the active GPU, logical CPU threads and available
+dedicated VRAM, displays the recommendation, and applies it with overrides cleared.
+`--detect-and-apply-graphics` performs the same explicit action at startup. Only
+a first launch automatically selects and saves a recommendation. Existing and
+migrated selections remain intact across GPU/driver changes. Recovery continues
+to protect malformed or unsupported overlays from writes, including explicit saves.
+
+Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
+chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.
+Locomotion defaults use separation radius 2 m/strength 0.6, flock radius 12 m,
+cohesion 0.5 and alignment 0.4. Server autosaves default to every 9000 ticks:
+five minutes at the canonical 30 Hz clock, to avoid saving every second during
+normal play. Smoke fixtures explicitly use 30 ticks to exercise saves at ticks
+30/60/90; explicit zero suppresses autosaves, including recorder fixtures.
+
+Preset revisions 7 and 8 resolve omitted island masks, surface breaks, biomes,
+biome relief, cliffs, rivers, lakes, structures and hydraulic/thermal erosion on.
+The biome table is `common/biomes.json`; structures resolve under the data root.
+Revision 6 and unversioned presets retain their historical omitted-field choices.
+Explicit false and an empty biome table remain off. New saves embed resolved
+choices; neutral knobs and UI controls use the same versioned resolver. Existing
+saved presets are read without rewriting their choices.
+
+Schema 8 gates `generation_params.terrain.surface_sampling_revision: 2`
+(issue #453). New worlds and the shipping catalog select revision 2, so activation
+height samples and vertex materials use the complete heightmap shaping sequence.
+Older readers reject schema 8. Explicit sampling revision 1 is preserved;
+historical presets without the selector keep revision 1 and their original
+identity bytes. Its canonical identity remains at schema 7. Erosion continues to
+bake its historical substrate, preserving generated terrain in existing worlds.
+
+The ordinary hills world is `worlds/atlas/presets/default.json`: its island mask
+is now on, alongside its already-enabled terrain features. Amplified, archipelago,
+caverns, cave-dense, mountains and temperate forest also enable their shipping
+features.
+`flat_lands` keeps its minimal identity with explicit opt-outs and structures on.
+Vulkan RHI, Steam and GNS defaults remain unchanged, as do developer diagnostics.
+
+`cave_dense.json` follows the Caverns revision-7 migration: island mask, biome
+relief and cliffs are on, and hydraulic/thermal erosion uses four iterations
+instead of eight, matching the retuned Caverns terrain. Its denser cave tuning
+is preserved: cave threshold `0.54`, surface-break density `0.55`, maximum feature
+radius `52` m. Its canonical preset identity changes from `e70158a4777ee36b`
+(frozen revision 6) to `a9296ce03a5d9f33` (shipping revision 8). The frozen copy
+has SHA-256 `5eff891c8d9f654ada480abf27b9cf9781cc86798fec60844bf28b1a7a4ae5e0`;
+the shipping copy has SHA-256
+`416c5a8d847c31e240fe3d103ed73e769131e3488a9ef1096076f01235d67a18`.
+Existing saves without an embedded preset use the frozen copy. The game
+repository's cave-dense qualification fixture and identity sidecar must select
+the intended revision: retaining the old fixture matches the frozen bytes;
+using shipping revision 8 requires updating both the fixture and its pins.

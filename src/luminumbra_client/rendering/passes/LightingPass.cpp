@@ -1,4 +1,8 @@
 #include "LightingPass.h"
+#include "../FarWorldReplay.h"
+#include "../RenderingDefaults.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
 #include "../PassShaderLayouts.h"
@@ -158,6 +162,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
     }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
     glCopyTexSubImage2D(GL_TEXTURE_2D,
@@ -173,6 +178,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
 }
 
 void LightingPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL LightingPass.execute");
     if (!ctx.render_view && !ctx.camera)
         throw std::invalid_argument("Lighting requires a validated view or production camera");
     if (ctx.static_studio && (!ctx.render_view || ctx.authored_surface.id == 0))
@@ -199,6 +205,8 @@ void LightingPass::execute(const RenderContext& ctx) {
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
+    m_lighting_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    m_lighting_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     m_lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
     m_lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
     m_lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
@@ -325,14 +333,8 @@ void LightingPass::execute(const RenderContext& ctx) {
                     0.92f}; // richer sat + punchier contrast (de-wash
                             // noon; owner "white filter" pass 2026-07-07)
             if (const auto env = Core::ReadEnvironment("LUMIN_GRADE")) {
-                std::sscanf(env->c_str(),
-                            "%f,%f,%f,%f,%f,%f",
-                            &g.exposure,
-                            &g.saturation,
-                            &g.contrast,
-                            &g.wr,
-                            &g.wg,
-                            &g.wb);
+                ParseCommaSeparatedPrefix(
+                    *env, g.exposure, g.saturation, g.contrast, g.wr, g.wg, g.wb);
             }
             return g;
         }();
@@ -364,7 +366,8 @@ void LightingPass::execute(const RenderContext& ctx) {
     // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
     // same projection the SSAO pass builds, plus the screen size.
     {
-        m_lighting_shader->setMat4("u_projection", projection);
+        m_lighting_shader->setMat4("u_projection",
+                                   ctx.far_world_ladder ? ctx.gbuffer_projection : projection);
         m_lighting_shader->setVec2(
             "u_screenSize",
             glm::vec2(ctx.internal_w(), ctx.internal_h())); // cave AO marches the internal G-buffer
@@ -372,21 +375,8 @@ void LightingPass::execute(const RenderContext& ctx) {
         if (ctx.static_studio) {
             m_lighting_shader->setFloat("u_caveAmbientOcclusion", 0.0f);
         } else {
-            struct CaveAO {
-                float enabled, maxDist, floor, thickness;
-                int steps;
-            };
-            static const CaveAO s_caveAO = [] {
-                CaveAO c{0.0f, 24.0f, 0.06f, 1.5f, 8}; // DEFAULT OFF (enabled=0)
-                if (const auto env = Core::ReadEnvironment("LUMIN_CAVE_AO")) {
-                    // "enabled,maxDist,floor,steps,thickness"
-                    float en = 0, md = 24, fl = 0.06f, th = 1.5f;
-                    int st = 8;
-                    std::sscanf(env->c_str(), "%f,%f,%f,%d,%f", &en, &md, &fl, &st, &th);
-                    c = CaveAO{en, md, fl, th, st};
-                }
-                return c;
-            }();
+            static const auto s_caveAO =
+                ResolveCaveAmbientOcclusion(Core::ReadEnvironment("LUMIN_CAVE_AO"));
             m_lighting_shader->setFloat("u_caveAmbientOcclusion", s_caveAO.enabled);
             m_lighting_shader->setFloat("u_caveSkyMaxDist", s_caveAO.maxDist);
             m_lighting_shader->setInt("u_caveSkySteps", s_caveAO.steps);
@@ -414,7 +404,7 @@ void LightingPass::execute(const RenderContext& ctx) {
             continue;
         }
         m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
-                                   (*ctx.light_space_matrices)[i]);
+                                   (*ctx.light_space_matrices)[static_cast<std::size_t>(i)]);
     }
     glm::vec3 terrainOrigin(floor(eye.x / CHUNK_SIZE_X) * CHUNK_SIZE_X,
                             0.0f,
@@ -439,7 +429,7 @@ void LightingPass::execute(const RenderContext& ctx) {
         m_lighting_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
     }
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     if (ctx.lighting_draws)
         ++(*ctx.lighting_draws);
     glBindVertexArray(0);
@@ -449,6 +439,7 @@ void LightingPass::execute(const RenderContext& ctx) {
 }
 
 void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL LightingPass.execute_lightning_overlay");
     const LightningRenderState& lit = *ctx.lightning_state;
     if (!lit.active || lit.pulse_intensity <= 0.0f) {
         return; // zero-cost OFF path (no strike this frame)
@@ -461,6 +452,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // Lazily build the overlay program on first strike.
     if (!m_lightning_overlay_shader) {
+        if (ctx.frozen_replay)
+            return;
         m_lightning_overlay_shader = std::make_unique<Shader>(
             (m_root_path / "res/shaders/lightning_overlay.vert").string().c_str(),
             (m_root_path / "res/shaders/lightning_overlay.frag").string().c_str());
@@ -480,6 +473,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // (Re)allocate the scene-copy texture if the framebuffer size changed.
     if (m_lightning_scene_copy == 0 || m_lightning_copy_w != w || m_lightning_copy_h != h) {
+        if (ctx.frozen_replay)
+            return;
         if (m_lightning_scene_copy != 0) {
             glDeleteTextures(1, &m_lightning_scene_copy);
             m_lightning_scene_copy = 0;
@@ -501,6 +496,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     // Snapshot the composited (lit + sky + water + particles) FBO color into the
     // scratch texture; the overlay reads it and writes the additive result back.
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
@@ -538,7 +534,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     }
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

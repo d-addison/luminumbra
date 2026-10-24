@@ -2,12 +2,65 @@
 
 #include "RenderMeasurement.h"
 #include "luminumbra_common/core/Environment.h"
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <ostream>
 
 namespace Luminumbra::Client::Measurement {
 
 inline nlohmann::json optional_value(const std::optional<double>& value) {
     return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+}
+
+inline void add_far_world_reporting(nlohmann::json& report, SampleRing& ring) {
+    auto& block = report["far_world"];
+    block["frames"] = nlohmann::json::array();
+    nlohmann::json summary = {{"requested_mode", nlohmann::json::object()},
+                              {"effective_mode", nlohmann::json::object()},
+                              {"refusal", nlohmann::json::object()},
+                              {"submission_refusal", nlohmann::json::object()},
+                              {"suppressed_frames", 0},
+                              {"unsettled_frames", 0}};
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+        const auto& sample = ring.at(ring.first() + i);
+        const auto& far = sample.far_world;
+        block["frames"].push_back(
+            {{"frame", sample.frame},
+             {"requested_mode", far.requested_mode},
+             {"effective_mode", far.effective_mode},
+             {"refusal", far.refusal},
+             {"submission_refusal", far.submission_refusal},
+             {"suppressed", far.suppressed},
+             {"coverage_settled", far.coverage_settled},
+             {"streaming",
+              {{"generation_pending", far.generation_pending},
+               {"meshing_pending", far.meshing_pending},
+               {"generation_outstanding", far.generation_outstanding},
+               {"meshing_outstanding", far.meshing_outstanding},
+               {"terrain_uploads_pending", far.terrain_uploads_pending}}},
+             {"content_identity", std::to_string(far.content_identity)},
+             {"settings",
+              {{"gns_compiled", far.gns_compiled},
+               {"active_regions", far.active_regions},
+               {"water_cells_per_side", far.water_cells_per_side},
+               {"grass_density_scale",
+                far.grass_density_scale ? nlohmann::json(*far.grass_density_scale)
+                                        : nlohmann::json(nullptr)}}}});
+        for (const auto& [field, value] :
+             {std::pair{"requested_mode", far.requested_mode},
+              std::pair{"effective_mode", far.effective_mode},
+              std::pair{"refusal", far.refusal},
+              std::pair{"submission_refusal", far.submission_refusal}}) {
+            auto& count = summary[field][value];
+            count = count.is_null() ? 1 : count.get<std::size_t>() + 1;
+        }
+        summary["suppressed_frames"] =
+            summary["suppressed_frames"].get<std::size_t>() + far.suppressed;
+        summary["unsettled_frames"] =
+            summary["unsettled_frames"].get<std::size_t>() + !far_frame_settled(far);
+    }
+    block["summary"] = std::move(summary);
 }
 
 inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
@@ -72,9 +125,32 @@ inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
             : nlohmann::json(nullptr);
 }
 
+// Flush explicitly so buffered/partial output failures are visible to both schemas.
+inline bool write_render_benchmark(std::ostream& output, const nlohmann::json& report) {
+    output << report.dump(2);
+    output.flush();
+    return static_cast<bool>(output);
+}
+
+inline bool write_render_benchmark(const std::filesystem::path& path,
+                                   const nlohmann::json& report,
+                                   bool binary) {
+    std::error_code error;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error)
+            return false;
+    }
+    std::ofstream output(path, binary ? std::ios::binary : std::ios::out);
+    const bool written = write_render_benchmark(output, report);
+    output.close();
+    return written && static_cast<bool>(output);
+}
+
 inline nlohmann::json render_overrides(int argc, char** argv) {
     nlohmann::json result = nlohmann::json::object();
     // Treat every non-workload CLI option as an override requiring an exact declaration.
+    // Roots select file locations; --systems-config still requires a declaration.
     const std::vector<std::string> flags = {
         "--no-audio", "--auto-create-world", "--auto-enter-world", "--no-menu-backdrop"};
     const std::vector<std::string> options = {"--render-benchmark",
@@ -86,6 +162,8 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
                                               "--load-world",
                                               "--perf-profile",
                                               "--traversal",
+                                              "--runtime-root",
+                                              "--save-root",
                                               "--declare-render-overrides",
                                               "--world-preset",
                                               "--cam-pos",
@@ -96,8 +174,12 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
         const std::string arg = argv[i];
         if (std::find(flags.begin(), flags.end(), arg) != flags.end())
             continue;
-        const bool hasValue = i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
-        if (std::find(options.begin(), options.end(), arg) != options.end()) {
+        const auto assignment = arg.find('=');
+        const std::string option = arg.substr(0, assignment);
+        const bool assigned = assignment != std::string::npos;
+        const bool hasValue =
+            !assigned && i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
+        if (std::find(options.begin(), options.end(), option) != options.end()) {
             if (hasValue)
                 ++i;
             continue;

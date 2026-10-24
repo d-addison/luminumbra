@@ -1,5 +1,6 @@
 #include "WorldPersistenceRoundtrip.h"
 
+#include "../HashCheckpoint.h"
 #include "../core/Log.h"
 #include "../core/ResidencyContract.h" // the hash scope derives from the contract
 #include "ecs/EntitySnapshot.h"
@@ -370,12 +371,17 @@ std::string StableDump(const nlohmann::json& value) {
     return stream.str();
 }
 
-std::string Checksum(const std::string& text) {
+std::string Checksum(const std::string& text, std::string_view suffix = {}) {
     std::uint64_t hash = 14695981039346656037ull;
-    for (unsigned char byte : text) {
-        hash ^= static_cast<std::uint64_t>(byte);
-        hash *= 1099511628211ull;
-    }
+    const auto mix = [&hash](std::string_view bytes) {
+        for (const char character : bytes) {
+            const auto byte = static_cast<unsigned char>(character);
+            hash ^= static_cast<std::uint64_t>(byte);
+            hash *= 1099511628211ull;
+        }
+    };
+    mix(text);
+    mix(suffix);
 
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
@@ -862,6 +868,17 @@ void VerifyChunkFieldResidencyCoverage(const nlohmann::json& chunk_json) {
     }
 }
 
+std::string WaterCursorHashInput(std::uint64_t cursor) {
+    if (cursor == 0)
+        return {};
+    std::string bytes(kWaterCursorHashLabel);
+    // Bounded to label.size() + eight bytes, independent of host size_t width
+    // and byte order. No serialized world buffer needs to be extended or copied.
+    for (unsigned shift = 0; shift < 64; shift += 8)
+        bytes.push_back(static_cast<char>((cursor >> shift) & 0xffu));
+    return bytes;
+}
+
 std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
@@ -902,11 +919,18 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
 }
 } // namespace
 
-std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
+std::string HashSimulationProjection(const std::string& canonical_bytes,
+                                     std::uint64_t water_sim_cursor) {
+    return Checksum(canonical_bytes, WaterCursorHashInput(water_sim_cursor));
+}
+
+std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
+                                           std::uint64_t water_sim_cursor) {
     // Determinism oracle over SIM TRUTH only (render mesh excluded — see
     // kRenderMeshHashExcludedFields). The save/load snapshot remains the full
     // SerializeWorldStreamingStateSnapshotJson; only the HASH scope changes.
-    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state));
+    return HashSimulationProjection(SerializeWorldStreamingStateSimTruthForHash(state),
+                                    water_sim_cursor);
 }
 
 std::string ComputeRegionContentHash(const WorldStreamingState& state) {
@@ -941,12 +965,13 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
         nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", std::move(contents)}}));
 }
 
-WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {
+WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
+                                                                 std::uint64_t water_sim_cursor) {
     // project the SAME canonical snapshot the top-level hash uses into
     // per-subsystem field groups, then checksum each group with the SAME
-    // Checksum and the SAME chunk-id-ascending ordering. This never calls or
-    // alters ComputeWorldStreamingStateHash, so the top-level world_hash is
-    // byte-identical; these sub-hashes are purely additive localization data.
+    // Checksum and the SAME chunk-id-ascending ordering. Nonzero scheduling
+    // cursors add a separate checksum to the water group; zero keeps every
+    // legacy projection byte-identical.
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         if (!lhs || !rhs) {
@@ -1037,13 +1062,18 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
                                                    {"chunks", std::move(water_array)}}));
     // entities filled by the overload below from the ECS snapshot (no chunk source).
     sub.entities = std::string();
+    if (water_sim_cursor != 0) {
+        sub.water += kWaterCursorHashLabel;
+        sub.water += Checksum(WaterCursorHashInput(water_sim_cursor));
+    }
     return sub;
 }
 
 WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
-                                    const std::string& entity_snapshot_json) {
-    WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state);
+                                    const std::string& entity_snapshot_json,
+                                    std::uint64_t water_sim_cursor) {
+    WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state, water_sim_cursor);
     sub.entities = Checksum(entity_snapshot_json);
     return sub;
 }

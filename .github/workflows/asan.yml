@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -20,10 +21,21 @@ permissions:
   contents: read
 
 concurrency:
-  # Manual capture attempts have separate run groups. Every devel push has its
-  # own commit group, preserving complete verdicts for previously merged tips.
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && format('{0}-qualification-{1}', github.workflow, github.run_id) || format('{0}-{1}{2}', github.workflow, github.ref, github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '') }}
-  cancel-in-progress: ${{ !((github.event_name == 'workflow_dispatch' && inputs.qualification_capture) || (github.event_name == 'push' && github.ref == 'refs/heads/devel')) }}
+  # Devel pushes share one workflow/ref group: the running run finishes, while
+  # GitHub's queue of one replaces a pending run with the newest devel push.
+  # The push suffix separates this group from cancellable scheduled runs.
+  # The campaign freeze audit covers a devel push run that ended cancelled
+  # only with a newer devel push run of the same workflow path on a descendant
+  # SHA that is pending or successful, or whose first attempt failed but has
+  # an accepted automatic rerun request. Coverage is recomputed on every audit.
+  # If the covering run later fails, or itself ends cancelled without its own
+  # covering run, the freeze re-latches. Failed runs are never covered by
+  # descendants; only their own successful rerun or an explicit resolution
+  # can resolve them.
+  # Main pushes and manual runs (including qualification captures) have isolated
+  # groups and never cancel. PR ref grouping/cancellation stays unchanged.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
 
 env:
   QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -31,15 +43,118 @@ env:
   QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
 
 jobs:
-  asan:
-    name: Linux / GCC ASan
+  # Classify every event; shards also use the PR-only fast lane. The aggregate
+  # preserves the required result for drafts and path-routed skips.
+  # !cancelled() and != false keep missing/failed classification on the build path.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
+      needs_python: ${{ steps.paths.outputs.needs_python }}
+      needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
+      heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
+    steps:
+      - name: Check out repository and PR history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify merge-base diff (all lanes for non-PR events)
+        id: paths
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_REF: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Use already-fetched base history; never execute the PR's classifier.
+          # The explicit guard also handles bases predating the fail-open rules.
+          all_lanes() {
+            echo 'Classification uncertain or CI inputs changed; running all lanes'
+            printf 'needs_cpp=true\nneeds_python=true\nneeds_heavy=true\nheavy_reason=classification_uncertain\n' >> "$GITHUB_OUTPUT"
+          }
+          if [ "$CI_EVENT" != pull_request ] || [ "$CI_BASE_REF" != devel ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ -z "$CI_REPOSITORY" ] || [ -z "$CI_HEAD_REPOSITORY" ] ||
+             [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+            all_lanes
+          elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
+            all_lanes
+          elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
+            rm -f "$RUNNER_TEMP/classified-paths.txt"
+            if GITHUB_OUTPUT="$RUNNER_TEMP/classified-paths.txt" python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE" &&
+               python3 -I -B -c '
+          import pathlib, sys
+          rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          assert len(rows) == 4
+          values = dict(row.split("=", 1) for row in rows)
+          assert set(values) == {"needs_cpp", "needs_python", "needs_heavy", "heavy_reason"}
+          assert all(values[key] in ("true", "false") for key in ("needs_cpp", "needs_python", "needs_heavy"))
+          if values["needs_heavy"] == "false":
+              assert values["heavy_reason"] == "reviewed_presentation_or_docs"
+          else:
+              assert values["needs_cpp"] == "true"
+              assert values["heavy_reason"] in ("non_pr_event", "main_or_unknown_base", "classification_uncertain", "heavy_sensitive_paths")
+          ' "$RUNNER_TEMP/classified-paths.txt"; then
+              cat "$RUNNER_TEMP/classified-paths.txt" >> "$GITHUB_OUTPUT"
+            else
+              all_lanes
+            fi
+          else
+            all_lanes
+          fi
+
+  # Run the two stdlib suites registered by tools/ci/local_check_contracts.cmake
+  # before admitting expensive PR shards. No compiler, packages or build tree.
+  fast-lane:
+    name: ASan / Python contracts
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) == 'false' && needs.changes.outputs.needs_cpp != 'false' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check changed translation unit contracts
+        run: python3 -I -B tools/ci/test_changed_tus.py
+      - name: Check offline dependency contracts
+        run: python3 -I -B tools/ci/test_offline_deps.py
+
+  # Drafts cannot merge. ready_for_review reruns this job on the same head;
+  # maintainers must wait for that run's required checks to pass before merging.
+  asan-shard:
+    name: Linux / GCC ASan shard ${{ matrix.shard }}/3
+    # Drafts, including missing metadata, must reach the guard even on docs-only
+    # changes. Ready PRs can still skip this lane through the path gate.
+    needs: [changes, fast-lane]
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') && (github.event_name != 'pull_request' || toJSON(github.event.pull_request.draft) != 'false' || needs.fast-lane.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
       CC: gcc
       CXX: g++
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 600M
     steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify manual qualification identity and dependencies
@@ -50,28 +165,184 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev \
             libglu1-mesa-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
             python3-numpy python3-pil wayland-protocols xauth xorg-dev xvfb
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+      - name: Restore compiler cache
+        id: compiler-cache
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            linux-x64-gcc-asan-ccache-
       - name: Configure
         id: configure
-        run: cmake --preset debug-asan
+        run: >-
+          cmake --preset debug-asan -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Reset compiler cache statistics
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
+        continue-on-error: true
+        run: ccache -z || true
       - name: Build
         id: build
         run: cmake --build --preset debug-asan --parallel 4
+      - name: Report compiler cache statistics
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
+        continue-on-error: true
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ matrix.shard == 1 && always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ matrix.shard == 1 && always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        # Cache writes are best-effort, including collisions on same-SHA reruns.
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
         id: tests
         run: |
+          ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json
+          ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json
+          # Balance fixture and required-suite groups using recorded costs.
+          python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"
+          # Recheck the ordered roster in the same context immediately before CTest.
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
-            xvfb-run -a ctest --preset debug-asan --no-tests=error -LE manual \
-              --parallel 2 --timeout 300 --output-junit ctest.junit.xml
-          # Inventory floor: measured 2281 tests on devel b56cdba1, minus ~1% margin (policy: see the Linux lane in ci.yml).
-          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2260
-      - name: Bind manual qualification evidence
+            xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan
+      - name: Bind manual qualification shard evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         env:
           QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","configure":"${{ steps.configure.outcome }}","build":"${{ steps.build.outcome }}","tests":"${{ steps.tests.outcome }}"}'
-        run: python tools/ci/qualification_capture.py write --lane asan --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/debug-asan/bin/common_tests --junit build/debug-asan/ctest.junit.xml --output build/debug-asan/qualification-capture.json
+        run: python tools/ci/qualification_capture.py asan-shard --lane asan --expected-sha "$QUALIFICATION_EXPECTED_SHA" --shard ${{ matrix.shard }} --binary build/debug-asan/bin/common_tests --junit build/debug-asan/ctest.junit.xml --output build/debug-asan/qualification-shard.json
+      - name: Upload shard JUnit
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Keep each shard's latest evidence when only failed jobs are rerun.
+          name: asan-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}
+          overwrite: true
+          path: |
+            build/debug-asan/ctest.junit.xml
+            build/debug-asan/ctest.inventory.json
+            build/debug-asan/ctest.partition.json
+            build/debug-asan/qualification-shard.json
+          if-no-files-found: error
+          # Preserve successful producers for GitHub's full 30-day rerun window.
+          retention-days: 30
+      - name: Upload sanitizer evidence
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}
+          overwrite: true
+          path: |
+            build/debug-asan/ctest.junit.xml
+            build/debug-asan/Testing/Temporary
+            build/debug-asan/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+
+  asan:
+    name: Linux / GCC ASan
+    needs: [changes, fast-lane, asan-shard]
+    # Invalid dependencies must reach the refusal step.
+    # The first guard still rejects every draft (including docs-only drafts).
+    # A successful classification with needs_cpp=false and a skipped shard
+    # preserves the path gate's successful required check. Failed classification
+    # is rejected even when the shards succeed. A failed fast lane must fail
+    # this required check even though its dependent shards are skipped.
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
+    steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped')) }}
+        run: |
+          echo "Aggregate dependencies did not pass" >&2
+          exit 1
+      - name: Require all ASan shards to pass
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        env:
+          ASAN_SHARD_RESULT: ${{ needs.asan-shard.result }}
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+        run: |
+          if [[ "$CI_PATHS_RESULT" == 'success' && "$NEEDS_CPP" == 'false' && "$ASAN_SHARD_RESULT" == 'skipped' ]]; then
+            message="route: skipped (ASan not needed by Classify changed paths)"
+            echo "$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$ASAN_SHARD_RESULT" != 'success' ]]; then
+            echo "ASan shards did not all pass: $ASAN_SHARD_RESULT" >&2
+            exit 1
+          fi
+      - name: Download shard JUnit
+        if: needs.asan-shard.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: asan-junit-${{ github.sha }}-${{ github.run_id }}-shard-*
+          path: build/asan-shards
+      - name: Merge shard JUnit and check inventory
+        id: tests
+        if: needs.asan-shard.result == 'success'
+        run: |
+          for source in build/asan-shards/asan-junit-${{ github.sha }}-${{ github.run_id }}-shard-*; do
+            shard="${source##*-}"
+            mv "$source" "build/asan-shards/shard-$shard"
+          done
+          python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards --output build/debug-asan/ctest.junit.xml --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
+          # Enforce the full discovery floor before selection; only the two
+          # reviewed heavy cases may be absent from a verified light union.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+          # This lane must exercise the unpadded guard-page probe at the expected active ISA.
+          python3 tools/ci/compare_ambient_receipts.py asan=build/debug-asan/ctest.junit.xml \
+            --expect-labels asan --require-probe asan
+      - name: Upload merged JUnit
+        if: needs.asan-shard.result == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asan-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/debug-asan/ctest.junit.xml
+            build/debug-asan/ctest.junit.selection.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        env:
+          QUALIFICATION_PRODUCERS: '{"tests":"${{ steps.tests.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane asan --expected-sha "$QUALIFICATION_EXPECTED_SHA" --asan-shards build/asan-shards --junit build/debug-asan/ctest.junit.xml --output build/debug-asan/qualification-capture.json
       - name: Upload manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -79,17 +350,7 @@ jobs:
           name: qualification-asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/debug-asan/ctest.junit.xml
+            build/debug-asan/ctest.junit.selection.json
             build/debug-asan/qualification-capture.json
           if-no-files-found: error
           retention-days: 30
-      - name: Upload sanitizer evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: asan-test-evidence-${{ github.sha }}
-          path: |
-            build/debug-asan/ctest.junit.xml
-            build/debug-asan/Testing/Temporary
-            build/debug-asan/test-artifacts
-          if-no-files-found: warn
-          retention-days: 14

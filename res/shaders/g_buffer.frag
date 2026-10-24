@@ -101,6 +101,7 @@ uniform int u_forceFlat = 0;
 // close range, where shadow/SSAO render it near-black). Default 0.0 disables
 // the clip; live chunk and static mesh draws never set it.
 uniform float u_farClipInnerRadius;
+uniform float u_farClipFarRadius;
 
 // Worldgen-preview far-field: a CENTER-relative (world-space XZ) variant of the
 // inner clip above. The preview is an external orbit camera looking at a fixed
@@ -151,7 +152,7 @@ bool farCellLess(ivec3 a, ivec3 b) {
     if (a.y != b.y) return a.y < b.y;
     return a.z < b.z;
 }
-bool farLiveOwns(vec3 local) {
+bool farLiveOwns(vec3 local, uint materialId) {
     // Canonical tile/span origins are integer multiples of 16 (remainder=0).
     // Adding zero preserves the stored float local; /16 is exact binary scaling.
     // Integer boundary locals, or integer remainder + integer local below 2^24,
@@ -168,7 +169,9 @@ bool farLiveOwns(vec3 local) {
         if (farCellLess(u_farLiveCells[middle].xyz, cell)) lo = middle + 1;
         else hi = middle;
     }
-    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell));
+    int readiness = materialId == 200u ? 2 : 1;
+    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell)) &&
+           (u_farLiveCells[lo].w & readiness) != 0;
 }
 
 // Input from the vertex shader, with "flat" interpolation for the integer ID
@@ -360,17 +363,29 @@ void main()
         // the prescribed strict comparisons retain exactly representable limits
         // without expanding a clip band. It cannot change half-open cell ownership.
         float horizontalSquared = dot(relativeWorld.xz, relativeWorld.xz);
-        vec3 local = farTileLocal();
         if (dot(relativeWorld, relativeWorld) < 176.0 * 176.0 ||
-            horizontalSquared > u_farOuterRadius * u_farOuterRadius || farLiveOwns(local))
+            horizontalSquared > u_farOuterRadius * u_farOuterRadius)
             discard;
-        if (u_farArrivalEligible == 1 &&
-            horizontalSquared <= u_farFinerOuterRadius * u_farFinerOuterRadius &&
-            all(greaterThanEqual(local.xz, vec2(0.0))) && all(lessThan(local.xz, vec2(u_farTileEdge)))) {
-            int child = int(local.x >= u_farTileEdge * 0.5) + 2 * int(local.z >= u_farTileEdge * 0.5);
-            if (local.y >= u_farChildY[child].x && local.y <= u_farChildY[child].y)
+        if (u_farLiveCellCount > 0 || u_farArrivalEligible == 1) {
+            vec3 local = farTileLocal();
+            if (u_farLiveCellCount > 0 && farLiveOwns(local, fs_in.MaterialID))
                 discard;
+            if (u_farArrivalEligible == 1 &&
+                horizontalSquared <= u_farFinerOuterRadius * u_farFinerOuterRadius &&
+                all(greaterThanEqual(local.xz, vec2(0.0))) && all(lessThan(local.xz, vec2(u_farTileEdge)))) {
+                int child = int(local.x >= u_farTileEdge * 0.5) + 2 * int(local.z >= u_farTileEdge * 0.5);
+                if (local.y >= u_farChildY[child].x && local.y <= u_farChildY[child].y)
+                    discard;
+            }
         }
+    }
+    // The vertex band bounds rasterization; retain exact fragment ownership
+    // for both far terrain and its water sheets at a reduced horizon. The
+    // shipping 3050 m horizon keeps its original vertex-only outer boundary
+    // exactly, including rasterization at that boundary (Ultra parity).
+    if (u_farWorldLadder != 1 && u_farClipFarRadius > 0.0 && u_farClipFarRadius < 3050.0 &&
+        dot(fs_in.FragPos, fs_in.FragPos) > u_farClipFarRadius * u_farClipFarRadius) {
+        discard;
     }
     if (u_farWorldLadder != 1 && u_farClipInnerRadius > 0.0 &&
         dot(fs_in.FragPos, fs_in.FragPos) < u_farClipInnerRadius * u_farClipInnerRadius) {

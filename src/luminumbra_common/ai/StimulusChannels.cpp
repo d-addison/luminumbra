@@ -21,12 +21,11 @@ float Clamp01(float value) noexcept {
     return value;
 }
 
-// Day fraction in [0, 1): 0 == cycle start (midnight), 0.5 == midday. Integer
-// epoch math first (exact), then to float -- a pure function of the integer tick,
-// no float accumulator (the  / critique- rule).
+// Midnight-origin solar phase for enabled calendars; legacy tick period otherwise.
+// Integer epoch and warp ratios precede conversion to float.
 float DayFraction(const StimulusContext& context) noexcept {
     if (context.world_clock)
-        return static_cast<float>(context.world_clock->day_phase(context.tick));
+        return static_cast<float>(context.world_clock->solar_phase(context.tick));
     const auto tick = context.tick;
     const std::uint64_t tick_in_day = tick % kTicksPerDayCycle;
     return static_cast<float>(static_cast<double>(tick_in_day) /

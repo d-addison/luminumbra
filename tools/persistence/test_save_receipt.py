@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import save_receipt
 
@@ -26,6 +28,7 @@ def _populate(root: Path) -> None:
 
 
 def _run(argv: list) -> tuple:
+    """Call the CLI in this process so filesystem mocks cover refusal paths."""
     out = io.StringIO()
     err = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -170,14 +173,74 @@ class SaveReceiptContract(unittest.TestCase):
 
     def test_symlink_is_rejected(self) -> None:
         link = self.tree / "link.bin"
-        try:
-            os.symlink(self.tree / "b.bin", link)
-        except OSError:
-            self.skipTest("symlinks are not available on this host")
-        with self.assertRaises(save_receipt.ReceiptError):
-            save_receipt.snapshot(self.tree)
-        code, _, _ = _run(["snapshot", str(self.tree), "--out", str(self.base / "link.json")])
-        self.assertEqual(code, 2)
+        with contextlib.ExitStack() as stack:
+            try:
+                os.symlink(self.tree / "b.bin", link)
+            except OSError as error:
+                if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                        and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                    raise
+                # DirEntry reports the link before the walker reads its target.
+                entry = mock.Mock(name="symlink entry")
+                entry.name = link.name
+                entry.is_symlink.return_value = True
+                scandir = stack.enter_context(mock.patch.object(save_receipt.os, "scandir"))
+                scandir.return_value.__enter__.side_effect = lambda: iter([entry])
+            with self.assertRaisesRegex(save_receipt.ReceiptError, "symlink"):
+                save_receipt.snapshot(self.tree)
+            code, _, err = _run(["snapshot", str(self.tree), "--out", str(self.base / "link.json")])
+            self.assertEqual(code, 2)
+            self.assertIn("symlink", err)
+
+    def test_symlink_is_rejected_without_symlink_privilege(self) -> None:
+        with mock.patch.object(os, "symlink", side_effect=PermissionError(errno.EACCES, "denied")):
+            self.test_symlink_is_rejected()
+
+    def test_reparse_points_are_rejected_without_symlink_privilege(self) -> None:
+        status = mock.Mock(st_mode=self.tree.stat().st_mode, st_file_attributes=0x400)
+        with mock.patch.object(Path, "lstat", return_value=status):
+            with self.assertRaises(save_receipt.ReceiptError):
+                save_receipt.snapshot(self.tree)
+        entry = mock.Mock()
+        entry.name = "junction"
+        entry.is_symlink.return_value = False
+        entry.stat.return_value = mock.Mock(st_file_attributes=0x400)
+        with mock.patch.object(save_receipt.os, "scandir") as scandir:
+            scandir.return_value.__enter__.return_value = iter([entry])
+            with self.assertRaisesRegex(save_receipt.ReceiptError, "reparse point"):
+                save_receipt.snapshot(self.tree)
+        entry.stat.assert_called_once_with(follow_symlinks=False)
+
+    def test_existing_v1_receipts_with_colon_paths_still_load(self) -> None:
+        original = save_receipt.snapshot(self.tree)
+        receipt_path = self.base / "legacy.json"
+        for path in ("C:/world.bin", "C:world.bin", "world.bin:stream", "worlds/C:world.bin"):
+            with self.subTest(path=path):
+                files = sorted([{**original["files"][0], "path": path}]
+                               + [dict(item) for item in original["files"][1:]],
+                               key=lambda item: item["path"])
+                receipt = {**original, "files": files,
+                           "tree_digest": save_receipt._tree_digest(files)}
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                self.assertEqual(save_receipt.load_receipt(receipt_path)["files"], files)
+                result = save_receipt.diff(receipt_path, receipt_path)
+                self.assertFalse(save_receipt._has_differences(result))
+        for path in ("/world.bin", "a\\b.bin", "a/../b.bin", "a//b.bin"):
+            with self.subTest(path=path):
+                receipt = {**original, "files": [dict(item) for item in original["files"]]}
+                receipt["files"][0]["path"] = path
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                with self.assertRaisesRegex(save_receipt.ReceiptError, "invalid path"):
+                    save_receipt.load_receipt(receipt_path)
+
+    def test_snapshot_refuses_stream_names_before_reading_file_contents(self) -> None:
+        entry = mock.Mock()
+        entry.name = "world.bin:stream"
+        with mock.patch.object(save_receipt.os, "scandir") as scandir:
+            scandir.return_value.__enter__.return_value = iter([entry])
+            with self.assertRaisesRegex(save_receipt.ReceiptError, "non-portable path"):
+                save_receipt.snapshot(self.tree)
+        entry.stat.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -4,12 +4,14 @@
 
 set(CLIENT_INTERNAL_SOURCES
     # App (pre-main() helpers + frame-loop regions peeled out of main_client.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/app/FrameAttribution.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/CaveFlourishes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/HangWatchdog.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/DebugOverlays.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/GameAssets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/UiInputRouter.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/InputCallbacks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/MenuScreens.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/ProcgenPalettes.cpp
@@ -18,6 +20,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/app/WindowModeControls.cpp
 
     # Core
+    ${CMAKE_CURRENT_LIST_DIR}/core/HardwareInfo.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioConfig.cpp
 
     # Audio
@@ -28,6 +31,16 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/audio/MiniaudioManager.cpp
 
     # Debug
+    ${CMAKE_CURRENT_LIST_DIR}/app/RegisterDeveloperWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/DeveloperWidgetUi.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/PassiveDeveloperWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/RenderControlWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperWidgetRegistry.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperCommandRegistry.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperConsole.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperConsoleUi.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperLogSink.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperLogAttachment.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/RuntimeOverlaySchema.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/WorldGenViewer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/DebugCamera.cpp
@@ -39,12 +52,18 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldWaterMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeRenderMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeBuildQueue.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeUpload.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGpuBackend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGlBackend.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldReplayGl.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeHandoff.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldHandoffRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldHandoffDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDepthBias.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FarWorldPassUniforms.cpp
@@ -162,8 +181,14 @@ set(CLIENT_VENDOR_SOURCES)
 
 # Main client executable sources.
 set(CLIENT_APP_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/../startup/RuntimeEntry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
 )
+
+# Preserve the implementation TU's ISA while routing both client binaries
+# through the baseline startup wrapper before constructing engine state.
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
+    COMPILE_DEFINITIONS "main=LuminumbraApplicationMain")
 
 # Complete executable source set for legacy consumers that include this file
 # directly.

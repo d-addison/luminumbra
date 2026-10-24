@@ -24,6 +24,8 @@
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
+#include "luminumbra_common/core/GraphicsPresets.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <luminumbra/rendering/RenderView.h>
 #include <luminumbra/rendering/StaticScene.h>
@@ -38,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -894,6 +897,7 @@ TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
         pass.set_density_scale(1.6f);
         pass.set_wind({0, 0});
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
             pass.set_evidence_frame(frame, 1);
             pass.rebuild_instances(chunks, ground, nullptr, {8, 12.4f, 8});
@@ -963,6 +967,7 @@ TEST(PassContext, FoliageGpuCapacityCountsOnlyColumnsInsideTheScatterHorizon) {
         pass.set_fade_distances(48, 92);
         pass.set_density_scale(1.6f);
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         pass.set_wind({0, 0});
         std::size_t queries = 0;
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
@@ -1021,6 +1026,7 @@ TEST(PassContext, FoliageGpuCapacityKeepsTheExistingUploadedColumnLimit) {
         pass.set_fade_distances(900, 1000);
         pass.set_density_scale(1.6f);
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         pass.set_wind({0, 0});
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
             pass.set_evidence_frame(frame, 1);
@@ -1060,6 +1066,7 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
     pass.set_fade_distances(48, 92);
     pass.set_density_scale(1.6f);
     pass.set_readback_enabled(true);
+    pass.set_evidence_enabled(true);
     Camera camera({8, 12.4f, 8}, {0, 1, 0}, 35, -18);
     camera.Zoom = 60;
     const auto ground = +[](void*, float, float) {
@@ -1135,4 +1142,137 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
     pass.reset_shader();
     glDeleteFramebuffers(1, &target.fbo);
     glDeleteTextures(1, &target.tex);
+}
+
+TEST(PassContext, QualificationUploadsDrainBeforeDispatchAndTemporalHistory) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(true);
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({8, 80, 8}, {0, 1, 0}, -90, 0);
+    CloudRenderState clouds;
+    clouds.enabled = true;
+    pipeline.set_cloud_state(clouds);
+    pipeline.set_time_of_day(0.37f);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    const float time_of_day = pipeline.get_time_of_day();
+    const auto sun_direction = pipeline.sun_direction();
+    const auto cloud_offset = pipeline.get_cloud_state().scroll_offset;
+    pipeline.set_taau_enabled(false);
+    pipeline.set_taau_enabled(true);
+    // Nine tiny public streaming adoptees exceed the eight-attempt ceiling,
+    // independent of machine speed. No generation, workers or physics are needed.
+    constexpr int chunks = 9;
+    for (int x = 0; x < chunks; ++x) {
+        auto chunk = std::make_shared<Chunk>(IVec3{x, 0, 0});
+        chunk->mesh_vertices = {
+            {{0, 0, 0}, {0, 1, 0}, 1}, {{0, 0, 1}, {0, 1, 0}, 1}, {{1, 0, 0}, {0, 1, 0}, 1}};
+        chunk->mesh_indices = {0, 1, 2};
+        chunk->mesh_version.store(1);
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    }
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    ASSERT_FALSE(pipeline.render_uploads_settled());
+    EXPECT_TRUE(pipeline.frame_stage_trace().empty());
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    EXPECT_EQ(pipeline.get_time_of_day(), time_of_day);
+    EXPECT_EQ(pipeline.sun_direction(), sun_direction);
+    EXPECT_EQ(pipeline.get_cloud_state().scroll_offset, cloud_offset);
+    // The progress floor guarantees completion within one pass per chunk.
+    for (int frame = 1; frame < chunks && !pipeline.render_uploads_settled(); ++frame) {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        EXPECT_EQ(pipeline.get_time_of_day(), time_of_day);
+        EXPECT_EQ(pipeline.sun_direction(), sun_direction);
+        EXPECT_EQ(pipeline.get_cloud_state().scroll_offset, cloud_offset);
+        if (!pipeline.render_uploads_settled()) {
+            EXPECT_TRUE(pipeline.frame_stage_trace().empty());
+            EXPECT_FALSE(pipeline.taau_history_valid());
+        }
+    }
+    ASSERT_TRUE(pipeline.render_uploads_settled());
+    EXPECT_FALSE(pipeline.frame_stage_trace().empty());
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    // A normal measured/interactive frame still dispatches with pending work.
+    for (auto* chunk : world.get_renderable_chunks())
+        chunk->mesh_version.store(2);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_GT(pipeline.get_time_of_day(), time_of_day);
+    EXPECT_NE(pipeline.sun_direction(), sun_direction);
+    EXPECT_NE(pipeline.get_cloud_state().scroll_offset, cloud_offset);
+    EXPECT_FALSE(pipeline.render_uploads_settled());
+    EXPECT_FALSE(pipeline.frame_stage_trace().empty());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(PassContext, ShippingTemporalResolveBuildsHistoryJittersAndResets) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_lod_enabled(false);
+    EXPECT_TRUE(pipeline.taau_enabled());
+    EXPECT_EQ(pipeline.volumetric_quality(), 1);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({8, 80, 8}, {0, 1, 0}, -90, 0);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    const auto first_jitter = pipeline.taau_jitter_ndc();
+    EXPECT_NE(first_jitter, glm::vec2(0.0f));
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_NE(pipeline.taau_jitter_ndc(), first_jitter);
+    pipeline.on_resize(80, 64);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    pipeline.set_taau_enabled(false);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    EXPECT_EQ(pipeline.taau_jitter_ndc(), glm::vec2(0.0f));
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    pipeline.set_taau_enabled(true);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    EXPECT_NE(pipeline.taau_jitter_ndc(), glm::vec2(0.0f));
+    // Settings transactions invalidate history even when render scale is unchanged.
+    // Exercise every non-scale graphics control through the public renderer API.
+    using namespace luminumbra::core;
+    for (const GraphicsOverrides& overrides :
+         {GraphicsOverrides{{"grass_density", 0.8}},
+          GraphicsOverrides{{"grass_fade_start_m", 32.0}},
+          GraphicsOverrides{{"grass_fade_end_m", 64.0}},
+          GraphicsOverrides{{"far_terrain_radius_m", 1500.0}},
+          GraphicsOverrides{{"shadow_resolution", 1024.0}},
+          GraphicsOverrides{{"volumetric_quality", 0.0}},
+          GraphicsOverrides{{"grass_enabled", false}},
+          GraphicsOverrides{{"ui_blur", std::string("off")}}}) {
+        GraphicsSettings settings;
+        settings.overrides = overrides;
+        ResolvedGraphics resolved;
+        std::string error;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
+        ASSERT_TRUE(pipeline.apply_graphics(resolved));
+        EXPECT_FALSE(pipeline.taau_history_valid());
+        pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+        EXPECT_TRUE(pipeline.taau_history_valid());
+        ASSERT_TRUE(pipeline.apply_graphics(resolved));
+        EXPECT_TRUE(pipeline.taau_history_valid()); // Unchanged application preserves history.
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

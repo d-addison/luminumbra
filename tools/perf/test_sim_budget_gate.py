@@ -4,18 +4,25 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any
 import unittest
+from unittest import mock
 
 import capture_sim_budget as capture
 import check_sim_budgets
 import propose_sim_budgets
 import sim_budget_compare
 import sim_budget_io
+from test_fixture_hash import (
+    ROOTED_REFERENCES, ESCAPING_REFERENCES, directory_link, remove_directory_link, symlink_or_skip,
+)
 
 
 PRESETS = capture.PRESETS
@@ -39,6 +46,8 @@ def artifact_for(preset: str, ticks: int, work_scale: int) -> dict[str, Any]:
     return {
         "schema": "luminumbra.server_tick.v1", "preset": preset, "seed": "1337",
         "ticks_requested": ticks, "passed": True,
+        "effective_simulation": dict.fromkeys(
+            capture.shipping_simulation_gates() + ("finite_hydrology", "weather_rain"), True),
         "world_hash": HASH, "world_hash_replay": HASH,
         "sim_budget": {"schema": "luminumbra.sim_budget.v2", "work_replay_match": True,
                        "stages": stages},
@@ -91,6 +100,41 @@ def read_budgets(path: Path) -> dict[str, Any]:
 
 
 class SimBudgetGateTests(unittest.TestCase):
+    def test_preset_identity_is_preserved_and_enforced(self):
+        before = self.capture_dir("preset-before", overrides={"preset_hash": FIXTURE_HASH})
+        after = self.capture_dir("preset-after", overrides={"preset_hash": ZERO_HASH})
+        budgets = self.root / "preset-budgets.json"
+        emit_budgets(before, budgets)
+        self.assertEqual(read_budgets(budgets)["identity"]["preset_hash"], FIXTURE_HASH)
+        code, output, error = run_tool(propose_sim_budgets, [str(before)])
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(output)["identity"]["preset_hash"], FIXTURE_HASH)
+        for module, argv in ((check_sim_budgets, [str(after), str(budgets)]),
+                             (sim_budget_compare, [str(before), str(after)])):
+            code, output, error = run_tool(module, argv)
+            self.assertEqual((code, output), (2, ""))
+            self.assertIn("preset_hash", error)
+        historical = self.capture_dir("historical-preset")
+        code, _, error = run_tool(sim_budget_compare, [str(before), str(historical)])
+        self.assertEqual(code, 2)
+        self.assertIn("preset_hash", error)
+
+    def test_invalid_preset_hash_is_refused(self):
+        budgets = self.root / "preset-format-budgets.json"
+        emit_budgets(self.capture_dir("preset-format-base"), budgets)
+        data = read_budgets(budgets)
+        for index, value in enumerate((None, 3, True, "a" * 63, "A" * 64, "")):
+            directory = self.capture_dir(f"bad-preset-{index}", overrides={"preset_hash": value})
+            with self.assertRaisesRegex(ValueError, "preset_hash"):
+                sim_budget_io.load_capture(directory)
+            data["identity"]["preset_hash"] = value
+            budgets.write_text(json.dumps(data), encoding="utf-8")
+            if value is None:
+                self.assertIsNone(check_sim_budgets.load_budgets(budgets)["identity"]["preset_hash"])
+            else:
+                with self.assertRaisesRegex(ValueError, "preset_hash"):
+                    check_sim_budgets.load_budgets(budgets)
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -98,6 +142,114 @@ class SimBudgetGateTests(unittest.TestCase):
 
     def capture_dir(self, name: str, **kwargs: Any) -> Path:
         return write_capture(self.root / name, **kwargs)
+
+    def test_every_budget_tool_refuses_external_artifact_references(self):
+        reference = self.capture_dir("reference")
+        budgets = self.root / "budgets.json"
+        emit_budgets(reference, budgets)
+        directory = self.capture_dir("unsafe")
+        manifest_path = directory / "capture.json"
+        manifest = read_budgets(manifest_path)
+        for artifact in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+            manifest["runs"][0]["artifact"] = artifact
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.subTest(artifact=artifact):
+                with self.assertRaisesRegex(ValueError, "fixture reference"):
+                    sim_budget_io.load_capture(directory)
+                for module, argv in (
+                        (propose_sim_budgets, [str(directory)]),
+                        (check_sim_budgets, [str(directory), str(budgets)]),
+                        (sim_budget_compare, [str(reference), str(directory)])):
+                    code, out, err = run_tool(module, argv)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn("fixture reference", err)
+
+    def test_artifact_links_cannot_leave_capture_directory(self):
+        directory = self.capture_dir("linked")
+        target = self.root / "outside.json"
+        artifact = directory / "default.json"
+        artifact.rename(target)
+        symlink_or_skip(self, artifact, target)
+        with self.assertRaisesRegex(ValueError, "resolves outside root"):
+            sim_budget_io.load_capture(directory)
+
+    def test_manifest_and_run_require_regular_files_before_read(self):
+        directory = self.capture_dir("non-regular")
+        original_stat = Path.stat
+        original_read = Path.read_text
+        for name in ("capture.json", "default.json"):
+            for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                def status(path, *args, **kwargs):
+                    if path == directory / name:
+                        return os.stat_result((mode,) + (0,) * 9)
+                    return original_stat(path, *args, **kwargs)
+
+                def read(path, *args, **kwargs):
+                    if path == directory / name:
+                        raise AssertionError("unchecked read")
+                    return original_read(path, *args, **kwargs)
+
+                with self.subTest(name=name, mode=mode), \
+                        mock.patch.object(Path, "stat", status), \
+                        mock.patch.object(Path, "read_text", read), \
+                        self.assertRaisesRegex(ValueError, "not a regular file"):
+                    sim_budget_io.load_capture(directory)
+
+    def test_selected_capture_directory_alias_keeps_metadata_checks(self):
+        actual = self.capture_dir("actual")
+        directory = self.root / "alias"
+        directory_link(directory, actual.resolve())
+        original_stat = Path.stat
+        try:
+            sim_budget_io.load_capture(directory)
+            for name in ("capture.json", "default.json"):
+                for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                    def status(path, *args, **kwargs):
+                        if path == directory / name:
+                            return os.stat_result((mode,) + (0,) * 9)
+                        return original_stat(path, *args, **kwargs)
+
+                    with self.subTest(name=name, mode=mode), \
+                            mock.patch.object(Path, "stat", status), \
+                            self.assertRaisesRegex(ValueError, "not a regular file"):
+                        sim_budget_io.load_capture(directory)
+        finally:
+            remove_directory_link(directory)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
+    def test_fifo_manifest_and_run_are_refused_without_reading(self):
+        directory = self.capture_dir("fifo")
+        original_read = Path.read_text
+        for name in ("capture.json", "default.json"):
+            path = directory / name
+            content = path.read_bytes()
+            path.unlink()
+            os.mkfifo(path)
+
+            def read(candidate, *args, **kwargs):
+                if candidate == path:
+                    raise AssertionError("unchecked read")
+                return original_read(candidate, *args, **kwargs)
+
+            try:
+                with self.subTest(name=name), mock.patch.object(Path, "read_text", read), \
+                        self.assertRaisesRegex(ValueError, "not a regular file"):
+                    sim_budget_io.load_capture(directory)
+            finally:
+                path.unlink()
+                path.write_bytes(content)
+
+    def test_normalized_nested_artifact_reference_stays_valid(self):
+        directory = self.capture_dir("nested")
+        (directory / "nested").mkdir()
+        (directory / "default.json").rename(directory / "nested/default.json")
+        (directory / "nested\\default.json").write_bytes((directory / "nested/default.json").read_bytes())
+        manifest_path = directory / "capture.json"
+        manifest = read_budgets(manifest_path)
+        for artifact in ("nested/./unused/../default.json", "nested\\default.json"):
+            manifest["runs"][0]["artifact"] = artifact
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(list(sim_budget_io.load_capture(directory)["presets"]), list(PRESETS))
 
     def assert_workload_acceptance(self, directory: Path, reference: Path, budgets: Path,
                                    key: str, accepted: bool) -> None:
@@ -142,6 +294,21 @@ class SimBudgetGateTests(unittest.TestCase):
                         artifact_path.write_text(json.dumps(data), encoding="utf-8")
                     self.assert_workload_acceptance(directory, reference, budgets, key,
                                                     value in ("1337", "01337", 1337))
+
+    def test_partial_shipping_simulation_is_refused_by_every_consumer(self) -> None:
+        reference = self.capture_dir("shipping-reference")
+        budgets = self.root / "shipping-budgets.json"
+        emit_budgets(reference, budgets)
+        self.assert_workload_acceptance(reference, reference, budgets, "", True)
+        for gate in ("plant_growth", "erosion", "ecology", "reproduction"):
+            with self.subTest(gate=gate):
+                directory = self.capture_dir(f"shipping-disabled-{gate}")
+                path = directory / "default.json"
+                data = sim_budget_io.read_json(path)
+                data["effective_simulation"][gate] = False
+                path.write_text(json.dumps(data), encoding="utf-8")
+                self.assert_workload_acceptance(directory, reference, budgets,
+                                                "shipping simulation", False)
 
     def test_invalid_seed_and_ticks_values_are_consistent_across_tools(self) -> None:
         reference = self.capture_dir("range-reference", presets=("default",))
@@ -300,10 +467,7 @@ class SimBudgetGateTests(unittest.TestCase):
                                                                  "collision_radius": 2})
         code, _, _ = run_tool(check_sim_budgets, [str(other), str(budgets)])
         self.assertEqual(code, 0)
-        # The committed baseline pins ticks 600, so its capture must match that tick count.
-        baseline_other = self.capture_dir("radius-null-baseline", ticks=600,
-                                          overrides={"surface_radius": 2, "collision_radius": 2})
-        code, _, err = run_tool(check_sim_budgets, [str(baseline_other), str(capture_baseline())])
+        code, _, err = run_tool(check_sim_budgets, [str(other), str(budgets), "--require-complete"])
         self.assertEqual(code, 0, err)
 
     def test_null_fixture_hash_is_refused_by_propose_check_and_compare(self) -> None:
@@ -496,10 +660,15 @@ class SimBudgetGateTests(unittest.TestCase):
     def test_unpinned_budgets_report_but_only_fail_or_require_complete_gates(self) -> None:
         directory = self.capture_dir("unpinned")
         budgets = self.root / "unpinned.json"
-        committed = read_budgets(capture_baseline())
-        committed["identity"] = {"revision": None, "fixture_hash": None,
-                                 "seed": None, "ticks": None}
-        budgets.write_text(json.dumps(committed), encoding="utf-8")
+        emit_budgets(directory, budgets)
+        unpinned = read_budgets(budgets)
+        unpinned["identity"] = {"revision": None, "fixture_hash": None,
+                                "seed": None, "ticks": None}
+        for preset in unpinned["presets"].values():
+            preset["total"]["max_work_per_tick"] = None
+            for stage in preset["stages"].values():
+                stage["max_work_per_tick"] = None
+        budgets.write_text(json.dumps(unpinned), encoding="utf-8")
         code, out, _ = run_tool(check_sim_budgets, [str(directory), str(budgets)])
         self.assertEqual(code, 0)
         self.assertGreater(json.loads(out)["summary"]["unpinned"], 0)
@@ -558,20 +727,111 @@ class SimBudgetGateTests(unittest.TestCase):
                                                   "--require-complete"])
         self.assertEqual(code, 3)
 
-    def test_committed_baseline_is_structurally_unpinned(self) -> None:
+    def test_committed_baseline_is_complete_for_shipping_capture(self) -> None:
         data = check_sim_budgets.load_budgets(capture_baseline())
         self.assertEqual(data["schema"], "luminumbra.sim_budgets.v1")
+        self.assertEqual(data["headroom"], {"num": 3, "den": 2})
         self.assertEqual(data["identity"]["seed"], 1337)
         self.assertEqual(data["identity"]["ticks"], 600)
-        for key in ("fixture_hash", "revision", "surface_radius", "collision_radius"):
-            self.assertIsNone(data["identity"][key], key)
+        self.assertEqual(data["identity"]["surface_radius"], 1)
+        self.assertEqual(data["identity"]["collision_radius"], 1)
+        self.assertIsNone(data["identity"]["revision"])
+        self.assertIsNone(data["identity"]["fixture_hash"])
         self.assertEqual(set(data["presets"]), set(PRESETS))
+        idle = {"animation", "instinct", "perception", "locomotion", "energy",
+                "irrigation", "disease", "fire", "circadian", "events", "server_streaming"}
         for preset in PRESETS:
             entry = data["presets"][preset]
             self.assertEqual(set(entry["stages"]), set(capture.STAGES))
-            self.assertIsNone(entry["total"]["max_work_per_tick"])
-            for stage in entry["stages"].values():
-                self.assertIsNone(stage["max_work_per_tick"])
+            self.assertEqual(entry["total"]["max_work_per_tick"], 221289)
+            self.assertEqual({name for name, stage in entry["stages"].items()
+                              if stage["expect_inactive"]}, {"wind", "weather"})
+            self.assertEqual({name for name, stage in entry["stages"].items()
+                              if stage["max_work_per_tick"] == 0}, idle | {"wind", "weather"})
+            for name, stage in entry["stages"].items():
+                self.assertIs(type(stage["max_work_per_tick"]), int, f"{preset}/{name}")
+                self.assertGreaterEqual(stage["max_work_per_tick"], 0)
+
+    def test_committed_limits_pass_complete_and_reject_each_stage_regression(self) -> None:
+        budgets = check_sim_budgets.load_budgets(capture_baseline())
+        # Synthetic traces exercise the pinned combined path, including sampled idle stages.
+        measured = {"server_physics": 1, "scent": 65536, "creatures": 11,
+                    "wind_weather": 8192, "aether": 4096, "soil": 65536,
+                    "plants": 6, "pollination": 6, "crops": 6, "grazing": 6,
+                    "lifespan": 8, "alarm": 6, "decay": 6, "territory": 6,
+                    "packs": 2, "migration": 6, "server_water": 4096}
+        ticks = budgets["identity"]["ticks"]
+        # Capture evidence keeps its own valid hash even though the baseline leaves it unpinned.
+        directory = self.capture_dir("shipping", ticks=ticks)
+        for preset in PRESETS:
+            artifact = artifact_for(preset, ticks, 1)
+            for stage in artifact["sim_budget"]["stages"]:
+                name = stage["name"]
+                inactive = name in {"wind", "weather"}
+                work = measured.get(name, 0)
+                stage.update(samples=0 if inactive else ticks,
+                             work_total=work * ticks,
+                             work_trace=[] if inactive else [
+                                 {"tick": tick, "work": work} for tick in range(1, ticks + 1)],
+                             duration_ms=None if inactive else dict(DURATION))
+                self.assertEqual(budgets["presets"][preset]["stages"][name]["max_work_per_tick"],
+                                 sim_budget_io.headroom(work, 3, 2))
+            (directory / f"{preset}.json").write_text(json.dumps(artifact), encoding="utf-8")
+        code, out, err = run_tool(check_sim_budgets, [str(directory), str(capture_baseline()),
+                                                    "--require-complete"])
+        self.assertEqual(code, 0, err)
+        summary = json.loads(out)["summary"]
+        self.assertEqual(summary, {"pass": 89, "inactive": 6, "fail": 0, "unpinned": 0,
+                                   "unbudgeted": 0, "missing": 0, "unexpected_inactive": 0})
+        loaded = sim_budget_io.load_capture(directory)
+        for preset in PRESETS:
+            for name in capture.STAGES:
+                with self.subTest(preset=preset, stage=name):
+                    regressed = copy.deepcopy(loaded)
+                    stage = regressed["presets"][preset]["stages"][name]
+                    limit = budgets["presets"][preset]["stages"][name]["max_work_per_tick"]
+                    stage.update(samples=ticks, trace=[limit + 1] * ticks)
+                    report, code = check_sim_budgets.build_report(regressed, budgets, True)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(report["presets"][preset]["stages"][name]["verdict"], "fail")
+            with self.subTest(preset=preset, stage="total"):
+                regressed = copy.deepcopy(loaded)
+                for name, stage in regressed["presets"][preset]["stages"].items():
+                    if stage["samples"]:
+                        limit = budgets["presets"][preset]["stages"][name]["max_work_per_tick"]
+                        stage["trace"] = [limit] * ticks
+                report, code = check_sim_budgets.build_report(regressed, budgets, True)
+                self.assertEqual(code, 1)
+                self.assertEqual(report["presets"][preset]["total"]["verdict"], "fail")
+                self.assertTrue(all(stage["verdict"] in ("pass", "inactive")
+                                    for stage in report["presets"][preset]["stages"].values()))
+
+    def test_idle_proposals_require_calibration_and_zero_limits_enforce_no_work(self) -> None:
+        directory = self.capture_dir("idle")
+        for preset in PRESETS:
+            path = directory / f"{preset}.json"
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            stage = artifact["sim_budget"]["stages"][capture.STAGES.index("animation")]
+            stage["work_total"] = 0
+            for sample in stage["work_trace"]:
+                sample["work"] = 0
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+        budgets = self.root / "idle-budgets.json"
+        emit_budgets(directory, budgets)
+        proposal = read_budgets(budgets.with_suffix(".proposal.json"))
+        data = read_budgets(budgets)
+        for preset in PRESETS:
+            stage = proposal["presets"][preset]["stages"]["animation"]
+            self.assertEqual(stage["status"], "idle")
+            self.assertIsNone(stage["proposed_max_work_per_tick"])
+            self.assertFalse(data["presets"][preset]["stages"]["animation"]["expect_inactive"])
+        self.assertEqual(run_tool(check_sim_budgets, [str(directory), str(budgets),
+                                                    "--require-complete"])[0], 3)
+        for preset in PRESETS:
+            data["presets"][preset]["stages"]["animation"]["max_work_per_tick"] = 0
+        budgets.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(run_tool(check_sim_budgets, [str(directory), str(budgets),
+                                                    "--require-complete"])[0], 0)
 
     def test_compare_same_captures_are_unchanged(self) -> None:
         before = self.capture_dir("cmp-before")

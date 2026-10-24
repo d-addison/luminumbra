@@ -1,4 +1,7 @@
 #include "ParticlePass.h"
+#include "../FarWorldReplay.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "PassGlHelpers.h"
@@ -629,6 +632,7 @@ void ParticlePass::update(float dt) {
 }
 
 std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL ParticlePass.execute");
     // No-op (zero draw work) when nothing to render: keeps existing visual gates
     // byte-stable.
     if (!m_shader || !m_shader->IsValid() || m_frame_instance_count == 0 || m_vao == 0) {
@@ -729,8 +733,13 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     // Point the VAO's binding 0 at this frame's ring slot, then instanced-draw
     // 4 verts (a quad) per particle.
     glBindVertexArray(m_vao);
+    PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_frame_instance_count));
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
+                                                GL_TRIANGLE_STRIP,
+                                                0,
+                                                4,
+                                                static_cast<GLsizei>(m_frame_instance_count));
     glBindVertexArray(0);
 
     glActiveTexture(GL_TEXTURE0);

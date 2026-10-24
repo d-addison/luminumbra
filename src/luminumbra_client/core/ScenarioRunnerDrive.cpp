@@ -98,7 +98,7 @@ ScenarioRunner::InGameDrive ScenarioRunnerImpl::onGameStateInGame(float deltaTim
         driveLodBoundaryOscillation() || driveLodSeamArrival() || drivePlayerView() ||
         driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
         driveCreatureSlice(deltaTime) || driveNetworkedSession()) {
-        return InGameDrive::kHandled;
+        return scenario_failed ? InGameDrive::kBreakCase : InGameDrive::kHandled;
     }
     return InGameDrive::kFallThrough;
 }
@@ -156,8 +156,13 @@ bool ScenarioRunnerImpl::driveLodGround() {
         // already Ready at the required LOD, so steady-state frames
         // (camera already settled) pay nothing.
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-            gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                g_camera->Position, gameSession->GetPhysicsSystem(), 4, 1);
+            if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                    g_camera->Position, gameSession->GetPhysicsSystem(), 4, 1)) {
+                scenario_failed = true;
+                scenario_failure_reason = "surface_preparation_refused";
+                glfwSetWindowShouldClose(window, true);
+                return true;
+            }
         }
         return true;
     }
@@ -476,6 +481,7 @@ bool ScenarioRunnerImpl::onPreRenderFoliage() {
         foliage->set_density_scale(FoliageVisualProfile::density_scale *
                                    scenario_config.foliage_density_scale);
         foliage->set_readback_enabled(true);
+        foliage->set_evidence_enabled(true);
         // Stay calm until a fresh, identified calm frame was actually retained.
         // The bounded run refuses missing evidence instead of manufacturing zero.
         const std::uint32_t phase = foliage_calm.sampled ? 2u : 1u;
@@ -919,6 +925,7 @@ bool ScenarioRunnerImpl::driveFarLodHorizon() {
         // cancels them per-pixel (3x3 neighborhood mask) cleanly.
         if (farlod_horizon_stations.empty()) {
             farlod_horizon_stations = BuildFarLodHorizonStations();
+            farlod_horizon_expected_tiles.reserve(Luminumbra::Rendering::kFarWorldDiagnosticTiles);
             farlod_horizon_captures_written.assign(farlod_horizon_stations.size(), false);
             farlod_horizon_far_off_sliver_px.assign(farlod_horizon_stations.size(), -1);
             farlod_horizon_sky_enforced = !PlayerViewSeaWaterInNearField(gameSession.get());
@@ -929,9 +936,7 @@ bool ScenarioRunnerImpl::driveFarLodHorizon() {
                 .count();
         const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
         const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 0.999);
-        if (auto* farlod = renderPipeline.farlod()) {
-            farlod->set_enabled(progress >= kFarLodHorizonPhaseSplit);
-        }
+        renderPipeline.set_far_world_submission(progress >= kFarLodHorizonPhaseSplit);
         const std::size_t station_count = farlod_horizon_stations.size();
         std::size_t station_index = 0;
         if (progress >= kFarLodHorizonPhaseSplit) {
@@ -955,6 +960,10 @@ bool ScenarioRunnerImpl::driveFarLodHorizon() {
             station_index = first_unwritten >= station_count
                                 ? time_based_index
                                 : std::min(time_based_index, first_unwritten);
+        }
+        if (progress >= kFarLodHorizonPhaseSplit && farlod_horizon_timed_station != station_index) {
+            farlod_horizon_timed_station = station_index;
+            farlod_horizon_station_started_at = std::chrono::steady_clock::now();
         }
         farlod_horizon_applied_station = station_index;
         ApplyFarLodHorizonCamera(
@@ -1077,10 +1086,15 @@ bool ScenarioRunnerImpl::driveSkinnedMeshVisual(float deltaTime) {
             // The shoreline can be hundreds of metres from spawn; stream the scene
             // region in now so terrain + water are meshed before the first capture.
             if (ws && gameSession->GetPhysicsSystem()) {
-                ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(mid.x, mid.y, mid.z),
-                                           gameSession->GetPhysicsSystem(),
-                                           scenario_config.horizon_radius,
-                                           scenario_config.collision_radius);
+                if (!ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(mid.x, mid.y, mid.z),
+                                                gameSession->GetPhysicsSystem(),
+                                                scenario_config.horizon_radius,
+                                                scenario_config.collision_radius)) {
+                    scenario_failed = true;
+                    scenario_failure_reason = "surface_preparation_refused";
+                    glfwSetWindowShouldClose(window, true);
+                    return true;
+                }
             }
             wildlife_setup = true;
             LUMINUMBRA_CORE_INFO("wildlife: water-edge ({:.1f},{:.1f}), animal "
@@ -1133,11 +1147,16 @@ bool ScenarioRunnerImpl::driveSkinnedMeshVisual(float deltaTime) {
             // The walking-row showcase moves the camera, so it streams each frame.
             const bool skip = scenario_config.wildlife && (wildlife_stream_tick++ % 30 != 0);
             if (!skip) {
-                gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                    g_camera->Position,
-                    gameSession->GetPhysicsSystem(),
-                    scenario_config.horizon_radius,
-                    scenario_config.collision_radius);
+                if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                        g_camera->Position,
+                        gameSession->GetPhysicsSystem(),
+                        scenario_config.horizon_radius,
+                        scenario_config.collision_radius)) {
+                    scenario_failed = true;
+                    scenario_failure_reason = "surface_preparation_refused";
+                    glfwSetWindowShouldClose(window, true);
+                    return true;
+                }
             }
         }
         return true;
@@ -1190,6 +1209,8 @@ bool ScenarioRunnerImpl::driveNetworkedSession() {
             net_cfg.budget_ticks = 90;
             net_cfg.hash_cadence_ticks = 30;
             net_cfg.root_path = root_path_str;
+            net_cfg.systems_config_override = scenario_config.systems_config_override;
+            net_cfg.preset_json_override = scenario_config.preset_json_override;
             net_cfg.surface_radius = scenario_config.horizon_radius;
             net_cfg.collision_radius = scenario_config.collision_radius;
             if (!networked_session_driver.Begin(gameSession.get(), net_cfg)) {

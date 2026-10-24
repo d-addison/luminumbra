@@ -4,8 +4,8 @@
 //
 // Creatures keep a daily rhythm: a DIURNAL creature is most active at NOON and at rest at
 // MIDNIGHT; a NOCTURNAL creature is the inverse. This system reads the day clock's
-// time-of-day in [0,1] (0 = midnight, 0.5 = noon, 1 = midnight again) and writes each
-// participating creature's ACTIVITY in [0,1] — a smooth, continuous, libm-free day curve.
+// midnight-origin solar phase in [0,1] (0 = midnight, 0.5 = noon, 1 = midnight again) and writes
+// each participating creature's ACTIVITY in [0,1] — a smooth, continuous, libm-free day curve.
 // CreatureBrainSystem consumes activity to choose sleep and wake behaviour;
 // this system maintains the scalar.
 //
@@ -91,7 +91,7 @@ CircadianActivity(float time_of_day01, bool nocturnal, float amplitude = 1.0f) {
 }
 
 // RunCircadianOnTick: write every participating creature's activity from the day clock.
-// id-ordered. `time_of_day01` is the caller-supplied fraction of the day in [0,1] (0/1 =
+// id-ordered. `time_of_day01` is the caller-supplied solar phase in [0,1] (0/1 =
 // midnight, 0.5 = noon). Returns participation stats. Empty roster -> pure no-op.
 inline CircadianStats
 RunCircadianOnTick(entt::registry& reg, float time_of_day01, float amplitude = 1.0f) {

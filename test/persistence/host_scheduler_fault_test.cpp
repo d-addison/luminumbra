@@ -1,16 +1,19 @@
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
+
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -166,10 +169,19 @@ public:
 
 // Headers are included above before substitution. Keep the mode control flow
 // verbatim so deleting its fault branch, Finalize guard or explicit shutdown
-// changes the behavior under test. These sources are not separately linked.
+// changes the behavior under test. Rename every included entry point: the
+// unadapted Replay.cpp is also linked for the identity roundtrip regressions.
 #define ServerWorldRunner SchedulerFaultTestRunner
+#define RunRecord RunSchedulerFaultRecord
+#define RunReplay RunSchedulerFaultReplay
+#define RunMutateReplayFixture RunSchedulerFaultMutateReplayFixture
+#define RunServer RunSchedulerFaultServer
 #include "../../src/luminumbra_server/modes/Replay.cpp"
 #include "../../src/luminumbra_server/modes/Server.cpp"
+#undef RunServer
+#undef RunMutateReplayFixture
+#undef RunReplay
+#undef RunRecord
 #undef ServerWorldRunner
 
 namespace {
@@ -181,15 +193,14 @@ protected:
     std::shared_ptr<spdlog::logger> previous_logger;
 
     void SetUp() override {
-        root = fs::temp_directory_path() /
-               ("luminumbra_host_fault_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        previous_logger = Log::GetCoreLogger();
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_host_fault_");
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         WriteHostFile(root / "data/common/systems.json",
                       R"({"sim":{"active_regions":{"enabled":true}}})");
-        previous_logger = Log::GetCoreLogger();
         auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_output);
         auto logger = std::make_shared<spdlog::logger>("host-fault-test", sink);
         logger->set_pattern("%v");
@@ -198,10 +209,12 @@ protected:
     }
 
     void TearDown() override {
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
         HostObservation() = nullptr;
         Log::GetCoreLogger() = previous_logger;
         std::error_code error;
-        fs::remove_all(root, error);
+        if (!root.empty())
+            fs::remove_all(root, error);
     }
 
     ServerCliOptions Options() const {
@@ -240,7 +253,7 @@ protected:
 
 TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
     const auto options = Options();
-    EXPECT_EQ(RunServer(options), 3);
+    EXPECT_EQ(RunSchedulerFaultServer(options), 3);
     EXPECT_EQ(observation.ticks, kFaultTick);
     EXPECT_EQ(observation.frames, kFaultTick);
     // No streaming/trace publication after the faulting tick, including when a
@@ -259,7 +272,7 @@ TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
 
 TEST_F(HostSchedulerFault, RecordFaultAbortsWithoutPublishingReplayOrRegionTrace) {
     const auto options = Options();
-    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(RunSchedulerFaultRecord(options), 1);
     ASSERT_FALSE(observation.fault_message.empty());
     EXPECT_EQ(observation.ticks, kFaultTick);
     EXPECT_EQ(observation.frames, kFaultTick);
@@ -289,7 +302,7 @@ TEST_F(HostSchedulerFault, RecordFaultPreservesAnExistingReplayAndTraceByteForBy
         << error;
     const auto previous_replay = ReadHostFile(options.record_path);
     const auto previous_trace = ReadHostFile(options.record_path + ".regions.json");
-    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(RunSchedulerFaultRecord(options), 1);
     ASSERT_FALSE(observation.fault_message.empty());
     EXPECT_EQ(ReadHostFile(options.record_path), previous_replay);
     EXPECT_EQ(ReadHostFile(options.record_path + ".regions.json"), previous_trace);
@@ -303,7 +316,7 @@ TEST_F(HostSchedulerFault, HealthyRecordPublishesACompleteReplayAndRegionTrace) 
     observation.inject_fault = false;
     auto options = Options();
     options.ticks = 2;
-    ASSERT_EQ(RunRecord(options), 0);
+    ASSERT_EQ(RunSchedulerFaultRecord(options), 0);
     const auto recording = Luminumbra::Replay::ReadReplay(options.record_path);
     ASSERT_TRUE(recording.has_value());
     if (recording) {
@@ -346,11 +359,13 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     ASSERT_TRUE(quit_requested);
     EXPECT_NE(log_output.str().find("; saving and quitting"), std::string::npos);
     // The injected corrupt file also refuses saving. Keep the client's existing
-    // failure policy: neither update spawn metadata nor report a successful save.
+    // failure policy: retain pending state and never report a successful save.
+    bool failed_spawn_captured = false;
     Luminumbra::Client::SaveSessionOnExit(
         &session,
-        [] { FAIL() << "A failed state save must not reach the spawn update"; },
+        [&] { failed_spawn_captured = true; },
         [] { FAIL() << "A failed state save must not be reported as successful"; });
+    EXPECT_TRUE(failed_spawn_captured);
     EXPECT_TRUE(quit_requested);
     ASSERT_NO_FATAL_FAILURE(RemoveHostFaultFile(session));
     const auto expected_contents = LiveAuthoritativeContents(session);
@@ -361,8 +376,8 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     Luminumbra::Client::SaveSessionOnExit(
         &session,
         [&] {
-            // This callback runs only AFTER the recovery state is durable.
-            ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
+            // The complete save must still be pending when the spawn is captured.
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
             session.SetSpawnPoint(exit_spawn);
             spawn_updated = true;
         },
@@ -379,6 +394,122 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     EXPECT_TRUE(saved_reported);
     // GLFW loop exit and renderer reader draining remain NEEDS-NATIVE. This
     // test covers the production quit/save decisions without simulating a window.
+    ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
+}
+
+TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRetry) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(root.generic_string() + "/");
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Client metadata failure", "1337", "default"));
+    ASSERT_NO_FATAL_FAILURE(ArmHostFault(session));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Meshing);
+    chunk->heightmap_data = {731.0f};
+    chunk->mark_sdf_loaded_or_edited();
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    for (std::uint64_t tick = 1; tick <= kFaultTick; ++tick)
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    const auto fault_optional = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault_optional.has_value());
+    if (!fault_optional.has_value())
+        return;
+    const auto& fault = fault_optional.value();
+    const auto expect_consistent_session = [&] {
+        const auto& current_fault = session.GetRegionSchedulerFault();
+        ASSERT_TRUE(current_fault.has_value());
+        if (!current_fault.has_value())
+            return;
+        EXPECT_EQ(current_fault->tick, fault.tick);
+        EXPECT_EQ(current_fault->message, fault.message);
+        EXPECT_EQ(session.GetSimulationTickCount(), kFaultTick);
+        EXPECT_TRUE(session.IsSimulationTickBoundary());
+        EXPECT_TRUE(session.GetWorldOpenError().empty());
+    };
+
+    // Establish the state-save failure baseline: edits and save stamps remain pending.
+    const auto unsaved_ledger = session.GetActiveRegionLedger().encode();
+    bool failed_spawn_captured = false;
+    Luminumbra::Client::SaveSessionOnExit(
+        &session,
+        [&] { failed_spawn_captured = true; },
+        [] { FAIL() << "A failed state save must not be reported as successful"; });
+    EXPECT_TRUE(failed_spawn_captured);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), unsaved_ledger);
+    ASSERT_NO_FATAL_FAILURE(expect_consistent_session());
+    ASSERT_NO_FATAL_FAILURE(RemoveHostFaultFile(session));
+    const auto expected_contents = LiveAuthoritativeContents(session);
+    const auto directory = session.GetWorldSaveDir();
+    const auto previous_spawn = session.GetMetadata().spawnPoint;
+    const Luminumbra::Vec3 exit_spawn(19.0f, 23.0f, -17.0f);
+    bool spawn_updated = false;
+    bool saved_reported = false;
+    const auto durable_metadata = ReadHostFile(directory / "world_info.json");
+    const auto durable_ledger = ReadHostFile(WorldSaveService::active_regions_path(directory));
+    const auto saved_ledger = session.GetActiveRegionLedger().encode();
+    const auto read_save = [&directory] {
+        std::map<fs::path, std::string> bytes;
+        for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+            if (entry.is_regular_file())
+                bytes.emplace(entry.path().lexically_relative(directory),
+                              ReadHostFile(entry.path()));
+        }
+        return bytes;
+    };
+    const auto previous_save = read_save();
+    const auto retained_metadata = directory / "retained-metadata";
+    Luminumbra::Client::SaveSessionOnExit(
+        &session,
+        [&] {
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
+            session.SetSpawnPoint(exit_spawn);
+            spawn_updated = true;
+            // An occupied metadata destination refuses the complete save on both
+            // Windows and POSIX, without relying on directory rename publication.
+            fs::rename(directory / "world_info.json", retained_metadata);
+            fs::create_directory(directory / "world_info.json");
+        },
+        [&] { saved_reported = true; });
+    fs::remove_all(directory / "world_info.json");
+    fs::rename(retained_metadata, directory / "world_info.json");
+    ASSERT_TRUE(spawn_updated);
+    EXPECT_FALSE(saved_reported);
+    // Metadata refusal preserves the prior save and leaves the current chunk
+    // edits and save stamps pending.
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), saved_ledger);
+    EXPECT_EQ(read_save(), previous_save);
+    EXPECT_EQ(ReadHostFile(directory / "world_info.json"), durable_metadata);
+    EXPECT_EQ(ReadHostFile(WorldSaveService::active_regions_path(directory)), durable_ledger);
+    EXPECT_EQ(session.GetMetadata().spawnPoint, exit_spawn);
+    const auto metadata = nlohmann::json::parse(durable_metadata);
+    EXPECT_EQ(metadata.at("spawnPoint").at("x"), previous_spawn.x);
+    EXPECT_EQ(metadata.at("spawnPoint").at("y"), previous_spawn.y);
+    EXPECT_EQ(metadata.at("spawnPoint").at("z"), previous_spawn.z);
+    ASSERT_NO_FATAL_FAILURE(expect_consistent_session());
+    EXPECT_TRUE(WorldSaveService::validate_save(directory));
+
+    // Retry must persist the pending recovery chunks as well as the new spawn.
+    Luminumbra::world::WorldStateSaveReport retry;
+    ASSERT_TRUE(session.SaveWorldState(&retry));
+    EXPECT_GT(retry.chunks_dirty, 0u);
+    EXPECT_GT(retry.chunks_saved, 0u);
+    EXPECT_TRUE(retry.saved);
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    Luminumbra::Client::SaveSessionOnExit(
+        &session, [&] { session.SetSpawnPoint(exit_spawn); }, [&] { saved_reported = true; });
+    EXPECT_TRUE(saved_reported);
+    const auto retried_metadata =
+        nlohmann::json::parse(ReadHostFile(directory / "world_info.json"));
+    EXPECT_EQ(retried_metadata.at("spawnPoint").at("x"), exit_spawn.x);
+    EXPECT_EQ(retried_metadata.at("spawnPoint").at("y"), exit_spawn.y);
+    EXPECT_EQ(retried_metadata.at("spawnPoint").at("z"), exit_spawn.z);
+    ASSERT_NO_FATAL_FAILURE(expect_consistent_session());
     ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
 }
 } // namespace

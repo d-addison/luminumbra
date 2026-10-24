@@ -21,6 +21,12 @@ class RenderResourceRegistry;
 // hierarchy, stats collection, and the GPU timer issue/collect calls.
 class ShadowPass {
 public:
+    bool tint_dirty() const noexcept {
+        return m_tint_dirty;
+    }
+    void restore_tint_dirty(bool dirty) noexcept {
+        m_tint_dirty = dirty;
+    }
     ShadowPass();
     ~ShadowPass();
 
@@ -29,7 +35,10 @@ public:
     // FBO) is REGISTRY-OWNED (allocated/destroyed by the registry, the
     // pilot-gate ownership leg). The ShadowMap struct caches the owned GL ids so
     // every downstream reader is unchanged.
-    void init_shadow_map(RenderResourceRegistry& registry);
+    bool init_shadow_map(RenderResourceRegistry& registry);
+    // Accept only supported sizes, seed before startup or transactionally resize
+    // both opaque depth and tinted transmission. Failure keeps the old atlas.
+    bool set_resolution(RenderResourceRegistry& registry, u32 resolution);
     void destroy_shadow_map(RenderResourceRegistry& registry);
     void reset_shader();
 
@@ -59,6 +68,7 @@ public:
     }
 
 private:
+    void clear_tint();
     ShadowMap m_shadow_map;
     std::unique_ptr<Shader> m_shadow_shader;
     //  the tint cascade + its per-cascade FBO (color = tint layer,

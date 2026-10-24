@@ -14,14 +14,8 @@ import time
 import unittest
 
 import render_contract as contract
-
-
-def _file_sha256(path):
-    digest = hashlib.sha256()
-    with path.open('rb') as source:
-        for block in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
+import perf
+import render_runner_process as process_runner
 
 
 def _atomic_write(path, payload):
@@ -80,13 +74,25 @@ SURFACE_READY_PHASE = re.compile(r'EnsureSurfaceReadyNear[:/]')
 
 
 def _report_timeout(receipt, log):
+    truncated = False
     try:
-        payload = log.read_bytes()
+        with log.open('rb') as source:
+            source.seek(0, os.SEEK_END)
+            offset = max(0, source.tell() - TIMEOUT_LOG_TAIL_BYTES)
+            truncated = offset > 0
+            source.seek(offset)
+            payload = source.read(TIMEOUT_LOG_TAIL_BYTES)
     except OSError as error:
         payload = b''
         receipt['evidence_errors'].append(f'timeout log read: {error}')
-    tail = payload[-TIMEOUT_LOG_TAIL_BYTES:].decode('utf-8', errors='replace')
-    phases = [line for line in payload.decode('utf-8', errors='replace').splitlines()
+    tail = payload.decode('utf-8', errors='replace')
+    # Phase discovery is limited to the retained raw-byte window. Its first
+    # line may be a fragment, so it cannot establish a complete phase record.
+    complete_lines = tail.splitlines(keepends=True)
+    if truncated:
+        complete_lines = complete_lines[1:]
+    complete_lines = [line for line in complete_lines if line.endswith('\n')]
+    phases = [line for line in complete_lines
               if SURFACE_READY_PHASE.search(line)]
     last_phase = phases[-1].strip() if phases else None
     receipt.update(log_tail=tail, last_observed_phase=last_phase)
@@ -112,15 +118,17 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
                    return_code=None, capture_status='missing', capture_path=None,
                    capture_sha256=None, evidence_errors=[])
     try:
-        receipt['binary_sha256'] = _file_sha256(Path(command[0]))
-        with log.open('wb') as output:
-            started = time.monotonic()
+        executable = process_runner.resolve_executable(command[0], cwd, environment)
+        command = [str(executable), *command[1:]]
+        receipt.update(command=command, binary_path=command[0])
+        with process_runner.verified_binary(receipt), log.open('wb') as output:
+            started = time.perf_counter()
             try:
                 result = subprocess.run(command, cwd=cwd, env=environment,
                                         stdout=output, stderr=subprocess.STDOUT,
                                         timeout=180, check=False)
             finally:
-                receipt['elapsed_seconds'] = time.monotonic() - started
+                receipt['elapsed_seconds'] = time.perf_counter() - started
             receipt.update(outcome='returned', return_code=result.returncode)
     except (subprocess.TimeoutExpired, OSError) as error:
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
@@ -176,26 +184,26 @@ class RenderRunnerTests(unittest.TestCase):
         text = text.replace('expected_ticks 1800', 'expected_ticks 4')
         self.script.write_bytes(text.encode('utf-8'))
 
-    def run_client(self, name, extra=(), environment=None, expected_exit=0):
+    def run_client(self, name, extra=(), environment=None, expected_exit=0, schema='v3'):
         artifact = self.root / (name + '.json')
         log = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')
         command = [str(OPTIONS.client), '--no-audio', '--no-menu-backdrop',
-                   '--render-benchmark', str(artifact), '--render-benchmark-schema', 'v3',
-                   '--capture-size', '160x90', '--perf-profile', 'quality',
+                   '--render-benchmark', str(artifact), '--render-benchmark-schema', schema,
+                   *(['--capture-size', '160x90', '--perf-profile', 'quality'] if schema == 'v3' else []),
                    '--render-benchmark-warmup', '2', *extra]
         retained = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.json')
         receipt_path = retained.with_suffix('.process.json')
         result, evidence_errors = _run_process(
             command, cwd=self.root, environment=environment or self.environment,
             log=log, artifact=artifact, retained=retained, receipt_path=receipt_path)
-        self.assertEqual(result.returncode, expected_exit, log.read_text(errors='replace')[-6000:])
+        self.assertEqual(result.returncode, expected_exit, log.read_text(errors='replace', encoding="utf-8")[-6000:])
         if expected_exit:
             self.assertFalse(artifact.exists())
             _require_evidence(evidence_errors)
-            return log.read_text(errors='replace')
+            return log.read_text(errors='replace', encoding="utf-8")
         # A completed capture alone could hide a mesh/material fallback. Require
         # the real loaders to accept the synthetic inputs on every success path.
-        output = log.read_text(errors='replace')
+        output = log.read_text(errors='replace', encoding="utf-8")
         self.assertIn('Static-model textures registered (3 models).', output)
         for part in ('trunk', 'branches', 'leaves'):
             self.assertIn(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", output)
@@ -207,16 +215,65 @@ class RenderRunnerTests(unittest.TestCase):
         first = self.run_client('first', ['--traversal', str(self.script)])
         second = self.run_client('second', ['--traversal', str(self.script)])
         for data in (first, second):
+            self.assertIn('far_world', data)
+            perf.validate_far_world_reporting(data)
+            for key, mode in (('requested_mode', 'ladder'), ('effective_mode', 'legacy'),
+                              ('refusal', 'ImmutableAuthorityUnavailable')):
+                self.assertEqual(data['far_world']['summary'][key], {mode: data['frames']})
+            self.assertEqual(data['world_content_identity'], data['workload']['content_identity'])
             contract.validate(data, data['adapter']['renderer'], traversal=self.script)
             self.assertEqual(data['workload']['actual_ticks'], 4)
             self.assertEqual([row['tick'] for row in data['workload']['camera_samples']], [1, 2, 3, 4])
         self.assertEqual(first['workload']['camera_samples'], second['workload']['camera_samples'])
         self.assertEqual(first['workload']['actual_ticks'], second['workload']['actual_ticks'])
+        for name in ('first', 'second'):
+            output = (OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')).read_text(
+                errors='replace', encoding='utf-8')
+            self.assertIn('Far world: requested=ladder effective=legacy refusal=ImmutableAuthorityUnavailable', output)
+        for name, option in (('separate', ['--render-benchmark-frames', '4']),
+                             ('assigned', ['--render-benchmark-frames=4'])):
+            with self.subTest(frame_option=name):
+                log = self.run_client('traversal-frames-' + name,
+                                      ['--traversal', str(self.script), *option], expected_exit=2)
+                self.assertIn('Traversal owns the measured duration; '
+                              'omit --render-benchmark-frames', log)
 
     def test_implicit_creation_failure(self):
         log = self.run_client('missing', ['--world-preset', 'nonexistent_render_test_preset'], expected_exit=2)
         self.assertIn('World open refused', log)
         self.assertIn('nonexistent_render_test_preset', log)
+
+    def test_v2_measured_frame_bounds(self):
+        for schema in ('v2', 'v3'):
+            for index, count in enumerate(('0', '-1', '18001', '999999999999999999999999',
+                                           '4junk', '4.0', '+4', ' 4', '4 ', '')):
+                for assigned in (False, True):
+                    option = (['--render-benchmark-frames=' + count] if assigned
+                              else ['--render-benchmark-frames', count])
+                    with self.subTest(schema=schema, count=count, assigned=assigned):
+                        log = self.run_client(f'bounded-{schema}-{index}-{int(assigned)}', option,
+                                              expected_exit=2, schema=schema)
+                        self.assertIn('Render benchmark requires 1..18000 measured frames', log)
+            log = self.run_client('missing-' + schema, ['--render-benchmark-frames'],
+                                  expected_exit=2, schema=schema)
+            self.assertIn('Render benchmark requires 1..18000 measured frames', log)
+
+    def test_isolation_submission_reporting(self):
+        declaration = self.root / 'overrides.json'
+        declaration.write_text(json.dumps({'cli:--isolation-layers': 'foliage'}), encoding='utf-8')
+        data = self.run_client('isolated', ['--render-benchmark-frames', '4',
+                                          '--isolation-layers', 'foliage',
+                                          '--declare-render-overrides', str(declaration)])
+        contract.validate(data, data['adapter']['renderer'])
+        self.assertEqual(data['far_world']['summary']['suppressed_frames'], 4)
+        self.assertEqual(data['far_world']['summary']['submission_refusal'],
+                         {'IsolationSuppressed': 4})
+        for row in data['far_world']['frames']:
+            self.assertTrue(row['suppressed'])
+            self.assertEqual(row['submission_refusal'], 'IsolationSuppressed')
+        output = (OPTIONS.artifacts / (self._testMethodName + '-isolated.log')).read_text(
+            errors='replace', encoding='utf-8')
+        self.assertIn('suppressed=true submission_refusal=IsolationSuppressed', output)
 
     def test_gl_debug_override_collection(self):
         environment = dict(self.environment, LUMIN_GL_DEBUG='1')
@@ -225,7 +282,7 @@ class RenderRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'undeclared'):
             contract.validate(data, data['adapter']['renderer'])
         declaration = self.root / 'overrides.json'
-        declaration.write_text(json.dumps({'env:LUMIN_GL_DEBUG': '1'}))
+        declaration.write_text(json.dumps({'env:LUMIN_GL_DEBUG': '1'}), encoding="utf-8")
         data = self.run_client('declared', ['--render-benchmark-frames', '4',
                                           '--declare-render-overrides', str(declaration)], environment)
         contract.validate(data, data['adapter']['renderer'])
@@ -235,20 +292,39 @@ class RenderRunnerTests(unittest.TestCase):
         saves = list((self.root / 'worlds/saves').iterdir())
         self.assertEqual(len(saves), 1)
         saved = saves[0]
-        metadata = json.loads((saved / 'world_info.json').read_text())
+        metadata = json.loads((saved / 'world_info.json').read_text(encoding="utf-8"))
         self.assertEqual(metadata['worldType'], 'default')
-        preset = json.loads((self.root / 'worlds/atlas/presets/default.json').read_text())
-        preset['generation_params']['terrain']['height_offset'] += 1
-        (saved / 'preset.json').write_text(json.dumps(preset))
-        altered = self.run_client('altered', ['--load-world', saved.name, '--render-benchmark-frames', '4'])
-        self.assertEqual(altered['workload']['preset'], original['workload']['preset'])
+        loaded = self.run_client('loaded', ['--load-world', saved.name,
+                                            '--render-benchmark-frames', '4'])
+        for data in (original, loaded):
+            contract.validate(data, data['adapter']['renderer'])
+        for key in ('preset', 'preset_revision', 'preset_identity', 'content_identity'):
+            self.assertEqual(loaded['workload'][key], original['workload'][key])
+
+        manifest = dict(original['workload'])
+        manifest['preset_identity'] = f"{int(manifest['preset_identity'], 16) ^ 1:016x}"
+        manifest['content_identity'] = str(int(manifest['content_identity']) ^ 1)
         for key in ('preset_identity', 'content_identity'):
-            self.assertNotEqual(altered['workload'][key], original['workload'][key])
-            with self.assertRaisesRegex(ValueError, 'workload manifest'):
-                contract.validate(altered, altered['adapter']['renderer'],
-                                  workload={key: original['workload'][key]})
-        log = self.run_client('refused', ['--load-world', saved.name, '--traversal', str(self.script)], expected_exit=2)
-        self.assertIn('content identity mismatch', log)
+            with self.assertRaisesRegex(ValueError, f'workload manifest does not match: {key}'):
+                contract.validate(original, original['adapter']['renderer'],
+                                  workload={key: manifest[key]})
+
+        preset = json.loads((saved / 'preset.json').read_text(encoding="utf-8"))
+        preset['generation_params']['terrain']['height_offset'] += 1
+        (saved / 'preset.json').write_text(json.dumps(preset), encoding="utf-8")
+
+        def save_bytes():
+            return {path.relative_to(saved): None if path.is_dir() else path.read_bytes()
+                    for path in saved.rglob('*')}
+
+        before = save_bytes()
+        for name, extra in (('altered', ['--render-benchmark-frames', '4']),
+                            ('refused', ['--traversal', str(self.script)])):
+            with self.subTest(name=name):
+                log = self.run_client(name, ['--load-world', saved.name, *extra], expected_exit=2)
+                self.assertIn('World open refused: Incompatible world preset: '
+                              'saved preset identity does not match.', log)
+                self.assertEqual(save_bytes(), before)
 
 
 if __name__ == '__main__':

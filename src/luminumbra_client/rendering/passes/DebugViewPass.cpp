@@ -1,4 +1,6 @@
 #include "DebugViewPass.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../Camera.h"            // near/far planes for Depth-mode linearization
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -39,6 +41,7 @@ void DebugViewPass::reset_shader() {
 }
 
 void DebugViewPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL DebugViewPass.execute");
     // Default-OFF guard: Mode::None (0) is a true no-op so the normal render is untouched.
     if (m_mode == Mode::None)
         return;
@@ -55,6 +58,8 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     const float far_plane = ctx.camera ? ctx.camera->GetFarPlane() : 4000.0f;
 
     m_shader->use();
+    m_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    m_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     m_shader->setInt("u_mode", m_mode);
     m_shader->setFloat("u_near", near_plane);
     m_shader->setFloat("u_far", far_plane);
@@ -73,7 +78,7 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     m_shader->setInt("gDepth", 3);
 
     glBindVertexArray(m_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 }
 

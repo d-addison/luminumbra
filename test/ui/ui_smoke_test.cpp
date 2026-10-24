@@ -1,3 +1,4 @@
+#include "../support/UniqueTempPath.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -15,27 +16,263 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
+#include <limits>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "audio/NullAudioManager.h"
+#include "core/FilesystemPath.h"
+#include "luminumbra_common/core/FramePacing.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/world/KnobLayer.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
 #include "ui/components/common/Panel.h"
 #include "ui/components/game/WorldList.h"
 #include "ui/core/UIComponent.h"
+#include "ui/core/UIHotReload.h"
 #include "ui/core/UIStateManager.h"
 #include "world/WorldgenOverride.h"
 
 namespace fs = std::filesystem;
 
 namespace {
+
+class UserPresetPersistence : public testing::Test {
+private:
+    fs::path m_directory;
+
+protected:
+    const fs::path& Directory() const {
+        return m_directory;
+    }
+    void SetUp() override {
+        m_directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("user_preset_write_");
+    }
+    void TearDown() override {
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            false);
+        std::error_code error;
+        fs::remove_all(m_directory, error);
+    }
+    static std::string Read(const fs::path& path) {
+        const std::ifstream input(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << input.rdbuf();
+        return bytes.str();
+    }
+    static void Write(const fs::path& path, const std::string& bytes) {
+        ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::write_file_durably(path, bytes));
+    }
+    void ExpectNoStaging() const {
+        for (const auto& entry : fs::recursive_directory_iterator(m_directory))
+            EXPECT_EQ(Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename())
+                          .find(".tmp."),
+                      std::string::npos);
+    }
+};
+
+TEST_F(UserPresetPersistence, NativeWatcherPathsReachFilesystemAndEmitUtf8) {
+    const auto directory = Directory() / fs::path(u8"ui-\u4e16\u754c");
+    fs::create_directory(directory);
+    const auto document = directory / fs::path(u8"page-\u03a9.rml");
+    ASSERT_NO_FATAL_FAILURE(Write(document, "initial"));
+    ASSERT_NO_FATAL_FAILURE(Write(directory / fs::path(u8"other.\u4e16\u754c"), "ignored"));
+    Luminumbra::Client::UI::UIHotReload watcher;
+    watcher.SetEnabled(true);
+    std::vector<std::string> changed;
+    watcher.SetReloadCallback([&](const std::string& path) { changed.push_back(path); });
+    watcher.WatchDirectory(directory, "rml");
+    const auto stamp = fs::last_write_time(document);
+    fs::last_write_time(document, stamp + std::chrono::seconds(2));
+    // One watcher interval, independent of timestamp resolution and renderer state.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    watcher.Update();
+    ASSERT_EQ(changed.size(), 1u);
+    EXPECT_EQ(changed.front(), Luminumbra::Filesystem::GenericUtf8PathString(document));
+    watcher.StopWatching(document);
+    watcher.ClearAllWatches();
+    changed.clear();
+    watcher.WatchFile(directory / "absent");
+    watcher.WatchDirectory(directory / "absent", "rml");
+    watcher.Update();
+    EXPECT_TRUE(changed.empty());
+}
+
+TEST_F(UserPresetPersistence, InterruptedRenamePreservesSourceAndDestinationThenRetries) {
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    for (const bool same_name : {false, true}) {
+        SCOPED_TRACE(same_name);
+        ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source","unknown":17})"));
+        ASSERT_NO_FATAL_FAILURE(Write(destination, R"({"name":"Existing destination"})"));
+        const auto source_bytes = Read(source);
+        const auto destination_bytes = Read(destination);
+        const auto target = same_name ? source : Directory() / "new_destination.json";
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            true);
+        const bool renamed = Luminumbra::Client::RenameUserPreset(source, target, "Renamed");
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            false);
+        EXPECT_FALSE(renamed);
+        EXPECT_EQ(Read(source), source_bytes);
+        EXPECT_EQ(Read(destination), destination_bytes);
+        ExpectNoStaging();
+        ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, target, "Renamed"));
+        EXPECT_EQ(nlohmann::json::parse(Read(target)).at("name"), "Renamed");
+        EXPECT_EQ(nlohmann::json::parse(Read(target)).at("unknown"), 17);
+        EXPECT_EQ(fs::exists(source), same_name);
+        ExpectNoStaging();
+    }
+}
+
+TEST_F(UserPresetPersistence, OccupiedDestinationRefusesExactBytesAndThenRetries) {
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    const std::string source_bytes = "{ \"name\": \"Source\", \"unknown\": 17 }\n";
+    const std::string occupied_bytes = "{ \"name\": \"Occupied\" }\r\n";
+    ASSERT_NO_FATAL_FAILURE(Write(source, source_bytes));
+    ASSERT_NO_FATAL_FAILURE(Write(destination, occupied_bytes));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+        EXPECT_EQ(Read(source), source_bytes);
+        EXPECT_EQ(Read(destination), occupied_bytes);
+        ExpectNoStaging();
+    }
+    ASSERT_TRUE(fs::remove(destination));
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_FALSE(fs::exists(source));
+    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("unknown"), 17);
+    ExpectNoStaging();
+}
+
+TEST_F(UserPresetPersistence, InvalidSourceAndPublicationFailurePreserveExistingFiles) {
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    ASSERT_NO_FATAL_FAILURE(Write(destination, R"({"name":"Existing destination"})"));
+    const auto before = Read(destination);
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    fs::create_directory(source);
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_EQ(Read(destination), before);
+    fs::remove(source);
+    for (const auto* bytes : {"", "{", "[]", "null", "{}trailing"}) {
+        SCOPED_TRACE(bytes);
+        ASSERT_NO_FATAL_FAILURE(Write(source, bytes));
+        EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+        EXPECT_EQ(Read(source), bytes);
+        EXPECT_EQ(Read(destination), before);
+    }
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source"})"));
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, std::string(1, '\xff')));
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Source");
+    EXPECT_EQ(Read(destination), before);
+    const auto blocked = Directory() / "blocked.json";
+    fs::create_directory(blocked);
+    ASSERT_NO_FATAL_FAILURE(Write(blocked / "keep", "occupied"));
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, blocked, "Renamed"));
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Source");
+    EXPECT_EQ(Read(blocked / "keep"), "occupied");
+    ExpectNoStaging();
+    fs::remove_all(blocked);
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, blocked, ""));
+    EXPECT_EQ(nlohmann::json::parse(Read(blocked)).at("name"), "Custom");
+    EXPECT_FALSE(fs::exists(source));
+}
+
+TEST_F(UserPresetPersistence, AliasedDestinationKeepsThePublishedPreset) {
+    const auto source = Directory() / "user_source.json";
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source","unknown":17})"));
+    const auto destination = Directory() / "." / source.filename();
+    ASSERT_NE(source, destination);
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Renamed");
+    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("unknown"), 17);
+    const auto hard_link = Directory() / "user_hard_link.json";
+    fs::create_hard_link(source, hard_link);
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, hard_link, "Separate entry"));
+    EXPECT_FALSE(fs::exists(source));
+    EXPECT_EQ(nlohmann::json::parse(Read(hard_link)).at("name"), "Separate entry");
+#ifdef _WIN32
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source"})"));
+    const auto case_variant = Directory() / "USER_SOURCE.JSON";
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, case_variant, "Case variant"));
+    EXPECT_EQ(nlohmann::json::parse(Read(case_variant)).at("name"), "Case variant");
+#endif
+    ExpectNoStaging();
+}
+
+#ifndef _WIN32
+TEST_F(UserPresetPersistence, HardLinkSourceRemovalFailureRestoresAliasAndRetries) {
+    const auto source = Directory() / "source.json";
+    const auto destination = Directory() / "alias.json";
+    const std::string original = R"({"name":"Original","unknown":17})";
+    ASSERT_NO_FATAL_FAILURE(Write(source, original));
+    fs::create_hard_link(source, destination);
+    const int descriptor = ::open(source.c_str(), O_RDONLY);
+    ASSERT_GE(descriptor, 0);
+    const auto held_source = fs::path("/dev/fd") / std::to_string(descriptor);
+    const bool renamed = Luminumbra::Client::RenameUserPreset(held_source, destination, "Renamed");
+    EXPECT_EQ(::close(descriptor), 0);
+    EXPECT_FALSE(renamed);
+    EXPECT_EQ(Read(source), original);
+    EXPECT_EQ(Read(destination), original);
+    EXPECT_TRUE(fs::equivalent(source, destination));
+    ExpectNoStaging();
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_FALSE(fs::exists(source));
+    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("name"), "Renamed");
+    ExpectNoStaging();
+}
+#endif
+
+TEST_F(UserPresetPersistence, SourceRemovalFailureKeepsBothCompletePresets) {
+    const auto source = Directory() / "original/user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source"})"));
+#ifdef _WIN32
+    // An open CRT read handle denies deletion on Windows.
+    std::ifstream held_source(source, std::ios::binary);
+    ASSERT_TRUE(held_source);
+    const auto removal_source = source;
+#else
+    // Descriptor entries can be read but not unlinked, even by a privileged runner.
+    const int descriptor = ::open(source.c_str(), O_RDONLY);
+    ASSERT_GE(descriptor, 0);
+    const auto removal_source = fs::path("/dev/fd") / std::to_string(descriptor);
+#endif
+    const bool renamed =
+        Luminumbra::Client::RenameUserPreset(removal_source, destination, "Renamed");
+#ifdef _WIN32
+    held_source.close();
+    EXPECT_FALSE(held_source.fail());
+#else
+    EXPECT_EQ(::close(descriptor), 0);
+#endif
+    EXPECT_FALSE(renamed);
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Source");
+    EXPECT_FALSE(fs::exists(destination));
+    ExpectNoStaging();
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_FALSE(fs::exists(source));
+}
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
 #define LUMINUMBRA_SOURCE_ROOT "."
@@ -223,8 +460,9 @@ void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ui.Update();
     }
-    if (document)
+    if (document) {
         EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+    }
 }
 
 Rml::ElementDocument* LoadDocumentAndFind(Luminumbra::Client::Rml_UIManager& ui,
@@ -389,6 +627,10 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
           "apply_settings_btn",
           "back_btn",
           "vsync_toggle",
+          "perf_hud_toggle",
+          "open_developer_console",
+          "developer_help_btn",
+          "developer_help",
           "window_mode_prev",
           "window_mode_next",
           "window_mode_value"}},
@@ -712,6 +954,9 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
         std::string resolution = "1920x1080";
         std::string window_mode = "borderless";
         bool vsync = true;
+        int frame_cap = 120;
+        bool perf_hud = true;
+        int console_opens = 0;
         float fov = 45.0f;
         float sensitivity = 0.025f;
         float audio_master = 1.0f;
@@ -733,11 +978,30 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     sb.SetWindowMode = [&](const std::string& v) {
         model.window_mode = v;
     };
+    sb.GetPerfHud = [&] {
+        return model.perf_hud;
+    };
+    sb.SetPerfHud = [&](bool visible) {
+        model.perf_hud = visible;
+        ++model.save_count; // The real setter mutates the registry and saves immediately.
+    };
+    sb.OpenDeveloperConsole = [&] {
+        ++model.console_opens;
+    };
+    sb.GetDeveloperHelp = [] {
+        return std::string("console.toggle = F1\nshader.reload = F5");
+    };
     sb.GetVSync = [&] {
         return model.vsync;
     };
     sb.SetVSync = [&](bool v) {
         model.vsync = v;
+    };
+    sb.GetFrameCap = [&] {
+        return model.frame_cap;
+    };
+    sb.SetFrameCap = [&](int cap) {
+        model.frame_cap = cap;
     };
     sb.GetFov = [&] {
         return model.fov;
@@ -792,6 +1056,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(control_value("setting_resolution"), "1920x1080");
     EXPECT_EQ(control_value("setting_window_mode"), "borderless");
     EXPECT_EQ(control_value("setting_vsync"), "on");
+    EXPECT_EQ(control_value("setting_frame_cap"), "120");
     EXPECT_EQ(std::stof(control_value("setting_fov")), 45.0f);
     EXPECT_NEAR(std::stof(control_value("setting_mouse_sensitivity")), 0.025f, 1e-4f);
 
@@ -810,8 +1075,45 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     change_control("setting_window_mode", "fullscreen");
     EXPECT_EQ(model.window_mode, "fullscreen");
 
+    change_control("setting_vsync", "invalid");
+    EXPECT_TRUE(model.vsync);
     change_control("setting_vsync", "off");
     EXPECT_FALSE(model.vsync);
+
+    for (const int cap : {30, 60, 120, 144, 165, 240, 0}) {
+        change_control("setting_frame_cap", std::to_string(cap));
+        EXPECT_EQ(model.frame_cap, cap);
+        EXPECT_EQ(control_value("setting_frame_cap"), std::to_string(cap));
+    }
+    change_control("setting_frame_cap", "144");
+    change_control("setting_frame_cap", "61");
+    EXPECT_EQ(model.frame_cap, 144);
+
+    // UI edits update the saved choices while each measurement mode keeps
+    // presentation uncapped. Leaving measurement uses the latest live edits.
+    using luminumbra::core::FramePacingOverrides;
+    for (const auto overrides :
+         {FramePacingOverrides{
+              .benchmark_active = true, .scenario_active = false, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = true, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = false, .profiling_active = true}}) {
+        for (const bool vsync : {true, false}) {
+            change_control("setting_vsync", vsync ? "on" : "off");
+            change_control("setting_frame_cap", "240");
+            EXPECT_EQ(model.vsync, vsync);
+            EXPECT_EQ(model.frame_cap, 240);
+            const auto pacing =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap, overrides);
+            EXPECT_FALSE(pacing.vsync);
+            EXPECT_EQ(pacing.frame_cap, 0);
+            const auto restored =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap);
+            EXPECT_EQ(restored.vsync, vsync);
+            EXPECT_EQ(restored.frame_cap, 240);
+        }
+    }
 
     change_control("setting_fov", "90");
     EXPECT_FLOAT_EQ(model.fov, 90.0f);
@@ -827,6 +1129,164 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
     EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
 
+    auto* perf_toggle = settings->GetElementById("perf_hud_toggle");
+    ASSERT_NE(perf_toggle, nullptr);
+    EXPECT_TRUE(perf_toggle->IsClassSet("on"));
+    ClickAndUpdate(ui, perf_toggle);
+    EXPECT_FALSE(model.perf_hud);
+    EXPECT_FALSE(perf_toggle->IsClassSet("on"));
+    EXPECT_EQ(model.save_count, 2);
+    settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
+    ASSERT_NE(settings, nullptr);
+    perf_toggle = settings->GetElementById("perf_hud_toggle");
+    ASSERT_NE(perf_toggle, nullptr);
+    EXPECT_FALSE(perf_toggle->IsClassSet("on"));
+    ClickAndUpdate(ui, settings->GetElementById("open_developer_console"));
+    EXPECT_EQ(model.console_opens, 1);
+    auto* help = settings->GetElementById("developer_help");
+    ASSERT_NE(help, nullptr);
+    EXPECT_NE(help->GetInnerRML().find("console.toggle = F1"), std::string::npos);
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::None);
+    ClickAndUpdate(ui, settings->GetElementById("developer_help_btn"));
+    EXPECT_FALSE(help->IsClassSet("hidden"));
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::Block);
+    ClickAndUpdate(ui, settings->GetElementById("developer_help_btn"));
+    EXPECT_TRUE(help->IsClassSet("hidden"));
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::None);
+    // A change made in the hub refreshes the ordinary settings value from the same getter.
+    model.perf_hud = true;
+    ui.RefreshDeveloperSettings();
+    EXPECT_TRUE(perf_toggle->IsClassSet("on"));
+
+    ui.Shutdown();
+}
+
+TEST(UiSmokeTest, GraphicsControlsUseOneBridgeAndShowSessionValuesAndFailures) {
+    using namespace Luminumbra::Client;
+    using namespace luminumbra::core;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    GraphicsSettingsState state({}, {{"render_scale", 0.67}});
+    int edits = 0;
+    SettingsBridge bridge;
+    bridge.GetGraphics = [&] {
+        return state.Display();
+    };
+    bridge.EditGraphics = [&](const GraphicsEdit& edit) {
+        ++edits;
+        if (edit.kind == GraphicsEditKind::DetectApply) {
+            GraphicsHardwareInputs inputs;
+            inputs.renderer = "<em>unknown GPU</em>";
+            EXPECT_TRUE(state.Stage(edit, inputs));
+        } else {
+            EXPECT_TRUE(state.Stage(edit));
+        }
+        state.Applied(true, 0.0);
+    };
+    bridge.SaveGraphics = [&] {
+        state.Saved(false);
+    };
+    bridge.Save = [] {
+        return false;
+    };
+    ui.SetSettingsBridge(std::move(bridge));
+    auto* settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
+    ASSERT_NE(settings, nullptr);
+    auto* scale = settings->GetElementById("graphics_render_scale");
+    ASSERT_NE(scale, nullptr);
+    ASSERT_NE(dynamic_cast<Rml::ElementFormControl*>(scale), nullptr);
+    EXPECT_NEAR(
+        std::stof(dynamic_cast<Rml::ElementFormControl*>(scale)->GetValue()), 0.67f, 0.001f);
+    EXPECT_TRUE(scale->HasAttribute("disabled"));
+    EXPECT_EQ(settings->GetElementById("graphics_render_scale_session")->GetInnerRML(),
+              " (session override)");
+
+    const auto change = [&](const char* id, const char* value) {
+        auto* element = settings->GetElementById(id);
+        ASSERT_NE(element, nullptr);
+        auto* control = dynamic_cast<Rml::ElementFormControl*>(element);
+        ASSERT_NE(control, nullptr);
+        control->SetValue(value);
+        Rml::Dictionary params;
+        element->DispatchEvent(Rml::EventId::Change, params);
+        ui.Update();
+    };
+    change("graphics_render_scale", "0.5");
+    EXPECT_EQ(edits, 0); // Session controls cannot write their effective values to saved choices.
+    change("graphics_preset", "high");
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    change("graphics_grass_density", "0.5");
+    EXPECT_NE(settings->GetElementById("graphics_state")->GetInnerRML().find("Custom (base: High)"),
+              std::string::npos);
+    EXPECT_DOUBLE_EQ(std::get<double>(state.Settings().overrides.at("grass_density")), 0.5);
+    change("graphics_grass_fade_start_m", "30");
+    change("graphics_grass_fade_end_m", "60");
+    change("graphics_far_terrain_radius_m", "1500");
+    change("graphics_shadow_resolution", "1024");
+    change("graphics_volumetric_quality", "0");
+    change("graphics_grass_enabled", "off");
+    change("graphics_ui_blur", "half");
+    EXPECT_EQ(state.Settings().overrides.size(), 8u);
+    EXPECT_DOUBLE_EQ(state.Display().effective.values.far_outer_clip_m, 1550.0);
+    EXPECT_EQ(state.Display().effective.values.shadow_resolution, 1024);
+    EXPECT_FALSE(state.Display().effective.values.grass_enabled);
+    EXPECT_EQ(state.Display().effective.values.ui_blur, UiBlurQuality::Half);
+    ClickAndUpdate(ui, settings->GetElementById("graphics_reset"));
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    ClickAndUpdate(ui, settings->GetElementById("graphics_detect"));
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::Low);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    EXPECT_EQ(settings->GetElementById("graphics_hardware")->QuerySelector("em"), nullptr);
+    EXPECT_NE(settings->GetElementById("graphics_hardware")->GetInnerRML().find("Recommended: Low"),
+              std::string::npos);
+    ClickAndUpdate(ui, settings->GetElementById("graphics_retry_save"));
+    EXPECT_EQ(settings->GetElementById("graphics_status")->GetInnerRML(),
+              "Save failed; graphics are active for this session");
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    EXPECT_DOUBLE_EQ(state.Display().effective.values.render_scale, 0.67);
+    ClickAndUpdate(ui, settings->GetElementById("back_btn"));
+    auto* menu = FindDocumentByElementId(ui.GetContext(), "main_menu");
+    ASSERT_NE(menu, nullptr);
+    EXPECT_FALSE(menu->GetElementById("notification")->IsClassSet("hidden"));
+    EXPECT_EQ(menu->GetElementById("notification_text")->GetInnerRML(),
+              "Settings could not be saved. Reopen settings for details.");
+    ui.Shutdown();
+}
+
+TEST(UiSmokeTest, BackdropClassesFollowLiveQualityAndNewDocumentsWithoutCompounding) {
+    using namespace Luminumbra::Client;
+    using luminumbra::core::UiBlurQuality;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ui.SetSavedWorldList(SavedWorldFixture);
+    for (const auto quality : {UiBlurQuality::Off,
+                               UiBlurQuality::Half,
+                               UiBlurQuality::Full,
+                               UiBlurQuality::Half,
+                               UiBlurQuality::Full}) {
+        ui.SetBackdropBlurQuality(quality);
+        for (const auto& [path, id] : {std::pair{"main_menu.rml", "main_menu"},
+                                       std::pair{"settings.rml", "settings"},
+                                       std::pair{"world_selection.rml", "world_selection"},
+                                       std::pair{"world_creation.rml", "world_creation"},
+                                       std::pair{"pause.rml", "pause"}}) {
+            auto* document = LoadDocumentAndFind(ui, path, id);
+            ASSERT_NE(document, nullptr);
+            EXPECT_EQ(document->IsClassSet("backdrop-off"), quality == UiBlurQuality::Off);
+            EXPECT_EQ(document->IsClassSet("backdrop-half"), quality == UiBlurQuality::Half);
+            ui.SetBackdropBlurQuality(UiBlurQuality::Full);
+            EXPECT_FALSE(document->IsClassSet("backdrop-off"));
+            EXPECT_FALSE(document->IsClassSet("backdrop-half"));
+            ui.SetBackdropBlurQuality(quality);
+        }
+    }
     ui.Shutdown();
 }
 
@@ -862,7 +1322,8 @@ TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
     ASSERT_NE(settings, nullptr);
     auto* status = settings->GetElementById("setting_audio_status");
     ASSERT_NE(status, nullptr);
-    EXPECT_NE(status->GetInnerRML().find("Audio is disabled for this release."), std::string::npos);
+    EXPECT_NE(status->GetInnerRML().find("Audio playback disabled or unavailable."),
+              std::string::npos);
     for (const char* id : {"setting_audio_master", "setting_audio_music", "setting_audio_sfx"}) {
         auto* control = dynamic_cast<Rml::ElementFormControl*>(settings->GetElementById(id));
         ASSERT_NE(control, nullptr);
@@ -971,8 +1432,9 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
             jump_row = r;
     }
     ASSERT_NE(jump_row, nullptr);
-    if (auto* chip = settings->GetElementById("kb_Jump"))
+    if (auto* chip = settings->GetElementById("kb_Jump")) {
         EXPECT_EQ(chip->GetInnerRML(), "Space");
+    }
     ClickAndUpdate(ui, jump_row);
     EXPECT_EQ(last_rebind_action, "Jump");
 
@@ -1106,13 +1568,14 @@ TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
         std::size_t count = 0;
     };
     std::optional<Saved> saved;
-    ui.SetWorldPresetSaver(
-        [&](const std::string& name,
-            const std::string& base,
-            const std::vector<Luminumbra::Client::WorldGenParam>& p) -> std::string {
-            saved = Saved{name, base, p.size()};
-            return "user_test_type";
-        });
+    ui.SetWorldPresetSaver([&](const std::string& name,
+                               const std::string& base,
+                               const std::vector<Luminumbra::Client::WorldGenParam>& p,
+                               bool overwrite_confirmed) -> std::string {
+        EXPECT_FALSE(overwrite_confirmed);
+        saved = Saved{name, base, p.size()};
+        return "user_test_type";
+    });
     ui.SetWorldPresetList([&]() -> std::vector<std::pair<std::string, std::string>> {
         return {{"My Canyon", "user_my_canyon"}};
     });
@@ -1330,24 +1793,26 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     std::string last_saved_name;
     ui.SetWorldParamGetter([&](const std::string&, const std::string&) { return std::string(); });
     ui.SetWorldPresetList([&]() { return store; });
-    ui.SetWorldPresetSaver(
-        [&](const std::string& name,
-            const std::string&,
-            const std::vector<Luminumbra::Client::WorldGenParam>&) -> std::string {
-            const std::string type = "user_" + slug(name);
-            // overwrite-or-insert by id (mirrors the on-disk saver).
-            for (auto& e : store)
-                if (e.second == type) {
-                    e.first = name;
-                    ++save_count;
-                    last_saved_name = name;
-                    return type;
-                }
-            store.emplace_back(name, type);
-            ++save_count;
-            last_saved_name = name;
-            return type;
-        });
+    ui.SetWorldPresetSaver([&](const std::string& name,
+                               const std::string&,
+                               const std::vector<Luminumbra::Client::WorldGenParam>&,
+                               bool overwrite_confirmed) -> std::string {
+        const std::string type = "user_" + slug(name);
+        // overwrite-or-insert by id (mirrors the on-disk saver).
+        for (auto& e : store)
+            if (e.second == type) {
+                EXPECT_TRUE(overwrite_confirmed);
+                e.first = name;
+                ++save_count;
+                last_saved_name = name;
+                return type;
+            }
+        EXPECT_FALSE(overwrite_confirmed);
+        store.emplace_back(name, type);
+        ++save_count;
+        last_saved_name = name;
+        return type;
+    });
     ui.SetWorldPresetExists([&](const std::string& name) -> bool {
         const std::string type = "user_" + slug(name);
         for (const auto& e : store)
@@ -1401,7 +1866,9 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     // Re-trigger and CONFIRM -> the save proceeds (the overwrite the user opted into).
     ClickAndUpdate(ui, wc->GetElementById("save_preset_btn"));
     EXPECT_FALSE(ow_modal->IsClassSet("hidden"));
+    SetControlValue(wc, "save_preset_name", "Unconfirmed name");
     ClickAndUpdate(ui, wc->GetElementById("confirm_overwrite_btn"));
+    EXPECT_EQ(last_saved_name, "My Canyon");
     EXPECT_TRUE(ow_modal->IsClassSet("hidden"));
     EXPECT_EQ(save_count, 1) << "confirming overwrite must commit the save";
     EXPECT_EQ(store.size(), 1u) << "overwriting must not add a second preset";
@@ -1617,6 +2084,161 @@ TEST(WorldgenOverrideTest, BuildCustomPresetAppliesOnlyRealDeltas) {
     EXPECT_EQ(rb.skipped, 1);
 }
 
+TEST(WorldgenOverrideTest, NumericOverridesRejectPartialNonfiniteAndOutOfRangeValues) {
+    using Luminumbra::Client::BuildCustomPreset;
+    using namespace Luminumbra::world;
+    const nlohmann::json base = {
+        {"generation_params", {{"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}}}}};
+    const auto unchanged = BuildCustomPreset(base, {}).json;
+    const auto knobs = NeutralKnobVector();
+    const auto resolved_base = ResolveEffectivePreset(base, TerrainPresetUse::NewWorld);
+    // The persisted layer snapshots generation_params; schema_rev belongs to the preset.
+    const auto baseline = ApplyKnobLayer(resolved_base, knobs).at("generation_params");
+    const auto reopened = [&](const char* path, const char* value, const char* type) {
+        nlohmann::json persisted;
+        WriteKnobLayer(persisted, resolved_base, knobs, {{path, value, type}});
+        EXPECT_EQ(persisted.at("schema_rev"), resolved_base.at("schema_rev"));
+        const auto layer = ReadKnobLayer(nlohmann::json::parse(persisted.dump()));
+        EXPECT_TRUE(layer.present);
+        const auto resolved = ResolveKnobLayer(layer.baseline, layer.knobs, layer.overrides);
+        auto saved_params = persisted.at("generation_params");
+        saved_params.erase("knob_layer");
+        EXPECT_EQ(saved_params, resolved.at("generation_params"));
+        return resolved;
+    };
+    for (const auto* value : {"", "0suffix", "nan", "inf", "-inf", "1e999"}) {
+        SCOPED_TRACE(value);
+        for (const auto* type : {"float", "int"}) {
+            SCOPED_TRACE(type);
+            const auto result = BuildCustomPreset(base, {{"terrain.base_amplitude", value, type}});
+            EXPECT_FALSE(result.changed);
+            EXPECT_EQ(result.applied, 0);
+            EXPECT_EQ(result.skipped, 1);
+            EXPECT_EQ(result.json, unchanged);
+            EXPECT_EQ(reopened("terrain.base_amplitude", value, type).at("generation_params"),
+                      baseline);
+        }
+    }
+    for (const auto* value : {"1e38",
+                              "-1e38",
+                              "1e1",
+                              "6.5",
+                              "6.",
+                              "9223372036854775808",
+                              "-9223372036854775809",
+                              "9223372036854775808.0"}) {
+        SCOPED_TRACE(value);
+        const auto result = BuildCustomPreset(base, {{"terrain.octaves", value, "int"}});
+        EXPECT_FALSE(result.changed);
+        EXPECT_EQ(result.skipped, 1);
+        EXPECT_EQ(result.json, unchanged);
+        EXPECT_EQ(reopened("terrain.octaves", value, "int").at("generation_params"), baseline);
+    }
+    for (const auto& [value, expected] :
+         {std::pair{"0", 0LL},
+          std::pair{"0.000000", 0LL},
+          std::pair{"8.000000", 8LL},
+          std::pair{"123456789.000000", 123456789LL},
+          std::pair{"9223372036854775807", std::numeric_limits<long long>::max()},
+          std::pair{"9223372036854775807.0", std::numeric_limits<long long>::max()},
+          std::pair{"-9223372036854775808", std::numeric_limits<long long>::lowest()}}) {
+        SCOPED_TRACE(value);
+        const auto result = BuildCustomPreset(base, {{"terrain.octaves", value, "int"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.applied, 1);
+        EXPECT_EQ(result.skipped, 0);
+        EXPECT_EQ(result.json["generation_params"]["terrain"]["octaves"].get<long long>(),
+                  expected);
+        EXPECT_EQ(
+            reopened("terrain.octaves", value, "int")["generation_params"]["terrain"]["octaves"]
+                .get<long long>(),
+            expected);
+    }
+    const auto zero = BuildCustomPreset(base, {{"terrain.base_amplitude", "0", "float"}});
+    EXPECT_TRUE(zero.changed);
+    EXPECT_EQ(zero.json["generation_params"]["terrain"]["base_amplitude"], 0.0);
+    EXPECT_EQ(reopened("terrain.base_amplitude",
+                       "0",
+                       "float")["generation_params"]["terrain"]["base_amplitude"],
+              0.0);
+}
+
+TEST(WorldgenOverrideTest, NumericBaselineComparisonIsExactAndRangeChecked) {
+    using Luminumbra::Client::BuildCustomPreset;
+    for (const auto& initial : {nlohmann::json(),
+                                nlohmann::json("unknown"),
+                                nlohmann::json(5.5),
+                                nlohmann::json(1e38),
+                                nlohmann::json(-1e38),
+                                nlohmann::json(std::numeric_limits<unsigned long long>::max())}) {
+        SCOPED_TRACE(initial.dump());
+        const nlohmann::json base = {{"generation_params", {{"custom_integer", initial}}}};
+        const auto result = BuildCustomPreset(base, {{"custom_integer", "5", "int"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.json["generation_params"]["custom_integer"], 5);
+    }
+    for (const auto& initial : {nlohmann::json(5LL), nlohmann::json(5ULL), nlohmann::json(5.0)}) {
+        const nlohmann::json base = {{"generation_params", {{"custom_integer", initial}}}};
+        EXPECT_FALSE(BuildCustomPreset(base, {{"custom_integer", "5", "int"}}).changed);
+    }
+    const auto maximum = std::to_string(std::numeric_limits<long long>::max());
+    const auto added =
+        BuildCustomPreset(nlohmann::json::object(), {{"custom_integer", maximum, "int"}});
+    EXPECT_TRUE(added.changed);
+    EXPECT_EQ(added.json["generation_params"]["custom_integer"].get<long long>(),
+              std::numeric_limits<long long>::max());
+    for (const auto& initial :
+         {nlohmann::json("unknown"), nlohmann::json(std::numeric_limits<double>::quiet_NaN())}) {
+        const nlohmann::json base = {{"generation_params", {{"custom_float", initial}}}};
+        const auto result = BuildCustomPreset(base, {{"custom_float", "1e38", "float"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.applied, 1);
+        EXPECT_EQ(result.json["generation_params"]["custom_float"].get<float>(), 1e38f);
+    }
+}
+
+TEST(WorldgenOverrideTest, KnobsRejectInvalidNumbersAndRetainFiniteClamping) {
+    using Luminumbra::Client::BuildKnobResolvedPreset;
+    const nlohmann::json base = {
+        {"generation_params", {{"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}}}}};
+    const auto neutral = BuildKnobResolvedPreset(base, {});
+    for (const auto* value : {"", "0suffix", "nan", "inf", "-inf", "1e999"}) {
+        SCOPED_TRACE(value);
+        const auto result =
+            BuildKnobResolvedPreset(base, {{"knob.mountainousness", value, "knob"}});
+        EXPECT_FALSE(result.changed);
+        EXPECT_EQ(result.knob_count, 0);
+        EXPECT_EQ(result.json, neutral.json);
+    }
+    for (const auto* value : {"0", "1", "-4", "4"}) {
+        SCOPED_TRACE(value);
+        const auto result =
+            BuildKnobResolvedPreset(base, {{"knob.mountainousness", value, "knob"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.knob_count, 1);
+        const auto expected = BuildKnobResolvedPreset(
+            base,
+            {{"knob.mountainousness", value[0] == '-' || value[0] == '0' ? "0" : "1", "knob"}});
+        EXPECT_EQ(result.json, expected.json);
+    }
+}
+
+TEST(WorldgenOverrideTest, CustomizationKeepsExplicitSamplingAndItsSchemaGate) {
+    for (const int revision : {1, 2}) {
+        const nlohmann::json base = {{"schema_rev", 7},
+                                     {"generation_params",
+                                      {{"terrain", {{"surface_sampling_revision", revision}}},
+                                       {"features", nlohmann::json::object()}}}};
+        const auto custom = Luminumbra::Client::BuildCustomPreset(base, {});
+        const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(base, {});
+        for (const auto* preset : {&custom.json, &knobs.json}) {
+            EXPECT_EQ(preset->at("schema_rev"), revision == 1 ? 7 : 8);
+            EXPECT_EQ(preset->at("generation_params").at("terrain").at("surface_sampling_revision"),
+                      revision);
+        }
+    }
+}
+
 // Drift guard: every worldgen-param data-path authored in world_creation.rml must be a real
 // generation_params key (present in some curated preset, or a known default-only key). Catches a
 // typo'd path that would silently no-op both seeding and the override.
@@ -1766,4 +2388,22 @@ TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
     EXPECT_TRUE(preview_has_knob) << "the knob must drive the live preview state";
 
     ui.Shutdown();
+}
+
+TEST(WorldgenOverrideTest, OmittedShippingBiomesCanBeExplicitlyDisabled) {
+    nlohmann::json base = {
+        {"schema_rev", 7},
+        {"generation_params",
+         {{"terrain", nlohmann::json::object()}, {"features", nlohmann::json::object()}}}};
+    const std::vector<Luminumbra::Client::WorldGenParam> off = {
+        {"biomes.enabled", "false", "bool"}};
+    const auto custom = Luminumbra::Client::BuildCustomPreset(base, off);
+    EXPECT_TRUE(custom.changed);
+    EXPECT_TRUE(
+        custom.json.at("generation_params").at("biomes").at("table").get<std::string>().empty());
+    const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(base, off);
+    EXPECT_TRUE(knobs.changed);
+    EXPECT_EQ(knobs.override_count, 1);
+    EXPECT_TRUE(
+        knobs.json.at("generation_params").at("biomes").at("table").get<std::string>().empty());
 }

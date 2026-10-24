@@ -5,9 +5,11 @@
 // before (verified by raw-quiescing the workers first). This is the proving
 // pin for the barrier swap: availability is a pure function of (dispatch
 // schedule, tick), never job-completion timing.
+#include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
+
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -37,7 +39,7 @@ using Luminumbra::world::GameSession;
 // Must mirror kActivationPipelineLatencyTicks in SHIELD_WorldSystem.cpp.
 constexpr std::int64_t kExpectedPipelineLatencyTicks = 8;
 
-// Temp root containing ONLY the world preset (headless — no res/data assets).
+// Temp root containing the preset and its simulation dependencies.
 // The root is unique per fixture instance so concurrent common_tests processes
 // never share (or clobber) a directory; each TEST builds ONE instance and
 // reuses it, so within-run path stability still holds. The destructor removes
@@ -45,13 +47,13 @@ constexpr std::int64_t kExpectedPipelineLatencyTicks = 8;
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        root_ = fs::temp_directory_path() /
-                ("luminumbra_activation_queue_test_" + std::to_string(stamp));
+        root_ =
+            Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_activation_queue_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;

@@ -26,6 +26,7 @@ option(LUMINUMBRA_ENABLE_FRAME_POINTERS "Preserve frame pointers in first-party 
 option(ENABLE_BINARY_RELEASES "Enable Windows/Linux runtime package generation" OFF)
 
 include(cmake/performance_manifest.cmake)
+include(cmake/runtime_isa.cmake)
 
 function(luminumbra_enable_frame_pointers TARGET_NAME)
   if(NOT LUMINUMBRA_ENABLE_FRAME_POINTERS OR NOT TARGET ${TARGET_NAME})
@@ -87,6 +88,8 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
   endif()
 
   target_compile_definitions(${TARGET_NAME} PRIVATE
+    # Compile-database consumers distinguish target policy from source ownership.
+    LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1
     $<$<CONFIG:Debug>:LUMINUMBRA_DEBUG>
   )
 

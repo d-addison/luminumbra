@@ -4,16 +4,18 @@
 // design decisions, section 3.
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
 #include "persistence/SaveTransaction.h"
+
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
 
 #include <array>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -30,11 +32,9 @@ using Luminumbra::WorldStreamingState;
 using Luminumbra::Persistence::WorldSaveService;
 
 std::filesystem::path MakeTempSaveDir(const std::string& tag) {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() /
-        ("luminumbra_region_format_" + tag + "_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir);
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_region_format_" + tag + "_");
+
     return dir;
 }
 
@@ -417,6 +417,8 @@ TEST(WorldSaveRegionFormat,
     EXPECT_TRUE(updated_target->is_voxel_data_dirty());
     EXPECT_EQ(ReadFileBytes(region), prior_region_bytes);
     EXPECT_FALSE(HasRegionTemporaryFile(region));
+    // Relocated staging lives in the save root, outside the strict region scan.
+    EXPECT_FALSE(HasRegionTemporaryFile(save_dir.path / region.filename()));
 
     // The live path is still a complete, loadable image of the prior region.
     WorldStreamingState after_interruption;
@@ -509,6 +511,38 @@ TEST(WorldSaveRegionFormat, CorruptRegionFileReportsErrors) {
     std::vector<std::string> errors;
     EXPECT_FALSE(service.load_world(state, save_dir.path, errors));
     EXPECT_FALSE(errors.empty());
+}
+
+TEST(WorldSaveRegionFormat, MaximalCompressedSizeIsRefusedAsTruncated) {
+    TempSaveDir save_dir("payload_bounds");
+    const auto path = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    std::filesystem::create_directories(path.parent_path());
+
+    // One valid v2 manifest entry, no payload, declaring a UINT32_MAX
+    // compressed size. With 64-bit size_t this checks the truncated-payload
+    // refusal; the offset + size wraparound it also guards against (26 +
+    // UINT32_MAX wrapping to 25) is only reachable where size_t is 32-bit.
+    std::string bytes("LMR1\x02\x00\x01\x00", 8);
+    bytes.append(18, '\0');
+    bytes[8 + 10] = 1; // raw size
+    const auto compressed_size = std::numeric_limits<std::uint32_t>::max();
+    for (int i = 0; i < 4; ++i)
+        bytes[8 + 14 + i] = static_cast<char>(compressed_size >> (8 * i));
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(output.is_open());
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+
+    std::vector<WorldSaveService::ContainerRecord> records;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::read_container_records(path, records, &errors));
+    EXPECT_TRUE(records.empty());
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find("record payload is truncated"), std::string::npos);
+    EXPECT_EQ(ReadFileBytes(path), bytes);
 }
 
 TEST(WorldSaveRegionFormat, HasWorldSaveRecognizesOnlySupportedContainers) {

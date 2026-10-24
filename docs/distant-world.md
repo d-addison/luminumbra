@@ -1,22 +1,24 @@
 # Distant world and distant simulation contract
 
-Status: accepted contract, September 8, 2026, revised the same day after two
-independent review rounds. Implementation is planned in bounded slices and
-is **not** present in the tree at the time of writing; each section states the
-current shipped behaviour so nothing here reads as implemented. Nothing in this
-document waives the acceptance evidence that each slice must supply, and no
-format change listed here exists until its slice lands.
+Status: accepted contract, September 8, 2026; release-scope clarification
+October 14, 2026. This is the target contract. The [implementation and acceptance
+gap map](distant-world-implementation-status.md) and
+[release notes](release-notes-v0.3.0.md) distinguish implemented source from
+planned work and pending evidence. Generation, meshing, queues, residency, upload
+accounting and renderer integration are implemented; normal presets still lack
+immutable authority and fall back from the default Ladder request to Legacy.
+Saved-world far production authority remains fixture-only until FW S8 (v0.3.1);
+the renderer reports an explicit unavailable/refusal diagnostic.
 
-For the September 13 recovered source, see the [implementation and acceptance
-gap map](distant-world-implementation-status.md). It distinguishes landed
-prerequisites from the remaining runtime and evidence work without changing this
-contract. The subsequent [bounded volume-generation entry point](far-volume-generation.md)
-implements the first sampler-driven part of DW01; runtime integration remains open.
-The [bounded volume mesher](far-volume-meshing.md) supplies the first CPU kernel
-part of DW03 with same-authority halo normals; runtime integration remains open.
-The [canonical discovery and authority facade](far-volume-convergence.md) adds
-the original surface-span discovery and explicit numeric profiles; queue,
-allocation and renderer integration remain separate.
+Indexed authority durability/rehydration, durable completed work and ground-object
+continuation, durable regional fields/weather/scent/energy, regional foliage/water
+continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9
+closure, and the committed-generation edited-SDF producer and FW S8 consumer are
+planned for v0.3.1. The per-system continuation and transaction requirements below
+describe that planned work. Regional continuation performance/default enablement
+is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).
+No current-candidate native qualification is claimed and no acceptance threshold
+is waived by source landing.
 
 ## Scope
 
@@ -25,7 +27,7 @@ allocation and renderer integration remain separate.
   extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m,
   about ±16,777 km on each horizontal axis; coordinates are masked, never range
   checked). World positions are 32-bit floats. By owner decision (September 8,
-  2026) v0.3 qualifies traversal and rendering within 32 km of the world origin,
+  2026) the contract requires qualification within 32 km of the world origin,
   where positions keep sub-centimetre precision; the camera-relative
   (floating-origin) precision work that would qualify the full addressable extent
   is deliberately residual scope, not an open contract gap. Chunk identity,
@@ -43,7 +45,7 @@ allocation and renderer integration remain separate.
 - Simulation over distance runs only in **persistent active regions** and only
   while the world host runs. There is no wall-clock progression while a world is
   shut down.
-- Audio remains disabled for v0.3 and every qualification run launches with
+- Ordinary audio playback is enabled; every qualification run launches with
   `--no-audio`; nothing in this contract depends on audio.
 
 ## Three explicit sets
@@ -57,7 +59,7 @@ authoritative volumetric overlays captured from resident chunks; simulation
 systems tick every registry participant regardless of residency; wind, weather,
 aether ambience, scent, soil and irrigation are fixed grids anchored on the
 spawn point. A host-side active-region ledger and scheduler foundation exists
-(`sim.active_regions`, off by default; see [active regions](active-regions.md)),
+(`sim.active_regions`, enabled by default for v0.3.0; see [active regions](active-regions.md)),
 but no distant-simulation consumer uses the schedule yet.
 
 This contract separates three sets that may overlap but are never equated.
@@ -189,6 +191,12 @@ silhouette features to the full radius, and the acceptance stations include
 deep interiors and distant mouths beyond the noise-cave cutoff, not only within
 it.
 
+Qualification must pin the cave-dense revision and identity. The packaged
+`worlds/atlas/presets/cave_dense.json` now uses revision 8; the revision-6 fixture
+is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
+shipping preset identities under "Shipping defaults" in the [engine guide](engine-guide.md) before comparing
+captures or synchronizing the game repository's fixture and identity sidecar.
+
 ### Edits and the far authority overlay
 
 Edits are baked into every tier on the world host inside the save path, after
@@ -285,13 +293,15 @@ chunks stops (they stay resident) and the failure is reported; dirty state is
 never dropped. Parked bytes, save latency and failures are shown in the
 diagnostic panel and qualified on the historical 5,433-chunk edited save.
 
-The default-off ledger and deterministic scheduler foundation is now implemented;
+The ledger and deterministic scheduler foundation is implemented and enabled by default;
 see [the active-region format and scheduling guide](active-regions.md) for its
 canonical bytes, refusal behaviours and bounded slice boundaries. It has no
-per-system consumers and no measured budget caps yet. Dirty parking, autosave
-policy changes, snapshot transactions and the diagnostic panel remain pending.
+per-system consumers and no measured budget caps yet. Dirty parking,
+snapshot transactions and the diagnostic panel are planned for v0.3.1.
 Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the server autosave interval defaults to zero.
+saves only on quit or shutdown, and the dedicated server autosave interval defaults
+to 9000 ticks (five minutes at the canonical 30 Hz clock). Explicit zero disables
+autosave; capture and determinism fixtures explicitly use 30 ticks.
 
 ## Per-system distant policy
 
@@ -327,48 +337,97 @@ record omission in the table applies without losing that phase.
 
 ## Simulation clock and calendar
 
-One persisted absolute tick base continues across save and load. Day length is
-36,000 ticks (20 minutes at 30 Hz) and a year is 8 days for every consumer
-below and for the rendered sky; the shorter render day remains only as a debug
-override.
+One persisted absolute tick base continues across save and load. New worlds
+use a 162,000-tick day (90 minutes at 30 Hz): about 60 minutes of geometric
+daylight and 30 minutes of night, set by the reduced fraction 2/3. Sunrise,
+noon and sunset occur at ticks 27,000, 81,000 and 135,000. The eight-day year
+and independent eight-day lunar month each last 1,296,000 ticks (12 hours).
+Seasonal tilt changes peak elevation while horizon times remain fixed.
 
-| Consumer today | Period today | Under this contract |
+| Consumer | Legacy period with active regions disabled | Enabled calendar input |
 |---|---|---|
-| Plant light (`GameSession.cpp`) | 36,000-tick day | Calendar day |
-| Plant season (`GameSession.cpp`) | 288,000-tick year (8 days) | Calendar year |
-| Circadian slot (`GameSession.cpp`) | 36,000-tick day | Calendar day |
-| Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |
-| Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |
-| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 1,800-tick day, 432,000-tick season | Calendar day and year |
+| Plant daily light | 36,000-tick day | Midnight-origin solar phase |
+| Plant annual temperature | 288,000-tick year | Linear calendar year |
+| Circadian activity | 36,000-tick day | Midnight-origin solar phase |
+| Migration | 108,000-tick year | Calendar spring phase |
+| Stimulus time-of-day, daily temperature, fallback light | 7,200-tick day | Midnight-origin solar phase |
+| Stimulus season | 432,000-tick year | Calendar spring phase |
+| Rendered sun | Selected rendering calendar; legacy noon origin | Solar phase shifted by 1/2 to sky noon origin |
+| Rendered season | 432,000-tick year | Calendar spring phase |
+| Rendered moon | Selected rendering calendar month | Calendar day length × independent lunar days |
+| Weather, storms, wind, aether | Absolute tick periods | Unchanged absolute tick periods |
+| Resume cap | No enabled scheduler | One recorded calendar day |
 
-One physical origin governs every consumer: tick zero is midnight of day zero
-in midwinter, which is the origin the plant and circadian formulas use today;
-the rendered sky, migration and stimulus channels adopt the same origin with
-explicit per-consumer offsets, and a test asserts that sky, plant and
-circadian phases agree at a set of pinned ticks.
+Linear day/year phases and indices remain elapsed time. The solar phase warps
+the elapsed day continuously through midnight 0, sunrise 1/4, noon 1/2 and
+sunset 3/4, using integer comparisons and ratios before conversion to double.
+The symmetric 1/2 path retains the original arithmetic. Seasons keep the
+midwinter origin for annual plant temperature and spring offset for migration,
+stimulus and sky. Simulation uses no wall-clock accumulation for these curves.
 
-The clock metadata (`simulationTick`, `calendar`) is validated strictly: absent
-keys mean tick zero and the pinned defaults; `dayLengthTicks` must be an integer
-in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an
-unsigned integer below 2^62, and the products day × year and tick + catch-up
-clamp are overflow-checked; anything else refuses the world as corrupt metadata.
-Calendar phase origins equal today's formulas (phase = tick modulo period from
-tick zero), so the plant season still starts at its cold minimum. Snapshots are
-taken only on tick boundaries, never inside a batched client catch-up.
+Calendar version 2 records five integer parameters: day ticks, year days,
+daylight numerator/denominator and lunar days. Day ticks are in `[1, 2^31)`,
+year and lunar days in `[1, 366]`, and the daylight fraction satisfies
+`0 < n < d <= 65535` in reduced form. Products promote to `uint64_t` first.
+The saved absolute tick is an unsigned integer below `2^62`. Missing/extra
+members, unknown versions and noninteger values refuse before generation or
+writing. The [engine guide](@ref simulation-clock-metadata) specifies
+the complete schema, canonical bytes and refusal rules.
 
-Current behaviour: the tick counter restarts at zero on every load, so a loaded
-world resumes tick-zero weather, and the six durations above coexist.
+Unversioned two-field calendars retain their recorded day/year with symmetric
+1/2 daylight and lunar month eight days. An absent calendar in an existing save
+or snapshot resolves to pinned 216,000 / 8 / 1 / 2 / 8. Complete version 2
+calendars retain all recorded values. Reads never rewrite anything. Successful
+explicit saves preserve the two-field calendar for symmetric 1/2 daylight with
+an eight-day lunar cycle; other calendars use version 2. Simulation ticks and
+state are never rescaled. Snapshots are taken only on tick boundaries,
+never inside a batched client catch-up. Enabled clock canonical bytes preserve `world_clock:v1:`
+and its 16-byte payload for those legacy-representable calendars; other calendars
+use `world_clock:v2:` and a 28-byte payload. Imported legacy calendars retain
+the enabled clock's canonical hash contribution. The calendar change does not
+alter replay layouts; the current configuration and preset identity contract
+is described below.
+
+With `sim.active_regions` disabled, opening a world restarts the tick counter
+at zero and biological consumers retain their legacy periods. Explicit snapshot
+loads retain the running simulation tick. New disabled worlds carry
+a presentation-only `renderCalendar` marker with the complete version 2 object;
+it neither requires active regions nor contributes to the disabled simulation
+hash. Existing unmarked disabled worlds retain symmetric 216,000-tick rendering
+and omit the marker on saves. Markers survive normal saves and explicit
+snapshots; explicit loads replace the rendering calendar even if metadata is
+absent. Competing marker/clock authorities are refused.
+
+The lunar period is independent of year length and solar phase.
+The lunar month follows the selected calendar's recorded day length and lunar-day count. Tick zero is
+full moon; default day four is the new-moon illumination floor 0.08 and day eight
+is full again. Imported 36,000- and 216,000-tick days have lunar months of
+288,000 and 1,728,000 ticks, so imported moon brightness can change. Environment
+and direct illumination overrides retain precedence and clamping. The moon
+stays opposite the sun; the disc's visible phase and shaders are unchanged.
+
+Renderer fallbacks advance elapsed time and then warp solar angle. The default
+wall-clock day derives to 5,400 seconds. Direct solar pins use the inverse
+mapping for smooth release; photo hold and later scenario pins retain precedence.
+Debug day length changes only solar pacing. Simulation speed hotkeys retain
+their existing batching and pause–16× range; ideal 16× gives a 337.5-second day.
 
 ## Persistence and format contract
 
-Unchanged: preset revision 6, LMR1 container v2 for `chunks/region/*.lmr`
+Preset revision 7 retains revision 6 omission compatibility; current-format saves
+without embedded packaged presets use frozen revision-6 copies. Lockstep
+Hello is version 4; LREC1 uses version 3 for complete streams and version 4 for
+diagnostic suffixes with an elided prefix. Both replay versions bind effective
+configuration plus resolved preset/dependency content; older layouts are refused.
+See the [identity contract](development/system-config-identity.md).
+
+Unchanged: LMR1 container v2 for `chunks/region/*.lmr`
 including its lod-level and flag validation, the
 `luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept
 decodable with its existing dimensions and validation; no longer written by the
 runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes
 and placement, the plant record payload, canonical in-memory serialization, the
-LREC1 replay record layout and checkpoint bytes, and the lockstep hash message
-and protocol. There is no obsolete-world migration.
+replay checkpoint bytes and lockstep hash message. There is no obsolete-world migration.
 
 New records, each declared before its slice lands with exact version identity,
 byte order, lengths, checksums, allocation limits and section-evolution rules
@@ -514,6 +573,161 @@ instead of bracketing the frame, pins the framebuffer to 3840×1600, and does no
 record the renderer string; present-to-present wall timing already exists but
 is not retained per frame.
 
+## Station discovery (REQ-E4)
+
+`luminumbra_station_discovery` is a CPU-only tool linked to `luminumbra_common`.
+It loads the canonical preset parser with an explicit data root, then constructs
+an unstreamed query world with no jobs or water system. Discovery reads terrain;
+it does not create a live session, edit terrain, change generation numerics or
+produce native qualification evidence.
+
+```text
+luminumbra_station_discovery --preset-json PRESET --data-root DATA --seed INTEGER
+  --kind mouth|arch|horizon|coverage --origin-mm X Z --radius-m R
+  --y-range-m MIN MAX --view-distance-m D --limit N
+```
+
+All flags are required exactly once. `DATA` names the data directory, not the
+repository root. The seed is 0 through 2147483615, R is 1 through 16384 metres,
+D is 0 through 16384 metres and N is 1 through 64. Search radius and horizontal
+camera-to-feature distance are independent. Absolute eye positions use metres,
+Y-up, and exactly the game's scene-set fields `{x,y,z,yaw,pitch}`. Angles use
+degrees: yaw zero faces +X, positive yaw faces +Z, positive pitch points upward.
+Feature orientation uses `DeterministicMath`, with yaw in [-180,180) and pitch
+clamped to [-89,89].
+
+Success writes one compact, key-sorted UTF-8 JSON document and a final LF to
+stdout; diagnostics go to stderr. `luminumbra.station-discovery.v1` includes
+`engine_revision`, `inputs_sha256`, `algorithm: "sampled-portals.v1"`,
+`numeric_profile: "canonical-worldgen.v1"`, `certified: false`, seed, the echoed
+query and candidates. Candidates contain only an ID, an integer-millimetre
+`anchor_mm: [x,y,z]` and the five-field pose. The closed JSON Schema 2020-12 is
+exported by `python3 -I -B tools/gates/station_discovery_contract.py --schema`;
+the same stdlib module validates types, bounds, IDs and ordering. Its `--input`
+mode accepts independent `--expected-engine-revision` and
+`--expected-inputs-sha256` pins; `--require-certified` currently refuses every
+result. Neither schema validation nor a discovery pose certifies native terrain
+visibility or continuous cave topology.
+
+The build revision is pinned by `LUMINUMBRA_STATION_ENGINE_REVISION` at configure
+time, defaulting to the checkout revision when Git is available. Input identity
+is SHA-256 of a compact key-sorted UTF-8 JSON manifest (non-ASCII names remain
+unescaped, no final LF), mapping logical relative names to exact-byte SHA-256
+digests. The preset is `preset.json`;
+consumed biome, structure and species inputs use `data/<relative-name>`. Structure inputs
+include optional placement files and every consumed piece in each type directory.
+Species files are captured even when biome and structure generation are disabled.
+Absolute paths, timestamps, timings and session content identities are excluded.
+Each input file is limited to 1048576 bytes and each snapshot (preset plus
+dependencies) to 8388608 bytes, checked before allocating file contents.
+Captured files and structure type directories share limits of 4096 entries and
+1048576 bytes of logical UTF-8 pathname storage, including the preset key and
+`data/` prefixes.
+Exceeding any byte, entry or pathname limit exits 1 with an `input-limit` refusal and empty stdout.
+Each file is parsed and validated as it is captured, before its bytes enter the snapshot.
+Dependency bytes and structure integer domains are validated before the preset
+loader can consume them. The loader reads only the validated captured bytes.
+Logical dependency names must be relative portable UTF-8 paths without root names,
+root directories, traversal components, backslashes, colons or NULs.
+Their names/bytes are checked again after discovery;
+observable changes refuse the whole result.
+Run against immutable pinned inputs; these checks do not promise exclusion of
+every concurrent filesystem race.
+
+`sampled-portals.v1` freezes the following sampled predicate. Enumerate all
+seeded surface-break cells whose footprints can intersect the search disk,
+using the same placement decoder as `FindLargestSurfaceBreak`. Scan global 4 m
+lattice anchors inside each accepted footprint and the query disk. Loop ranges
+are clipped to the disk row by row and to Y values that fit the 12 m stencil;
+a span with no such lattice Y returns an empty feature catalogue without visits.
+Local index still refers to the full feature bounding box over Z, X, then Y,
+including skipped lattice points. At an anchor,
+air requires density >= 0.25 and solid requires density <= -0.25. A mouth has
+an air anchor, a solid roof at Y+4, and a straight face-connected path through
+air at 4 and 8 metres along an ordered cardinal direction. The 8 m endpoint is
+exterior only when it and its Y+4/+8/+12 samples are air. An arch additionally
+requires that access on the opposite side, solid transverse supports at +/-4 m
+at anchor Y, and solid roof samples above both supports at Y+4. All stencil Y
+samples must fit within the requested span. These are sampled mouth/arch
+candidates; an accepted doline alone is insufficient to classify either.
+
+For each feature, try viewing directions +X, +Z, -X, -Z in that order, placing
+the eye D metres behind the anchor. Eye Y is the larger of anchor Y+1.8 and
+terrain height at the eye XZ+1.8. Require air at the eye and its six axis offsets
+of 0.5 m, then along the eye-to-anchor sightline at equally spaced intervals
+of at most 4 m, including the anchor. The interval count is
+`max(1, ceil((D + abs(anchor_Y - eye_Y)) / 4))`, using the cardinal path's
+length bound. Candidates without a clear sampled pose are omitted. The completed catalogue is ranked by squared integer-millimetre
+XZ anchor distance, then signed cell Z, signed cell X and local index; apply N
+after ranking. IDs encode kind and signed cells (`n` negative, `p` nonnegative)
+plus local index, so ties and negative coordinates have a stable identity.
+Mouth ranking does not select the largest opening.
+
+Sampled terrain heights used for poses and control anchors are rounded upward
+to millimetres to preserve the minimum terrain clearance.
+
+`horizon` returns up to four control views at the query origin, 1.8 m above
+terrain, with yaw 0/90/-180/-90 and pitch zero. `coverage` adds the 80 m elevated
+view, yaw 45 and pitch -20. All controls share the terrain anchor Y sampled once
+at that origin. Control IDs explicitly contain `-control-`; they do
+not discover features, and D is echoed but does not reposition them. They also
+require sampled eye clearance and the requested Y span. Neither kind claims
+that any tier is covered or settled.
+
+Refuse inverted vertical spans, spans over 512 m, horizontal coordinates or
+search/pose/stencil footprints beyond +/-2^23 metres, more than 262144 enumerated
+cells, more than 16777216 lattice visits, or more than 16777216 density samples.
+Every visited Z/X/Y anchor counts, including those rejected before sampling;
+the read-only `StationDiscoveryResult::lattice_visits` diagnostic remains available
+on refusal.
+Exceeding any budget discards all candidates. Work limits count operations, never
+elapsed time. Unsupported/nonfinite sampling also refuses. CLI usage errors
+(missing, repeated or unknown flags, invalid integer syntax, or an unknown kind)
+exit 2; integer overflow, out-of-range query values, missing/invalid input files,
+parser warnings or clamping, unsupported numerics, and budget exhaustion exit 1
+with no partial success on stdout.
+Completed empty/disabled catalogues exit 0 with `candidates: []`. Output writes
+are checked through completion; a write or flush failure exits 1.
+
+The tool currently permits exploratory results only on the existing x86-64
+AVX2 query path with IEEE binary32 and round-to-nearest; unsupported ISA or FP
+paths refuse before constructing the world. Defensive preset refusals include
+JSON nesting above 128, noninteger/out-of-range integer fields, octaves outside
+1..32, hydro iterations outside 0..512, malformed optional blocks/spline pairs,
+and enabled feature radii below the decoder's 3 m minimum. These checks apply to
+discovery only; they do not change the preset loader or terrain generation.
+Enabled hydro also requires finite nonnegative parameters, thermal/deposition/
+evaporation fractions in 0..1, and
+cell sizes at least 2^-39 m (keeping the horizontal domain within +/-2^62 erosion
+cells). Discovery checks the complete query footprint and the 64-cell region's
+iterations+8 halo before constructing the world. Structure placement integers,
+box minima/extents and resulting maxima, socket positions and byte material IDs
+are checked before the pool loader converts them. World-backed discovery holds
+one shared worldgen epoch across the catalogue snapshot and every sample;
+callers must not already hold the world's non-recursive sample scope.
+The numeric-profile name reserves
+the intended contract, while `certified: false` explicitly records that shared
+canonical worldgen numerics and identical GCC/MSVC/UCRT real-seed goldens remain
+prerequisites for certification. Existing terrain libm/noise usage is unchanged.
+Synthetic topology fixtures establish mouth/arch predicates, signed ranking,
+pose clearance/directions, budgets, controls and shared-placement parity;
+real-seed cross-platform goldens are a follow-up, not invented expectations.
+The stdlib contract tests and CPU CLI repeat/refusal smoke are ordinary CTest
+entries without manual or GPU guards.
+
+Discovery emits no `settled` or qualification claims. Native pose/name manifest
+capture integration remains required before these arbitrary poses can qualify
+through the horizon harness. Each station's clock must begin when its exact
+pose and world/render binding are applied, with readiness inclusive at 90 s.
+Recompute expected per-tier coverage independently from that camera: current
+`Uploaded` and valid `Empty` tiles cover; merely `Ready`, stale generation/binding
+or insufficient-span tiles do not. Complete coverage, sky <=2%, zero seam bands
+and zero outer edge remain separate native qualification gates, with receipts
+for every row/profile/display. Existing deadline, empty-tile, stale-generation,
+span and water refusal tests remain in force. Custom-station manifest mismatch
+controls belong to that capture integration. Deep-interior discovery is a
+separate follow-up; this tool does not complete the game's entire scene set.
+
 ## Evidence map
 
 | Contract area | Executable evidence |
@@ -529,6 +743,50 @@ is not retained per frame.
 Names of new tests are binding once their slices land; the activation slice
 fills in fixture identifiers, thresholds and artifact schemas per row.
 
+## Acceptance requirement IDs
+
+This is the authoritative list of required mappings for the performance contract,
+evidence map, simulation budgets and associated acceptance issues. Each ID must
+have one evidence row in `tools/ci/acceptance_matrix.json`, even when its evidence
+is partial, planned or awaiting native qualification. Add requirements here before
+mapping their evidence; the checker reads this list independently of the matrix.
+The descriptions identify requirements, not their current coverage status.
+
+- `perf.floor-p99`: Both profiles meet the 16.67 ms p99 floor on every workload.
+- `perf.target-report-only`: Report the 8.33 ms target without failing captures.
+- `perf.adapter-identity`: Record GL identity and refuse an unqualified adapter.
+- `perf.timer-coverage`: Record frame wall, CPU submit, present and GPU timings with frame attribution and explicit unavailability.
+- `perf.percentile-definition`: Report p50, p95, p99, maximum and median absolute deviation using the shared definition.
+- `perf.fixed-view-workload`: Pin fixed-view inputs and use 400 warm-up and 240 measured frames.
+- `perf.traversal-60s`: Pin 60-second traversal inputs and include streaming transients.
+- `perf.cave-walk-and-edited-tour`: Qualify cave and edited-world traversals with snapshot commit and all-tier bake inside the measured window.
+- `perf.invalid-capture`: Refuse incomplete timers, undeclared overrides, workload mismatches and unsettled far ladders.
+- `perf.far-horizon-gate`: Require complete wanted-set coverage, bounded below-horizon sky and no seams or outer-radius edge.
+- `perf.requirement-matrix`: Map every contract requirement to named evidence, fixtures, thresholds and artifact schemas.
+- `perf.save-load-oracle`: Compare N-save-load-K with uninterrupted N+K for every persisted subsystem, with negative controls.
+- `em.far-ladder`: Qualify far ladder, caves and seams on default, mountains, archipelago and cave-dense fixtures.
+- `em.edits-far-authority`: Preserve all-tier edit authority across save and load.
+- `em.snapshot-commit`: Recover interrupted snapshot commits and inspect the catalog read-only.
+- `em.clock-ledger-pages`: Persist and round-trip clock, ledger, pages, creatures and water with negative controls.
+- `em.hash-determinism`: Verify hash pins, additivity, replay and lockstep checkpoints.
+- `em.performance`: Qualify six fixed views and three traversals for every profile and display with schema v3 artifacts.
+- `em.client-hang`: Detect client stalls and re-arm the watchdog after heartbeat recovery.
+- `sim.budget-capture`: Capture deterministic per-system work on representative worlds.
+- `sim.budget-enforcement`: Enforce measured per-system and residency limits and reject incomplete qualification.
+- `iss.60`: Bound saved-world catalog validation without blocking the UI thread.
+- `iss.61`: Qualify packaged create, edit, save, restart, select, load and world switching.
+- `iss.62`: Preserve saved-edit rendering across culling boundaries and world switches.
+- `iss.63`: Qualify clean no-UI saved-world loading with a nonblack, context-matched capture.
+- `iss.68`: Qualify serial loading, networking soak and performance together in a v0.3 receipt.
+- `iss.126`: Give every reviewed contract requirement named evidence.
+- `iss.128`: Emit client GL identity and per-frame render distributions for the qualification workloads.
+- `iss.129`: Measure representative-world simulation work and propose per-system tick budgets.
+- `iss.130`: Adopt reversed-Z float depth without GL error-severity output.
+- `iss.134`: Persist the simulation clock and unify the calendar across save and load.
+- `iss.141`: Qualify the expanded contract with production simulation and residency budget enforcement.
+- `iss.163`: Compare ambient field hashes across different hosts and active ISA dispatch levels.
+- `iss.173`: Prove production wind call sites supply padded position arrays for SIMD tail loads.
+
 ## Deferred
 
 Traversal beyond 32 km from the origin (origin rebasing), views beyond 16 km,
@@ -538,3 +796,9 @@ of coarse state and the far authority overlay to remote clients, scent and
 foraging at distance, a simulation-only residency class, scheduled game events
 and Workshop content distribution are tracked separately and are not part of
 this contract.
+
+FW renderer diagnostics and the current horizon artifact/gate contract are described in
+[Far world horizon v2](far-world-horizon-v2.md). Ladder is the default requested mode;
+`render.far_world_ladder.enabled:false` explicitly opts out to Legacy. Effective
+Legacy fallback and refusal diagnostics remain when Ladder cannot bind. Native
+ladder qualification remains outstanding.

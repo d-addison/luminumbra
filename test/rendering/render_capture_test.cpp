@@ -1,3 +1,5 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "luminumbra_client/app/RenderBenchmarkReport.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -43,6 +45,43 @@
 #include "rendering/OitModel.h"           // Weighted blended OIT model.
 #include "rendering/RenderGraph.h"
 #include "rendering/SnowCoverModel.h" // Render-only snow cover.
+
+TEST(RenderBenchmarkOverrides, RuntimeLocationsLeaveSystemsConfigurationDeclared) {
+    for (const bool assigned_runtime : {false, true}) {
+        for (const bool assigned_save : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "assigned runtime: " << assigned_runtime
+                                              << ", assigned save: " << assigned_save);
+            std::vector<std::string> arguments = {"client"};
+            arguments.push_back(assigned_runtime ? "--runtime-root=runtime" : "--runtime-root");
+            if (!assigned_runtime)
+                arguments.push_back("runtime");
+            // A following positional override must not be consumed by an assigned root.
+            arguments.push_back("runtime-successor");
+            arguments.push_back(assigned_save ? "--save-root=storage" : "--save-root");
+            if (!assigned_save)
+                arguments.push_back("storage");
+            arguments.insert(
+                arguments.end(),
+                {"save-successor", "--systems-config", "systems.json", "--render-scale", "0.5"});
+            std::vector<char*> argv(arguments.size());
+            std::transform(arguments.begin(),
+                           arguments.end(),
+                           argv.begin(),
+                           [](std::string& value) { return value.data(); });
+            const auto active = Luminumbra::Client::Measurement::render_overrides(
+                static_cast<int>(argv.size()), argv.data());
+            nlohmann::json cli = nlohmann::json::object();
+            for (const auto& item : active.items())
+                if (item.key().rfind("cli:", 0) == 0)
+                    cli[item.key()] = item.value();
+            const nlohmann::json expected = {{"cli:runtime-successor", "true"},
+                                             {"cli:save-successor", "true"},
+                                             {"cli:--systems-config", "systems.json"},
+                                             {"cli:--render-scale", "0.5"}};
+            EXPECT_EQ(cli, expected);
+        }
+    }
+}
 
 namespace fs = std::filesystem;
 
@@ -251,7 +290,7 @@ void SetMat3(GLuint program, const char* name, const glm::mat3& value) {
 }
 
 TerrainGenParams CaptureTerrainParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.035f;
     params.base_amplitude = 8.0f;
     params.octaves = 5;
@@ -268,7 +307,7 @@ TerrainGenParams CaptureTerrainParams() {
 }
 
 TerrainGenParams CaptureWaterParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.02f;
     params.base_amplitude = 1.0f;
     params.height_offset = -4.0f;
@@ -296,6 +335,8 @@ CaptureScene BuildTerrainScene() {
 CaptureScene BuildWaterScene() {
     SHIELD_WorldSystem world(nullptr, nullptr, CaptureWaterParams(), kSeed);
     WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
     Chunk chunk({0, 0, 0});
     world.GenerateChunkData(chunk);
     chunk.water_level_data.assign(static_cast<std::size_t>(WATER_SIM_RESOLUTION_X) *
@@ -385,7 +426,10 @@ void WritePpm(const fs::path& path, int width, int height, const std::vector<uns
     output << "P6\n" << width << " " << height << "\n255\n";
     for (int y = height - 1; y >= 0; --y) {
         for (int x = 0; x < width; ++x) {
-            const std::size_t pixel = (static_cast<std::size_t>(y) * width + x) * 4u;
+            const std::size_t pixel =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                 static_cast<std::size_t>(x)) *
+                4u;
             const unsigned char rgb[3] = {rgba[pixel], rgba[pixel + 1u], rgba[pixel + 2u]};
             output.write(reinterpret_cast<const char*>(rgb), 3);
         }
@@ -1058,7 +1102,7 @@ TEST(TimeOfDayModel, MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors) {
         return c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f;
     };
     constexpr std::uint64_t kLunar =
-        54000ull; // == RenderPipeline::kTicksPerLunarCycle (30 min @ 30 Hz)
+        54000ull; // Arbitrary primitive-test period; runtime uses the saved lunar calendar
 
     // SEASON PALETTE tint: bit-exact vs the verbatim construction + manual luma normalize.
     for (float wave : {-1.0f, -0.5f, 0.0f, 0.3f, 1.0f}) {
@@ -1424,22 +1468,24 @@ TEST(SnowCoverModel, AccumulatesUnderSnowMeltsUnderSunAndClamps) {
 // TIME AUTHORITY — time-of-day is a pure function of the
 // sim tick. Same tick -> same TOD, bit-for-bit, no matter how many times or in
 // what order it is evaluated (there is no accumulator to drift with frame
-// pacing); the default day length reproduces the legacy 60 s/day wall pacing.
+// pacing); the default day length matches the world calendar's 90-minute day.
 TEST(TodTickPurity, SameTickSameTodIndependentOfFramePacing) {
     namespace R = Luminumbra::Rendering;
-    EXPECT_EQ(R::kDefaultDayLengthTicks, 1800u) << "60 s/day at 30 Hz — the legacy pacing";
+    EXPECT_EQ(R::kDefaultDayLengthTicks, 162000u) << "90 min/day at 30 Hz";
+    EXPECT_EQ(R::kDefaultDayLengthTicks, Luminumbra::world::WorldCalendar{}.dayLengthTicks);
+    constexpr auto day = R::kDefaultDayLengthTicks;
     // Anchors: tick 0 == noon (tod 0); half a day == midnight (tod 0.5); wraps.
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(0, 1800), 0.0f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(900, 1800), 0.5f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800, 1800), 0.0f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800ull * 1000ull + 450ull, 1800), 0.25f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(0, day), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day / 2, day), 0.5f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day, day), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day * 1000 + day / 4, day), 0.25f);
     // Purity: evaluating out of order / repeatedly yields bit-identical values —
     // the property a wall-clock accumulator can never have.
     const std::uint64_t ticks[] = {7ull, 12345ull, 99999999ull, 3ull, 7ull};
-    const float first_seven = R::TimeOfDayFromTick(7, 1800);
+    const float first_seven = R::TimeOfDayFromTick(7, day);
     for (std::uint64_t t : ticks) {
-        const float a = R::TimeOfDayFromTick(t, 1800);
-        const float b = R::TimeOfDayFromTick(t, 1800);
+        const float a = R::TimeOfDayFromTick(t, day);
+        const float b = R::TimeOfDayFromTick(t, day);
         EXPECT_EQ(a, b);
         if (t == 7ull) {
             EXPECT_EQ(a, first_seven);
@@ -1574,4 +1620,38 @@ TEST(RenderGraph, WriteAfterWriteAndReadAfterWriteOrderingHold) {
     EXPECT_EQ(s, expected);
     EXPECT_TRUE(g.validate().empty());
     EXPECT_EQ(g.latest_writer_of("T", "c"), "b");
+}
+
+TEST(TimeOfDayModel, ElapsedSolarInverseAndCalendarRelativeCelestialSeam) {
+    namespace R = Luminumbra::Rendering;
+    using Luminumbra::world::WorldCalendar;
+    using Luminumbra::world::WorldClock;
+    for (const auto calendar : {WorldCalendar{},
+                                WorldCalendar::Legacy(),
+                                WorldCalendar{36000, 3, 1, 2, 8},
+                                WorldCalendar{101, 7, 3, 5, 9}}) {
+        const WorldClock clock(0, calendar);
+        for (const auto phase : {0.0, .1, .25, .3, .5, .75, .9, .999}) {
+            const auto elapsed = R::NoonElapsedFromSolarTime(phase, calendar);
+            EXPECT_NEAR(R::SolarTimeFromNoonElapsed(elapsed, calendar), phase, 1e-7);
+        }
+        const auto period = clock.lunar_period_ticks();
+        for (const auto tick :
+             {std::uint64_t{0}, period / 2, period - 1, period, WorldClock::kTickLimit - 1}) {
+            const WorldClock at(tick, calendar);
+            const auto season = R::ComputeSeason(at);
+            const auto frame = R::EvaluateCelestialBodies(
+                R::TimeOfDayFromWorldClock(at), season.sunDeclination, tick, -1.0f, period);
+            EXPECT_FLOAT_EQ(frame.moon.illumination, R::LunarIllumination(tick, period));
+            EXPECT_EQ(frame.moon.travel_direction, -frame.sun.travel_direction);
+        }
+        EXPECT_FLOAT_EQ(R::LunarIllumination(0, period), 1.0f);
+        EXPECT_NEAR(R::LunarIllumination(period / 2, period), R::kNewMoonFloor, 1e-5f);
+        EXPECT_FLOAT_EQ(R::LunarIllumination(period, period), 1.0f);
+    }
+    const WorldClock different_year(0, {162000, 3, 2, 3, 8});
+    EXPECT_NE(R::LunarIllumination(different_year.year_length_ticks(),
+                                   different_year.lunar_period_ticks()),
+              1.0f);
+    EXPECT_EQ(WorldClock{}.lunar_period_ticks(), 1296000u);
 }

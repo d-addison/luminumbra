@@ -3,14 +3,17 @@
 #include "FarVolumeGpuBackend.h"
 #include "FarVolumeResidency.h"
 #include "FarWorldCaveSelection.h"
+#include "FarWorldDiagnostics.h"
+#include "FarWorldSelection.h"
 
 namespace Luminumbra::Rendering {
 
 // Explicit immutable fixture authority only. Implementations and all reachable
 // data must be bounded, pure, immutable and worker safe; never wrap a mutable
-// SHIELD_WorldSystem. content_identity includes numeric and cave semantics.
+// SHIELD_WorldSystem. content_identity includes numeric, cave and water semantics
+// (capability, wet flags, levels and bounds). Unavailable water refuses Ladder.
 // A saved-world producer requires committed-generation authority + dirty parking.
-class FarWorldPristineFixture {
+class FarWorldPristineFixture : public FarWorldWaterObservation {
 public:
     virtual ~FarWorldPristineFixture() = default;
     virtual std::uint64_t content_identity() const noexcept = 0;
@@ -55,7 +58,7 @@ FarWorldExperimentalLimits FarWorldDevelopmentLimits() noexcept;
 // clip-aware arrival are integrated; ray depth qualification is a later slice.
 class FarWorldRenderer {
 public:
-    explicit FarWorldRenderer(FarWorldMode requested = FarWorldMode::Legacy);
+    explicit FarWorldRenderer(FarWorldMode requested = FarWorldMode::Ladder);
     ~FarWorldRenderer();
     FarWorldRenderer(const FarWorldRenderer&) = delete;
     FarWorldRenderer& operator=(const FarWorldRenderer&) = delete;
@@ -94,6 +97,18 @@ public:
                       std::span<const FarVolumeWantedRequest> requests);
     FarWorldSubmitStats Submit(const std::array<double, 3>& camera,
                                const FarWorldPrepareDraw& prepare);
+    // Called after the selected G-buffer submission; never for a paired replay.
+    void CaptureDiagnostic(FarWorldSelection selection,
+                           std::uint64_t frame,
+                           const std::array<double, 3>& camera,
+                           float actual_plane,
+                           bool advanced,
+                           std::size_t draws,
+                           std::size_t indices,
+                           std::uint64_t legacy_epoch = 0);
+    const FarWorldDiagnosticSnapshot& Diagnostic() const noexcept {
+        return diagnostic_;
+    }
     void PrepareWorldSwap();
     void Shutdown();
     // Publication is independent of the culler. The pipeline feeds every prepared
@@ -151,6 +166,12 @@ private:
     std::uint64_t world_epoch_ = 0, bake_generation_ = 0;
     FarWorldExperimentalLimits limits_;
     FarVolumeFrameResult last_frame_;
+    FarWorldDiagnosticSnapshot diagnostic_;
+    FarWorldSubmissionRefusal submission_refusal_ = FarWorldSubmissionRefusal::None;
+    std::array<FarWorldTierDiagnostic, World::kFarTierCount> diagnostic_tiers_{};
+    // Fixed telemetry transition scratch is included in the integration charge.
+    std::array<bool, kScratchSlots> diagnostic_old_wanted_{}, diagnostic_old_pair_{},
+        diagnostic_budget_before_{};
     // Explicit destruction in Drain, then Shutdown: residency -> authority and
     // integration charges -> memory -> driver. Driver lives through GPU release.
     std::unique_ptr<FarVolumeGpuDriver> driver_;
@@ -164,6 +185,8 @@ private:
     // integration charge. Slots are reclaimed only by Drain, never by eviction.
     std::array<Ledger, kScratchSlots> ledgers_{}, pending_ledgers_{};
     std::array<FarVolumeWantedRequest, kScratchSlots> requests_{};
+    // Reserved once on binding; backing storage is included in the integration charge.
+    std::vector<World::FarTileKey> wanted_;
 };
 
 bool MakeFarWorldDrawCommand(const FarVolumeDrawRecord& record,

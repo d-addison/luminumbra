@@ -3,11 +3,12 @@
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -146,7 +147,9 @@ std::string Patched(std::string bytes,
 }
 
 std::string ReadBytes(const std::filesystem::path& path) {
-    const std::ifstream input(path, std::ios::binary);
+    // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+    std::ifstream input;
+    input.open(path, std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
@@ -165,10 +168,7 @@ void WriteValidTree(const std::filesystem::path& dir) {
 class TempDir {
 public:
     TempDir() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path_ = std::filesystem::temp_directory_path() /
-                ("luminumbra_far_overlay_test_" + std::to_string(stamp));
-        std::filesystem::create_directories(path_);
+        path_ = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_far_overlay_test_");
     }
     ~TempDir() {
         std::error_code ec;

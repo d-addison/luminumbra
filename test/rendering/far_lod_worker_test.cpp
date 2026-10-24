@@ -1,4 +1,7 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
+
+#include "../support/UniqueTempPath.h"
 
 #include "luminumbra_client/debug/DebugCamera.h"
 #include "luminumbra_client/rendering/Camera.h"
@@ -15,7 +18,6 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -41,10 +43,7 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
 
 struct TempSaveDir {
     TempSaveDir() {
-        path = std::filesystem::temp_directory_path() /
-               ("luminumbra_far_worker_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_far_worker_");
     }
     ~TempSaveDir() {
         std::error_code error;
@@ -54,7 +53,7 @@ struct TempSaveDir {
 };
 
 TerrainGenParams FlatParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.005f;
     params.base_amplitude = 0.0f;
     params.height_offset = 12.0f;
@@ -114,7 +113,7 @@ std::vector<PlaneSegmentBits> SharedPlaneSegments(const FarLodRegionMesh& mesh,
             indices[2] >= mesh.vertices.size()) {
             continue;
         }
-        for (int edge = 0; edge < 3; ++edge) {
+        for (std::size_t edge = 0; edge < 3; ++edge) {
             const VoxelVertex& a = mesh.vertices[indices[edge]];
             const VoxelVertex& b = mesh.vertices[indices[(edge + 1) % 3]];
             // A region mesh is closed on one side of this exact sample plane,

@@ -14,6 +14,7 @@
 #include <luminumbra/core/Types.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <glm/glm.hpp>
 #include <memory>
@@ -27,6 +28,7 @@ class Chunk;
 namespace Systems {
 
 class SHIELD_WorldSystem;
+class JoltRuntimeLease;
 
 struct ChunkCollisionData {
     JPH::BodyID body_id;
@@ -37,9 +39,23 @@ public:
     PhysicsSystem();
     ~PhysicsSystem();
 
+    // Lifecycle calls require owner-thread exclusion of updates/producers.
+    // A supplied Jolt factory must be fully initialized and remain alive,
+    // with compatible complete allocators, through every runtime lease,
+    // including startup preparation. Process-static RTTI also retains storage
+    // that requires compatible allocators after the final lease ends.
     void startup();
     void shutdown();
     void update(float delta_time);
+    struct WorkItems {
+        std::uint64_t bodies = 0;
+        std::uint64_t characters = 0;
+    };
+    // Input bodies for the latest scene update, plus character steps since it.
+    // Diagnostic only; static bodies count too. No solver/timing estimates.
+    [[nodiscard]] WorkItems work_items() const {
+        return m_work_items;
+    }
     bool is_started() const {
         return m_started;
     }
@@ -189,6 +205,9 @@ public:
     }
 
 private:
+    WorkItems m_work_items{};
+    // Independent ownership, released only after all Jolt resources.
+    std::unique_ptr<JoltRuntimeLease> m_runtime_lease;
     // Jolt core components
     std::unique_ptr<JPH::PhysicsSystem> m_jolt_system;
     std::unique_ptr<JPH::TempAllocator> m_temp_allocator;

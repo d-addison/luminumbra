@@ -76,7 +76,7 @@ Cilliers / Poly Haven, CC0-1.0; see [Game assets](game-assets.md).
 
 Native Windows Release binaries used GNU UCRT64 15.1.0 and production OpenGL,
 without ASan, coverage, Tracy or Diligent. NVIDIA's startup process table matched
-guard PID 51780 and bypass PID 87308 to GPU 0, an RTX 5070 Ti with driver 595.97.
+both client processes to GPU 0, an RTX 5070 Ti with driver 595.97.
 Other applications were present in the shared hardware environment; their
 presence alone does not establish interference.
 
@@ -226,3 +226,7 @@ artifact. Require the watchdog arm log, complete shutdown with drained jobs and
 all ten headless-profile milestones, and no crash/hang reports before treating
 an automated capture run as complete. None of these checks grants visual
 approval or proves that every streaming, cave, edit or water view is correct.
+
+`--render-benchmark-aovs` explicitly selects the unjittered, TAAU-disabled
+measurement workload. Its existing manifest records the effective temporal setting
+and jitter. Ordinary rendering continues to use TAAU by default.

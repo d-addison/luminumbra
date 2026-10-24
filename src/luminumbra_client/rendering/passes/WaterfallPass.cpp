@@ -1,4 +1,6 @@
 #include "WaterfallPass.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "ParticlePass.h"
 #include "PassGlHelpers.h"
@@ -43,6 +45,7 @@ void WaterfallPass::destroy_geometry() {
 }
 
 void WaterfallPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL WaterfallPass.execute");
     // 7-W. WATERFALL SHEETS (, ): the animated falling-sheet veil drawn
     // over each detected waterfall site. Render-only dressing on a world-
     // deterministic site set (never hashed). Drawn after water, into the lit FBO,
@@ -111,7 +114,8 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             m_shader->setFloat("u_crest_y", s.crest.y);
             m_shader->setFloat("u_foot_y", s.foot.y);
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
-            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawArrays, GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
         }
         glBindVertexArray(0);
 

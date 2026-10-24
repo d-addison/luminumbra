@@ -30,10 +30,18 @@
 // blobs, and hash checkpoints. It knows NOTHING about voxels, biomes, cameras,
 // or any game concept.
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "../HashCheckpoint.h"
 
 namespace Luminumbra::Replay {
 
@@ -41,13 +49,17 @@ namespace Luminumbra::Replay {
 // move the gate goldens deliberately in the same commit (determinism discipline
 // section 13: replay LREC1 is versioned).
 inline constexpr char kLrec1Magic[5] = {'L', 'R', 'E', 'C', '1'};
-inline constexpr std::uint16_t kLrec1Version = 1;
+inline constexpr std::uint16_t kLrec1Version = 3;
+// Version 3 remains byte-identical for complete streams. Only diagnostic
+// streams with ElidedPrefix require version 4; readers accept both layouts.
+inline constexpr std::uint16_t kLrec1ElidedVersion = 4;
 inline constexpr char kLrec1Trailer[8] = {'L', 'R', 'E', 'C', 'E', 'N', 'D', '1'};
 
 // Record type tags (u8 on the wire).
 enum class RecordType : std::uint8_t {
-    Input = 0x01,      // per-tick input set (may be empty -- valid + compact)
-    Checkpoint = 0x02, // world_hash + authoritative sub-hashes at a tick
+    Input = 0x01,        // per-tick input set (may be empty -- valid + compact)
+    Checkpoint = 0x02,   // world_hash + authoritative sub-hashes at a tick
+    ElidedPrefix = 0x03, // version 4 diagnostic suffix: tick and digest of removed prefix
 };
 
 // Session boot parameters -- everything ServerWorldRunner boots from, so a
@@ -66,7 +78,21 @@ struct ReplayHeader {
     std::uint32_t surface_radius = 4;
     std::uint32_t collision_radius = 2;
     std::string engine_version; // luminumbra::core::GetEngineVersionString()
+    std::string system_config_identity;
+    // Canonical resolved preset plus sorted data_root-relative dependency paths
+    // and exact-byte file hashes (TerrainPresetLoadResult::preset_content_hash).
+    std::string preset_content_hash;
 };
+
+// Required in addition to the existing start/checkpoint world-hash comparisons.
+[[nodiscard]] inline bool ConfigurationMatches(const ReplayHeader& header,
+                                               const std::string& live_identity,
+                                               const std::string& live_preset_hash) {
+    return (header.version == kLrec1Version || header.version == kLrec1ElidedVersion) &&
+           !live_identity.empty() && !header.system_config_identity.empty() &&
+           header.system_config_identity == live_identity && !live_preset_hash.empty() &&
+           !header.preset_content_hash.empty() && header.preset_content_hash == live_preset_hash;
+}
 
 // One per-tick input record. The headless smoke has no player inputs today, so
 // `inputs` is typically empty -- the format still carries the (empty) set so the
@@ -81,13 +107,7 @@ struct InputRecord {
 // Mesh is EXCLUDED per the  caveat (it is a derived render artifact that
 // legitimately differs across save/load; authoritative state = terrain/water/
 // entities). Hashes are stored as their hex strings (no float/endianness risk).
-struct CheckpointRecord {
-    std::uint64_t tick = 0;
-    std::string world_hash;
-    std::string terrain;
-    std::string water;
-    std::string entities;
-};
+using CheckpointRecord = HashCheckpoint;
 
 // --- Writer: append-on-record. ----------------------------------------------
 // Usage: construct with the header (writes it immediately), RecordInput once per
@@ -127,6 +147,142 @@ private:
     bool m_open = false;
 };
 
+// Automatic lockstep diagnostics. Buffered disk segments retain all unconfirmed
+// ticks and a rolling suffix (1024 ticks or 64 MiB, whichever is reached first).
+// Segments contain at most 1024 ticks / 64 MiB, except a single larger tick.
+// No simulation callback or per-record flush is needed. Segments are closed
+// before deletion on every platform; destruction removes the working directory.
+// Finalize writes a normal LREC1, with an explicit ElidedPrefix record when the
+// seed alone cannot reconstruct the suffix. Such an artifact is diagnostic only.
+// A whole-tick sink. Calls are serialized by QueuedReplayRecorder; implementations
+// may perform blocking I/O here, never in the simulation's enqueue operation.
+class ReplayTickSink {
+public:
+    virtual ~ReplayTickSink() = default;
+    virtual bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks) = 0;
+    virtual bool Open(const std::string& destination, const ReplayHeader& header) = 0;
+    virtual bool RecordTick(std::uint64_t tick,
+                            const std::vector<std::uint8_t>& inputs,
+                            const std::array<std::string_view, 4>* hashes,
+                            std::uint64_t confirmed_tick) = 0;
+    virtual bool Finalize(const std::string& destination,
+                          std::uint64_t tick_count,
+                          std::uint64_t divergence_tick) = 0;
+    virtual void Close() = 0;
+    [[nodiscard]] virtual std::size_t RetainedBytes() const = 0;
+    [[nodiscard]] virtual std::size_t ByteLimit() const = 0;
+    [[nodiscard]] virtual std::size_t SegmentCount() const = 0;
+};
+
+class BoundedReplayRecorder final : public ReplayTickSink {
+public:
+    static constexpr std::size_t kSegmentTicks = 1024;
+    static constexpr std::size_t kSegmentBytes = std::size_t{64} * 1024 * 1024;
+
+    BoundedReplayRecorder() = default;
+    ~BoundedReplayRecorder() override;
+    BoundedReplayRecorder(const BoundedReplayRecorder&) = delete;
+    BoundedReplayRecorder& operator=(const BoundedReplayRecorder&) = delete;
+
+    // Checks the disk bound before any recording allocation: unconfirmed_ticks
+    // * max_tick_bytes + three segments (a segment may hold one maximum tick).
+    bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks) override;
+    bool Open(const std::string& destination, const ReplayHeader& header) override;
+    bool RecordTick(std::uint64_t tick,
+                    const std::vector<std::uint8_t>& inputs,
+                    const std::array<std::string_view, 4>* hashes,
+                    std::uint64_t confirmed_tick) override;
+    bool Finalize(const std::string& destination,
+                  std::uint64_t tick_count,
+                  std::uint64_t divergence_tick) override;
+    void Close() override;
+
+    [[nodiscard]] std::size_t RetainedBytes() const override {
+        return m_bytes;
+    }
+    [[nodiscard]] std::size_t ByteLimit() const override {
+        return m_byte_limit;
+    }
+    [[nodiscard]] std::size_t SegmentCount() const override {
+        return m_segments.size();
+    }
+
+private:
+    struct Segment {
+        std::string path;
+        std::uint64_t last_tick = 0;
+        std::uint64_t digest = 0;
+        std::size_t bytes = 0;
+        std::size_t ticks = 0;
+    };
+    bool Prune(std::uint64_t tick, std::uint64_t confirmed_tick);
+
+    ReplayHeader m_header;
+    std::string m_directory;
+    std::ofstream m_output;
+    std::deque<Segment> m_segments;
+    std::size_t m_max_tick_bytes = 0;
+    std::size_t m_byte_limit = 0;
+    std::size_t m_bytes = 0;
+    std::uint64_t m_digest = 1469598103934665603ULL;
+    std::uint64_t m_elided_tick = 0;
+    std::uint64_t m_elided_digest = 1469598103934665603ULL;
+    std::uint64_t m_last_tick = 0;
+};
+
+// Ordered recording on one existing JobSystem worker. Open is a setup operation;
+// RecordTick only retains immutable, already-encoded inputs and checkpoint strings.
+// Outstanding work (including the active tick) is bounded by both 4096 ticks and
+// max(64 MiB, maximum encoded tick) bytes, plus fixed-size queue metadata. Full
+// queues latch failure without waiting: simulation never depends on disk progress.
+// Finalize drains accepted ticks and reports failure with a .incomplete companion
+// containing the first rejected/failed tick and reason. Close drains then removes
+// working files; an in-sync shutdown does not publish an artifact.
+class QueuedReplayRecorder {
+public:
+    static constexpr std::size_t kQueueTicks = 4096;
+    static constexpr std::size_t kQueueBytes = std::size_t{64} * 1024 * 1024;
+    struct QueueLimits {
+        std::size_t bytes = 0;
+        std::size_t ticks = kQueueTicks;
+    };
+
+    QueuedReplayRecorder();
+    explicit QueuedReplayRecorder(std::unique_ptr<ReplayTickSink> sink);
+    ~QueuedReplayRecorder();
+    QueuedReplayRecorder(const QueuedReplayRecorder&) = delete;
+    QueuedReplayRecorder& operator=(const QueuedReplayRecorder&) = delete;
+
+    // Optional smaller queue budgets are useful for callers with tighter memory
+    // limits. Zero bytes selects the default above; ticks must be in [1,4096].
+    bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks);
+    bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks, QueueLimits limits);
+    bool Open(const std::string& destination, const ReplayHeader& header);
+    bool RecordTick(std::uint64_t tick,
+                    std::shared_ptr<const std::vector<std::uint8_t>> inputs,
+                    std::shared_ptr<const CheckpointRecord> checkpoint,
+                    std::uint64_t confirmed_tick);
+    // Explicit blocking lifecycle barrier, never called by the tick path.
+    bool Flush();
+    bool Finalize(const std::string& destination,
+                  std::uint64_t tick_count,
+                  std::uint64_t divergence_tick);
+    void Close();
+
+    [[nodiscard]] const char* FailureReason() const;
+    // Const snapshots published after each whole-tick sink operation. Flush
+    // before comparing them with files on disk.
+    [[nodiscard]] std::size_t RetainedBytes() const;
+    [[nodiscard]] std::size_t ByteLimit() const;
+    [[nodiscard]] std::size_t SegmentCount() const;
+    [[nodiscard]] std::size_t PendingTicks() const;
+    [[nodiscard]] std::size_t PendingBytes() const;
+
+private:
+    struct State;
+    std::unique_ptr<State> m_state;
+};
+
 // --- Reader: sequential read on playback. -----------------------------------
 // Parses the whole stream up front (replay files are small: ~tens of bytes per
 // tick) and exposes the header, the ordered records, and a truncation flag.
@@ -137,6 +293,8 @@ struct ReplayContents {
     std::uint64_t tick_count = 0;              // from the trailer
     bool truncated = false;                    // tail did not parse cleanly
     bool trailer_present = false;              // a valid trailer was found
+    std::uint64_t elided_through_tick = 0;     // nonzero => diagnostic suffix only
+    std::uint64_t elided_prefix_digest = 0;    // FNV-1a over elided record bytes
 };
 
 // Reads and parses an LREC1 stream. Returns nullopt only if the file cannot be

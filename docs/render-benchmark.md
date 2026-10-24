@@ -11,8 +11,9 @@ activation evidence remain separate work.
 `--render-benchmark output.json` continues to write
 `luminumbra.render_benchmark.v2`. The default frame count (120), warmup (60),
 3840×1600 capture size, configured render scale, legacy GPU timer ring and v2
-writer remain the legacy path. Omitting every new option allocates no measurement
-ring and issues no additional GL queries. No system configuration entry is added.
+writer retain their existing behavior. Both benchmark schemas allocate a bounded
+frame ring for far-mode evidence; only v3 issues additional GL queries. Ordinary
+play allocates no measurement ring. No system configuration entry is added.
 World generation, hash order, saves, preset revision 6, LMR1 container v2, world
 manifest v1 and FSD2 payload v3 are unaffected.
 
@@ -46,7 +47,12 @@ measurement starts; disagreement is refused with exit 2. V3 needs
 1..18000 measured frames and 1..18000 warmup frames. It does not silently
 truncate a window, drop overflow samples, or substitute a missing timer with zero.
 V3 writes JSON in binary stream mode; the v2 writer retains its existing mode.
-An incomplete v3 artifact write makes the client exit unsuccessfully.
+An incomplete artifact write makes the client exit unsuccessfully for either
+schema, including open, directory creation, partial write, flush and close errors.
+Workload options accept both separate values and assignment form (for example,
+`--render-benchmark-frames=4`) without becoming debug overrides. Assignment form
+never consumes the following argument; other CLI options still require exact
+override declarations.
 
 Example fixed view (the shader-state checks remain optional for v3):
 
@@ -73,6 +79,78 @@ frame count equals the expected tick count, within the 18000-frame capacity.
 Streaming transients inside the measured window are included. The example is
 surface flight only; cave-walk and edited-world save/bake qualification are not
 supplied.
+
+## Far-mode reporting and Ladder baselines
+
+Both v2 and v3 include `far_world.frames`, one row for every measured frame,
+and `far_world.summary`. Warmup and the report/screenshot frame are excluded.
+Measured windows in both schemas are bounded to 1..18000 frames; oversized
+requests fail before allocating sample storage. Rendering selection, authority
+binding, scheduling and submission are unchanged by this instrumentation (issue #392).
+
+Each row records `frame`, `requested_mode`, `effective_mode` (`legacy` or
+`ladder`), `refusal` (the exact selection enum name), `submission_refusal` (the
+exact submission enum name), `suppressed`, and `coverage_settled`. Suppression
+includes both the submission override and submission refusals such as
+`LiveOwnershipIncomplete`; these can leave the effective mode as Ladder.
+Coverage is settled only with a complete captured and advanced Ladder snapshot,
+available water, a nonempty wanted set, current covering and settled counts equal
+to wanted in every tier, no pending/building/ready work, rejected or evicted tiles,
+horizon refusal, incomplete water coverage or draw refusal. Tile and tier wanted
+counts must agree. This reports current far coverage, without
+certifying the independent station expected-set or 90-second qualification gate.
+
+Each row's `settings` records resolved `gns_compiled` (standalone
+GameNetworkingSockets build availability, including both enabled and disabled
+builds), `water_cells_per_side` (actual water solver resolution), `active_regions`
+(the session value) and `grass_density_scale` (the foliage pass value, or `null`
+when absent). Row `content_identity` is the immutable far authority's decimal
+uint64 identity, with `"0"` meaning unavailable. `world_content_identity` records
+the loaded terrain/content hash; v3 additionally retains its existing workload
+preset revision, preset identity and world content identity. The summary contains
+count maps for `requested_mode`, `effective_mode`, `refusal`,
+`submission_refusal`, plus `suppressed_frames` and `unsettled_frames`. Each row
+also includes cached `streaming` counts for `generation_pending`,
+`meshing_pending` and `terrain_uploads_pending`, plus `generation_outstanding`
+and `meshing_outstanding` booleans. The counts describe deferred work; the
+booleans include dispatched batches awaiting publication and the promotion
+pipeline. A frame is counted as unsettled if its far coverage is unsettled,
+any streaming count is nonzero, or either outstanding flag is true. Terrain
+isolation reports `suppressed=true` with `submission_refusal=IsolationSuppressed`
+for both Legacy and Ladder, because the G-buffer gates their shared submission
+path on the Terrain layer.
+
+Startup logs the current requested/effective mode, selection refusal, suppression
+and submission refusal. Subsequent mode or reason changes and submission
+suppression/refusal transitions log once per transition. Coverage settling alone
+does not generate a mode-transition log. SLOWFRAME lines include these far-mode
+fields and the settled flag.
+
+Any run submitted as a **Ladder baseline** must use `--ladder-baseline`:
+
+```sh
+python3 tools/perf/validate_render_capture.py capture.json \
+  --qualified-renderer 'NVIDIA GeForce RTX 5070 Ti' --ladder-baseline
+python3 tools/perf/perf.py validate capture.json --ladder-baseline
+```
+
+The first command performs full v3 measurement validation plus the Ladder rule.
+The second checks only the measured far-mode evidence in either benchmark
+schema; it does not establish timer, adapter or performance validity. With the
+full v2 checker, also supply its existing pose/TOD arguments. The Ladder rule
+rejects missing, malformed, noncontiguous or incomplete frame evidence,
+inconsistent summary counts, and any measured frame requesting/effectively using
+Legacy, reporting a refusal, suppressed submission, unsettled far coverage or
+pending streaming work, or an unavailable (zero) far authority content identity.
+It cannot be waived by override declarations or by a passing final report frame.
+Older captures without these additive fields remain diagnostic inputs when the
+Ladder-baseline rule is not requested; they cannot qualify as Ladder baselines.
+The existing registered FarWorldDiagnostics C++ cases cover transition decisions,
+coverage and serialization. The registered performance and render-contract Python
+suites cover refusal controls and repair of individual measured frames.
+`RenderBenchmarkMeasuredFrameBounds` registers strict v2/v3 frame-count refusals,
+and `RenderBenchmarkIsolationSubmission` checks isolation reporting. The
+existing native runner cases require far-mode rows and the dynamic startup log.
 
 ## Artifact v3
 
@@ -151,9 +229,9 @@ tick_rate 30
 speed_mps 8
 seed 424242
 preset default
-preset_revision 6
-preset_identity 026f24207a8ffc7e
-content_identity 16636010052247870746
+preset_revision 8
+preset_identity 56ffbe1771cddfa6
+content_identity 7583622726659997707
 expected_ticks 1800
 cold_cache true
 points 3
@@ -171,7 +249,7 @@ rate must equal expected ticks. A 60-second script at 30 Hz therefore measures
 1800 frames and does **not** necessarily take 60 seconds of wall time. The achieved
 wall duration is recorded as an observation in `measured_duration_seconds`, not
 used to pace the workload. Only 30 Hz,
-preset revision 6 and a fresh-process cold cache are supported. The
+preset revisions 6, 7 and 8 and a fresh-process cold cache are supported. The
 cache declaration concerns engine world/tile caches at launch, not driver shader
 caches or OS caches. Warmup subsequently populates the engine caches.
 Seed is a uint32; the preset is a nonempty lowercase identifier using letters,
@@ -276,6 +354,139 @@ Committed and generated evidence has these compatibility rules:
   missing, corrupt or incompatible receipt supplies no acceptance evidence and
   must not be treated as proof of completion.
 
+## Qualification execution record
+
+`tools/perf/run_qualification.py --client <native-client> --out-dir <output>
+--build-manifest <performance-build.json>` writes
+`qualification.json` with schema `luminumbra.render_qualification.v1`.
+The output directory is held exclusively with `.qualification.lock`, created with
+`O_CREAT | O_EXCL`, after the output directory is validated/created and before any
+run files or settings change, through aggregate publication. Directory creation
+and lock creation failures without an existing lock report `cannot write` and
+exit 2. A held lock refuses the run and names the lock file; it is never
+automatically reclaimed. Normal returns and exceptions release the lock. After
+an abrupt termination, the operator must establish that the owner has stopped
+before removing its lock. Aggregate publication uses a sibling temporary file
+and atomic replacement. Prior aggregates and selected cells' captures, verdicts,
+retained captures and receipts are set aside as `.prev-<n>`, including for cells
+that have become unready. An unevaluated cell reports no capture or adapter.
+
+`--host-record <staged-host.json>` validates Windows OS, PowerShell and GPU driver
+identity before execution, then publishes `host.json` with the aggregate under
+the same lock. A run without this option removes any previous `host.json` under
+the lock. If aggregate publication fails, the previous host is restored. Both
+staged and previous host files must be regular files, with no symlinks, and fit
+the shared 16 MiB input cap. Staged JSON must be UTF-8 (an optional BOM is accepted)
+and contain at most 64 object/array levels; invalid inputs refuse with exit 2.
+Dry runs preserve the current pair and write supplied host evidence separately
+as `host-dryrun.json`.
+
+Cell `artifact` paths, and retained `capture_path` values in process receipts, are
+relative to the output directory, such as `cells/surface-flight.quality.3840x1600.json`.
+The private process receipt still records absolute command, cwd and client paths.
+Its `binary_sha256` identifies the launched executable. The qualification runner
+adds `client_path` and a `client` object with the actual client code's `sha256`,
+`kind`, `sha256_verified`, `native_build`, manifest hashes and refusal `reason`.
+For `.py` clients, the executable hash identifies Python and the client hash
+identifies the script. Both script and native client hashes are checked before
+and after execution; a changed or unverifiable client makes the cell fail.
+Existing client paths, including bare `.py` filenames, resolve from the caller's
+directory before the child enters its per-cell working directory.
+
+Every launched cell receives `--systems-config` with the absolute path to the
+selected runtime's `data/common/systems.json`. The client parses this option in
+`src/luminumbra_client/core/RuntimeScenarioConfig.cpp` and strictly loads the
+override in `src/luminumbra_client/main_client.cpp`. Each process receipt records
+`systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
+A missing/unreadable configuration prevents launch; changed or unreadable bytes
+after execution fail the cell before the checker runs.
+The runner writes a per-cell `render-overrides.json` declaring the exact
+`cli:--systems-config` argument. Runtime and save roots select file locations and
+are excluded from render overrides.
+
+Every launched cell receives an absolute `--runtime-root`. The runner resolves
+the selected client executable before launch and searches only its directory and
+ancestors for `res/shaders/g_buffer.vert`, `data/audio/music.bank.json` and
+`worlds/atlas/presets/default.json`. For other layouts, supply the runner's
+`--runtime-root <absolute-directory>` argument. An incomplete explicit root fails
+without falling back to discovery. The output directory and per-cell working
+directory never select runtime assets, including when output is inside a checkout.
+
+Each cell also receives its own absolute `--save-root` at
+`<out-dir>/work/<cell-id>/storage`, with world saves and the world catalog beneath
+`worlds/saves` there. Its working directory remains `<out-dir>/work/<cell-id>`.
+Process receipts record `runtime_root` and `save_root` alongside the exact command.
+The client refuses relative, empty, missing-value or repeated root options,
+runtime roots missing required files, and save roots that cannot be created.
+`GameSession` uses the save-root override for world creation, loading, saving and
+catalog inspection; runtime assets still come from the runtime root. Ordinary
+client launches without either option retain discovery and runtime-root storage.
+Embedded presets resolve biome and structure dependencies from the runtime's
+`data/` directory. Legacy saves without an embedded preset use the runtime's
+frozen or named atlas preset, even when storage is separate.
+
+Traversal qualification binds both the script path and its expected SHA-256.
+Every traversal entry in `tools/perf/qualification/matrix.json` requires
+`script_sha256`: 64 lowercase hexadecimal digits for the exact script bytes,
+or null for a blocked traversal whose `script` is null. A missing or malformed
+digest is a matrix input error (exit 2). Before launching a traversal, the runner
+compares the fixture bytes with that expected digest; a mismatch records an
+invalid cell and exits 1 without launching the client or checker.
+The runner snapshots each manifest into `work/<cell-id>/workload.traversal`
+(at most 64 KiB) and passes that same file to the client and checker. It verifies
+the snapshot after each process and records its digest and verification status
+in the cell's `traversal` object. Editing the source fixture changes its digest
+and prevents qualification; edits after snapshot creation cannot change that run.
+
+The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
+compiler (`id`, `version`, `target`), configuration (the existing build options
+and `effective_flags_sha256`), and system (`name`, `processor`). For qualification
+it must additionally contain `"client": {"sha256": "<64 lowercase hex digits>"}`,
+recorded for the final native client binary after the build. The CMake-generated
+manifest currently has no client hash, so it must be extended with that evidence
+before use here. Missing/invalid fields in a supplied manifest are input errors.
+Omitting the manifest or supplying a different executable hash permits diagnostic
+captures but prevents qualification (`build_manifest_missing` or
+`client_build_hash_mismatch`). Executable format checks reject interpreter
+scripts, even if renamed or accompanied by a matching manifest, with
+`client_not_native_build`. Batch and command files are rejected by suffix even
+when they begin with an executable signature. PE images must have a valid DOS,
+PE, optional and section header layout with an executable entry point.
+The manifest is operator-supplied build evidence;
+synthetic controls do not establish a native GPU measurement.
+
+The checker `--verdict-out` contract is the complete
+`luminumbra.render_verdict.v1` envelope returned by `render_budget.evaluate`, with
+workload kind, profile, adapter, frames, `floor`, and `target`. The checker calls
+this envelope `floor` internally; it does not write only its nested floor block.
+The runner reconciles the envelope with the capture and selected cell. A real
+checker success with a passing floor produces a passing cell, even when aggregate
+qualification prerequisites remain unmet.
+
+The child writes to a private per-invocation capture directory. The runner
+publishes and checks that capture only after the process receipt records a
+successful return, successful retention, the exact spawned capture path and a
+SHA-256 matching both the private capture and retained bytes. The published
+artifact must match those bytes. An existing public artifact without this
+ownership evidence fails the cell before the checker runs.
+
+The aggregate records `matrix.sha256`, `matrix.canonical_sha256` and
+`matrix.canonical`. These are SHA-256 hashes of UTF-8 JSON with sorted object keys
+and compact separators, covering every matrix field, including poses and their
+provenance. The canonical hash is computed from the committed repository matrix.
+A different `--matrix` path makes every cell's `matrix_canonical` false, including
+a byte-identical copy; changed content is also noncanonical. Such runs include
+`non_canonical_matrix` in `render_floor_qualified_reasons` and cannot qualify.
+
+`render_floor_qualified` additionally requires all 36 canonical cells, the
+canonical checker, matching RTX 5070 Ti adapter identities, passing capture/floor
+checks, declared display refresh and manifest-bound native clients.
+`expanded_qualified` remains false until the far-world evidence is available.
+Unqualified records retain `qualification_status: "NEEDS-NATIVE-RUN"` and explicit
+`render_floor_qualified_reasons`. The committed matrix still has unrecorded fixed
+poses and blocked traversal workloads; completing diagnostic tests cannot
+qualify it. Missing acceptance evidence is never inferred from passing tests.
+
 ## Process failure and shutdown evidence
 
 Each `test_render_runner.py` child keeps its original 180-second process deadline,
@@ -289,18 +500,36 @@ old outputs are retired before another invocation, preventing stale evidence.
 
 The adjacent `<test-method>-<case>.process.json` has schema
 `luminumbra.render_runner_process.v1`. It records the exact command array, cwd,
-binary path and SHA-256, the 180-second limit, monotonic process elapsed seconds,
+binary path and SHA-256, the 180-second limit, high-resolution process elapsed seconds,
 and outcome `returned`, `timed_out` or `spawn_error`. `return_code` is null when no
 exit status was returned; exception type/message describe timeout or launch
 failure. Binary identity is null if the executable could not be read, and elapsed
-time is null if execution was never attempted. Hashing and evidence finalization
+time is null if execution was never attempted. Elapsed time uses `perf_counter()`
+around the process call. Hashing and evidence finalization
 are outside the recorded process interval. No capture-completion timestamp or
 teardown duration is inferred from these receipts.
+
+Both receipt producers resolve the executable to its real path and verify its
+device/file identifier, size, nanosecond modification/change times and SHA-256
+before and after execution. The original directory preserves runtime library
+discovery. `binary_identity_status` is `verified` after a matching final check;
+a changed or unreadable executable at the final check records `changed`, clears `binary_sha256`,
+adds an evidence error and fails the invocation. Captures remain diagnostic
+evidence on this failure. An existing process exception retains priority.
+Bare executable names search only absolute, nonempty PATH entries.
+
+The parameterized runner holds output locks through executable verification,
+capture retention and receipt publication. Lock identities resolve directory
+aliases and, on Windows, long destination names and case aliases.
+Generated qualification checker commands include `--enforce-floor` for the
+16.67 ms frame-wall p99 limit. Requested poses are rounded to float32 before
+comparison with client camera and streaming positions; the absolute comparison
+tolerance stays unchanged.
 
 `capture_status` is `retained`, `missing`, `invalid_json`, `read_error` or
 `write_error`; retained bytes have a path and SHA-256. A retained document with an
 unsupported schema remains diagnostic evidence and still fails normal validation.
-`evidence_errors` records persistence failures where a receipt can be written;
+`evidence_errors` records verification or persistence failures where a receipt can be written;
 receipt-write failures are reported to stderr. Evidence errors never replace the
 original timeout, launch error or validation assertion. A normally returning
 process cannot silently succeed when required evidence persistence failed.
@@ -323,3 +552,307 @@ written only at final shutdown. Its existing final `jobs_drained` and optional
 default, workload, timeout, queue policy or save behavior changes. These
 diagnostics localize a future wait; they do not establish the cause of the UCRT
 timeouts or a fix for the original `0xCFFFFFFF` incident.
+
+Shipping rendering enables vsync, TAAU and tier-1 volumetrics. Benchmark startup
+forces vsync off and the frame cap to unlimited, regardless of saved settings.
+The same presentation override applies throughout `--scenario` and `--profile-fly`
+runs, including live settings edits; it does not modify the saved choices.
+Players can set `user.video.vsync` (boolean, existing default on) and
+`user.video.frame_cap` (integer: 0 for unlimited, 30, 60, 120, 144, 165 or 240; default 0)
+through the settings screen. Invalid fields retain their previous/default values.
+The client limiter uses `steady_clock` and sleeps before spinning to its deadline.
+Windows prefers a high-resolution waitable timer. If unavailable or a wait fails,
+the fallback requests 1 millisecond timer resolution and releases the request at
+shutdown. If that request fails, it uses the queried system timer tick (or a
+15.625 millisecond default). It sleeps in whole coarse quanta that fit before the
+deadline and yields for the final sub-tick remainder. A failed high-resolution
+wait switches to this policy in the same frame. Other platforms and the
+high-resolution timer reserve 200 microseconds. Deterministic virtual-clock tests
+qualify the pacing policy only; native `SteadyFrameTiming` timer and sleep behavior
+remains unqualified until measured on Windows. Its wait runs
+before the frame work timers and is excluded from CPU/work buckets; benchmark
+wall timing has no cap wait because measurement always runs uncapped.
+
+Spatial parity, upscale seam and terrain AOV captures
+explicitly disable TAAU and record zero jitter; normal-default captures retain the
+temporal path. Validators accept preset revisions 6, 7 and 8. The shipping hills traversal
+now declares revision 8 and sampling revision 2. Its preset identity was regenerated
+with the canonical checksum oracle; the terrain content identity is unchanged.
+See the provenance beside `surface-flight.traversal`.
+
+## Continuous CPU attribution (issue #387)
+
+Detailed CPU attribution is off by default. `--frame-attribution` enables the
+frame collector, foliage stage timings, work counters and the `foliage-split`
+slow-frame log. Disabled collectors and stage timers take a branch without clock
+reads. This applies to gameplay, preview/menu and qualification callers alike.
+
+`--frame-attribution-csv` also enables that collection and writes every presented
+frame to `logs/frame-attribution.csv` in the process working directory, independently of
+benchmark warmup, the 12 ms slow-frame threshold and the 400-line log window.
+It is off by default, replaces the previous session's CSV, streams through a
+bounded buffer and closes on normal exit. It does not change vsync or the frame
+cap; “uncapped” refers to the recording duration and number of rows.
+
+The frame interval runs from loop entry through buffer swap. Its exclusive
+buckets are sim, stream, render submission, present, foliage rebuilds,
+scatter input preparation, plant rebake, event polling, residual menu work and
+residual UI work, together with the phases below. Rebuilds from preview and QA
+callers also enter the foliage bucket; any nested rebuild time is subtracted
+from its render, menu or poll parent. SLOWFRAME preserves its existing
+field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
+`other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
+remains rebuild time only.
+
+The CSV has 63 fields. Existing fields retain their zero-based indices; only
+`dirty_columns` is appended, at index 62, after all terrain, water and phase fields.
+Within each range below, columns appear in the listed order:
+
+| Indices | Columns |
+|---|---|
+| 0–12 | `frame`, `frame_ms`, `sim_ms`, `stream_ms`, `render_ms`, `present_ms`, `foliage_ms`, `scatter_ms`, `rebake_ms`, `poll_ms`, `menu_ms`, `ui_ms`, `other_ms` |
+| 13–21 | `signature_ms`, `sort_ms`, `surface_ms`, `repack_ms`, `hash_ms`, `upload_ms`, `palette_scratch_ms`, `dispatch_ms`, `cpu_fallback_ms` |
+| 22–29 | `rebuild_calls`, `reason_mask`, `admitted_columns`, `surface_misses`, `deferred_columns`, `copied_bytes`, `hashed_bytes`, `uploaded_bytes` |
+| 30–36 | `scratch_bytes`, `backlog`, `path`, `fallback`, `instance_capacity`, `generated_count`, `count_generation` |
+| 37–43 | `terrain_work_ms`, `terrain_overshoot_ms`, `terrain_attempts`, `terrain_adopted`, `terrain_work_bytes`, `terrain_byte_overshoot`, `terrain_pending` |
+| 44–50 | `water_work_ms`, `water_overshoot_ms`, `water_attempts`, `water_adopted`, `water_work_bytes`, `water_byte_overshoot`, `water_pending` |
+| 51–61 | The phase columns below |
+| 62 | `dirty_columns` |
+
+Issue #402's CPU wall-time phase columns follow the terrain and water fields,
+at indices 51–61, in order:
+
+| Column | Work measured |
+|---|---|
+| `ui_update_ms` | RmlUi layout/update |
+| `ui_render_ms` | RmlUi rendering, excluding nested phases |
+| `ui_filters_ms` | UI filter submission, including blur |
+| `menu_scene_ms` | Scenic menu and preview scene rendering or cached-image presentation |
+| `preview_adoption_ms` | Adopting a completed preview world |
+| `document_load_ms` | Synchronous UI document loading |
+| `texture_load_ms` | UI texture loading and upload |
+| `shader_load_ms` | Shader source loading, compilation and linking |
+| `shader_first_use_ms` | First program binding and first draw/dispatch submission, including raw compute programs |
+| `world_create_callback_ms` | Synchronous world-creation callback work |
+| `world_load_callback_ms` | Synchronous world-loading callback work |
+
+These phases are exclusive: an enclosing phase excludes its nested phases and
+direct foliage rebuild time. `render_ms`, `menu_ms`, `poll_ms` and `ui_ms` now
+exclude the phases completed inside each measured parent. `foliage_ms` likewise
+excludes shader load/first-use phases completed inside a rebuild. In particular,
+`menu_ms` no longer includes attributed scenic/preview or RmlUi work, `ui_ms`
+excludes the separate in-game RmlUi phases (and still includes final ImGui work),
+and `poll_ms` excludes attributed synchronous world callbacks. `other_ms` also
+excludes all appended phases. The corrected identity is:
+
+```text
+frame_ms = sim_ms + stream_ms + render_ms + present_ms + foliage_ms
+         + scatter_ms + rebake_ms + poll_ms + menu_ms + ui_ms
+         + ui_update_ms + ui_render_ms + ui_filters_ms + menu_scene_ms
+         + preview_adoption_ms + document_load_ms + texture_load_ms
+         + shader_load_ms + shader_first_use_ms
+         + world_create_callback_ms + world_load_callback_ms + other_ms
+```
+
+CSV rounding can introduce a small difference. The remainder is not clamped:
+a negative value exposes overlapping inputs. These are CPU submission costs;
+first-use collection adds no GPU waits or readbacks.
+
+Foliage stage times are CPU wall time, including GL submission calls, without
+GPU waits or new readbacks. `signature_ms` includes polling existing evidence
+and early-out handling. `surface_ms` covers complete uncached column builds
+(including CPU placement in fallback), never individual candidate timers.
+`repack_ms` covers GPU column ordering and slot preparation excluding surface builds.
+`cpu_fallback_ms` is inclusive of its surface builds and mapped uploads; do not
+add it to those sub-times. Palette/scratch time includes null-data storage
+allocation; `scratch_bytes` records that allocation separately from actual
+`uploaded_bytes`. The final `dirty_columns` field counts surface-slot uploads,
+including reconstruction after storage growth or compute-resource recreation.
+Unchanged columns transfer zero surface bytes. Copy bytes include the sorted
+working copy, column metadata, dirty-slot batch scratch, completed readback
+snapshots and CPU emitted/mapped records; hash bytes describe
+the unchanged evidence input hash. Frozen qualification rebuilds are identified
+as `frozen_gpu`; their submission time includes output clears and existing
+readback submission, including the first rebuild started by qualification.
+
+Surface storage uses deterministic free-list reuse and geometric growth up to
+512 slots (64 MiB). Exceeding the admitted-column cap uses the existing CPU
+fallback for that frame. Growth and compute-resource recreation rebuild slots
+from the CPU surface cache. Palette and scratch storage persist between builds;
+column and slot-order metadata share one bounded 18 KiB buffer and upload only
+when changed. Adjacent dirty runs of three or more slots share a transfer using
+bounded CPU scratch; runs of one or two keep direct per-slot transfers. Clean
+slots are never copied or transferred. Evidence hashes retain
+the logical full-build byte order independently of physical slot assignment.
+
+`reason_mask` combines: 1 initial build, 2 config (enabled, evidence phase,
+quantized gate wind, fade or density), 4 camera cell, 8 ground revision,
+16 scatter chunks, 32 pending backlog. Components mirror the existing signature;
+they do not introduce invalidation. `admitted_columns` counts columns included
+in the selected build after culling and budgeting; `surface_misses` counts
+uncached column builds. `deferred_columns` counts budget deferrals encountered
+before the existing capacity stop; `backlog` is the existing pending-work flag.
+Early-outs report zero rebuild work and `reused_gpu` or `reused_cpu`; an existing
+readback consumed before the early-out still contributes its copy bytes.
+`fallback` distinguishes GPU disabled/unavailable, missing resources and the
+GPU column capacity limit. No readback is enabled by recording.
+
+`instance_capacity` is storage capacity, never a generated count. The CSV's
+`generated_count` and `count_generation` are empty when no count is known.
+The per-frame stage times and work counters aggregate all calls on the render
+thread; `rebuild_calls` reports the number of invocations, reason bits and backlog
+are ORed, and differing path/fallback tokens become `mixed`. The instance
+snapshot belongs to the last invocation in that frame. With no invocation,
+capacity is zero and the generated count is empty. Each pass also exposes its
+last collected invocation's diagnostic without affecting its rebuild decision.
+
+Use the dedicated `profile` variant for Tracy captures (issue #395):
+
+```sh
+cmake --preset profile
+cmake --build --preset profile --target luminumbra_client_app
+```
+
+This uses `RelWithDebInfo`, frame pointers, and `LUMINUMBRA_ENABLE_TRACY=ON`
+in `build/profile`. Start a matching Tracy viewer and launch the client from that
+build. Tracy runs on demand, recording when the viewer connects. Configuring this
+variant fetches the upstream source; for offline use, supply an already
+provisioned checkout with `-DFETCHCONTENT_SOURCE_DIR_TRACY=/path/to/tracy`.
+The fetch settings in `cmake/tracy.cmake` pin Tracy v0.13.1 to an exact
+upstream revision; check out that same revision for offline use. Tracy uses the BSD-3-Clause licence; its verbatim notice is in
+[Third-party licenses](https://github.com/d-addison/luminumbra/blob/devel/THIRD_PARTY_LICENSES.md#tracy-v0131) and must accompany
+redistributed Tracy-enabled binaries.
+
+The `perf`, default, debug and release configurations disable Tracy. Their event
+macros expand to nothing, discard arguments, and add no profiler symbols,
+allocations, threads, dependency links or Tracy network fetch. Use `perf` for
+uninstrumented benchmark results and determinism gates. The shared worker library
+and client/server consumers inherit the same profiling definition in a profile
+build.
+
+Enabled-build qualification is pending a successful native CI run. The existing
+`GNS transport / compile probe` job configures the `profile` preset and builds
+the common library, server, shipping client and QA client against the pinned
+Tracy source, plus compile-only fixtures for enabled and disabled macro forms.
+This checks Linux/GCC compilation and linking, including loader/world jobs,
+capture presentation and inline rendering headers. Source-contract checks alone
+do not qualify the enabled build. No local profile configure or application
+build has been run for this change. Windows/MSVC, Windows/GCC and macOS enabled
+builds, profiler connection/capture behaviour and GPU execution remain
+unqualified by this compile check. Release/perf determinism and measurement
+lanes continue to use Tracy disabled.
+
+Stable timeline names include `Client frame` (scope begin/end, including early
+exit), the `Client` frame mark, `Worker job execution`, and `Job queue delay (ms)`.
+Capture-only rendering uses `Client capture frame` and `Client capture` marks.
+The queue plot measures from ring insertion to execution start for both priority
+lanes and both single and batch dispatch. Its timestamp storage and clock reads
+exist only in profile builds. Worker thread names identify the job pool, world
+preview, audio propagation and saved-world catalog workers. Disposable TCP accept
+threads retain their `TCP accept worker job` zone without explicit thread names,
+which Tracy retains for the process lifetime.
+
+`Job queue lock wait`, `Job completion lock wait`, `World chunks lock wait`,
+`Chunk state lock wait`, `Worldgen epoch lock wait`, the hydrology and far-build
+lock zones cover acquisition only. Condition waits, job completion waits, TCP
+future waits and `Client present wait` have separate scopes. File zones cover
+world/save reads, durable writes and replacement on Windows and POSIX, and both
+preset loading paths. `Shader compile` and `Shader link` cover driver calls in
+the material, compute, foliage, impostor and both UI shader paths.
+
+`GL <PassClass>.execute*` zones measure CPU submission for each major pass,
+including offscreen/preview consumers. Depth blits and opaque snapshots have
+their own `GL` zones. These complement the existing foliage rebuild/upload zones
+and frame-attribution buckets. GPU elapsed times still come from the existing
+asynchronous GPU queries; CPU submission zones do not imply GPU completion.
+All profiling values are observational: scheduling, wait predicates, simulation
+ordering and authoritative decisions never consume them.
+
+Completed GPU counts are only exposed with readback active and a matching build
+generation. Ordinary and frozen rebuilds clear the known count until that
+generation's readback completes; empty builds have a known zero count. Retained
+blade snapshots keep their own source generation for qualification. CPU fallback
+counts are available directly. Disabling readback retires its submission marker;
+re-enabling retries the snapshot even when inputs are unchanged. Frozen rebuilds
+also obey the disabled readback policy. Frame scans use `luminumbra.frame_scan.v2`:
+`foliage.instances` is a nonnegative integer when known (including zero), or
+`null` when unavailable. Readers must preserve unknown counts rather than
+coercing them to zero. `foliage.instance_capacity` is storage capacity, never a
+substitute count. The overlay labels capacity explicitly.
+
+Terrain and water adoption (issue #390) uses independent presentation budgets.
+The named, compile-time validated defaults in `rendering/UploadBudget.h` are:
+
+| Queue | Payload bytes/frame | Attempts/frame | Progress floor | Time/frame |
+| --- | ---: | ---: | ---: | ---: |
+| Terrain | 4 MiB | 8 | 1 | 3 ms |
+| Water | 1 MiB | 8 | 1 | 1 ms |
+
+Valid ranges are 1 byte through 64 MiB, 1 through 64 attempts, a floor from 1
+through the count limit, and 0.1 through 16 ms. The time interval starts before
+candidate discovery, lifecycle cleanup and ordering. Terrain also charges the
+shared snapshot preparation. Payload copying, foliage ground-query construction
+and GPU submission are inside the same interval. The byte cost is the checked
+vertex-plus-index payload size, charged once per attempt before copying, even
+when an attempt fails. It is separate from driver storage capacity and the
+existing counters for successful payload copies.
+
+After the progress floor, another upload starts only if its entire payload fits
+the remaining byte budget and the time budget has not expired. The count ceiling
+is unconditional. An indivisible upload can exceed time; the progress floor can
+also exceed bytes. Both overshoots are measured, including preparation that has
+already exceeded the time limit before the first attempt. A valid pending upload
+therefore always gets at least one attempt; a failed or superseded payload is
+retried without blocking other pending work. New arrivals are ordered by distance,
+new before replacement, then chunk ID. Existing pending work retains FIFO position,
+including when refreshed to a newer version, so nearer arrivals cannot starve it.
+
+Resident terrain and its foliage support stay available while replacements wait;
+pool growth allocates before releasing the old slice. Water uses a staging slot
+and publishes it only after both writes and attribute validation succeed, retaining
+the old buffers on failure in both Legacy and Ladder modes. The presented water
+version supplies both draw eligibility and far-water ownership while a replacement
+waits, preventing overlapping live and far surfaces. Empty water replacements use
+the same bounded adoption queue and remove the resident draw when adopted.
+The spare-water-slot cache remains bounded at 1024 entries. These queues never gate
+world publication, activation, collision readiness, water simulation or hashes.
+Legacy and Ladder far-tile integration retain their separate existing policies.
+
+The attribution CSV appends `terrain_` and `water_` fields for `work_ms`,
+`overshoot_ms`, `attempts`, `adopted`, `work_bytes`, `byte_overshoot` and `pending`.
+They aggregate every integration call in a presented frame, including menu and
+preview calls. Pending is the sum of each call's remaining backlog observations,
+not a global count of unique chunks. These are inclusive sub-measurements of the
+existing render/menu buckets; do not add their times again to the exclusive frame
+sum. Coverage frame observations expose the same work statistics per integration;
+the benchmark's final streaming record includes its settled status and limits.
+
+Benchmark warmup is a minimum: its final warmup frame waits for both upload queues
+to settle. Scene captures, survey stations, world visual sweeps, frame scans, parity captures,
+benchmark screenshots and terrain AOVs also wait for adoption. Traversal's measured
+frames keep normal budgets and include backlog; its final capture waits again.
+Use `--frame-attribution-csv` during fixed-view and traversal benchmarks to compare
+settled zero-adoption frames against per-frame streaming work and overshoot.
+Additional settling does not advance traversal ticks or measured frame IDs.
+The benchmark records extra presented settling frames in `upload_settling_frames`
+(`warmup` and `capture`), separately from the requested minimum `warmup_frames`.
+The held final benchmark warmup and report frames, standalone capture waits and
+synchronous survey/sweep upload drains advance both upload lanes with the same
+limits, but defer scene preparation after adoption and omit GPU drawing while
+either queue remains pending. The frame that reaches residency draws normally
+before warmup completes or capture proceeds. This avoids repeating a full
+software-rendered scene for each single-upload progress pass. Required settling
+frames, every measured frame, interactive rendering and previews draw normally;
+there is no software-renderer exemption from the upload budget.
+
+Settling uses work counts, with no clock input to world state. The initial pending
+terrain-plus-water backlog allows one render pass per item. Work published by a
+render pass adds one pass per observed arrival, up to 8192 arrivals per wait;
+continuous publication beyond this allowance fails explicitly. Successful adoptions
+are counted when detecting arrivals, including when the backlog stays level or
+shrinks. Persistent failures consume the remaining passes. The same policy covers
+synchronous qualification drains and presented warmup/capture waits. Failure returns
+an incomplete result, writes a failed capture record where applicable, and exits
+standalone captures with a nonzero status. The existing frame-scan watchdog remains
+in effect. AOV observations are capped at the requested warmup plus measured frames
+and one capture frame (at most 8192 records); settling retries do not append records.

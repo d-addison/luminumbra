@@ -14,6 +14,7 @@ import subprocess
 from typing import Any
 
 from fixture_hash import fixture_hash
+from fixture_paths import read_text, resolve_reference
 
 
 PRESETS = ("default", "mountains", "archipelago")
@@ -30,6 +31,14 @@ def integer(value: Any) -> bool:
     return type(value) is int and 0 <= value < 2**64
 
 
+def shipping_simulation_gates() -> tuple[str, ...]:
+    """Use the shipping systems document, ignoring its explanatory comment entries."""
+    path = resolve_reference(Path(__file__).resolve().parents[2] / "data/common", "systems.json")
+    systems = json.loads(read_text(path.parent, path, encoding="utf-8-sig"))
+    return tuple(sorted(name for name, gate in systems["sim"].items()
+                        if isinstance(gate, dict) and "enabled" in gate))
+
+
 def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) -> None:
     """Ignore unknown object keys; refuse incomplete, corrupt or future evidence."""
     for field in ("world_hash", "world_hash_replay"):
@@ -42,6 +51,10 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
             or data.get("passed") is not True
             or data.get("world_hash") != data.get("world_hash_replay")):
         raise ValueError("smoke identity, tick count or replay verdict mismatch")
+    effective = data.get("effective_simulation")
+    required = shipping_simulation_gates() + ("finite_hydrology", "weather_rain")
+    if not isinstance(effective, dict) or any(effective.get(key) is not True for key in required):
+        raise ValueError("capture did not activate the shipping simulation defaults")
     budget = data.get("sim_budget")
     if not isinstance(budget, dict) or budget.get("schema") != "luminumbra.sim_budget.v2":
         raise ValueError("missing or unsupported sim_budget schema")
@@ -93,7 +106,8 @@ def command(binary: Path, root: Path, artifact: Path, preset: str,
             seed: str, ticks: int, radius: int, collision_radius: int) -> list[str]:
     return [str(binary), "--root", str(root), "--smoke", "--no-audio", "--sim-budget",
             "--ecology-roster", "--planted-roster", "--preset", preset, "--seed", seed,
-            "--ticks", str(ticks), "--radius", str(radius), "--collision-radius",
+            "--ticks", str(ticks), "--autosave-ticks", "30", "--radius", str(radius),
+            "--collision-radius",
             str(collision_radius), "--artifact", str(artifact)]
 
 
@@ -123,6 +137,12 @@ def main() -> int:
         parser.error(f"evidence directory already exists: {evidence}")
     if not args.seed:
         parser.error("seed must be explicit and nonempty")
+    try:
+        common_hash = fixture_hash(resolve_reference(root, "data/common"), scope="headless-server")
+        preset_hash = fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
+                                   reference_root=resolve_reference(root, "data"))
+    except (OSError, ValueError) as exc:
+        parser.exit(1, f"Capture refused: {exc}\n")
     evidence.mkdir(parents=True)
     binary_digest = hashlib.sha256()
     with binary.open("rb") as stream:
@@ -133,7 +153,8 @@ def main() -> int:
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
         "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)),
         "binary_sha256": binary_digest.hexdigest(),
-        "fixture_hash": fixture_hash(root / "data/common", scope="headless-server"),
+        "fixture_hash": common_hash,
+        "preset_hash": preset_hash,
         "seed": args.seed, "ticks": args.ticks, "surface_radius": args.radius,
         "collision_radius": args.collision_radius, "runs": [],
     }
@@ -145,9 +166,14 @@ def main() -> int:
             print(f"Capturing {preset}: {args.ticks} ticks per replay", flush=True)
             with (evidence / f"{preset}.log").open("wb") as log:
                 subprocess.run(argv, cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
-            data = json.loads(artifact.read_text(encoding="utf-8-sig"))
+            data = json.loads(read_text(evidence, resolve_reference(evidence, artifact.name), encoding="utf-8-sig"))
             validate_artifact(data, preset, args.seed, args.ticks)
             manifest["runs"].append({"preset": preset, "artifact": artifact.name, "command": argv})
+        final_common_hash = fixture_hash(resolve_reference(root, "data/common"), scope="headless-server")
+        final_preset_hash = fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
+                                         reference_root=resolve_reference(root, "data"))
+        if (final_common_hash, final_preset_hash) != (common_hash, preset_hash):
+            raise ValueError("fixture hashes changed during capture")
         (evidence / "capture.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"Capture refused: {exc}; incomplete evidence retained in {evidence}\n")

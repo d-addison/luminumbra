@@ -8,7 +8,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "rendering/Camera.h"
-#include "rendering/FarLodSystem.h" // farlod()->stats() in build_state_json
+#include "rendering/FarLodSystem.h" // retained Legacy compatibility telemetry
 #include "rendering/RenderPipeline.h"
 
 #include <algorithm>
@@ -114,10 +114,10 @@ bool MemoryWatermarkExceeded(const RuntimeScenarioConfig& config,
     return measured_bytes > config.memory_watermark_mb * 1024ull * 1024ull;
 }
 
-RuntimeStateRecorder::RuntimeStateRecorder(RuntimeScenarioConfig config,
-                                           std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
+RuntimeStateRecorder::RuntimeStateRecorder(
+    RuntimeScenarioConfig config, std::unique_ptr<Luminumbra::Rendering::Camera>& camera_ref)
     : m_config(std::move(config))
-    , g_camera(g_camera)
+    , g_camera(camera_ref)
     , m_started_at(std::chrono::steady_clock::now()) {
     std::error_code ec;
     std::filesystem::create_directories(m_config.artifact_dir, ec);
@@ -451,8 +451,11 @@ RuntimeStateRecorder::build_state_json(const std::string& phase,
         state["resize_generation"] = render_pipeline->resize_generation();
         state["upload_queue"] = UploadStatsToJson(render_pipeline->get_last_mesh_upload_stats());
         state["render_pass"] = RenderPassStatsToJson(render_pipeline->get_last_render_pass_stats());
-        // Far-LOD scheduler telemetry (, FarLodHorizon gate inputs).
-        if (const auto* farlod = render_pipeline->farlod()) {
+        // D value schema includes immutable water readiness and submitted subtotals.
+        state["far_world"] =
+            Luminumbra::Rendering::FarWorldDiagnosticJson(render_pipeline->far_world_diagnostic());
+        // Historical counters are Legacy evidence, never Ladder qualification.
+        if (const auto* farlod = render_pipeline->legacy_far_compatibility()) {
             const auto& farlod_stats = farlod->stats();
             state["farlod"] = {
                 {"enabled", farlod_stats.enabled},
@@ -489,11 +492,11 @@ RuntimeScenarioFrameRecorder::RuntimeScenarioFrameRecorder(
     bool enabled,
     int coverage_radius,
     std::filesystem::path output_dir,
-    std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
+    std::unique_ptr<Luminumbra::Rendering::Camera>& camera_ref)
     : m_enabled(enabled)
     , m_coverage_radius(std::max(0, coverage_radius))
     , m_output_dir(std::move(output_dir))
-    , g_camera(g_camera)
+    , g_camera(camera_ref)
     , m_started_at(std::chrono::steady_clock::now()) {}
 
 bool RuntimeScenarioFrameRecorder::enabled() const {

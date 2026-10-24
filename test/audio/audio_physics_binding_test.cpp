@@ -2,9 +2,8 @@
 //
 // FrameAudio::UpdateListenerEnvironment calls MiniaudioManager::SetPhysicsSystem on
 // every in-game frame so that a world (re)load rebinds the occlusion raycaster without
-// extra plumbing. Before the fix the call logged an INFO line unconditionally, i.e. one
-// synchronous logger write per rendered frame on the render thread (the PID 66604
-// session logged that line 77,659 times). The binding must be edge-triggered: the log
+// extra plumbing. The binding must be edge-triggered to avoid synchronous logger
+// writes per rendered frame on the render thread for unchanged bindings. The log
 // record is emitted only when the binding changes, which the manager exposes as a
 // change counter so the test does not have to intercept the shared logger.
 //
@@ -90,4 +89,22 @@ TEST(AudioPhysicsBinding, CountsOnlyPointerChanges) {
     manager.SetPhysicsSystem(nullptr);             // world unloaded
     manager.SetPhysicsSystem(nullptr);
     EXPECT_EQ(manager.physics_binding_changes(), 3u);
+}
+
+TEST(AudioPhysicsBinding, FailedDeviceInitializationReportsUnavailableAndSuppressesPlayback) {
+    auto previous = Log::GetCoreLogger();
+    Log::GetCoreLogger() =
+        std::make_shared<spdlog::logger>("AUDIO_FAILURE_PROBE", std::make_shared<CountingSink>());
+    Luminumbra::Client::MiniaudioManager manager(".");
+    const bool initialized =
+        manager.Init([](const ma_engine_config*, ma_engine*) -> ma_result { return MA_NO_DEVICE; });
+    Log::GetCoreLogger() = previous;
+    EXPECT_FALSE(initialized);
+    EXPECT_FALSE(manager.IsPlaybackEnabled());
+    manager.SetMasterVolume(1.0f);
+    manager.SetMusicVolume(1.0f);
+    manager.SetSfxVolume(1.0f);
+    EXPECT_FALSE(manager.PlayOneShot2D("ui_click"));
+    manager.Shutdown();
+    EXPECT_FALSE(manager.IsPlaybackEnabled());
 }

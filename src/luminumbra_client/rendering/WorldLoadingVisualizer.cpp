@@ -1,5 +1,6 @@
 #include "WorldLoadingVisualizer.h"
 #include "core/Log.h"
+#include "rendering/AttributedGl.h"
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
@@ -10,9 +11,7 @@ WorldLoadingVisualizer::WorldLoadingVisualizer() {}
 
 WorldLoadingVisualizer::~WorldLoadingVisualizer() {}
 
-void WorldLoadingVisualizer::Startup(const std::filesystem::path& root_path,
-                                     int screen_width,
-                                     int screen_height) {
+void WorldLoadingVisualizer::Startup(const std::filesystem::path& root_path, int, int) {
     m_shader = std::make_unique<Rendering::Shader>(
         (root_path / "res/shaders/loading_hologram.vert").string().c_str(),
         (root_path / "res/shaders/loading_hologram.frag").string().c_str());
@@ -172,11 +171,23 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time,
     m_shader->setVec3("u_viewPos", m_camera->Position);
 
     glBindVertexArray(m_cube_vao);
-    glDrawElementsInstanced(GL_LINES, 24, GL_UNSIGNED_INT, nullptr, m_instance_data.size());
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawElementsInstanced, GL_LINES, 24, GL_UNSIGNED_INT, nullptr, m_instance_data.size());
     glBindVertexArray(0);
 
     glLineWidth(1.0f);
     glDisable(GL_BLEND);
+
+    DrawLoadingOverlay(status_text, progress, dispatched_chunks, total_chunks);
+}
+
+bool DrawLoadingOverlay(const std::string& status_text,
+                        float progress,
+                        int dispatched_chunks,
+                        std::size_t total_chunks) {
+    if (ImGui::GetCurrentContext() == nullptr) {
+        return false;
+    }
 
     // 4. Render overlay UI using ImGui
     ImGui::SetNextWindowPos(
@@ -197,6 +208,8 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time,
     ImGui::PopStyleVar();
 
     ImGui::End();
+
+    return true;
 }
 
 } // namespace Luminumbra::Client

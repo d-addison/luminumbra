@@ -167,6 +167,14 @@ void traversal_deterministic() {
     require(a.sample(0).position == (std::array<double, 3>{8, 80, 8}));
     require(a.sample(900).position == (std::array<double, 3>{248, 80, 8}));
     require(a.sample(1800).position == (std::array<double, 3>{488, 80, 8}));
+    for (const int revision : {6, 7, 8}) {
+        auto source = fixture("surface-flight.traversal");
+        source.replace(source.find("preset_revision 8"),
+                       std::string("preset_revision 8").size(),
+                       "preset_revision " + std::to_string(revision));
+        std::istringstream historical(source);
+        require(Traversal::read(historical).presetRevision == revision);
+    }
     refuses([&] { a.sample(-1); });
     refuses([&] { a.sample(1801); });
 }
@@ -178,7 +186,7 @@ void traversal_refusal() {
              {"tick_rate 30", "tick_rate 60"},
              {"expected_ticks 1800", "expected_ticks 1799"},
              {"seed 424242", "seed -1"},
-             {"preset_revision 6", "preset_revision 7"},
+             {"preset_revision 8", "preset_revision 9"},
              {"speed_mps 8", "speed_mps 80"},
              {"cold_cache true", "cold_cache false"},
              {"point 248 80 8", "point 8 80 8"}}) {

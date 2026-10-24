@@ -16,7 +16,8 @@ void Append(std::string& out, std::uint64_t value, unsigned width) {
 }
 std::uint64_t Hash(std::string_view bytes) {
     std::uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char byte : bytes) {
+    for (const char character : bytes) {
+        const auto byte = static_cast<unsigned char>(character);
         hash ^= byte;
         hash *= 1099511628211ull;
     }
@@ -445,7 +446,7 @@ std::string ActiveRegionLedger::payload(bool observational) const {
                            (static_cast<std::uint8_t>(r.edited) << 1) |
                            (static_cast<std::uint8_t>(r.pinned) << 2) |
                            (static_cast<std::uint8_t>(r.populated) << 3);
-        Append(bytes, flags, 1);
+        Append(bytes, static_cast<std::uint64_t>(flags), 1);
         Append(bytes, static_cast<std::uint8_t>(r.state), 1);
         Append(bytes, r.cadence_shift, 1);
         Append(bytes, r.wake_pending, 1);
