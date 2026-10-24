@@ -296,7 +296,8 @@ int RunReplay(const ServerCliOptions& options) {
                 if (live.terrain != recorded->terrain) {
                     divergence_section = "terrain";
                 } else if (live.water != recorded->water) {
-                    divergence_section = "water";
+                    divergence_section =
+                        Luminumbra::WaterHashDifferenceSection(live.water, recorded->water);
                 } else if (live.entities != recorded->entities) {
                     divergence_section = "entities";
                 } else {

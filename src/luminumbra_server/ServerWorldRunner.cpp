@@ -956,11 +956,10 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     }
 
     Persistence::WorldSaveService service;
-    //   +   hash revisionS: fold the wind AND weather sub-hashes
-    // into the top-level hash. The chunk hash itself is unchanged; the composite
-    // deliberately is not.
+    // Fold the cursor-bound chunk hash and the session's runtime sub-hashes
+    // using the shared append-only order.
     return Persistence::ComposeWorldHash(
-        service.world_hash(state),
+        service.world_hash(state, world_system->GetWaterSimWindowCursor()),
         WindSubHash(m_session.get()),
         WeatherSubHash(m_session.get()),
         AetherSubHash(m_session.get()),
@@ -971,8 +970,7 @@ std::string ServerWorldRunner::ComputeWorldHash() {
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
     // per-system sub-hashes over the SAME streamed-chunk snapshot the
-    // top-level world_hash is built from. Additive desync localization; the
-    // top-level hash (ComputeWorldHash) is unchanged.
+    // top-level world_hash is built from, including the same water cursor.
     Persistence::WorldStreamingStateSubHashes empty;
     if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
         return empty;
@@ -993,7 +991,8 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
     Persistence::WorldStreamingStateSubHashes sub =
-        Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
+        Persistence::ComputeWorldStreamingStateSubHashes(
+            state, entities_snapshot, world_system->GetWaterSimWindowCursor());
     // the wind sub-hash slot, supplied from the session's wind
     // field (not chunk-derived). Present + stable for the WindFieldDeterminism
     // gate and the desync-localization oracle.
@@ -1045,17 +1044,19 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     //   +   +  + gate-populated-world-replay +
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
-    out_world_hash = Persistence::ComposeWorldHash(service.world_hash(state),
-                                                   wind_hash,
-                                                   weather_hash,
-                                                   aether_hash,
-                                                   scent_hash,
-                                                   ecology_hash,
-                                                   plant_hash);
+    out_world_hash = Persistence::ComposeWorldHash(
+        service.world_hash(state, world_system->GetWaterSimWindowCursor()),
+        wind_hash,
+        weather_hash,
+        aether_hash,
+        scent_hash,
+        ecology_hash,
+        plant_hash);
 
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
+    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(
+        state, entities_snapshot, world_system->GetWaterSimWindowCursor());
     out_sub.wind = wind_hash;
     out_sub.weather = weather_hash;
     out_sub.aether = aether_hash;

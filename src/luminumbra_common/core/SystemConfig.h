@@ -123,6 +123,12 @@ struct SimulationIdentityValues {
     std::uint64_t region_work_limit = std::numeric_limits<std::uint64_t>::max();
     std::uint32_t region_hold_ticks = 30;
     std::uint8_t region_reduced_shift = 1;
+    // Resolved calendar, independent of whether simulation or rendering owns it.
+    std::uint32_t day_length_ticks = 162000;
+    std::uint32_t days_per_year = 8;
+    std::uint32_t daylight_numerator = 2;
+    std::uint32_t daylight_denominator = 3;
+    std::uint32_t lunar_cycle_days = 8;
 
     SimulationIdentityValues();
     [[nodiscard]] std::string ComputeIdentity() const;

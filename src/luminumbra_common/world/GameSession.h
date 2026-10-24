@@ -114,8 +114,9 @@ public:
                               const std::string& seed,
                               const std::string& worldType);
 
-    // Load an existing world from disk. Pre-adoption refusal also preserves
-    // the current world and its save eligibility.
+    // Load an existing world from disk. Catalog/preset preflight refusals preserve
+    // the current world and save eligibility. Snapshot reader refusals clear
+    // resident chunks and disable saving without publishing staged members.
     bool LoadWorld(const std::string& worldId);
 
     // Save current persistent state and metadata, including captured spawn changes.
@@ -128,7 +129,8 @@ public:
     // Persists streamed chunk voxel state under the canonical world save dir
     // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
     // plants and energy persist even when no chunks are dirty. Active-region saves
-    // also persist metadata; regions-disabled incremental saves preserve its bytes.
+    // also persist metadata; regions-disabled incremental saves reconcile the
+    // presentation calendar, otherwise preserving unmarked legacy metadata bytes.
     // A save without a prior container emits a full snapshot; later writes flush through
     // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
     // chunks, plants, energy and metadata succeed. Per-file atomic writes can persist
@@ -145,9 +147,11 @@ public:
     // called AFTER the world systems initialize but BEFORE chunk streaming
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
-    // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns true). Corrupt/incompatible snapshot refusal disables saving;
-    // a tick-boundary refusal leaves the session unchanged.
+    // edits are never clobbered by regeneration. Restores the saved water window
+    // cursor; absent metadata or an absent cursor resets it to zero. Malformed
+    // cursors refuse before changing the live cursor. A missing snapshot is a
+    // clean miss (returns true). Corrupt/incompatible snapshot refusal disables
+    // saving; a tick-boundary refusal leaves the session unchanged.
     // Latest create/open diagnostic, independent of current-world save eligibility.
     const std::string& GetWorldOpenError() const {
         return m_worldOpenError;
@@ -271,8 +275,10 @@ public:
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
-    // Computed on demand from the current effective simulation gates and tuning.
+    // Computed on demand from effective simulation gates, tuning and resolved calendar.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Pre-world admission can supply the calendar selected for the intended world.
+    [[nodiscard]] std::string SystemConfigIdentity(const WorldCalendar& calendar) const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
     // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {
@@ -403,6 +409,10 @@ public:
     [[nodiscard]] const WorldClock& GetWorldClock() const {
         return m_worldClock;
     }
+    [[nodiscard]] WorldCalendar GetRenderCalendar() const {
+        return m_activeRegionsEnabled ? m_worldClock.calendar()
+                                      : m_renderCalendar.value_or(WorldCalendar::Legacy());
+    }
     [[nodiscard]] const ActiveRegionLedger& GetActiveRegionLedger() const {
         return m_activeRegionLedger;
     }
@@ -506,8 +516,14 @@ private:
                               WorldStateSaveReport* report,
                               bool full_snapshot,
                               bool write_metadata);
+    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
+    struct LoadedWorldState;
+    bool ReadWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
+    void AdoptWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
+    // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
+    std::optional<WorldCalendar> m_renderCalendar;
     void AttachRegionEditObserver();
     RegionSchedulerConfig m_regionSchedulerConfig;
     std::optional<RegionSchedulerConfig> m_regionSchedulerOverride;

@@ -95,7 +95,8 @@ public:
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
-                                    const world::WorldClock& absent_clock = world::WorldClock{});
+                                    const world::WorldClock& absent_clock = world::WorldClock{
+                                        0, world::WorldCalendar::Legacy()});
     // Content-only projection region_content_v2: live over parked over durable records flagged
     // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
@@ -142,12 +143,15 @@ public:
                                                  std::vector<std::string>* errors = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
-    // Missing metadata is a legacy snapshot with a default clock.
+    // Missing metadata is a legacy snapshot with a pinned legacy clock and zero water cursor.
+    // A present cursor must be an unsigned integer representable by size_t.
     static bool read_clock_metadata(const std::filesystem::path& save_dir,
                                     world::WorldClock& clock,
                                     bool& requires_active_regions,
                                     std::vector<std::string>* errors = nullptr,
-                                    std::optional<Vec3>* ambient_anchor = nullptr);
+                                    std::optional<Vec3>* ambient_anchor = nullptr,
+                                    std::optional<world::WorldCalendar>* render_calendar = nullptr,
+                                    std::size_t* water_sim_cursor = nullptr);
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
@@ -283,7 +287,10 @@ public:
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format
     // independent: computed over the in-memory snapshot, never file bytes.
-    std::string world_hash(const WorldStreamingState& state) const;
+    // Supply the live cursor or the validated cursor restored from world metadata.
+    // Chunk-only legacy fixtures use the zero default.
+    std::string world_hash(const WorldStreamingState& state,
+                           std::uint64_t water_sim_cursor = 0) const;
 
     // Incremental writes: only region files containing
     // at least one dirty chunk are rewritten (all in-memory chunks of those

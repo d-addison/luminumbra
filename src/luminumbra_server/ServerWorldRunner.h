@@ -207,13 +207,13 @@ public:
     // quiesce). Returns the per-run report. Requires Boot to have succeeded.
     ServerTickReport RunFixedTicks(std::uint64_t tick_count);
 
-    // Deterministic hash over the in-memory streamed-chunk snapshot
+    // Deterministic hash over the in-memory streamed-chunk snapshot and water cursor
     // (WorldSaveService::world_hash; format-independent persistence hash).
     std::string ComputeWorldHash();
 
     // per-system sub-hashes over the SAME streamed-chunk snapshot, for
-    // desync localization. The top-level ComputeWorldHash above is unchanged;
-    // these are additive. entities hashes the deterministic avatar snapshot
+    // desync localization, including water/cursor when only the cursor differs.
+    // Zero cursors preserve legacy hashes. entities hashes the deterministic avatar snapshot
     // (empty only when no avatars are configured). Creature ecology and plants
     // have their own sub-hashes in the composite world hash.
     Persistence::WorldStreamingStateSubHashes ComputeWorldSubHashes();

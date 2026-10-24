@@ -1,6 +1,7 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
+#include "../support/CalendarMetadataCases.h"
 #include "../support/UniqueTempPath.h"
 
 #include "core/FilesystemPath.h"
@@ -23,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -897,9 +899,10 @@ TEST(WorldSaveService, EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop)
     nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion},
                                {"extension", {{"unknown", "preserved"}}}};
     clock.write_metadata(metadata);
-    const auto valid = metadata.dump();
     ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
-    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
+    ASSERT_TRUE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path()));
+    const auto valid = ReadFileBytes(save_dir.path() / "world_info.json");
+    ASSERT_EQ(nlohmann::json::parse(valid), metadata);
     EXPECT_FALSE(std::filesystem::exists(metadata_staging));
     ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
     for (const auto* invalid : {R"({"simulationTick":"invalid"})",
@@ -1317,4 +1320,144 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                   expected_digest);
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
+}
+
+TEST(WorldSaveService, WaterCursorMetadataChecksTypeAndNativeSizeBeforeConversion) {
+    const TempSaveDir save_dir("water_cursor_metadata");
+    const auto path = save_dir.path() / "world_info.json";
+    const auto read_cursor = [&](std::size_t& cursor) {
+        Luminumbra::world::WorldClock clock;
+        bool required = false;
+        return WorldSaveService::read_clock_metadata(
+            save_dir.path(), clock, required, nullptr, nullptr, nullptr, &cursor);
+    };
+    std::size_t cursor = 19;
+    ASSERT_TRUE(read_cursor(cursor));
+    EXPECT_EQ(cursor, 0u);
+    for (const auto& bytes :
+         {std::string(R"({"container_version":2})"),
+          nlohmann::json{{"container_version", 2},
+                         {"waterSimCursor", std::numeric_limits<std::size_t>::max()}}
+              .dump()}) {
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << bytes;
+            output.close();
+            ASSERT_FALSE(output.fail());
+        }
+        cursor = 19;
+        ASSERT_TRUE(read_cursor(cursor));
+        EXPECT_EQ(cursor,
+                  bytes.find("waterSimCursor") == std::string::npos
+                      ? 0u
+                      : std::numeric_limits<std::size_t>::max());
+    }
+    // Includes malformed JSON, a partial scalar, invalid types and a value
+    // beyond uint64_t. On narrower size_t hosts, also refuse a uint64_t overflow.
+    std::vector<std::string> invalid{"{",
+                                     R"({"waterSimCursor":)",
+                                     R"({"waterSimCursor":null})",
+                                     R"({"waterSimCursor":-1})",
+                                     R"({"waterSimCursor":1.5})",
+                                     R"({"waterSimCursor":1e38})",
+                                     R"({"waterSimCursor":true})",
+                                     R"({"waterSimCursor":"0"})",
+                                     R"({"waterSimCursor":18446744073709551616})"};
+    if constexpr (std::numeric_limits<std::size_t>::max() <
+                  std::numeric_limits<std::uint64_t>::max()) {
+        invalid.push_back(
+            nlohmann::json{{"waterSimCursor", std::numeric_limits<std::uint64_t>::max()}}.dump());
+    }
+    for (const auto& bytes : invalid) {
+        SCOPED_TRACE(bytes);
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << bytes;
+            output.close();
+            ASSERT_FALSE(output.fail());
+        }
+        EXPECT_FALSE(read_cursor(cursor));
+    }
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(std::filesystem::create_directory(path));
+    EXPECT_FALSE(read_cursor(cursor));
+}
+
+TEST(WorldSaveService, BothCalendarKindsAreValidatedBeforeEveryWriter) {
+    for (const auto& patch : Luminumbra::TestSupport::InvalidCalendarMetadata()) {
+        SCOPED_TRACE(patch.dump());
+        TempSaveDir save_dir("calendar_matrix");
+        auto metadata = nlohmann::json{{"container_version", 2}};
+        metadata.update(patch);
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path()));
+        EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "world_info.json"));
+        Luminumbra::world::ActiveRegionLedger ledger;
+        EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save_dir.path()));
+        std::ofstream(save_dir.path() / "world_info.json", std::ios::binary) << metadata.dump();
+        WorldStreamingState state;
+        PopulateFixtureWorld(state);
+        const auto before = metadata.dump();
+        const auto read = [&]() {
+            std::ifstream input(save_dir.path() / "world_info.json", std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(input), {});
+        };
+        EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
+        EXPECT_FALSE(WorldSaveService{}.save_dirty_chunks(state, save_dir.path()).saved);
+        EXPECT_FALSE(WorldSaveService::save_plant_entities({}, save_dir.path()));
+        EXPECT_FALSE(WorldSaveService::upsert_container_records(
+            WorldSaveService::region_file_path(save_dir.path(), 0, 0), {}));
+        EXPECT_FALSE(WorldSaveService::save_active_regions(
+            ledger, Luminumbra::world::WorldClock{}, save_dir.path()));
+        EXPECT_FALSE(
+            WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path()));
+        EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+            R"({"container_version":2,"simulationTick":0})", ledger, save_dir.path()));
+        EXPECT_EQ(read(), before);
+        EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
+    }
+}
+
+TEST(WorldSaveService, SupportedCalendarWritesNormalizeOnlyOnSuccessfulExplicitSave) {
+    for (const auto* key : {"calendar", "renderCalendar"}) {
+        TempSaveDir save_dir("calendar_normalize");
+        const auto path = save_dir.path() / "world_info.json";
+        auto metadata = nlohmann::json{{"container_version", 2}};
+        metadata[key] = key == std::string("calendar")
+                            ? nlohmann::json{{"dayLengthTicks", 36000}, {"daysPerYear", 3}}
+                            : Luminumbra::TestSupport::DefaultCalendarMetadata();
+        const std::string before = metadata.dump();
+        std::ofstream(path, std::ios::binary) << before;
+        const auto read = [&]() {
+            std::ifstream input(path, std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(input), {});
+        };
+        Luminumbra::world::WorldClock clock;
+        bool required = false;
+        ASSERT_TRUE(WorldSaveService::read_clock_metadata(save_dir.path(), clock, required));
+        EXPECT_EQ(required, key == std::string("calendar"));
+        EXPECT_EQ(read(), before);
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+        EXPECT_FALSE(WorldSaveService::save_metadata(before, save_dir.path()));
+        EXPECT_EQ(read(), before);
+        ASSERT_TRUE(WorldSaveService::save_metadata(before, save_dir.path()));
+        const auto written = nlohmann::json::parse(read());
+        EXPECT_EQ(written.at(key), metadata.at(key));
+        if (required) {
+            EXPECT_EQ(written.at(key).size(), 2u);
+            EXPECT_FALSE(written.at(key).contains("version"));
+            EXPECT_EQ(written.at(key).at("dayLengthTicks"), 36000);
+            EXPECT_EQ(written.at(key).at("daysPerYear"), 3);
+            // The two-field encoding still resolves the pinned solar/lunar values.
+            ASSERT_TRUE(WorldSaveService::read_clock_metadata(save_dir.path(), clock, required));
+            EXPECT_EQ(clock.calendar().daylightNumerator, 1u);
+            EXPECT_EQ(clock.calendar().daylightDenominator, 2u);
+            EXPECT_EQ(clock.calendar().lunarCycleDays, 8u);
+        } else {
+            EXPECT_EQ(written.at(key).at("version"), 2);
+            EXPECT_EQ(written.at(key).size(), 6u);
+            EXPECT_FALSE(written.contains("simulationTick"));
+            EXPECT_FALSE(written.contains("calendar"));
+        }
+    }
 }
