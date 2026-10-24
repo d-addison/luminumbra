@@ -331,6 +331,21 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
                          r"DrawCreatureNameplates\(")
 
+    def test_capture_day_phase_uses_calendar_without_frame_drift(self):
+        update = block(read(CLIENT / "rendering/RenderPipeline.cpp"),
+                       "void RenderPipeline::update_time_of_day(")
+        advance = compact(block(update, "if (!m_timeOfDayHold && !m_todTickDriven)"))
+        self.assertIn("m_dayLengthOverride ? m_dayLengthTicks : "
+                      "m_renderClock.calendar().dayLengthTicks", advance)
+        self.assertRegex(advance, r"if \(const auto& seconds = "
+                         r"Client::presentation_clock.capture_seconds\(\)\) "
+                         r"m_elapsedDayPhase = std::fmod\(\*seconds / m_dayDurationSeconds, 1.0\); "
+                         r"else m_elapsedDayPhase = std::fmod\(m_elapsedDayPhase \+ "
+                         r"deltaTime / m_dayDurationSeconds, 1.0\);")
+        self.assertIn("m_timeOfDay = Rendering::SolarTimeFromNoonElapsed("
+                      "m_elapsedDayPhase, m_renderClock);", advance)
+        self.assertIn("m_todTickDriven = false;", update)
+
     def test_disabled_timers_do_not_read_clocks(self):
         constructor = compact(block(self.header, "explicit StageTimer("))
         self.assertEqual(constructor, "if (m_running) m_start = std::chrono::steady_clock::now();")

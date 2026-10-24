@@ -1393,7 +1393,7 @@ bool LockstepSession::ComparePeerHash(PeerCheckpoint& checkpoint) {
     if (local->second->terrain != peer.terrain)
         section = "terrain";
     else if (local->second->water != peer.water)
-        section = "water";
+        section = WaterHashDifferenceSection(local->second->water, peer.water);
     else if (local->second->entities != peer.entities)
         section = "entities";
     EmitDesyncDump(peer.tick, section);

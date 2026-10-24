@@ -3138,23 +3138,28 @@
     {
       "id": "contract.calendar",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "statement": "The persisted clock, pinned calendar consumers, numeric bounds and tick-boundary snapshot refusals have landed unit evidence.",
+      "statement": "The default 162,000-tick calendar, solar horizons, linear indices and seasonal offsets have unit evidence on the real simulation tick path; simulation curves use integer ticks. Weather, storms, wind and aether retain their absolute tick periods. Snapshots refuse inside a batched catch-up and are taken only at tick boundaries.",
       "status": "covered",
       "requirements": [
         "dw.calendar.001",
         "dw.calendar.002",
+        "dw.calendar.024",
+        "dw.calendar.025",
+        "dw.calendar.026",
         "dw.calendar.004",
         "dw.calendar.005",
         "dw.calendar.006",
         "dw.calendar.007",
         "dw.calendar.008",
-        "dw.calendar.009",
-        "dw.calendar.010",
-        "dw.calendar.011",
-        "dw.calendar.012",
-        "dw.calendar.013",
-        "dw.calendar.014",
+        "dw.calendar.027",
         "dw.calendar.015",
+        "dw.calendar.010",
+        "dw.calendar.032",
+        "dw.calendar.011",
+        "dw.calendar.033",
+        "dw.calendar.035",
+        "dw.calendar.036",
+        "dw.calendar.020",
         "dw.calendar.016"
       ],
       "evidence": [
@@ -3168,6 +3173,46 @@
         },
         {
           "kind": "ctest",
+          "ref": "WorldClockTest.SolarHorizonsUseIntegerBoundariesAtEverySeason"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SymmetricIdentityOddDaysAndLargeIntegerProducts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SmoothSolarKnotsHaveExactPhasesAndContinuousRates"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SmoothSolarDaylightShareIsExactToOneTickInEverySeason"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StimulusSolarLightTemperatureAndOverridesPreserveFallbacks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CalendarConsumersUsePinnedPhasesOnTheRealTickPath"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DefaultCalendarContinuesAcrossSaveAndExplicitSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.BoundedWeatherRestorationMatchesStormMotionAndStrikes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
+        },
+        {
+          "kind": "ctest",
           "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
         },
         {
@@ -3176,15 +3221,7 @@
         },
         {
           "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.CalendarConsumersUsePinnedPhasesOnTheRealTickPath"
-        },
-        {
-          "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
-        },
-        {
-          "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
         }
       ]
     },
@@ -3287,7 +3324,7 @@
     {
       "id": "contract.region-cadence",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Absolute cadence, checked shifts/ticks and bounded resume keep frozen simulation content fixed.",
+      "statement": "Absolute cadence, checked shifts/ticks and bounded resume keep frozen simulation content fixed. Resume caps use one recorded elapsed calendar day (162,000 ticks for new worlds), independent of the solar daylight fraction; ARL1 bytes and timestamps are unchanged.",
       "status": "covered",
       "requirements": [
         "ar.activation.041",
@@ -3299,7 +3336,11 @@
         "ar.activation.047",
         "ar.activation.057",
         "ar.activation.058",
-        "ar.activation.059"
+        "ar.activation.059",
+        "dw.calendar.031",
+        "ar.activation.065",
+        "ar.activation.066",
+        "ar.activation.067"
       ],
       "evidence": [
         {
@@ -3313,6 +3354,10 @@
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.FrozenContentsAndCursorDoNotAdvanceAndResumeIsBounded"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.CanonicalLayoutAndObservationalExclusion"
         }
       ]
     },
@@ -3365,7 +3410,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; an integrated boundary regression with full endpoint coverage remains planned; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250. Full walking-anchor, ground-object edit and pin boundary coverage remains planned.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering`: docs/active-regions.md now agrees with the ledger's asymmetric half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers both axes; an integrated boundary regression with full endpoint coverage remains planned under issue #250. Boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence.",
       "evidence": [
         {
           "kind": "ctest",
@@ -3388,6 +3433,11 @@
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
           "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates, including the next representable float below -2^24.; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries",
+          "planned": "Add a host-boundary regression for walking anchors, ground-object edits and pins: exercise both X and Z endpoints; accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates for walking anchors and ground-object edits, including the next representable float below -2^24, with the corresponding signed region-pin bounds and rejection counters; owner: ds"
         }
       ]
     },
@@ -4401,12 +4451,11 @@
     {
       "id": "contract.ar.scope.01",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Explicit false selects the legacy clock path. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
+      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
       "status": "planned",
       "requirements": [
         "ar.scope.001",
         "ar.scope.002",
-        "ar.scope.003",
         "ar.scope.004",
         "ar.scope.005",
         "ar.scope.006",
@@ -4511,7 +4560,7 @@
     {
       "id": "contract.ar.activation.05",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Acceptance obligations: No callback consumer or catch-up is installed.",
+      "statement": "Acceptance obligations: no callback consumer or catch-up is installed.",
       "status": "planned",
       "requirements": [
         "ar.activation.060"
@@ -5065,19 +5114,50 @@
     {
       "id": "contract.calendar-pacing",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "statement": "Calendar pacing, flag-off legacy behavior and lunar-cycle limitations require dedicated evidence review.",
-      "status": "planned",
+      "statement": "Pure celestial and inverse-mapping tests cover calendar-relative sun, season and moon phases. The registered rendering clock test exercises fallback pacing, restored calendars, pins, hold and overrides with a GL context; live client rendering, environment precedence and unchanged disc/shader presentation remain pending native qualification.",
+      "status": "needs-native-run",
       "requirements": [
-        "dw.calendar.018",
-        "dw.calendar.019",
-        "dw.calendar.020",
-        "dw.calendar.021",
-        "dw.calendar.022",
-        "dw.calendar.023",
-        "dw.calendar.017",
-        "dw.calendar.003"
+        "dw.calendar.009",
+        "dw.calendar.028",
+        "dw.calendar.029",
+        "dw.calendar.030",
+        "dw.calendar.050",
+        "dw.calendar.054",
+        "dw.calendar.055",
+        "dw.calendar.056",
+        "dw.calendar.057",
+        "dw.calendar.058",
+        "dw.calendar.059",
+        "dw.calendar.060",
+        "dw.calendar.061",
+        "dw.calendar.062",
+        "dw.calendar.003",
+        "dw.calendar.023"
       ],
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "TimeOfDayModel.ElapsedSolarInverseAndCalendarRelativeCelestialSeam"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TimeOfDayModel.MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SkyCircadianAndStimulusSharePinnedCalendarPhases"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderClock.DefaultPacingAndRestoredCustomCalendarPreserveOverrides"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/gates/validate-engine-frontier.ps1",
+          "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode TimeOfDaySweep",
+          "receipt_schema": "luminumbra.timeofday_sweep.v1",
+          "planned": "Extend the visual sweep to qualify default and imported calendar pacing, marker selection, environment and direct illumination precedence, pin release and unchanged moon disc/shaders in the live client; the existing pinned sweep alone does not establish these claims.; owner: ac"
+        },
         {
           "kind": "doc",
           "ref": "docs/distant-world.md",
@@ -5160,6 +5240,189 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-metadata",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Calendar version 2 has five bounded integer parameters. Invalid members, versions, rational fractions, lunar periods and clock ticks refuse transactionally through metadata and world-open paths; the engine guide records the schema.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.034",
+        "dw.calendar.013",
+        "dw.calendar.014",
+        "dw.calendar.037"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.ConstructorChecksRationalAndLunarBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockInvalidMetadata.RefusesWithoutChangingClock"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.CalendarAndMarkerRefusalMatrixPreservesInitializedAndMetadataOnlySaves"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-compatibility",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Absent and unversioned calendars retain pinned legacy values, explicit saves select the legacy or version 2 encoding without rescaling state, and legacy clock hash bytes remain exact. Calendar identity participates in admission without changing replay layouts.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.018",
+        "dw.calendar.012",
+        "dw.calendar.019",
+        "dw.calendar.038",
+        "dw.calendar.039",
+        "dw.calendar.040",
+        "dw.calendar.041",
+        "dw.calendar.042",
+        "dw.calendar.043",
+        "dw.calendar.044",
+        "dw.calendar.045",
+        "dw.calendar.046"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LegacyMetadataRoundTripsAsExactTwoFieldV1Record"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.ExtendedSolarOrLunarParametersRetainV2Encoding"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LegacyCanonicalBytesMatchV1Exactly"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequireFeature"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnabledLegacyClockPinsEmptyEcologyFold"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CalendarIdentityRejectsDifferentResolvedCalendarsBeforeAdmission"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/system-config-identity.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.HeaderRoundtrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.EffectiveConfigIdentityRefusesDifferentRulesBeforePlayback"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-disabled",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Disabled world opens restart simulation at zero with legacy biological periods. Explicit snapshots retain the running tick while replacing the presentation calendar, including absent metadata; markers persist without requiring active regions or entering the disabled clock hash, and competing authorities refuse.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.017",
+        "dw.calendar.047",
+        "dw.calendar.048",
+        "dw.calendar.049",
+        "dw.calendar.051",
+        "dw.calendar.052",
+        "dw.calendar.053",
+        "ar.scope.003"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledKeepsLegacyMetadataBytesAndTickZeroLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledCallbacksKeepLegacySavesLoadsAndNestedTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RenderCalendarMarkerLifecycleAndSnapshotReplacement"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.UnmarkedSnapshotOverwriteRemovesRenderCalendarOnEverySavePath"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnergyWriteFailurePreservesCalendarMetadataOnEverySavePath"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-lunar-period",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "The lunar month is independent of solar phase and year length, and imported calendars use their recorded day length for the eight-day lunar period.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.021",
+        "dw.calendar.022"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LunarMonthIsIndependentOfYearAndImportsRecordedDayLength"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-speed",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Simulation speed controls retain batching and the pause through 16 times range; at ideal 16 times speed the default day lasts 337.5 seconds. Input dispatch and live pacing need dedicated regression and native evidence.",
+      "status": "planned",
+      "requirements": [
+        "dw.calendar.063",
+        "dw.calendar.064"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Add an input-dispatch regression for pause, doubling, halving and the 16 times cap, and qualify actual tick batching and day duration in the live client.; owner: ac"
         }
       ]
     },

@@ -244,7 +244,11 @@ add_executable(common_tests
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/FarEditedBake_test.cpp
+    # Snapshot cursor restoration and destination refusal cases are discovered
+    # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    # Incremental cursor layout and staged-load refusal regressions use the same discovery.
+    persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
     # Deterministic work ceilings and injected negative gates (issue #396).
     common/DeterministicWorkBudget_test.cpp
@@ -1543,6 +1547,7 @@ add_executable(frontier_gates_test
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
+    persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
 )
 
@@ -2602,6 +2607,9 @@ add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
+add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_asan_shards.py)
+set_tests_properties(AsanShardContractPython PROPERTIES TIMEOUT 60)
 add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)
 add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B

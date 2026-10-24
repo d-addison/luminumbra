@@ -34,7 +34,8 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     session.SetFiniteHydrologyEnabled(runner_config.finite_hydrology);
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
-    hello.system_config_identity = session.SystemConfigIdentity();
+    // Network hosts create a new world with this calendar, even when active regions are off.
+    hello.system_config_identity = session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{});
     try {
         nlohmann::json source;
         if (options.preset_json_override) {
@@ -136,7 +137,9 @@ ReplayRunnerConfigFrom(const ServerCliOptions& options,
                 Luminumbra::world::LoadTerrainPresetFromJson(resolved, root / "data");
             if (preset.ok &&
                 Luminumbra::Replay::ConfigurationMatches(
-                    header, identity_session.SystemConfigIdentity(), preset.preset_content_hash)) {
+                    header,
+                    identity_session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{}),
+                    preset.preset_content_hash)) {
                 config.preset_json_override = resolved.dump();
                 config.required_preset_content_hash = header.preset_content_hash;
                 return config;

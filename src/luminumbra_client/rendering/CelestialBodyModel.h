@@ -55,9 +55,10 @@ struct CelestialFrame {
     SunGeometry sun_geometry;
 };
 
+// The caller supplies the absolute celestial tick and resolved calendar month.
 inline CelestialFrame EvaluateCelestialBodies(float timeOfDay,
                                               float sunDeclination,
-                                              std::uint64_t seasonTick,
+                                              std::uint64_t celestialTick,
                                               float moonForcedOverride,
                                               std::uint64_t ticksPerLunarCycle) {
     CelestialFrame frame;
@@ -80,7 +81,7 @@ inline CelestialFrame EvaluateCelestialBodies(float timeOfDay,
     frame.moon.day_factor = 0.0f;    // the moon is the night key
     frame.moon.sky_dome_day_factor = 0.0f;
     frame.moon.illumination =
-        ComputeMoonIllumination(seasonTick, moonForcedOverride, ticksPerLunarCycle);
+        ComputeMoonIllumination(celestialTick, moonForcedOverride, ticksPerLunarCycle);
     return frame;
 }
 
