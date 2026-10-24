@@ -337,42 +337,80 @@ record omission in the table applies without losing that phase.
 
 ## Simulation clock and calendar
 
-One persisted absolute tick base continues across save and load. Day length is
-216,000 ticks (two hours at 30 Hz) and a year is 8 days (16 hours) for
-calendar consumers and the rendered sky. Explicit calendars retain their saved
-pacing; shorter render days remain available as debug overrides.
+One persisted absolute tick base continues across save and load. New worlds
+use a 162,000-tick day (90 minutes at 30 Hz): about 60 minutes of geometric
+daylight and 30 minutes of night, set by the reduced fraction 2/3. Sunrise,
+noon and sunset occur at ticks 27,000, 81,000 and 135,000. The eight-day year
+and independent eight-day lunar month each last 1,296,000 ticks (12 hours).
+Seasonal tilt changes peak elevation while horizon times remain fixed.
 
-| Consumer | Legacy period without the calendar | Calendar period |
+| Consumer | Legacy period with active regions disabled | Enabled calendar input |
 |---|---|---|
-| Plant light (`GameSession.cpp`) | 36,000-tick day | Calendar day |
-| Plant season (`GameSession.cpp`) | 288,000-tick year (8 days) | Calendar year |
-| Circadian slot (`GameSession.cpp`) | 36,000-tick day | Calendar day |
-| Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |
-| Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |
-| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 216,000-tick day, 432,000-tick season | Calendar day and year |
+| Plant daily light | 36,000-tick day | Midnight-origin solar phase |
+| Plant annual temperature | 288,000-tick year | Linear calendar year |
+| Circadian activity | 36,000-tick day | Midnight-origin solar phase |
+| Migration | 108,000-tick year | Calendar spring phase |
+| Stimulus time-of-day, daily temperature, fallback light | 7,200-tick day | Midnight-origin solar phase |
+| Stimulus season | 432,000-tick year | Calendar spring phase |
+| Rendered sun | Selected rendering calendar; legacy noon origin | Solar phase shifted by 1/2 to sky noon origin |
+| Rendered season | 432,000-tick year | Calendar spring phase |
+| Rendered moon | Selected rendering calendar month | Calendar day length × independent lunar days |
+| Weather, storms, wind, aether | Absolute tick periods | Unchanged absolute tick periods |
+| Resume cap | No enabled scheduler | One recorded calendar day |
 
-One physical origin governs every consumer: tick zero is midnight of day zero
-in midwinter, which is the origin the plant and circadian formulas use today;
-the rendered sky, migration and stimulus channels adopt the same origin with
-explicit per-consumer offsets, and a test asserts that sky, plant and
-circadian phases agree at a set of pinned ticks.
+Linear day/year phases and indices remain elapsed time. The solar phase warps
+the elapsed day continuously through midnight 0, sunrise 1/4, noon 1/2 and
+sunset 3/4, using integer comparisons and ratios before conversion to double.
+The symmetric 1/2 path retains the original arithmetic. Seasons keep the
+midwinter origin for annual plant temperature and spring offset for migration,
+stimulus and sky. Simulation uses no wall-clock accumulation for these curves.
 
-The clock metadata (`simulationTick`, `calendar`) is validated strictly: absent
-keys mean tick zero and the pinned defaults; `dayLengthTicks` must be an integer
-in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an
-unsigned integer below 2^62, and the products day × year and tick + catch-up
-clamp are overflow-checked; anything else refuses the world as corrupt metadata.
-Calendar phase origins equal today's formulas (phase = tick modulo period from
-tick zero), so the plant season still starts at its cold minimum. Snapshots are
-taken only on tick boundaries, never inside a batched client catch-up.
+Calendar version 2 records five integer parameters: day ticks, year days,
+daylight numerator/denominator and lunar days. Day ticks are in `[1, 2^31)`,
+year and lunar days in `[1, 366]`, and the daylight fraction satisfies
+`0 < n < d <= 65535` in reduced form. Products promote to `uint64_t` first.
+The saved absolute tick is an unsigned integer below `2^62`. Missing/extra
+members, unknown versions and noninteger values refuse before generation or
+writing. The [engine guide](@ref simulation-clock-metadata) specifies
+the complete schema, canonical bytes and refusal rules.
 
-With `sim.active_regions` off, the tick counter restarts at zero on load and
-simulation consumers retain the legacy periods above. With it on, the saved
-clock governs their day and year phases. Wind and weather retain independent
-tick-based update periods. The renderer's lunar cycle is still fixed at 54,000
-ticks (30 minutes): four full cycles per default day, including two during a
-night. Its brightness therefore changes within a night rather than between
-nights; a calendar-relative lunar period needs a separate pacing decision.
+Unversioned two-field calendars retain their recorded day/year with symmetric
+1/2 daylight and lunar month eight days. An absent calendar in an existing save
+or snapshot resolves to pinned 216,000 / 8 / 1 / 2 / 8. Complete version 2
+calendars retain all recorded values. Reads never rewrite anything. Successful
+explicit saves preserve the two-field calendar for symmetric 1/2 daylight with
+an eight-day lunar cycle; other calendars use version 2. Simulation ticks and
+state are never rescaled. Snapshots are taken only on tick boundaries,
+never inside a batched client catch-up. Enabled clock canonical bytes preserve `world_clock:v1:`
+and its 16-byte payload for those legacy-representable calendars; other calendars
+use `world_clock:v2:` and a 28-byte payload. Imported legacy calendars retain
+the enabled clock's canonical hash contribution. The calendar change does not
+alter replay layouts; the current configuration and preset identity contract
+is described below.
+
+With `sim.active_regions` disabled, opening a world restarts the tick counter
+at zero and biological consumers retain their legacy periods. Explicit snapshot
+loads retain the running simulation tick. New disabled worlds carry
+a presentation-only `renderCalendar` marker with the complete version 2 object;
+it neither requires active regions nor contributes to the disabled simulation
+hash. Existing unmarked disabled worlds retain symmetric 216,000-tick rendering
+and omit the marker on saves. Markers survive normal saves and explicit
+snapshots; explicit loads replace the rendering calendar even if metadata is
+absent. Competing marker/clock authorities are refused.
+
+The lunar period is independent of year length and solar phase.
+The lunar month follows the selected calendar's recorded day length and lunar-day count. Tick zero is
+full moon; default day four is the new-moon illumination floor 0.08 and day eight
+is full again. Imported 36,000- and 216,000-tick days have lunar months of
+288,000 and 1,728,000 ticks, so imported moon brightness can change. Environment
+and direct illumination overrides retain precedence and clamping. The moon
+stays opposite the sun; the disc's visible phase and shaders are unchanged.
+
+Renderer fallbacks advance elapsed time and then warp solar angle. The default
+wall-clock day derives to 5,400 seconds. Direct solar pins use the inverse
+mapping for smooth release; photo hold and later scenario pins retain precedence.
+Debug day length changes only solar pacing. Simulation speed hotkeys retain
+their existing batching and pause–16× range; ideal 16× gives a 337.5-second day.
 
 ## Persistence and format contract
 

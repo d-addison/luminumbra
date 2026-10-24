@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
-#include <system_error>
 
 #include "../ServerCliOptions.h"
 #include "../ServerWorldRunner.h"
@@ -23,10 +22,6 @@
 Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     namespace fs = std::filesystem;
     const auto root = options.root.empty() ? fs::path(".") : fs::path(options.root);
-    auto path = root / "data/common/systems.json";
-    std::error_code error;
-    if (!fs::exists(path, error))
-        path = fs::path("data/common/systems.json");
     Luminumbra::Net::HelloMsg hello;
     hello.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
     hello.preset = options.preset;
@@ -34,12 +29,13 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     Luminumbra::world::GameSession session;
     session.ApplySystemConfig(options.systems_config_override
                                   ? *options.systems_config_override
-                                  : luminumbra::core::SystemConfig::LoadFromFile(path.string()));
+                                  : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(root));
     const auto runner_config = RunnerConfigFrom(options);
     session.SetFiniteHydrologyEnabled(runner_config.finite_hydrology);
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
-    hello.system_config_identity = session.SystemConfigIdentity();
+    // Network hosts create a new world with this calendar, even when active regions are off.
+    hello.system_config_identity = session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{});
     try {
         nlohmann::json source;
         if (options.preset_json_override) {
@@ -109,15 +105,10 @@ ReplayRunnerConfigFrom(const ServerCliOptions& options,
     config.autosave_interval_ticks = 0;
     config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
     const auto root = options.root.empty() ? fs::path(".") : fs::path(options.root);
-    auto systems_path = root / "data/common/systems.json";
-    std::error_code error;
-    if (!fs::exists(systems_path, error))
-        systems_path = fs::path("data/common/systems.json");
     // Freeze the configuration used for identity admission and subsequent boot.
-    const auto systems_config =
-        options.systems_config_override
-            ? *options.systems_config_override
-            : luminumbra::core::SystemConfig::LoadFromFile(systems_path.string());
+    const auto systems_config = options.systems_config_override
+                                    ? *options.systems_config_override
+                                    : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(root);
     config.systems_config_override = systems_config;
     Luminumbra::world::GameSession identity_session;
     identity_session.ApplySystemConfig(systems_config);
@@ -146,7 +137,9 @@ ReplayRunnerConfigFrom(const ServerCliOptions& options,
                 Luminumbra::world::LoadTerrainPresetFromJson(resolved, root / "data");
             if (preset.ok &&
                 Luminumbra::Replay::ConfigurationMatches(
-                    header, identity_session.SystemConfigIdentity(), preset.preset_content_hash)) {
+                    header,
+                    identity_session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{}),
+                    preset.preset_content_hash)) {
                 config.preset_json_override = resolved.dump();
                 config.required_preset_content_hash = header.preset_content_hash;
                 return config;

@@ -71,13 +71,13 @@ void PutU16(std::vector<std::uint8_t>& out, std::uint16_t v) {
 }
 
 void PutU32(std::vector<std::uint8_t>& out, std::uint32_t v) {
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
     }
 }
 
 void PutU64(std::vector<std::uint8_t>& out, std::uint64_t v) {
-    for (int i = 0; i < 8; ++i) {
+    for (std::size_t i = 0; i < 8; ++i) {
         out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
     }
 }
@@ -116,8 +116,8 @@ struct Cursor {
             ok = false;
             return false;
         }
-        v = static_cast<std::uint16_t>(data[pos]) |
-            (static_cast<std::uint16_t>(data[pos + 1]) << 8);
+        v = static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[pos]) |
+                                       (static_cast<std::uint16_t>(data[pos + 1]) << 8));
         pos += 2;
         return true;
     }
@@ -127,7 +127,7 @@ struct Cursor {
             return false;
         }
         v = 0;
-        for (int i = 0; i < 4; ++i)
+        for (std::size_t i = 0; i < 4; ++i)
             v |= static_cast<std::uint32_t>(data[pos + i]) << (8 * i);
         pos += 4;
         return true;
@@ -138,7 +138,7 @@ struct Cursor {
             return false;
         }
         v = 0;
-        for (int i = 0; i < 8; ++i)
+        for (std::size_t i = 0; i < 8; ++i)
             v |= static_cast<std::uint64_t>(data[pos + i]) << (8 * i);
         pos += 8;
         return true;
@@ -426,7 +426,7 @@ std::size_t TcpTransport::ReceiveBytesNeeded() {
     if (buffered < 4)
         return 4 - buffered;
     std::uint32_t frame_len = 0;
-    for (int i = 0; i < 4; ++i)
+    for (std::size_t i = 0; i < 4; ++i)
         frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
     if (frame_len > kMaxFramePayloadBytes) {
         Close();
@@ -445,7 +445,8 @@ void TcpTransport::CompactReceiveBuffer() {
         return;
     // Complete buffered frames drain by advancing the cursor. Only move the trailing
     // incomplete frame when another socket read is needed, at most once per read batch.
-    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + m_recv_offset);
+    m_recv_buffer.erase(m_recv_buffer.begin(),
+                        m_recv_buffer.begin() + static_cast<std::ptrdiff_t>(m_recv_offset));
     m_recv_offset = 0;
 }
 
@@ -460,7 +461,7 @@ bool TcpTransport::IsPeerConnected() const {
     if (buffered < 4)
         return false;
     std::uint32_t frame_len = 0;
-    for (int i = 0; i < 4; ++i)
+    for (std::size_t i = 0; i < 4; ++i)
         frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
     return frame_len <= kMaxFramePayloadBytes && frame_len <= buffered - 4;
 }
@@ -493,10 +494,11 @@ bool TcpTransport::PumpRecv() {
             std::min(sizeof(buf), kTcpReceiveBufferBytes - m_recv_buffer.size());
         const int n = ::recv(static_cast<SOCKET>(m_socket), buf, static_cast<int>(want), 0);
         if (n > 0) {
-            if (m_recv_buffer.size() + n > m_recv_buffer.capacity())
+            if (m_recv_buffer.size() + static_cast<std::size_t>(n) > m_recv_buffer.capacity())
                 m_recv_buffer.reserve(
                     std::min(kTcpReceiveBufferBytes,
-                             std::max(m_recv_buffer.size() + n, m_recv_buffer.capacity() * 2)));
+                             std::max(m_recv_buffer.size() + static_cast<std::size_t>(n),
+                                      m_recv_buffer.capacity() * 2)));
             m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
             continue;
         }
@@ -659,11 +661,11 @@ bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     if (buffered < 4)
         return false;
     std::uint32_t frame_len = 0;
-    for (int i = 0; i < 4; ++i)
+    for (std::size_t i = 0; i < 4; ++i)
         frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
     if (buffered - 4 < static_cast<std::size_t>(frame_len))
         return false; // frame not fully arrived
-    const auto payload = m_recv_buffer.begin() + m_recv_offset + 4;
+    const auto payload = m_recv_buffer.begin() + static_cast<std::ptrdiff_t>(m_recv_offset) + 4;
     out.assign(payload, payload + frame_len);
     m_recv_offset += 4 + frame_len;
     if (m_recv_offset == m_recv_buffer.size()) {
@@ -821,10 +823,11 @@ bool TcpTransport::PumpRecv() {
             std::min(sizeof(buf), kTcpReceiveBufferBytes - m_recv_buffer.size());
         const ssize_t n = ::recv(static_cast<int>(m_socket), buf, want, 0);
         if (n > 0) {
-            if (m_recv_buffer.size() + n > m_recv_buffer.capacity())
+            if (m_recv_buffer.size() + static_cast<std::size_t>(n) > m_recv_buffer.capacity())
                 m_recv_buffer.reserve(
                     std::min(kTcpReceiveBufferBytes,
-                             std::max(m_recv_buffer.size() + n, m_recv_buffer.capacity() * 2)));
+                             std::max(m_recv_buffer.size() + static_cast<std::size_t>(n),
+                                      m_recv_buffer.capacity() * 2)));
             m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
             continue;
         }
@@ -968,11 +971,11 @@ bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     if (buffered < 4)
         return false;
     std::uint32_t frame_len = 0;
-    for (int i = 0; i < 4; ++i)
+    for (std::size_t i = 0; i < 4; ++i)
         frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
     if (buffered - 4 < static_cast<std::size_t>(frame_len))
         return false;
-    const auto payload = m_recv_buffer.begin() + m_recv_offset + 4;
+    const auto payload = m_recv_buffer.begin() + static_cast<std::ptrdiff_t>(m_recv_offset) + 4;
     out.assign(payload, payload + frame_len);
     m_recv_offset += 4 + frame_len;
     if (m_recv_offset == m_recv_buffer.size()) {
@@ -1390,7 +1393,7 @@ bool LockstepSession::ComparePeerHash(PeerCheckpoint& checkpoint) {
     if (local->second->terrain != peer.terrain)
         section = "terrain";
     else if (local->second->water != peer.water)
-        section = "water";
+        section = WaterHashDifferenceSection(local->second->water, peer.water);
     else if (local->second->entities != peer.entities)
         section = "entities";
     EmitDesyncDump(peer.tick, section);

@@ -2,6 +2,7 @@
 #include <luminumbra/rendering/RenderView.h>
 
 #include "BenchmarkGpuQueries.h"
+#include "luminumbra_common/core/SimulationClock.h"
 #include "luminumbra_common/world/WorldClock.h"
 #include <optional>
 
@@ -20,6 +21,7 @@
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
 #include "StaticModelTex.h"         // StaticModelTex hoisted to namespace scope
 #include "TerrainSubmit.h"          // SubmitTerrainChunksFn + TerrainSubmitStats
+#include "UploadBudget.h"
 #include "core/AssetManager.h"
 #include "core/IsolationConfig.h" // isolation/layer render mode (backdrop + spawn-suppression)
 #include "luminumbra_common/components/LightingComponents.h"
@@ -107,6 +109,14 @@ struct ChunkRenderData {
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
+
+    void SetPresentedTerrainUpload(FarWorldLiveUpload& upload,
+                                   const ChunkGeometryPool& pool) const noexcept {
+        upload.snapshot_version = mesh_version;
+        upload.uploaded_version = mesh_version;
+        upload.uploaded_indices = element_count;
+        upload.valid_allocation = pool.valid_allocation(pool_handle, element_count);
+    }
 };
 
 struct WaterRenderData {
@@ -123,6 +133,16 @@ struct WaterRenderData {
 
     bool LadderUploadValid() const noexcept {
         return vao_id != 0 && vbo_id != 0 && ebo_id != 0 && ladder_upload_version == mesh_version;
+    }
+
+    // Retained water is the presented version until replacement adoption. Both
+    // the draw list and far-water mask must consume this same certificate.
+    bool PresentedLadderWaterEligible(bool enabled) const noexcept {
+        return LadderWaterPassEligible(
+            mesh_version, mesh_version, element_count, LadderUploadValid(), enabled);
+    }
+    void SetPresentedLadderWaterUpload(FarWorldLiveUpload& upload, bool enabled) const noexcept {
+        SetLadderWaterUpload(upload, mesh_version, enabled);
     }
 
     void SetLadderWaterUpload(FarWorldLiveUpload& upload,
@@ -159,6 +179,8 @@ struct WaterRenderData {
 class RenderPipeline {
 public:
     struct MeshUploadFrameStats {
+        UploadWorkStats terrain_budget{};
+        UploadWorkStats water_budget{};
         size_t snapshot_count = 0;
         size_t terrain_upload_candidates = 0;
         size_t terrain_uploads = 0;
@@ -367,7 +389,8 @@ public:
                       Systems::SHIELD_WorldSystem& world_system,
                       const Camera& camera,
                       float deltaTime,
-                      bool wireframe = false);
+                      bool wireframe = false,
+                      UploadPresentation presentation = UploadPresentation::Streaming);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -500,6 +523,9 @@ public:
     void set_sky_lut_gpu_enabled(bool e) {
         m_sky_lut.set_gpu_skyview_enabled(e);
     }
+    bool sky_lut_gpu_enabled() const {
+        return m_sky_lut.gpu_skyview_enabled();
+    }
     const glm::vec2& taau_jitter_ndc() const {
         return m_taau_jitter_ndc;
     } // sub-pixel projection jitter for the G-buffer
@@ -512,6 +538,11 @@ public:
     void clear_all_chunk_data(); // Force clear all cached chunk render data
     const MeshUploadFrameStats& get_last_mesh_upload_stats() const {
         return m_last_mesh_upload_stats;
+    }
+    // Presentation readiness only. Never use to gate simulation or collision.
+    bool render_uploads_settled() const {
+        return m_last_mesh_upload_stats.terrain_uploads_deferred == 0 &&
+               m_last_mesh_upload_stats.water_uploads_deferred == 0;
     }
     const RenderPassFrameStats& get_last_render_pass_stats() const {
         return m_last_render_pass_stats;
@@ -634,7 +665,7 @@ public:
         m_timeOfDayHold = hold;
     }
     // drive the day clock from the AUTHORITATIVE sim tick —
-    // tod = TimeOfDayFromTick(tick, day_length) (TimeOfDayModel.h). Called per frame
+    // tod = SolarTimeFromNoonElapsed(elapsed, calendar). Called per frame
     // from live play; suppresses that frame's wall-clock advance so TOD is a pure
     // function of the tick (same tick -> same sun, independent of frame pacing).
     // Precedence unchanged: the photo-mode hold wins here, and scenario/scene pins
@@ -642,6 +673,12 @@ public:
     // never call this keep the legacy wall-clock advance at the shared day length.
     void set_time_of_day_tick(std::uint64_t sim_tick);
     void set_world_clock(const world::WorldClock& clock);
+    // Presentation calendar for clock-disabled saves; keeps the legacy noon origin.
+    void set_render_calendar(world::WorldCalendar calendar);
+    // Read-only diagnostic of the adopted calendar's celestial period.
+    [[nodiscard]] std::uint64_t get_lunar_period_ticks() const {
+        return m_renderClock.lunar_period_ticks();
+    }
     void set_day_length_ticks(std::uint64_t ticks) {
         m_dayLengthTicks = ticks == 0 ? 1 : ticks;
         m_dayLengthOverride = true;
@@ -651,7 +688,7 @@ public:
     // the sun-path trig) -- never wall-clock, never a free-running float
     // accumulator (regression review). It is: the client pushes the
     // replicated sim tick here each frame; the season modulates the sun ARC
-    // (declination / day length) and a biome material/foliage PALETTE tint ON TOP
+    // (declination / peak elevation) and a biome material/foliage PALETTE tint ON TOP
     // of the existing time-of-day, and adds NOTHING to world_hash. One-way :
     // nothing here writes back into the sim.
     void set_season_tick(std::uint64_t tick);
@@ -836,6 +873,22 @@ public:
     const FarWorldDiagnosticSnapshot& far_world_diagnostic() const {
         return m_far_world->Diagnostic();
     }
+    FarWorldReportingState far_world_reporting_state() const {
+        const auto& diagnostic = m_far_world->Diagnostic();
+        const bool terrain_submission =
+            m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Terrain);
+        if (diagnostic.captured) {
+            auto state = FarWorldReportState(diagnostic, terrain_submission);
+            state.coverage_settled =
+                state.coverage_settled && diagnostic.frame == m_far_world_frame;
+            return state;
+        }
+        return {.selection = m_far_world->Selection(FarWorldPurpose::World),
+                .submission_refusal = terrain_submission
+                                          ? FarWorldSubmissionRefusal::None
+                                          : FarWorldSubmissionRefusal::IsolationSuppressed,
+                .coverage_settled = false};
+    }
     void set_far_world_submission(bool submit) {
         m_far_world_submission = submit;
     }
@@ -963,6 +1016,7 @@ private:
         size_t terrain_index_count = 0;
         size_t water_vertex_count = 0;
         size_t water_index_count = 0;
+        bool water_metadata_valid = true;
 
         bool has_terrain_mesh() const {
             return terrain_vertex_count > 0 && terrain_index_count > 0;
@@ -981,6 +1035,20 @@ private:
             return !vertices.empty() && !indices.empty();
         }
     };
+
+    struct MeshUploadCandidate {
+        ChunkMeshSnapshot chunk{};
+        bool is_new = false;
+        bool is_stale = false;
+        float distance_sq = 0;
+        std::size_t bytes = 0;
+    };
+    UploadQueue<MeshUploadCandidate> m_terrain_upload_queue;
+    UploadQueue<MeshUploadCandidate> m_water_upload_queue;
+    template<bool Water>
+    void manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
+                                   const Camera& camera,
+                                   double preparation_ms = 0);
 
     // build the SSAO pass contract from pipeline state.
     // Shared by the render_frame call site and capture_ssao_parity so the gated
@@ -1041,7 +1109,8 @@ private:
                        Systems::SHIELD_WorldSystem& world_system,
                        const Camera& camera,
                        float deltaTime,
-                       bool wireframe);
+                       bool wireframe,
+                       UploadPresentation presentation);
     void dispatch_stages(const Camera& camera);
     FarReplayCamera replay_camera(const Camera& camera) const;
 
@@ -1089,7 +1158,8 @@ private:
 
     void ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
     void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
-                                    const Camera& camera);
+                                    const Camera& camera,
+                                    double preparation_ms);
     bool copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
@@ -1159,14 +1229,18 @@ private:
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
     void update_time_of_day(float deltaTime);
-    float m_timeOfDay = 0.5f;             // Start at sunrise
-    bool m_timeOfDayHold = false;         // freeze auto-advance for photo-mode TOD scrub
-    float m_dayDurationSeconds = 7200.0f; // 2 h/day, matching the world calendar
+    float m_timeOfDay = 0.5f;       // Midnight in the noon-origin sky
+    double m_elapsedDayPhase = 0.5; // Unwarped, noon-origin presentation time
+    bool m_timeOfDayHold = false;   // freeze auto-advance for photo-mode TOD scrub
+    double m_dayDurationSeconds = world::WorldCalendar{}.dayLengthTicks /
+                                  luminumbra::core::SimulationClock::kCanonicalTickRateHz;
+    world::WorldClock m_renderClock;
+    std::uint64_t m_celestialTick = 0;
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
     std::optional<world::WorldClock> m_worldClock;
     bool m_dayLengthOverride = false;
-    std::uint64_t m_dayLengthTicks = 216000; // == TimeOfDayModel kDefaultDayLengthTicks
+    std::uint64_t m_dayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
     bool m_todTickDriven = false;
 
     u32 m_screen_width = 0;
@@ -1259,8 +1333,6 @@ private:
     // const, so the moon is tunable independent of the sun. Default == the prior shader kMoonColor
     // (byte-identical until deliberately re-calibrated). This is a fixed pipeline value.
     glm::vec3 m_moonRadiance = glm::vec3(0.40f, 0.52f, 0.92f);
-    static constexpr std::uint64_t kTicksPerLunarCycle =
-        54000ull;                        // 30 min @ 30 Hz (a lunar "month")
     float m_seasonSunDeclination = 0.0f; // radians, seasonal arc tilt
     float m_sunElevationRad = 0.0f;      // sun elevation this frame (radians)
     glm::vec3 m_seasonPaletteTint{1.0f}; // warm(summer)/cool(winter) palette tint

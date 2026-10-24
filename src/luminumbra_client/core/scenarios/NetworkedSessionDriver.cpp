@@ -166,7 +166,7 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
         state.insert_chunk(chunk);
     }
     const Luminumbra::Persistence::WorldSaveService service;
-    out.world_hash = service.world_hash(state);
+    out.world_hash = service.world_hash(state, world_system->GetWaterSimWindowCursor());
 
     // Terrain/water authority only here (no streamed game entities), so the
     // entities sub-hash is the stable checksum of the EMPTY canonical ECS
@@ -175,7 +175,8 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
     const Luminumbra::Persistence::WorldStreamingStateSubHashes sub =
-        Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+        Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(
+            state, empty_entities, world_system->GetWaterSimWindowCursor());
     out.terrain = sub.terrain;
     out.water = sub.water;
     out.entities = sub.entities;
@@ -245,14 +246,10 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     m_impl->host_session->SetJobSystem(&m_impl->host_job_system);
     m_impl->host_session->SetRootPath(config.root_path);
     m_impl->host_session->SetSaveRootPath(client_session->GetSaveRootPath());
-    auto systems_path = std::filesystem::path(config.root_path) / "data/common/systems.json";
-    std::error_code systems_error;
-    if (!std::filesystem::exists(systems_path, systems_error))
-        systems_path = std::filesystem::path("data/common/systems.json");
     m_impl->host_session->ApplySystemConfig(
         config.systems_config_override
             ? *config.systems_config_override
-            : luminumbra::core::SystemConfig::LoadFromFile(systems_path.string()));
+            : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(config.root_path));
     if (!m_impl->host_session->CreateWorld(
             "Networked Host",
             std::to_string(config.seed),

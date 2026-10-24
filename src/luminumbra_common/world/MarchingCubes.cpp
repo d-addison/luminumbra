@@ -976,9 +976,11 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
             return false;
         }
         const std::size_t column_x =
-            (static_cast<std::size_t>(sample_x) * sample_step_i) / CHUNK_SIZE_X;
+            (static_cast<std::size_t>(sample_x) * static_cast<std::size_t>(sample_step_i)) /
+            CHUNK_SIZE_X;
         const std::size_t column_z =
-            (static_cast<std::size_t>(sample_z) * sample_step_i) / CHUNK_SIZE_Z;
+            (static_cast<std::size_t>(sample_z) * static_cast<std::size_t>(sample_step_i)) /
+            CHUNK_SIZE_Z;
         return column_x < 32u && column_z < 32u && sdf_owned_columns[column_x + column_z * 32u];
     };
 
@@ -1420,9 +1422,9 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
     for (u32 z = 0; z < n; ++z)
         for (u32 x = 0; x < n; ++x) {
             const std::size_t index = static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * n;
-            vertices.push_back({Vec3(static_cast<float>(x * step_i),
+            vertices.push_back({Vec3(static_cast<float>(x * static_cast<u32>(step_i)),
                                      World::DequantizeFarLodHeight(tile.height_q[index]),
-                                     static_cast<float>(z * step_i)),
+                                     static_cast<float>(z * static_cast<u32>(step_i))),
                                 Vec3(0.0f),
                                 static_cast<u32>(tile.material[index])});
         }
@@ -2063,19 +2065,20 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
                        Chunk& chunk) {
     (void)water_system;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
-    std::vector<VoxelVertex> water_vertices;
-    std::vector<u32> water_indices;
-    water_vertices.reserve(static_cast<std::size_t>(resolution) *
-                           static_cast<std::size_t>(resolution) * 4u);
-    water_indices.reserve(static_cast<std::size_t>(resolution) *
-                          static_cast<std::size_t>(resolution) * 6u);
-
-    if (!HasCompleteWaterGrid(chunk, resolution)) {
+    if (resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)) {
         chunk.water_mesh_vertices.clear();
         chunk.water_mesh_indices.clear();
         chunk.water_mesh_generated.store(false, std::memory_order_release);
         return;
     }
+
+    // Resolution is validated before multiplication/allocation: at most 32*32
+    // quads, four vertices and six indices per quad.
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    std::vector<VoxelVertex> water_vertices;
+    std::vector<u32> water_indices;
+    water_vertices.reserve(cells * 4u);
+    water_indices.reserve(cells * 6u);
 
     const IVec3 chunk_base_pos =
         chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
@@ -2098,8 +2101,10 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
     for (int z = 0; z < resolution; ++z) {
         for (int x = 0; x < resolution; ++x) {
             // Get the water surface heights at the four corners of this water grid cell
-            float world_x0 = chunk_base_pos.x + x * cell_width_x;
-            float world_z0 = chunk_base_pos.z + z * cell_width_z;
+            float world_x0 =
+                static_cast<float>(chunk_base_pos.x) + static_cast<float>(x) * cell_width_x;
+            float world_z0 =
+                static_cast<float>(chunk_base_pos.z) + static_cast<float>(z) * cell_width_z;
             float world_x1 = world_x0 + cell_width_x;
             float world_z1 = world_z0 + cell_width_z;
 
@@ -2112,8 +2117,10 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
             // the legacy worldgen-height test only if the depth array is unavailable.
             bool renderable;
             if (have_depth) {
-                renderable = chunk.water_depth_mm[static_cast<std::size_t>(z) * resolution + x] >
-                             kMinRenderableWaterDepthMm;
+                renderable =
+                    chunk.water_depth_mm[static_cast<std::size_t>(z) *
+                                             static_cast<std::size_t>(resolution) +
+                                         static_cast<std::size_t>(x)] > kMinRenderableWaterDepthMm;
             } else {
                 renderable = (water_h00 - world_system.GetTerrainHeightAt(world_x0, world_z0)) >
                              kMinRenderableWaterDepth;
@@ -2122,11 +2129,18 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
                 u32 base_idx = static_cast<u32>(water_vertices.size());
 
                 // Define vertices relative to chunk origin
-                Vec3 p00 = {x * cell_width_x, water_h00 - chunk_base_pos.y, z * cell_width_z};
-                Vec3 p10 = {(x + 1) * cell_width_x, water_h10 - chunk_base_pos.y, z * cell_width_z};
-                Vec3 p01 = {x * cell_width_x, water_h01 - chunk_base_pos.y, (z + 1) * cell_width_z};
-                Vec3 p11 = {
-                    (x + 1) * cell_width_x, water_h11 - chunk_base_pos.y, (z + 1) * cell_width_z};
+                Vec3 p00 = {static_cast<float>(x) * cell_width_x,
+                            water_h00 - static_cast<float>(chunk_base_pos.y),
+                            static_cast<float>(z) * cell_width_z};
+                Vec3 p10 = {static_cast<float>(x + 1) * cell_width_x,
+                            water_h10 - static_cast<float>(chunk_base_pos.y),
+                            static_cast<float>(z) * cell_width_z};
+                Vec3 p01 = {static_cast<float>(x) * cell_width_x,
+                            water_h01 - static_cast<float>(chunk_base_pos.y),
+                            static_cast<float>(z + 1) * cell_width_z};
+                Vec3 p11 = {static_cast<float>(x + 1) * cell_width_x,
+                            water_h11 - static_cast<float>(chunk_base_pos.y),
+                            static_cast<float>(z + 1) * cell_width_z};
 
                 water_vertices.push_back({p00, normal, water_mat_id});
                 water_vertices.push_back({p01, normal, water_mat_id});

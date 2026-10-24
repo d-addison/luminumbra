@@ -564,6 +564,18 @@ TEST(InitialWorldLoadingPerfTest, StreamingBudgetSchedulerExpandsSurfaceBeforeVe
     EXPECT_GE(stats.surface_generation_scheduled, stats.vertical_generation_scheduled);
     EXPECT_GT(stats.deferred_generation, 0u);
     EXPECT_LE(stats.active_chunks_after, stats.max_active_chunks_budget);
+
+    // Dispatched work can drain before the next activation pass. The undispatched
+    // backlog must still be visible on every intervening report frame.
+    world.wait_for_streaming_jobs();
+    for (int frame = 1; frame < stats.update_interval_frames; ++frame) {
+        world.update(registry, spawn, &physics_system.physics);
+        const auto& pending = world.get_last_streaming_budget_stats();
+        EXPECT_EQ(pending.generation_candidates, 0u);
+        EXPECT_EQ(pending.scheduled_generation, 0u);
+        EXPECT_FALSE(pending.generation_job_active);
+        EXPECT_EQ(pending.deferred_generation, stats.deferred_generation);
+    }
 }
 
 TEST(InitialWorldLoadingPerfTest, StreamingWalkMaintainsBudgetsAndWritesWorldStateArtifact) {

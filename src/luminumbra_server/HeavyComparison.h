@@ -153,6 +153,8 @@ inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) 
             return false;
         }
     }
+    // The water checkpoint includes the nonzero scheduling cursor even when
+    // active regions are disabled; it affects which awake chunks advance next.
     return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&
            a.sub.entities == b.sub.entities;
 }

@@ -207,13 +207,13 @@ public:
     // quiesce). Returns the per-run report. Requires Boot to have succeeded.
     ServerTickReport RunFixedTicks(std::uint64_t tick_count);
 
-    // Deterministic hash over the in-memory streamed-chunk snapshot
+    // Deterministic hash over the in-memory streamed-chunk snapshot and water cursor
     // (WorldSaveService::world_hash; format-independent persistence hash).
     std::string ComputeWorldHash();
 
     // per-system sub-hashes over the SAME streamed-chunk snapshot, for
-    // desync localization. The top-level ComputeWorldHash above is unchanged;
-    // these are additive. entities hashes the deterministic avatar snapshot
+    // desync localization, including water/cursor when only the cursor differs.
+    // Zero cursors preserve legacy hashes. entities hashes the deterministic avatar snapshot
     // (empty only when no avatars are configured). Creature ecology and plants
     // have their own sub-hashes in the composite world hash.
     Persistence::WorldStreamingStateSubHashes ComputeWorldSubHashes();
@@ -228,11 +228,12 @@ public:
                                       Persistence::WorldStreamingStateSubHashes& out_sub);
 
     //  heavy oracle support: persists the COMPLETE in-memory streamed-
-    // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated
-    // GameSession::SaveWorldState, which writes nothing for a never-edited
-    // world). Used so a freshly loaded session adopts exactly this chunk set and
+    // chunk snapshot via WorldSaveService::save_world, regardless of the voxel
+    // dirty flags used by GameSession::SaveWorldState. Used so a freshly loaded
+    // session adopts exactly this chunk set and
     // the save/load round-trip is comparable. Returns the chunk count written,
-    // or zero on refusal. Preset/identity refusal preserves disk bytes and pending state.
+    // or zero if any required writer fails. Preset/identity refusal preserves disk bytes
+    // and pending state; dirty chunks are acknowledged only after metadata, plants and energy.
     std::size_t SaveFullSnapshot();
 
     std::size_t StreamedChunkCount();

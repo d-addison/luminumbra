@@ -43,7 +43,7 @@ env:
   QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
 
 jobs:
-  # Classify every event; shards depend directly on this gate. The aggregate
+  # Classify every event; shards also use the PR-only fast lane. The aggregate
   # preserves the required result for drafts and path-routed skips.
   # !cancelled() and != false keep missing/failed classification on the build path.
   changes:
@@ -53,6 +53,8 @@ jobs:
     outputs:
       needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
       needs_python: ${{ steps.paths.outputs.needs_python }}
+      needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
+      heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
     steps:
       - name: Check out repository and PR history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,6 +66,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_REPOSITORY: ${{ github.repository }}
           CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_REF: ${{ github.base_ref }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -71,36 +74,71 @@ jobs:
           # The explicit guard also handles bases predating the fail-open rules.
           all_lanes() {
             echo 'Classification uncertain or CI inputs changed; running all lanes'
-            printf 'needs_cpp=true\nneeds_python=true\n' >> "$GITHUB_OUTPUT"
+            printf 'needs_cpp=true\nneeds_python=true\nneeds_heavy=true\nheavy_reason=classification_uncertain\n' >> "$GITHUB_OUTPUT"
           }
-          if [ "$CI_EVENT" != pull_request ] || [ -z "$CI_BASE_SHA" ] ||
-             [ -z "$CI_HEAD_SHA" ] || [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+          if [ "$CI_EVENT" != pull_request ] || [ "$CI_BASE_REF" != devel ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ -z "$CI_REPOSITORY" ] || [ -z "$CI_HEAD_REPOSITORY" ] ||
+             [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
             all_lanes
           elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
             all_lanes
           elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
-            if ! python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE"; then
+            rm -f "$RUNNER_TEMP/classified-paths.txt"
+            if GITHUB_OUTPUT="$RUNNER_TEMP/classified-paths.txt" python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE" &&
+               python3 -I -B -c '
+          import pathlib, sys
+          rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          assert len(rows) == 4
+          values = dict(row.split("=", 1) for row in rows)
+          assert set(values) == {"needs_cpp", "needs_python", "needs_heavy", "heavy_reason"}
+          assert all(values[key] in ("true", "false") for key in ("needs_cpp", "needs_python", "needs_heavy"))
+          if values["needs_heavy"] == "false":
+              assert values["heavy_reason"] == "reviewed_presentation_or_docs"
+          else:
+              assert values["needs_cpp"] == "true"
+              assert values["heavy_reason"] in ("non_pr_event", "main_or_unknown_base", "classification_uncertain", "heavy_sensitive_paths")
+          ' "$RUNNER_TEMP/classified-paths.txt"; then
+              cat "$RUNNER_TEMP/classified-paths.txt" >> "$GITHUB_OUTPUT"
+            else
               all_lanes
             fi
           else
             all_lanes
           fi
 
+  # Run the two stdlib suites registered by tools/ci/local_check_contracts.cmake
+  # before admitting expensive PR shards. No compiler, packages or build tree.
+  fast-lane:
+    name: ASan / Python contracts
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) == 'false' && needs.changes.outputs.needs_cpp != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check changed translation unit contracts
+        run: python3 -I -B tools/ci/test_changed_tus.py
+      - name: Check offline dependency contracts
+        run: python3 -I -B tools/ci/test_offline_deps.py
+
   # Drafts cannot merge. ready_for_review reruns this job on the same head;
   # maintainers must wait for that run's required checks to pass before merging.
   asan-shard:
-    name: Linux / GCC ASan shard ${{ matrix.shard }}/2
+    name: Linux / GCC ASan shard ${{ matrix.shard }}/3
     # Drafts, including missing metadata, must reach the guard even on docs-only
     # changes. Ready PRs can still skip this lane through the path gate.
-    needs: changes
-    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') }}
+    needs: [changes, fast-lane]
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') && (github.event_name != 'pull_request' || toJSON(github.event.pull_request.draft) != 'false' || needs.fast-lane.result == 'success') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
       CC: gcc
       CXX: g++
@@ -176,11 +214,11 @@ jobs:
         run: |
           ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json
           ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json
-          # Alternate independent tests; keep fixture setup/consumers in one shard.
-          python3 tools/ci/asan_shards.py plan --shard ${{ matrix.shard }} --directory build/debug-asan
+          # Balance fixture and required-suite groups using recorded costs.
+          python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"
           # Recheck the ordered roster in the same context immediately before CTest.
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
-            xvfb-run -a python3 tools/ci/asan_shards.py run --directory build/debug-asan
+            xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan
       - name: Bind manual qualification shard evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         env:
@@ -196,6 +234,7 @@ jobs:
           path: |
             build/debug-asan/ctest.junit.xml
             build/debug-asan/ctest.inventory.json
+            build/debug-asan/ctest.partition.json
             build/debug-asan/qualification-shard.json
           if-no-files-found: error
           # Preserve successful producers for GitHub's full 30-day rerun window.
@@ -215,16 +254,21 @@ jobs:
 
   asan:
     name: Linux / GCC ASan
-    needs: [changes, asan-shard]
-    # Cancel a running aggregate when the workflow is cancelled. Cancelled
-    # dependencies must still schedule the explicit refusal, never a job skip.
+    needs: [changes, fast-lane, asan-shard]
+    # Invalid dependencies must reach the refusal step.
     # The first guard still rejects every draft (including docs-only drafts).
     # A successful classification with needs_cpp=false and a skipped shard
     # preserves the path gate's successful required check. Failed classification
-    # or missing output still requires successful shards.
-    if: ${{ !cancelled() || needs.changes.result == 'cancelled' || needs.asan-shard.result == 'cancelled' }}
+    # is rejected even when the shards succeed. A failed fast lane must fail
+    # this required check even though its dependent shards are skipped.
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
     steps:
       - name: Reject draft pull requests
         shell: bash
@@ -238,10 +282,10 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reject cancelled dependencies
-        if: ${{ always() && (needs.changes.result == 'cancelled' || needs.asan-shard.result == 'cancelled') }}
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped')) }}
         run: |
-          echo "ASan dependencies were cancelled" >&2
+          echo "Aggregate dependencies did not pass" >&2
           exit 1
       - name: Require all ASan shards to pass
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -268,16 +312,32 @@ jobs:
         id: tests
         if: needs.asan-shard.result == 'success'
         run: |
-          for shard in 1 2; do
-            mv "build/asan-shards/asan-junit-${{ github.sha }}-${{ github.run_id }}-shard-$shard" "build/asan-shards/shard-$shard"
+          for source in build/asan-shards/asan-junit-${{ github.sha }}-${{ github.run_id }}-shard-*; do
+            shard="${source##*-}"
+            mv "$source" "build/asan-shards/shard-$shard"
           done
-          python3 tools/ci/asan_shards.py merge --directory build/asan-shards --output build/debug-asan/ctest.junit.xml
-          # Keep devel's inventory floor on the verified union of both shards.
+          python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards --output build/debug-asan/ctest.junit.xml --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
+          # Enforce the full discovery floor before selection; only the two
+          # reviewed heavy cases may be absent from a verified light union.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
           # Require each developer target explicitly; total-count margin cannot hide one.
-          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
           # This lane must exercise the unpadded guard-page probe at the expected active ISA.
           python3 tools/ci/compare_ambient_receipts.py asan=build/debug-asan/ctest.junit.xml \
             --expect-labels asan --require-probe asan
+      - name: Upload merged JUnit
+        if: needs.asan-shard.result == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asan-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/debug-asan/ctest.junit.xml
+            build/debug-asan/ctest.junit.selection.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Bind manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         env:
@@ -290,6 +350,7 @@ jobs:
           name: qualification-asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/debug-asan/ctest.junit.xml
+            build/debug-asan/ctest.junit.selection.json
             build/debug-asan/qualification-capture.json
           if-no-files-found: error
           retention-days: 30

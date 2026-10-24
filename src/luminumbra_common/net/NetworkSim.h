@@ -91,16 +91,20 @@ private:
         std::deque<PendingFrame>& q = isA ? m_ba : m_ab; // A receives from the B->A queue
         int best = -1;
         for (int i = 0; i < static_cast<int>(q.size()); ++i) {
-            if (q[i].deliver_tick > m_tick)
+            if (q[static_cast<std::size_t>(i)].deliver_tick > m_tick)
                 continue;
-            if (best < 0 || q[i].deliver_tick < q[best].deliver_tick ||
-                (q[i].deliver_tick == q[best].deliver_tick && q[i].seq < q[best].seq)) {
+            if (best < 0 ||
+                q[static_cast<std::size_t>(i)].deliver_tick <
+                    q[static_cast<std::size_t>(best)].deliver_tick ||
+                (q[static_cast<std::size_t>(i)].deliver_tick ==
+                     q[static_cast<std::size_t>(best)].deliver_tick &&
+                 q[static_cast<std::size_t>(i)].seq < q[static_cast<std::size_t>(best)].seq)) {
                 best = i;
             }
         }
         if (best < 0)
             return false;
-        out = std::move(q[best].data);
+        out = std::move(q[static_cast<std::size_t>(best)].data);
         q.erase(q.begin() + best);
         return true;
     }

@@ -1,8 +1,10 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
+#include "../AttributedGl.h"
 #include "../FoliageEvidence.h"
 #include "../FoliageGroundMesh.h"
+#include "../FoliageSurfaceSlots.h"
 #include "../RenderContext.h"
 #include "app/FrameAttribution.h"
 
@@ -487,8 +489,8 @@ private:
     std::unique_ptr<EvidenceQueries> m_evidence_queries;
     std::array<std::size_t, 2> m_phase_query_counts{};
     std::size_t m_last_draw_calls = 0;
-    u32 m_compute_prog = 0;
-    u32 m_prefix_prog = 0;
+    AttributedGl::Program m_compute_prog{};
+    AttributedGl::Program m_prefix_prog{};
     struct ScatterUniforms {
         int chunk_count = -1;
         int archetype_count = -1;
@@ -508,7 +510,7 @@ private:
     u32 m_group_counts_ssbo = 0;
     u32 m_group_offsets_ssbo = 0;
     int m_uploaded_chunk_count = 0;
-    static constexpr std::size_t kMaxGpuChunks = 512;
+    static constexpr std::size_t kMaxGpuChunks = FoliageSurfaceSlots::kCapacity;
     // Rebuild scratch retains its high-water capacity. GPU input scratch is
     // bounded by 512 columns, each with 8192 vec4 samples (64 MiB total).
     struct GpuChunk {
@@ -519,11 +521,32 @@ private:
     std::vector<ChunkScatter> m_ordered_chunks;
     std::vector<const ChunkScatter*> m_admitted_chunks;
     std::vector<GpuChunk> m_chunk_params;
-    std::vector<glm::vec4> m_surface_scratch;
+    FoliageSurfaceSlots m_surface_slots;
+    std::size_t m_surface_storage_slots = 0;
+    std::array<std::uint64_t, kMaxGpuChunks> m_slot_revisions{};
+    std::vector<std::uint32_t> m_slot_order;
+    std::vector<FoliageSurfaceSlots::Key> m_surface_keys;
+    struct DirtySurface {
+        std::size_t slot;
+        const std::vector<glm::vec4>* samples;
+        std::uint64_t revision;
+    };
+    std::vector<DirtySurface> m_dirty_surfaces;
+    // One bounded 18 KiB transfer holds both metadata streams.
+    struct GpuMetadata {
+        std::array<GpuChunk, kMaxGpuChunks> params{};
+        std::array<std::uint32_t, kMaxGpuChunks> slots{};
+    };
+    GpuMetadata m_uploaded_metadata{};
+    // Only adjacent dirty runs are concatenated; at most 512 * 8192 vec4s.
+    std::vector<glm::vec4> m_dirty_surface_scratch;
+    std::size_t m_metadata_count = 0;
+    bool m_metadata_valid = false;
     // Palette storage is checked against element, GL byte, and uniform limits.
     std::vector<float> m_palette;
     float m_palette_total_weight = 1.0f;
     bool m_palette_dirty = true;
+    bool m_palette_uploaded = false;
     std::size_t m_group_storage_bytes = 0;
     u32 m_chunk_ssbo = 0;
     u32 m_surf_ssbo = 0;
@@ -598,14 +621,16 @@ private:
     };
     std::unordered_map<std::uint64_t, CachedChunkRecords> m_chunk_cache;
     std::uint64_t m_chunk_cache_gen = 1;
-    // Exact mesh hits at the GPU's deterministic candidate positions. Biome and
-    // footprint changes move those positions, so they must invalidate cached hits.
-    // Mesh replacement/removal invalidates the affected column separately.
+    // Exact mesh hits keyed by column and candidate footprint. Support revisions
+    // invalidate every footprint of an edited column without walking the cache.
     struct CachedSurfaceSamples {
-        std::uint64_t placement = 0;
+        std::uint64_t support_revision = 0;
+        std::uint64_t revision = 0;
         std::vector<glm::vec4> samples;
     };
-    std::unordered_map<std::uint64_t, CachedSurfaceSamples> m_surf_grid_cache;
+    std::unordered_map<FoliageSurfaceSlots::Key, CachedSurfaceSamples, FoliageSurfaceSlots::KeyHash>
+        m_surf_grid_cache;
+    std::uint64_t m_next_surface_revision = 0;
     //  implementation note: when MOVING fast, many chunks stream into the renderable set in one
     //  frame,
     // and building their (uncached) records all at once re-ran hundreds of SurfaceQuery calls -> a

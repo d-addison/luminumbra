@@ -57,6 +57,8 @@ jobs:
     outputs:
       needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
       needs_python: ${{ steps.paths.outputs.needs_python }}
+      needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
+      heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
     steps:
       - name: Check out repository and PR history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,6 +70,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_REPOSITORY: ${{ github.repository }}
           CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_REF: ${{ github.base_ref }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -75,15 +78,32 @@ jobs:
           # The explicit guard also handles bases predating the fail-open rules.
           all_lanes() {
             echo 'Classification uncertain or CI inputs changed; running all lanes'
-            printf 'needs_cpp=true\nneeds_python=true\n' >> "$GITHUB_OUTPUT"
+            printf 'needs_cpp=true\nneeds_python=true\nneeds_heavy=true\nheavy_reason=classification_uncertain\n' >> "$GITHUB_OUTPUT"
           }
-          if [ "$CI_EVENT" != pull_request ] || [ -z "$CI_BASE_SHA" ] ||
-             [ -z "$CI_HEAD_SHA" ] || [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+          if [ "$CI_EVENT" != pull_request ] || [ "$CI_BASE_REF" != devel ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ -z "$CI_REPOSITORY" ] || [ -z "$CI_HEAD_REPOSITORY" ] ||
+             [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
             all_lanes
           elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
             all_lanes
           elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
-            if ! python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE"; then
+            rm -f "$RUNNER_TEMP/classified-paths.txt"
+            if GITHUB_OUTPUT="$RUNNER_TEMP/classified-paths.txt" python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE" &&
+               python3 -I -B -c '
+          import pathlib, sys
+          rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          assert len(rows) == 4
+          values = dict(row.split("=", 1) for row in rows)
+          assert set(values) == {"needs_cpp", "needs_python", "needs_heavy", "heavy_reason"}
+          assert all(values[key] in ("true", "false") for key in ("needs_cpp", "needs_python", "needs_heavy"))
+          if values["needs_heavy"] == "false":
+              assert values["heavy_reason"] == "reviewed_presentation_or_docs"
+          else:
+              assert values["needs_cpp"] == "true"
+              assert values["heavy_reason"] in ("non_pr_event", "main_or_unknown_base", "classification_uncertain", "heavy_sensitive_paths")
+          ' "$RUNNER_TEMP/classified-paths.txt"; then
+              cat "$RUNNER_TEMP/classified-paths.txt" >> "$GITHUB_OUTPUT"
+            else
               all_lanes
             fi
           else
@@ -92,6 +112,10 @@ jobs:
 
   runner-contract:
     name: Runner contract / ${{ matrix.os }}
+    # Reuse the required heavy checks' routed-skip pattern. Python inputs also
+    # matter here; uncertain classification must keep the contracts runnable.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') }}
     strategy:
       fail-fast: false
       matrix:
@@ -110,6 +134,7 @@ jobs:
           python tools/perf/test_render_contract.py
           python tools/perf/test_capture_sim_budget.py
           python tools/perf/test_sim_budget_gate.py
+          python tools/perf/test_terrain_aov_paths.py
           python tools/perf/test_check_residency.py
           python tools/perf/test_plan_qualification.py
           python tools/perf/test_run_qualification.py
@@ -146,8 +171,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install measurement dependencies
+        timeout-minutes: 25
         run: |
-          sudo apt-get update
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get install -y --no-install-recommends \
             build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
@@ -172,7 +198,7 @@ jobs:
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset perf --no-tests=error \
-              -R '^(RenderTraversalIntegrated|RenderBenchmarkImplicitCreationFailure|RenderBenchmarkOverrideCollection|RenderTraversalEmbeddedPresetRefusal)$' \
+              -R '^(RenderTraversalIntegrated|RenderBenchmarkImplicitCreationFailure|RenderBenchmarkMeasuredFrameBounds|RenderBenchmarkIsolationSubmission|RenderBenchmarkOverrideCollection|RenderTraversalEmbeddedPresetRefusal)$' \
               --output-on-failure
       - name: Measure preview frame
         run: |
@@ -245,8 +271,9 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.event.before }}
           path: base
       - name: Install build dependencies
+        timeout-minutes: 25
         run: |
-          sudo apt-get update
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get install -y --no-install-recommends \
             build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
@@ -627,8 +654,9 @@ jobs:
         id: identity
         run: python3 tools/ci/qualification_capture.py preflight --lane server-capture --expected-sha "$QUALIFICATION_EXPECTED_SHA"
       - name: Install candidate build dependencies
+        timeout-minutes: 25
         run: |
-          sudo apt-get update
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get install -y --no-install-recommends \
             build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \

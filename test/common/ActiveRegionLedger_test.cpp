@@ -42,7 +42,8 @@ ActiveRegionLedger Reload(const ActiveRegionLedger& ledger) {
 // Same FNV-1a 64 as the implementation's Hash(), used to re-seal hand-crafted envelopes.
 std::uint64_t Fnv1a64(std::string_view bytes) {
     std::uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char byte : bytes) {
+    for (const char ch : bytes) {
+        const auto byte = static_cast<unsigned char>(ch);
         hash ^= byte;
         hash *= 1099511628211ull;
     }
@@ -210,9 +211,10 @@ TEST(ActiveRegionLedgerTest, PrioritySelectsLowestForReductionAndHighestForRecov
     const std::vector<RegionKey> wake_priority{{7, 7}, {3, 3}};
     ASSERT_EQ(wake.transitions.size(), wake_priority.size());
     EXPECT_EQ(wake.due, wake_priority);
-    for (std::size_t i = 0; i < wake_priority.size(); ++i)
+    for (std::size_t i = 0; i < wake_priority.size(); ++i) {
         EXPECT_EQ(wake.transitions[i],
                   (RegionTransition{wake_priority[i], RegionState::Frozen, RegionState::Active}));
+    }
 
     // Every region is eligible at once: recovery must choose forward priority,
     // including pin/edit rank, proximity age and coordinate tie breaks.
@@ -295,6 +297,11 @@ TEST(ActiveRegionLedgerTest, FrozenContentsAndCursorDoNotAdvanceAndResumeIsBound
         EXPECT_EQ(r.frozen_digest, frozen.frozen_digest);
     }
     constexpr std::uint64_t day = Luminumbra::world::WorldCalendar{}.dayLengthTicks;
+    EXPECT_EQ(day, 162000u);
+    EXPECT_EQ(ActiveRegionLedger::resume_window(
+                  kFar, 3, WorldClock(400000, WorldCalendar::Legacy()), UINT64_MAX)
+                  .elapsed_ticks,
+              216000u);
     EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(day + 100000), UINT64_MAX)
                   .elapsed_ticks,
               day);
@@ -802,9 +809,8 @@ TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
     std::vector<Vec3> grid;
     grid.reserve(600);
     for (int i = 0; i < 600; ++i) {
-        const int row = i / 30;
-        grid.emplace_back(
-            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>(row * 2048));
+        const int grid_z = (i / 30) * 2048;
+        grid.emplace_back(static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>(grid_z));
     }
     ActiveRegionLedger ledger;
     ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));

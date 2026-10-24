@@ -62,6 +62,45 @@ std::string ExtractBlock(const std::string& source, const std::string& signature
     return {};
 }
 
+TEST(RenderClockContract, FramePathsReuseTheValidatedCalendar) {
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto header = ReadShader("src/luminumbra_client/rendering/RenderPipeline.h");
+    ExpectContains(header, "world::WorldClock m_renderClock;");
+    const auto update = ExtractBlock(pipeline, "void RenderPipeline::update_time_of_day(");
+    ASSERT_FALSE(update.empty());
+    ExpectContains(update, "get_lunar_period_ticks()");
+    const auto period = ExtractBlock(header, "std::uint64_t get_lunar_period_ticks() const");
+    ExpectContains(period, "return m_renderClock.lunar_period_ticks();");
+    EXPECT_EQ(period.find("world::WorldClock"), std::string::npos);
+    ExpectContains(update, "SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock)");
+    EXPECT_EQ(update.find("world::WorldClock"), std::string::npos);
+    for (const char* signature : {"void RenderPipeline::set_time_of_day(",
+                                  "void RenderPipeline::set_time_of_day_tick(",
+                                  "void RenderPipeline::set_world_clock("}) {
+        const auto body = ExtractBlock(pipeline, signature);
+        ASSERT_FALSE(body.empty());
+        EXPECT_EQ(body.find("world::WorldClock"), std::string::npos);
+        EXPECT_EQ(body.find(", m_renderClock.calendar())"), std::string::npos)
+            << "calendar conversion would select a validating overload";
+    }
+    const auto model = ReadShader("src/luminumbra_client/rendering/TimeOfDayModel.h");
+    for (const char* signature :
+         {"inline double SolarPhaseFromElapsed(double phase, const world::WorldClock& clock)",
+          "inline double ElapsedPhaseFromSolar(double solarPhase, const world::WorldClock& clock)",
+          "inline float SolarTimeFromNoonElapsed(double phase, const world::WorldClock& clock)",
+          "inline double NoonElapsedFromSolarTime(double phase, const world::WorldClock& clock)"}) {
+        const auto body = ExtractBlock(model, signature);
+        ASSERT_FALSE(body.empty());
+        EXPECT_EQ(body.find("world::WorldClock"), std::string::npos);
+        EXPECT_EQ(body.find(", calendar)"), std::string::npos);
+    }
+    const auto adoption = ExtractBlock(pipeline, "void RenderPipeline::set_render_calendar(");
+    ExpectContains(adoption, "const world::WorldClock checked(0, calendar);");
+    ExpectContains(adoption, "m_renderClock = checked;");
+    ExpectContains(ExtractBlock(pipeline, "void RenderPipeline::set_world_clock("),
+                   "m_renderClock = clock;");
+}
+
 TEST(ShaderCompositingContract, WaterSamplesTheResolvedSceneAtFarDepth) {
     const std::string source = ReadShader("res/shaders/water.frag");
     ASSERT_FALSE(source.empty());
@@ -487,7 +526,26 @@ TEST(FarWorldWaterContract, ProductionWaterUsesIndependentReadinessAndCombinedSu
     ExpectContains(fragment, "case 200u: albedo = vec3(0.018, 0.065, 0.11);");
     const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
     ExpectContains(pipeline, "upload.water_snapshot_version = chunk.water_mesh_version;");
-    ExpectContains(pipeline, "LadderWaterPassEligible(chunk.water_mesh_version");
+    // Drawing and ownership must certify the retained presentation, even while
+    // the current snapshot is waiting for adoption. Check calls within their
+    // owning functions without depending on local names or line wrapping.
+    const auto draw = ExtractBlock(pipeline, "void RenderPipeline::execute_stage_water(");
+    EXPECT_TRUE(std::regex_search(draw, std::regex(R"(\.\s*PresentedLadderWaterEligible\s*\()")));
+    const auto prepare = ExtractBlock(pipeline, "void RenderPipeline::prepare_frame(");
+    EXPECT_TRUE(
+        std::regex_search(prepare, std::regex(R"(\.\s*SetPresentedLadderWaterUpload\s*\()")));
+    const auto header = ReadShader("src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto eligibility = ExtractBlock(header, "bool PresentedLadderWaterEligible(");
+    EXPECT_TRUE(std::regex_search(
+        eligibility,
+        std::regex(
+            R"(return\s+LadderWaterPassEligible\s*\(\s*mesh_version\s*,\s*mesh_version\s*,)"
+            R"(\s*element_count\s*,\s*LadderUploadValid\s*\(\s*\)\s*,\s*enabled\s*\)\s*;)")));
+    const auto ownership = ExtractBlock(header, "void SetPresentedLadderWaterUpload(");
+    EXPECT_TRUE(std::regex_search(
+        ownership,
+        std::regex(
+            R"(\bSetLadderWaterUpload\s*\(\s*upload\s*,\s*mesh_version\s*,\s*enabled\s*\))")));
     const auto pass = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
     ExpectContains(pass, "stats.far_water_indices += far_stats.water_indices;");
 }

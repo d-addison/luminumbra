@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Refusal regressions for manual CI evidence; no native processes are launched."""
+import importlib.util
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
@@ -9,7 +10,9 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 import zipfile
 
-import qualification_capture as capture
+SPEC = importlib.util.spec_from_file_location("qualification_capture", Path(__file__).with_name("qualification_capture.py"))
+capture = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(capture)
 
 HEAD = "a" * 40
 OTHER = "b" * 40
@@ -174,9 +177,9 @@ class CaptureContract(unittest.TestCase):
         return [{**self.asan_binding(), "shard": shard,
                  "producers": dict.fromkeys(capture.LANES["asan"][2], "success"),
                  "binary_sha256": "2" * 64, "junit_sha256": HASH,
-                 **({"ambient": RECEIPT} if shard == 2 else {})} for shard in (1, 2)]
+                 **({"ambient": RECEIPT} if shard == 2 else {})} for shard in (1, 2, 3)]
 
-    def test_asan_combines_both_producers_and_uses_receipt_producers_binary(self):
+    def test_asan_combines_all_producers_and_uses_receipt_producers_binary(self):
         records = self.asan_records()
         self.assertEqual(capture.LANES["asan"],
                          ("asan.yml", "Linux / GCC ASan", ("identity", "configure", "build", "tests")))
@@ -185,21 +188,25 @@ class CaptureContract(unittest.TestCase):
                              ("workflow_sha", OTHER), ("fixture_hash", "0" * 64),
                              ("source_dirty", True), ("job_name", "other"),
                              ("binary_sha256", ""), ("junit_sha256", "")):
-            changed = [records[0], {**records[1], field: value}]
+            changed = [records[0], {**records[1], field: value}, records[2]]
             with self.subTest(field=field), self.assertRaises(ValueError):
                 capture.asan_producers(self.asan_binding(), changed)
         for state in ("failure", "skipped", "cancelled", ""):
-            changed = [records[0], {**records[1], "producers": {**records[1]["producers"], "tests": state}}]
+            changed = [records[0], {**records[1], "producers": {**records[1]["producers"], "tests": state}}, records[2]]
             with self.subTest(state=state), self.assertRaises(ValueError):
                 capture.asan_producers(self.asan_binding(), changed)
-        for changed in (records[:1], records[::-1], [records[0], records[0]],
-                        [{**records[0], "ambient": RECEIPT}, records[1]],
-                        [records[0], {key: value for key, value in records[1].items() if key != "ambient"}]):
+        for changed in ([], records[:2], records + [records[0]], records[::-1],
+                        [records[0], records[0], records[2]],
+                        [records[0], records[1], {**records[2], "shard": 4}],
+                        [records[0], records[1], {}],
+                        [{**records[0], "shard": True}, *records[1:]],
+                        [{**records[0], "ambient": RECEIPT}, *records[1:]],
+                        [records[0], {key: value for key, value in records[1].items() if key != "ambient"}, records[2]]):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 capture.asan_producers(self.asan_binding(), changed)
 
-    def test_asan_producers_reject_different_binaries_in_either_shard_or_attempt(self):
-        for shard in (1, 2):
+    def test_asan_producers_reject_different_binaries_in_every_shard_or_attempt(self):
+        for shard in (1, 2, 3):
             for attempt in (1, 2):
                 records = self.asan_records()
                 records[shard - 1].update(binary_sha256="3" * 64, run_attempt=attempt)
@@ -223,16 +230,25 @@ class CaptureContract(unittest.TestCase):
                 patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": json.dumps(outcomes)}), \
                 patch.object(capture, "module", return_value=self.comparator()):
             capture.write_asan_shard(args)
+        self.assertIn("ambient", capture.read_json(args.output))
         self.assertEqual(capture.read_json(args.output)["ambient"], RECEIPT)
+        previous = args.output.read_bytes()
+        for shard in (0, 4, True, "3", None):
+            args.shard = shard
+            with self.subTest(shard=shard), self.assertRaisesRegex(ValueError, "invalid ASan shard"), \
+                    patch.object(capture, "source_identity") as source:
+                capture.write_asan_shard(args)
+            source.assert_not_called()
+            self.assertEqual(args.output.read_bytes(), previous)
 
-    def write_asan_capture(self, shard_attempts=(2, 2)):
+    def write_asan_capture(self, shard_attempts=(2, 2, 2)):
         binary = self.root / "common_tests"
         binary.write_bytes(b"binary digest fixture")
         producers = dict.fromkeys(capture.LANES["asan"][2], "success")
-        for shard in (1, 2):
+        for shard in (1, 2, 3):
             source = self.root / f"shard-{shard}"
             source.mkdir()
-            junit = self.junit(producers=0 if shard == 1 else 1)
+            junit = self.junit(producers=1 if shard == 2 else 0)
             destination = source / "ctest.junit.xml"
             destination.write_bytes(junit.read_bytes())
             args = types.SimpleNamespace(lane="asan", expected_sha=HEAD, shard=shard,
@@ -252,21 +268,21 @@ class CaptureContract(unittest.TestCase):
         return args, producers, binary
 
     def test_asan_aggregate_only_rerun_accepts_original_successful_producers(self):
-        args, _, _ = self.write_asan_capture((1, 1))
+        args, _, _ = self.write_asan_capture((1, 1, 1))
         document = capture.read_json(args.output)
         self.assertEqual(document["status"], "complete")
         self.assertEqual(document["run_attempt"], 2)
-        self.assertEqual([record["run_attempt"] for record in document["asan_shards"]], [1, 1])
+        self.assertEqual([record["run_attempt"] for record in document["asan_shards"]], [1, 1, 1])
 
     def test_asan_single_shard_rerun_preserves_each_producers_actual_attempt(self):
-        args, _, _ = self.write_asan_capture((1, 2))
+        args, _, _ = self.write_asan_capture((1, 2, 1))
         document = capture.read_json(args.output)
         self.assertEqual(document["status"], "complete")
         self.assertEqual(document["run_attempt"], 2)
-        self.assertEqual([record["run_attempt"] for record in document["asan_shards"]], [1, 2])
+        self.assertEqual([record["run_attempt"] for record in document["asan_shards"]], [1, 2, 1])
 
     def test_asan_manifest_writer_refuses_different_shard_binaries(self):
-        args, _, _ = self.write_asan_capture((1, 2))
+        args, _, _ = self.write_asan_capture((1, 2, 1))
         args.output.unlink()
         record_path = self.root / "shard-1/qualification-shard.json"
         record = {**capture.read_json(record_path), "binary_sha256": "3" * 64}
@@ -279,7 +295,7 @@ class CaptureContract(unittest.TestCase):
         self.assertEqual(capture.read_json(args.output)["status"], "incomplete")
 
     def test_asan_chain_refuses_different_shard_binaries_before_producer_proof(self):
-        args, _, _ = self.write_asan_capture((1, 2))
+        args, _, _ = self.write_asan_capture((1, 2, 1))
         document = capture.read_json(args.output)
         document["asan_shards"][0]["binary_sha256"] = "3" * 64
         args.output.write_text(json.dumps(document), encoding="utf-8")
@@ -300,11 +316,11 @@ class CaptureContract(unittest.TestCase):
                            ("workflow_path", "other"), ("repo", "other"), ("lane", "other"),
                            ("fixture_hash", "0" * 64), ("source_dirty", True)):
             with self.subTest(field=field, bad=bad), self.assertRaises(ValueError):
-                capture.asan_producers(self.asan_binding(), [{**records[0], field: bad}, records[1]])
+                capture.asan_producers(self.asan_binding(), [{**records[0], field: bad}, *records[1:]])
         for state in ("failure", "skipped", "cancelled", ""):
             reused = {**records[0], "producers": {**records[0]["producers"], "tests": state}}
             with self.subTest(state=state), self.assertRaises(ValueError):
-                capture.asan_producers(self.asan_binding(), [reused, records[1]])
+                capture.asan_producers(self.asan_binding(), [reused, *records[1:]])
 
     def test_asan_shard_capture_and_aggregate_keep_the_existing_manifest_contract(self):
         args, producers, binary = self.write_asan_capture()
@@ -314,7 +330,7 @@ class CaptureContract(unittest.TestCase):
         self.assertEqual(document["producers"], producers)
         self.assertEqual(document["binary_sha256"], capture.digest(binary))
         self.assertEqual(document["files"], {"ctest.junit.xml": capture.digest(args.junit)})
-        self.assertEqual(len(document["asan_shards"]), 2)
+        self.assertEqual(len(document["asan_shards"]), 3)
         for state in ("failure", "skipped", "cancelled", ""):
             args.output.unlink()
             with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
@@ -348,8 +364,9 @@ class CaptureContract(unittest.TestCase):
                 capture.verify_producer(doc)
         with patch.object(capture, "api", return_value={**run, "run_attempt": 1}), self.assertRaises(ValueError):
             capture.verify_producer(doc)
-        with patch.object(capture, "api", side_effect=[run, {"total_count": 1, "jobs": [job]}]):
-            self.assertEqual(capture.verify_producer(doc)["job_id"], 1)
+        full = {**job, "id": 2, "name": doc["job_name"] + " full qualification"}
+        with patch.object(capture, "api", side_effect=[run, {"total_count": 2, "jobs": [job, full]}]):
+            self.assertEqual(capture.verify_producer(doc)["job_id"], 2)
 
     def test_paginated_jobs_reject_repeated_page(self):
         doc = self.document()
@@ -357,6 +374,34 @@ class CaptureContract(unittest.TestCase):
         page = {"total_count": 200, "jobs": [{"id": i, "name": "other"} for i in range(100)]}
         with patch.object(capture, "api", side_effect=[run, page, page]), self.assertRaisesRegex(ValueError, "duplicate producer"):
             capture.verify_producer(doc)
+
+    def test_full_qualification_proof_requires_both_native_producer_and_aggregate(self):
+        for lane in ("linux-gcc", "windows-msvc", "windows-ucrt64"):
+            doc = {**self.document(), "lane": lane, "job_name": capture.LANES[lane][1]}
+            run = {"head_sha": HEAD, "event": "workflow_dispatch", "run_attempt": 2, "path": doc["workflow_path"]}
+            aggregate = {"id": 1, "name": doc["job_name"], "status": "completed", "conclusion": "success", "completed_at": "2026-10-11T00:00:00Z"}
+            full = {**aggregate, "id": 2, "name": doc["job_name"] + " full qualification"}
+            with patch.object(capture, "api", side_effect=[run, {"total_count": 2, "jobs": [aggregate, full]}]):
+                self.assertEqual(capture.verify_producer(doc)["job_id"], 2)
+            for state in ("failure", "skipped", "cancelled", ""):
+                for index in (0, 1):
+                    rows = [aggregate, full]
+                    rows[index] = {**rows[index], "conclusion": state}
+                    with self.subTest(lane=lane, state=state, index=index), patch.object(
+                            capture, "api", side_effect=[run, {"total_count": 2, "jobs": rows}]), self.assertRaises(ValueError):
+                        capture.verify_producer(doc)
+            with patch.object(capture, "api", side_effect=[run, {"total_count": 1, "jobs": [full]}]), self.assertRaises(ValueError):
+                capture.verify_producer(doc)
+            with patch.object(capture, "api", side_effect=[run, {"total_count": 1, "jobs": [aggregate]}]), self.assertRaises(ValueError):
+                capture.verify_producer(doc)
+            names = ("Configure, build, and test",) if lane == "windows-msvc" else ("Configure", "Build", "Test")
+            legacy = {**aggregate, "steps": [{"name": name, "status": "completed", "conclusion": "success"} for name in names]}
+            with patch.object(capture, "api", side_effect=[run, {"total_count": 1, "jobs": [legacy]}]):
+                self.assertEqual(capture.verify_producer(doc)["job_id"], 1)
+            for index in range(len(names)):
+                incomplete = {**legacy, "steps": legacy["steps"][:index] + legacy["steps"][index + 1:]}
+                with patch.object(capture, "api", side_effect=[run, {"total_count": 1, "jobs": [incomplete]}]), self.assertRaises(ValueError):
+                    capture.verify_producer(doc)
 
     def archive(self, document):
         path = self.root / "capture.zip"

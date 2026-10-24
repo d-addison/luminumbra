@@ -2,6 +2,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include "core/WaterSeedInputs.h"
 #include <atomic>
 #include <cstdint>
@@ -52,12 +53,14 @@ public:
 
     // Thread-safe state management
     ChunkState get_state() const {
-        std::lock_guard<std::mutex> lock(m_state_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
         return m_state;
     }
 
     void set_state(ChunkState new_state) {
-        std::lock_guard<std::mutex> lock(m_state_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
         m_state = new_state;
     }
 

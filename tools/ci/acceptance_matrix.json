@@ -3,6 +3,212 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "profiler.build-contract",
+      "source": "issue #433",
+      "statement": "Static source contracts require the existing Linux/GCC GNS compile job to configure the profile preset and build the common library, server, shipping client, QA client and both macro fixtures against pinned Tracy. The bootstrap installs NumPy and Pillow before enabling tests. Disposable TCP accept attempts retain job and future-wait zones without process-lifetime thread-name registration; persistent workers remain named. The licence disclosure links to the repository-hosted notice from generated documentation. Enabled native compile/link qualification is pending a successful CI run; no local profile configure or application build is claimed. Windows and macOS enabled builds, profiler captures and GPU execution remain outside this check. Release/perf lanes retain Tracy disabled.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ProfilerSourceContract"
+        },
+        {
+          "kind": "script",
+          "ref": "test/tools/check_profiler_contract.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.fast-replay-budget",
+      "source": "docs/ci/local-checks.md#fast-hosted-validation",
+      "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Changed first-party sources are admitted by each compiler's configured dependency closure, including included sources without their own database entries; standalone sources without database entries and sources consumed only by absent targets refuse before replay even above budget. Local compile/tidy share this admission. Included-source reports name proven consumers' inputs, and unconfigured-source reports exclude those inputs. Refusals, missing consumers or cross-selected TU entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_workflow_policy.py"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.target-warning-policy",
+      "source": "docs/ci/local-checks.md#fast-hosted-validation",
+      "statement": "The first-party CMake helper emits a private warning-policy definition for every compiler and configuration. Fast compile applies the strict fatal profile only to command variants carrying that definition; other selected variants replay their normal database flags. Unsupported marker values and undefines refuse before compilation. Mixed-policy variants of the same source remain selected and cache identity includes their effective commands.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContract"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.ctest-shard-partitions",
+      "source": "tools/ci/test_ctest_shards.py",
+      "statement": "Eight disjoint CTest shard contract partitions retain every unittest case and the 30-second deadline with unchanged labels. Whole-case overrides balance the groups for Windows; Windows deadline qualification remains pending. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster and registration regressions pin exact coverage and reject invalid selections. Windows Python ci/tools contracts reserve four CTest slots in both engine and compiler-free local-check projects, with explicit costs prioritizing known slow cases. These scheduling properties add no shard relationship edges; Linux retains its existing slot policy. Python-only scheduler regressions check exclusive execution, cost ordering and progress with smaller parallelism.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CTestShardContractPart8"
+        }
+      ]
+    },
+    {
+      "id": "ci.workflow-policy-partitions",
+      "source": "tools/ci/test_workflow_policy.py",
+      "statement": "Ten disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for both new entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart8"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart9"
+        }
+      ]
+    },
+    {
+      "id": "ci.asan-fast-lane",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "Ready pull requests needing native validation run ChangedTranslationUnitsContract and OfflineDependenciesContract before three ASan shards with 75-minute job deadlines. Fixture groups and each required parity and ambient receipt suite stay together; timing observations and CTest COST hints balance deterministic placement. Ordered qualification records cover all three producers with matching binary digests and exactly one ambient receipt. A failed fast lane skips all three shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AsanShardContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "QualificationCaptureContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "iss.500",
+      "source": "issue #500",
+      "statement": "Direct compile and tidy selection honors a nonempty LUMINUMBRA_BASE_REF, defaults to origin/devel when it is unset or empty, and gives explicit --base-ref priority. Unavailable or invalid refs fail without fallback or native work. The documented shell recipe uses the same environment default.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/ci/local-checks.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.scratch-preparation",
+      "source": "docs/ci/local-checks.md#worker-recipe",
+      "statement": "The documented prepare command checks original checkout and scratch components, fresh stage/init paths and all existing temporary, compiler-cache and build-tree entries before creating temporary/cache directories or exporting their paths. Redirects, non-directory components, special files and containment escapes refuse without writes; ordinary nested trees are allowed and checks repeat on every call.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContractPart2"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/ci/local-checks.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "iss.482",
       "source": "issue #482",
       "statement": "Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities.",
@@ -30,7 +236,7 @@
     {
       "id": "render.frame-scan-schema",
       "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
-      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks.",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 62 existing column indices and appends dirty_columns at index 62, for 63 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
       "status": "covered",
       "evidence": [
         {
@@ -380,12 +586,908 @@
           "ref": "tools/ci/check_acceptance_matrix.py"
         },
         {
+          "kind": "doc",
+          "ref": "docs/acceptance-matrix.md"
+        },
+        {
           "kind": "ctest",
           "ref": "AcceptanceMatrixContract"
         },
         {
-          "kind": "doc",
-          "ref": "docs/acceptance-matrix.md"
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract8"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract9"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract10"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract11"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract12"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract13"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract14"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract15"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract16"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract17"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract18"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract19"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract20"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract21"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract22"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract23"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract24"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract25"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract26"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract27"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract28"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract29"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract30"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract31"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract32"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract33"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract34"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract35"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract36"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract37"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract38"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract39"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract40"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract41"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract42"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract43"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract44"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract45"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract46"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract47"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract48"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract49"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract50"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract51"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract52"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract53"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract54"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract55"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract56"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract57"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract58"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract59"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract60"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract61"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract62"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract63"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract64"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract65"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract66"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract67"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract68"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract69"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract70"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract71"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract72"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract73"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract74"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract75"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract76"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract77"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract78"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract79"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract80"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract81"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract82"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract83"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract84"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract85"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract86"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract87"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract88"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract89"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract90"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract91"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract92"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract93"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract94"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract95"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract96"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract97"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract98"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract99"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract100"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract101"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract102"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract103"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract104"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract105"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract106"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract107"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract108"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract109"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract110"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract111"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract112"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract113"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract114"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract115"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract116"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract117"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract118"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract119"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract120"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract121"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract122"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract123"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract124"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract125"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract126"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract127"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract128"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract129"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract130"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract131"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract132"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract133"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract134"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract135"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract136"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract137"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract138"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract139"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract140"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract141"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract142"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract143"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract144"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract145"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract146"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract147"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract148"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract149"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract150"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract151"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract152"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract153"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract154"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract155"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract156"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract157"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract158"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract159"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract160"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract161"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract162"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract163"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract164"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract165"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract166"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract167"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract168"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract169"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract170"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract171"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract172"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract173"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract174"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract175"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract176"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract177"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract178"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract179"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract180"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract181"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract182"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract183"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract184"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract185"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract186"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract187"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract188"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract189"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract190"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract191"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract192"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract193"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract194"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract195"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract196"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract197"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract198"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract199"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract200"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract201"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract202"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract203"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract204"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract205"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract206"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract207"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract208"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract209"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract210"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract211"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract212"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract213"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract214"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract215"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract216"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract217"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract218"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract219"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract220"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract221"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract222"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract223"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract224"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract225"
         }
       ],
       "requirements": [
@@ -759,12 +1861,908 @@
           "ref": "tools/ci/check_acceptance_matrix.py"
         },
         {
+          "kind": "doc",
+          "ref": "docs/acceptance-matrix.md"
+        },
+        {
           "kind": "ctest",
           "ref": "AcceptanceMatrixContract"
         },
         {
-          "kind": "doc",
-          "ref": "docs/acceptance-matrix.md"
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract8"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract9"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract10"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract11"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract12"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract13"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract14"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract15"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract16"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract17"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract18"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract19"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract20"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract21"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract22"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract23"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract24"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract25"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract26"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract27"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract28"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract29"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract30"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract31"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract32"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract33"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract34"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract35"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract36"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract37"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract38"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract39"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract40"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract41"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract42"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract43"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract44"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract45"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract46"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract47"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract48"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract49"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract50"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract51"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract52"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract53"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract54"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract55"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract56"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract57"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract58"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract59"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract60"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract61"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract62"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract63"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract64"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract65"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract66"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract67"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract68"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract69"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract70"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract71"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract72"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract73"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract74"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract75"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract76"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract77"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract78"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract79"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract80"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract81"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract82"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract83"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract84"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract85"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract86"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract87"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract88"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract89"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract90"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract91"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract92"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract93"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract94"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract95"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract96"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract97"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract98"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract99"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract100"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract101"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract102"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract103"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract104"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract105"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract106"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract107"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract108"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract109"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract110"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract111"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract112"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract113"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract114"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract115"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract116"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract117"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract118"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract119"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract120"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract121"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract122"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract123"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract124"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract125"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract126"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract127"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract128"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract129"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract130"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract131"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract132"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract133"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract134"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract135"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract136"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract137"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract138"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract139"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract140"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract141"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract142"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract143"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract144"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract145"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract146"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract147"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract148"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract149"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract150"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract151"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract152"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract153"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract154"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract155"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract156"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract157"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract158"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract159"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract160"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract161"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract162"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract163"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract164"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract165"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract166"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract167"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract168"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract169"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract170"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract171"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract172"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract173"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract174"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract175"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract176"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract177"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract178"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract179"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract180"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract181"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract182"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract183"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract184"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract185"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract186"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract187"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract188"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract189"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract190"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract191"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract192"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract193"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract194"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract195"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract196"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract197"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract198"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract199"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract200"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract201"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract202"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract203"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract204"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract205"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract206"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract207"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract208"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract209"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract210"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract211"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract212"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract213"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract214"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract215"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract216"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract217"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract218"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract219"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract220"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract221"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract222"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract223"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract224"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract225"
         }
       ],
       "requirements": [
@@ -942,6 +2940,174 @@
       ]
     },
     {
+      "id": "iss.480",
+      "source": "issue #480",
+      "statement": "Meshing scratch chunks retain edit-aware standing water depth. Initial meshes, terrain remeshes and water-only remeshes through worker queues and the inline fallback match synchronous dug-pond water and terrain geometry at every supported water resolution; missing and truncated depth grids retain procedural culling.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.*"
+        }
+      ]
+    },
+    {
+      "id": "iss.483",
+      "source": "issue #483",
+      "statement": "Asynchronous meshing captures bounded water and terrain inputs on the main thread. Pending initial meshes, terrain remeshes and water-only remeshes retain dispatch geometry while water simulation advances, including grid resizing, and subsequently mesh the newer water state. Publication rejects superseded chunk generations, mesh versions and voxel revisions; invalid water resolutions and partial surface grids are rejected before allocation. Malformed heightmaps retain the analytic coarse fallback. Promotion reservations hand off to stage-B meshing exactly once for meshless and coarse chunks. Staleness compares only consumed level prefixes and exact-grid depth availability and values; ignored tails and unavailable depth do not queue repeated remeshes. Each update and each blocking-drain subpass copies at most 256 KiB across all terrain and water snapshot channels. Budget-deferred chunks retain their state and capture intervening edits at their later admission, including a later update; bursts drain to synchronous mesh geometry. Promotion admission reserves the maximum stage-B snapshot size so its entire reservation handoff fits the same byte budget. Streaming telemetry counts only admitted work as scheduled and retains byte-budget refusals as deferred. Candidate subtraction counts only matching admissions; retained descriptors outside the current scan remain backlogged until admission. Blocking drains settle the existing capped scheduler prefix, including deferred descriptors and both promotion stages; due activation retains the original dispatch tick. Save quiescence and destruction fence every admitted lane without publishing or admitting deferred work. Hydro prefetch retains one owned batch handle, fences callbacks before world dependencies are replaced or destroyed, and invalidates derived cache data when seed or parameters change. Rejected hydro dispatches do not prevent subsequent admission. Inline generation publishes completed data using the same generation lane contract. Meshing batches publish in stable due-tick order, including stage-B handoffs arriving behind newer ordinary batches; a pending promotion reserves one batch slot within the existing depth cap when all ordinary batches are due later. Mixed dispatches still admit both lanes when due ordinary batches can free the handoff slot. Retained requests refresh LOD, neighbor transition masks and terrain-versus-water classification in the existing candidate pass, retaining original due ticks and prefix ownership even when another producer satisfies the candidate. For issue #524, inline generation, promotion and meshing retain the same due-tick publication boundary as worker execution; unticked inline completion still publishes immediately. Registered boundary regressions cover Loading exclusion with real pending generation, full and coarse generation, initial and terrain remeshes, water-only work, promotion, empty and already-generated requests, raw save fences, early activation and exactly-once due publication.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.PromotionStageBPublishesExactlyOnce"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.UnusedWaterInputsDoNotQueueRepeatedRemeshes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.PendingWaterSnapshotComparesOnlyConsumedInputs"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.SnapshotByteBudgetDrainsBurstWithIdenticalMeshes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.BudgetDeferredChunkCapturesEditsOnNextPass"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.SnapshotByteBudgetPreservesPromotionHandoff"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.SnapshotByteAccountingBoundsPartialAndOversizedChannels"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.SnapshotByteBudgetAdmitsExactFitAndEmptySnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.BlockingDrainSettlesBudgetDeferredRequests"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.DueActivationSettlesBudgetDeferredRequestsAtOriginalTick"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.SurfaceReadinessSettlesBudgetDeferredRequests"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.ClearSettlesDeferredRequestsWithoutResurrection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.RegenerateSettlesDeferredRequestsWithoutResurrection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.GeneratorReplacementSettlesBudgetDeferredRequests"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.WaterReplacementFencesAdmittedPromotionAndDeferredMeshes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.HydroPrefetchFencesSaveAndBlockingDrain"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.HydroPrefetchFencesDestructionAndClear"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.HydroPrefetchFencesSeedParamsAndDependencyReplacement"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.RejectedHydroPrefetchCanBeAdmittedAfterStartup"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.DefaultCaveStreamsEveryNeighbouringMesh"
+        },
+        {
+          "kind": "ctest",
+          "ref": "InitialWorldLoadingPerfTest.PerformanceFrameworkBenchmarkScenariosWriteBudgetArtifacts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.UpdateSharesSnapshotBudgetWithPromotionHandoff"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.EvictedDeferredDescriptorsDoNotCopyOrMeshReplacementChunks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.DueActivationHandsOffPromotionAfterFullMeshingFifoDrains"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.DeferredAdmissionsCountOnlyCurrentCandidatesWithoutLosingBacklog"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.EarlierPromotionPublishesBeforeLaterOrdinaryBatch"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.EarlierPromotionKeepsHandoffSlotAcrossFutureBatchBackpressure"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.LastBatchSlotPreservesMixedDispatchInEitherOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.RetainedCandidateRefreshesMovingAnchorLodBeforeAdmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.RetainedCandidateRefreshesNeighbourTransitionMaskBeforeAdmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.RetainedCandidateRefreshesTerrainAndWaterClassificationBeforeAdmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.SatisfiedRetainedRequestKeepsCurrentLodAndOriginalOwnership"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldGenerationTest.UpdateSkipsMeshingChunksStillLoading"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.TickStampedGenerationWaitsForDueAcrossExecutionBackends"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.TickStampedMeshesWaitForDueAcrossExecutionBackends"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.UntickedInlineGenerationAndPromotionStillPublishOnCompletion"
+        }
+      ]
+    },
+    {
       "id": "contract.tier-values",
       "source": "docs/distant-world.md#far-range-declaration-and-compatibility",
       "statement": "The published one-based tier dimensions, nominal horizontal bands and invalid-input refusals have landed unit evidence; runtime adoption is tracked separately.",
@@ -991,23 +3157,28 @@
     {
       "id": "contract.calendar",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "statement": "The persisted clock, pinned calendar consumers, numeric bounds and tick-boundary snapshot refusals have landed unit evidence.",
+      "statement": "The default 162,000-tick calendar, solar horizons, linear indices and seasonal offsets have unit evidence on the real simulation tick path; simulation curves use integer ticks. Weather, storms, wind and aether retain their absolute tick periods. Snapshots refuse inside a batched catch-up and are taken only at tick boundaries.",
       "status": "covered",
       "requirements": [
         "dw.calendar.001",
         "dw.calendar.002",
+        "dw.calendar.024",
+        "dw.calendar.025",
+        "dw.calendar.026",
         "dw.calendar.004",
         "dw.calendar.005",
         "dw.calendar.006",
         "dw.calendar.007",
         "dw.calendar.008",
-        "dw.calendar.009",
-        "dw.calendar.010",
-        "dw.calendar.011",
-        "dw.calendar.012",
-        "dw.calendar.013",
-        "dw.calendar.014",
+        "dw.calendar.027",
         "dw.calendar.015",
+        "dw.calendar.010",
+        "dw.calendar.032",
+        "dw.calendar.011",
+        "dw.calendar.033",
+        "dw.calendar.035",
+        "dw.calendar.036",
+        "dw.calendar.020",
         "dw.calendar.016"
       ],
       "evidence": [
@@ -1021,6 +3192,46 @@
         },
         {
           "kind": "ctest",
+          "ref": "WorldClockTest.SolarHorizonsUseIntegerBoundariesAtEverySeason"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SymmetricIdentityOddDaysAndLargeIntegerProducts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SmoothSolarKnotsHaveExactPhasesAndContinuousRates"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SmoothSolarDaylightShareIsExactToOneTickInEverySeason"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StimulusSolarLightTemperatureAndOverridesPreserveFallbacks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CalendarConsumersUsePinnedPhasesOnTheRealTickPath"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DefaultCalendarContinuesAcrossSaveAndExplicitSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.BoundedWeatherRestorationMatchesStormMotionAndStrikes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
+        },
+        {
+          "kind": "ctest",
           "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
         },
         {
@@ -1029,15 +3240,7 @@
         },
         {
           "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.CalendarConsumersUsePinnedPhasesOnTheRealTickPath"
-        },
-        {
-          "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
-        },
-        {
-          "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
         }
       ]
     },
@@ -1140,7 +3343,7 @@
     {
       "id": "contract.region-cadence",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Absolute cadence, checked shifts/ticks and bounded resume keep frozen simulation content fixed.",
+      "statement": "Absolute cadence, checked shifts/ticks and bounded resume keep frozen simulation content fixed. Resume caps use one recorded elapsed calendar day (162,000 ticks for new worlds), independent of the solar daylight fraction; ARL1 bytes and timestamps are unchanged.",
       "status": "covered",
       "requirements": [
         "ar.activation.041",
@@ -1152,7 +3355,11 @@
         "ar.activation.047",
         "ar.activation.057",
         "ar.activation.058",
-        "ar.activation.059"
+        "ar.activation.059",
+        "dw.calendar.031",
+        "ar.activation.065",
+        "ar.activation.066",
+        "ar.activation.067"
       ],
       "evidence": [
         {
@@ -1166,6 +3373,10 @@
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.FrozenContentsAndCursorDoNotAdvanceAndResumeIsBounded"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.CanonicalLayoutAndObservationalExclusion"
         }
       ]
     },
@@ -1218,7 +3429,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md and the ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the half-open interval on both axes; an integrated boundary regression for walking anchors, ground-object edits and region pins with full endpoint coverage remains planned under issue #250.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering`: docs/active-regions.md now agrees with the ledger's asymmetric half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers both axes; an integrated boundary regression with full endpoint coverage remains planned under issue #250. Boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence.",
       "evidence": [
         {
           "kind": "ctest",
@@ -1234,8 +3445,18 @@
         },
         {
           "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals",
+          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both X and Z endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
+        },
+        {
+          "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
           "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates, including the next representable float below -2^24.; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries",
+          "planned": "Add a host-boundary regression for walking anchors, ground-object edits and pins: exercise both X and Z endpoints; accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates for walking anchors and ground-object edits, including the next representable float below -2^24, with the corresponding signed region-pin bounds and rejection counters; owner: ds"
         }
       ]
     },
@@ -1390,7 +3611,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -1492,7 +3713,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -1884,7 +4105,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -1905,7 +4126,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -2155,7 +4376,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -2249,12 +4470,11 @@
     {
       "id": "contract.ar.scope.01",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Explicit false selects the legacy clock path. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
+      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
       "status": "planned",
       "requirements": [
         "ar.scope.001",
         "ar.scope.002",
-        "ar.scope.003",
         "ar.scope.004",
         "ar.scope.005",
         "ar.scope.006",
@@ -2359,7 +4579,7 @@
     {
       "id": "contract.ar.activation.05",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Acceptance obligations: No callback consumer or catch-up is installed.",
+      "statement": "Acceptance obligations: no callback consumer or catch-up is installed.",
       "status": "planned",
       "requirements": [
         "ar.activation.060"
@@ -2397,7 +4617,7 @@
     {
       "id": "contract.ar.file.02",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: this slice uses the existing durable temporary-write and atomic replacement primitive for the ledger, without claiming cross-file atomicity. / Clock/ledger pair saves are synchronous and non-reentrant on the process's host thread. / The client calls them during world creation, its main-thread pause-menu quit callback, and shutdown after the main loop returns. / Its explicit persistence scenario also runs on that thread. / The server calls them synchronously from `RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick loop. / Job workers do not call the pair writer.",
+      "statement": "Acceptance obligations: this slice uses the existing durable temporary-write and atomic replacement primitive for the ledger, without claiming cross-file atomicity. / Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process. / The client calls them during world creation, its main-thread pause-menu quit callback, and shutdown after the main loop returns. / Its explicit persistence scenario also runs on that thread. / The server calls them synchronously from `RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick loop. / Job workers do not call the pair writer.",
       "status": "planned",
       "requirements": [
         "ar.file.007",
@@ -2418,7 +4638,7 @@
     {
       "id": "contract.ar.file.03",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: No overlapping production pair writers were found, including across sessions in one process. / The call sites state this ownership contract, and a debug-only atomic assertion guards the whole pair writer against concurrent or reentrant calls. / It does not serialize saves; / there is no production locking scheme. / Independently launched processes sharing one save directory are outside this ownership contract. / Incoming pairs are validated before either replacement.",
+      "statement": "Acceptance obligations: Public persistence APIs permit overlapping calls with stable caller-owned inputs. / A process-wide recursive mutex guards region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup. / It serializes writers through reclamation and replacement; / nested calls retain ownership until the outer call returns. / Independently launched processes sharing one save directory are outside this ownership contract. / Incoming pairs are validated before either replacement.",
       "status": "planned",
       "requirements": [
         "ar.file.013",
@@ -2460,7 +4680,7 @@
     {
       "id": "contract.ar.file.05",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: loading and later saves ignore it, and the next successful ledger save reclaims it, so repeated interruptions cannot accumulate ledger copies until the volume is exhausted. / Reclamation is safe because saves are serialized per destination by construction, so a staging file that already exists was abandoned by a process that is no longer writing it. / It is best effort: a file that cannot be removed is left alone and never blocks the save. / Unknown files inside the region directory are still refused. / The POSIX subprocess regression exits after the staging file is flushed and closed, verifies recovery while that file remains, and then verifies the next successful save removes it. / An accepted partial pair can contain an older ledger than its saved clock.",
+      "statement": "Acceptance obligations: loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim it. / Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer. / It is best effort: a file that cannot be removed is left alone and never blocks the save. / Unknown files inside the region directory are still refused. / The POSIX subprocess regression exits after the staging file is flushed and closed, verifies recovery while that file remains, and then verifies the next successful save removes it. / An accepted partial pair can contain an older ledger than its saved clock.",
       "status": "planned",
       "requirements": [
         "ar.file.025",
@@ -2913,19 +5133,50 @@
     {
       "id": "contract.calendar-pacing",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "statement": "Calendar pacing, flag-off legacy behavior and lunar-cycle limitations require dedicated evidence review.",
-      "status": "planned",
+      "statement": "Pure celestial and inverse-mapping tests cover calendar-relative sun, season and moon phases. The registered rendering clock test exercises fallback pacing, restored calendars, pins, hold and overrides with a GL context; live client rendering, environment precedence and unchanged disc/shader presentation remain pending native qualification.",
+      "status": "needs-native-run",
       "requirements": [
-        "dw.calendar.018",
-        "dw.calendar.019",
-        "dw.calendar.020",
-        "dw.calendar.021",
-        "dw.calendar.022",
-        "dw.calendar.023",
-        "dw.calendar.017",
-        "dw.calendar.003"
+        "dw.calendar.009",
+        "dw.calendar.028",
+        "dw.calendar.029",
+        "dw.calendar.030",
+        "dw.calendar.050",
+        "dw.calendar.054",
+        "dw.calendar.055",
+        "dw.calendar.056",
+        "dw.calendar.057",
+        "dw.calendar.058",
+        "dw.calendar.059",
+        "dw.calendar.060",
+        "dw.calendar.061",
+        "dw.calendar.062",
+        "dw.calendar.003",
+        "dw.calendar.023"
       ],
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "TimeOfDayModel.ElapsedSolarInverseAndCalendarRelativeCelestialSeam"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TimeOfDayModel.MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SkyCircadianAndStimulusSharePinnedCalendarPhases"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderClock.DefaultPacingAndRestoredCustomCalendarPreserveOverrides"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/gates/validate-engine-frontier.ps1",
+          "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode TimeOfDaySweep",
+          "receipt_schema": "luminumbra.timeofday_sweep.v1",
+          "planned": "Extend the visual sweep to qualify default and imported calendar pacing, marker selection, environment and direct illumination precedence, pin release and unchanged moon disc/shaders in the live client; the existing pinned sweep alone does not establish these claims.; owner: ac"
+        },
         {
           "kind": "doc",
           "ref": "docs/distant-world.md",
@@ -3008,6 +5259,338 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-metadata",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Calendar version 2 has five bounded integer parameters. Invalid members, versions, rational fractions, lunar periods and clock ticks refuse transactionally through metadata and world-open paths; the engine guide records the schema.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.034",
+        "dw.calendar.013",
+        "dw.calendar.014",
+        "dw.calendar.037"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.ConstructorChecksRationalAndLunarBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockInvalidMetadata.RefusesWithoutChangingClock"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.CalendarAndMarkerRefusalMatrixPreservesInitializedAndMetadataOnlySaves"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-compatibility",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Absent and unversioned calendars retain pinned legacy values, explicit saves select the legacy or version 2 encoding without rescaling state, and legacy clock hash bytes remain exact. Calendar identity participates in admission without changing replay layouts.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.018",
+        "dw.calendar.012",
+        "dw.calendar.019",
+        "dw.calendar.038",
+        "dw.calendar.039",
+        "dw.calendar.040",
+        "dw.calendar.041",
+        "dw.calendar.042",
+        "dw.calendar.043",
+        "dw.calendar.044",
+        "dw.calendar.045",
+        "dw.calendar.046"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LegacyMetadataRoundTripsAsExactTwoFieldV1Record"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.ExtendedSolarOrLunarParametersRetainV2Encoding"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LegacyCanonicalBytesMatchV1Exactly"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequireFeature"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnabledLegacyClockPinsEmptyEcologyFold"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CalendarIdentityRejectsDifferentResolvedCalendarsBeforeAdmission"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/system-config-identity.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.HeaderRoundtrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.EffectiveConfigIdentityRefusesDifferentRulesBeforePlayback"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-disabled",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Disabled world opens restart simulation at zero with legacy biological periods. Explicit snapshots retain the running tick while replacing the presentation calendar, including absent metadata; markers persist without requiring active regions or entering the disabled clock hash, and competing authorities refuse.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.017",
+        "dw.calendar.047",
+        "dw.calendar.048",
+        "dw.calendar.049",
+        "dw.calendar.051",
+        "dw.calendar.052",
+        "dw.calendar.053",
+        "ar.scope.003"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledKeepsLegacyMetadataBytesAndTickZeroLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledCallbacksKeepLegacySavesLoadsAndNestedTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RenderCalendarMarkerLifecycleAndSnapshotReplacement"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.UnmarkedSnapshotOverwriteRemovesRenderCalendarOnEverySavePath"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnergyWriteFailurePreservesCalendarMetadataOnEverySavePath"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-lunar-period",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "The lunar month is independent of solar phase and year length, and imported calendars use their recorded day length for the eight-day lunar period.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.021",
+        "dw.calendar.022"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LunarMonthIsIndependentOfYearAndImportsRecordedDayLength"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-speed",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Simulation speed controls retain batching and the pause through 16 times range; at ideal 16 times speed the default day lasts 337.5 seconds. Input dispatch and live pacing need dedicated regression and native evidence.",
+      "status": "planned",
+      "requirements": [
+        "dw.calendar.063",
+        "dw.calendar.064"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Add an input-dispatch regression for pause, doubling, halving and the 16 times cap, and qualify actual tick batching and day duration in the live client.; owner: ac"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-far-frame-storage",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. Only v3 issues additional GL queries.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkFrameCountStrictlyParsesBeforeApplyingBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkSerializesEveryMeasuredFarStateAndSummary"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-output-completion",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasRejectPartialWritesAndFlushFailures"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasCheckFileOpenAndDirectoryCreation"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-workload-assignments",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Assignment-form workload options do not become debug overrides or consume successor arguments; non-workload options remain observable overrides.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOverrides.WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides"
+        }
+      ]
+    },
+    {
+      "id": "content.foliage-directory-recovery",
+      "source": "docs/engine-guide.md#shipping-defaults",
+      "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageScanFailuresRemainRetryable"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageFileIoFailureRollsBackBeforeRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageDirectoryProviderExceptionsAreContained"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageUnavailableAndEmptyDirectoriesHaveDistinctResults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSpeciesUsePortableFilenameOrderForDuplicateIds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesRetriesAtDeadlineAndLogsOnlyTransitions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesEmptySuccessIsCachedAndRecoveryIsReportedOnce"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+        }
+      ]
+    },
+    {
+      "id": "render.ladder-content-identity",
+      "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
+      "statement": "Both benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/perf/test_perf.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+
+        }
+      ]
+    },
+    {
+      "id": "render.committed-residency-handoff",
+      "source": "docs/far-volume-memory.md#serving-and-target-handoff",
+      "statement": "The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Bounded retired-key history permits traversal beyond descriptor capacity while preserving serving/target span checks and global publication checks. Controller, renderer and diagnostic regressions using a fake GPU driver cover software behaviour for result-slot backpressure, overlap admission, supersession, upload failure and drain ownership. Native rendering qualification is still outstanding.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoffArrivalTest.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldHandoffRenderer.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldHandoffDiagnostics.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoffTraversal.*"
         }
       ]
     },
@@ -3420,26 +6003,6 @@
       ]
     },
     {
-      "id": "graphics.horizon-authority",
-      "source": "docs/engine-guide.md#world-generation-and-streaming",
-      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
-      "status": "covered",
-      "evidence": [
-        {
-          "kind": "ctest",
-          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
-        },
-        {
-          "kind": "ctest",
-          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
-        },
-        {
-          "kind": "ctest",
-          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
-        }
-      ]
-    },
-    {
       "id": "shield.surface-work-admission",
       "source": "docs/shield/sdf-contract.md#shield-sdf-contract",
       "statement": "Synchronous surface and collision radii are bounded at 12 chunks (625 columns), with exact vertical work capped at 8192 chunks before allocation or chunk mutation. Replay decoding, recording, server boot and client scenario admission refuse unsupported radii before world creation or output. A refused preview candidate retains its live world and generation and permits another candidate. Existing accepted identities and encoding are preserved. Source checks are available; native boundary, overflow, refusal and identity regressions await execution.",
@@ -3632,6 +6195,1202 @@
         {
           "kind": "doc",
           "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "iss.553-dependency-startup",
+      "source": "issue #553",
+      "statement": "A revision-bound Jolt startup patch uses a read-only source overlay and registered actual-dependency failure-injection regressions. Native ownership and platform qualification remain pending; first-party startup and world adoption are separate work.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "JoltStartupPatchContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/jolt-startup.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.MeasuredNullThrowAndUnwindSweep",
+          "planned": "Run actual-dependency failure and mutation controls with generated build owners; owner: physics"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "iss.563-build-inputs",
+      "source": "issue #563",
+      "statement": "Jolt overlay inputs retain exact LF bytes in autocrlf checkouts. Configuration requires Python 3.10 or newer even with BUILD_TESTING=OFF; compiler-free fixtures check interpreter discovery and overlay application. Zero-worker pool allocator and callback lifecycle qualification remains pending native execution.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "JoltStartupPatchContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.ZeroWorkersAcceptNullOnlyForZeroAllocatorAndExecuteBarrierJobs",
+          "planned": "Run the actual dependency regression with generated owners; owner: physics"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.acceptance-preparation-custody",
+      "source": "docs/ci/acceptance-refresh.md#preparation-custody",
+      "statement": "Journaled CLI writes persist an independent caller receipt outside the checkout and Git metadata before publishing a preparation marker. Interrupted receipt delivery is recoverable from that file. Legacy recovery and subsequent publication share one automatic enrollment, with one receipt creation and the clean marker retired at invocation exit; validation failures retire the reset marker and permit a fresh-receipt retry. Metadata directory aliases resolve before transaction paths are derived. Persistent authenticated preparation records support restart reacquisition, bounded reset and reuse, journal custody transfer and retirement. UNKNOWN, foreign, stale, unreadable and uncommitted enrollment states refuse untouched. Five outputs, fifteen payload artifacts, 16 MiB files, 64 KiB metadata, v1/v2 journals and complete-transaction sole-link checks are retained. Extra links refuse recovery, rollback and cleanup before mutation; identity, content and link count are rechecked before removal, replacement or permission changes. Sixty-four contract selections without child processes and 161 selections with child processes include recovery and custody cases alongside four public-tree partitions, with checked per-case storage reservations, unchanged labels and 30-second deadlines. Hosted Windows qualification remains pending.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/ci/check_acceptance_matrix.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/ci/acceptance-refresh.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract8"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract9"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract10"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract11"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract12"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract13"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract14"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract15"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract16"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract17"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract18"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract19"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract20"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract21"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract22"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract23"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract24"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract25"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract26"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract27"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract28"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract29"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract30"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract31"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract32"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract33"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract34"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract35"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract36"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract37"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract38"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract39"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract40"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract41"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract42"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract43"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract44"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract45"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract46"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract47"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract48"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract49"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract50"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract51"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract52"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract53"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract54"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract55"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract56"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract57"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract58"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract59"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract60"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract61"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract62"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract63"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract64"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract65"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract66"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract67"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract68"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract69"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract70"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract71"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract72"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract73"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract74"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract75"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract76"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract77"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract78"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract79"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract80"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract81"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract82"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract83"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract84"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract85"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract86"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract87"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract88"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract89"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract90"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract91"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract92"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract93"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract94"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract95"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract96"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract97"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract98"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract99"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract100"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract101"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract102"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract103"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract104"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract105"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract106"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract107"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract108"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract109"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract110"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract111"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract112"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract113"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract114"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract115"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract116"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract117"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract118"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract119"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract120"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract121"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract122"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract123"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract124"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract125"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract126"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract127"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract128"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract129"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract130"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract131"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract132"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract133"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract134"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract135"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract136"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract137"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract138"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract139"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract140"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract141"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract142"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract143"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract144"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract145"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract146"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract147"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract148"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract149"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract150"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract151"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract152"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract153"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract154"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract155"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract156"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract157"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract158"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract159"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract160"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract161"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract162"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract163"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract164"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract165"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract166"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract167"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract168"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract169"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract170"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract171"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract172"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract173"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract174"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract175"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract176"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract177"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract178"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract179"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract180"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract181"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract182"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract183"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract184"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract185"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract186"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract187"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract188"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract189"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract190"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract191"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract192"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract193"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract194"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract195"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract196"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract197"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract198"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract199"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract200"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract201"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract202"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract203"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract204"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract205"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract206"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract207"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract208"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract209"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract210"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract211"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract212"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract213"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract214"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract215"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract216"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract217"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract218"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract219"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract220"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract221"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract222"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract223"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract224"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract225"
+        }
+      ]
+    },
+    {
+      "id": "iss.385",
+      "source": "issue #385",
+      "statement": "Complete saves use per-file atomic writes for chunks, plants and energy before the metadata phase in both region modes. Required state-writer failures retain the previous metadata and pending dirty chunks. Regions-disabled incremental saves preserve devel file layout and metadata bytes, including plant-only containers and unchanged server shutdowns. Explicit full snapshots provide complete save-as exports and retain canonical dirty flags and save stamps, including destinations with trailing separators. Plant, region and manifest writers stage outside the strict region scan and reclaim their abandoned staging before replacement; plant cleanup also runs for an empty roster. Client preset and settings writers check durable atomic publication before reporting success or removing a renamed source. Registered regressions cover writer failures, malformed presets, interrupted replacement, retries and partial chunk writes. Native execution remains required. The shared region staging calculation preserves Windows UNC roots and the original save-root prefix, relocates only an original chunks/region suffix, and keeps other spellings adjacent; path diagnostics require no filesystem access, and native Windows durable-save qualification remains required. A POSIX regression covers a region symlink outside the save root with read-only target ancestors, abandoned staging, interrupted replacement and retry; native execution remains required. Bare relative container destinations reclaim abandoned staging in the current directory. All persistence writers serialize within the process through reclamation and publication, including region merges and empty-layer removal. Shared writes, metadata and empty energy and ledger saves reclaim abandoned staging while holding that ownership. Barrier-based overlapping region reclamation and shared empty-layer cleanup regressions are registered; native execution remains required. Region and manifest staging retain the original save-root traversal when a symlink is followed by a parent component. Complete and incremental session saves acquire shared ownership after job quiescence and snapshot capture, before destination validation, and retain it through payloads, metadata and dirty acknowledgement. Registered path and overlapping-session regressions include interrupted retries and incompatible clock refusal; native execution remains required.",
+      "status": "needs-native-run",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SnapshotEnergyFailure.FailureKeepsDirtyChunksAndRetryPersistsAllState"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CompleteSaveFailure.SiblingWriterFailureKeepsMetadataAndDirtyChunksPending"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.PartialChunkReplacementKeepsMetadataAndDirtyChunksPending"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PlantPersistence.EmptyRosterRemovalErrorIsReportedAndCanRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.EmptyEnergyRemovalFailureKeepsMetadataInBothRegionModes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldDeathTest.TerminatedLedgerStagingLeavesLoadableAndSavableWorld"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigSourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.EmptyLegacyEnergySavePreservesRebasedCadence"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.ClientMetadataSaveFailureSuppressesSuccessAndAllowsRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettle"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PlantSaveRecovery.AbandonedStagingDoesNotBlockLoadsAndIsReclaimedOnEverySave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PlantSaveRecovery.InterruptedReplacementPreservesRosterAndRetryLeavesNoRegionDebris"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.InterruptedRenamePreservesSourceAndDestinationThenRetries"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.InvalidSourceAndPublicationFailurePreserveExistingFiles"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.NumericOverridesRejectPartialNonfiniteAndOutOfRangeValues"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.NumericBaselineComparisonIsExactAndRangeChecked"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.KnobsRejectInvalidNumbersAndRetainFiniteClamping"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.AliasedDestinationKeepsThePublishedPreset"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameRetiresHardLinkAliasAndKeepsPathAlias"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameHandlesCaseOnlyDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameRetiresLeafSymlinkToDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameLeafSymlinkPreservesExternalTargetAndOccupiedDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameRefusesDanglingSourceAndDestination"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.CheckedRenameKeepsParentSymlinkAliasAndRetiresLeafDestinationAlias"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UserPresetPersistence.SourceRemovalFailureKeepsBothCompletePresets"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.OverlayReplacementFailurePreservesBytesAndRetryOverwrites"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.AbandonedRegionAndManifestStagingAllowsLoadAndIsReclaimedOnRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.StandaloneContainerReclaimsAdjacentStagingAndPreservesRecords"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ClientExitCompleteSavePublishesCapturedSpawnInBothRegionModes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.ContainerStagingKeepsUnrecognizedRegionSpellingAdjacent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.RegionStagingPreservesRootsAndStandaloneSpelling"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.DurableContainerStagingHandlesParentComponentsAndInterruptedRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.OverlappingRegionReclaimWaitsUntilStagedOwnerCompletes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.OverlappingRegionMergesRetainBothWritersRecords"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.SharedWritesAndEmptyRemovalReclaimStagingOnEverySave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.RegionStagingRetainsSymlinkParentTraversalWithoutFilesystemAccess"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAncestors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.SymlinkParentSaveReclaimsAndReplacesInTheResolvedDirectory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.OverlappingSessionSaveOwnsDestinationThroughMetadataAndRefusal"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/ci/check_acceptance_matrix.py",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json> --preparation-receipt-file <caller-metadata.json>",
+          "receipt_schema": "luminumbra.acceptance_execution.v1"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/v0.3-acceptance.md"
+        }
+      ]
+    },
+    {
+      "id": "iss.429",
+      "source": "issue #429",
+      "statement": "Client defaults, server boot, network admission and replay preflight load systems configuration from the runtime root with native filesystem paths. Replay preflight freezes that configuration for identity matching and boot. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required. Directory watches retain RML and RCSS filters together and discover nested additions; registered regressions also cover duplicate registration, wildcards and removed directories.",
+      "status": "needs-native-run",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.DefaultsAndUserOverlayComeFromRuntimeRoot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigStartup.HostAndNetworkAdmissionIgnoreConflictingLaunchDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigSourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.DirectoryWatchWildcardAndMissingDirectoryRemainSafe"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/ci/check_acceptance_matrix.py",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json> --preparation-receipt-file <caller-metadata.json>",
+          "receipt_schema": "luminumbra.acceptance_execution.v1"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/v0.3-acceptance.md"
         }
       ]
     }

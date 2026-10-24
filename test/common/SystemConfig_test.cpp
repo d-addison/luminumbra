@@ -9,23 +9,178 @@
 
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include <glm/glm.hpp>
 #include <iomanip>
 
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 using luminumbra::core::SysKey;
 using luminumbra::core::SysParam;
 using luminumbra::core::SystemConfig;
 
 namespace {
+
+class RuntimeSystemConfig : public testing::Test {
+protected:
+    const std::filesystem::path& Directory() const {
+        return directory;
+    }
+    const std::filesystem::path& Runtime() const {
+        return runtime;
+    }
+    void SetUp() override {
+        previous_cwd = std::filesystem::current_path();
+        directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("runtime-config-");
+        runtime = directory / std::filesystem::path(u8"runtime-\u4e16\u754c-\u03a9");
+        std::filesystem::create_directories(runtime / "data/common");
+        const auto unrelated = directory / "launch";
+        std::filesystem::create_directories(unrelated / "data/common");
+        Write(unrelated / "data/common/systems.json",
+              R"({"sim":{"erosion":{"enabled":false}},"user":{"video":{"fov":60}}})");
+        std::filesystem::current_path(unrelated);
+    }
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::current_path(previous_cwd, error);
+        std::filesystem::remove_all(directory, error);
+    }
+    static void Write(const std::filesystem::path& path, const std::string& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << bytes;
+        ASSERT_TRUE(output.good());
+    }
+
+private:
+    std::filesystem::path directory;
+    std::filesystem::path runtime;
+    std::filesystem::path previous_cwd;
+};
+
+TEST_F(RuntimeSystemConfig, OverlayReplacementFailurePreservesBytesAndRetryOverwrites) {
+    const auto path = Directory() / "settings.json";
+    auto config = SystemConfig::FromJsonString(R"({"user":{"video":{"fov":80}}})");
+    ASSERT_TRUE(config.SaveUserOverlay(path));
+    std::string before;
+    {
+        const std::ifstream input(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << input.rdbuf();
+        before = bytes.str();
+    }
+    config.user().fov = 100.0f;
+    Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+        true);
+    const bool saved = config.SaveUserOverlay(path);
+    Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+        false);
+    EXPECT_FALSE(saved);
+    {
+        const std::ifstream input(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << input.rdbuf();
+        EXPECT_EQ(bytes.str(), before);
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(Directory()))
+        EXPECT_EQ(
+            Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename()).find(".tmp."),
+            std::string::npos);
+    ASSERT_TRUE(config.SaveUserOverlay(path));
+    EXPECT_FLOAT_EQ(SystemConfig::LoadFromFile(path).user().fov, 100.0f);
+    config.user().fov = 110.0f;
+    ASSERT_TRUE(config.SaveUserOverlay(path));
+    EXPECT_FLOAT_EQ(SystemConfig::LoadFromFile(path).user().fov, 110.0f);
+}
+
+TEST_F(RuntimeSystemConfig, DefaultsAndUserOverlayComeFromRuntimeRoot) {
+    Write(Runtime() / "data/common/systems.json",
+          R"({"sim":{"plant_growth":{"enabled":false}},"user":{"video":{"fov":80}}})");
+    const auto defaults = SystemConfig::LoadFromRuntimeRoot(Runtime());
+    EXPECT_TRUE(defaults.enabled(SysKey::SimErosion));
+    EXPECT_FALSE(defaults.enabled(SysKey::SimPlantGrowth));
+    EXPECT_FLOAT_EQ(defaults.user().fov, 80.0f);
+
+    const auto overlay = Directory() / "settings.json";
+    Write(overlay, R"({"sim":{"plant_growth":{"enabled":true}},"user":{"video":{"fov":100}}})");
+    const auto layered = SystemConfig::LoadFromRuntimeRoot(Runtime(), overlay);
+    EXPECT_TRUE(layered.enabled(SysKey::SimErosion));
+    EXPECT_FALSE(layered.enabled(SysKey::SimPlantGrowth));
+    EXPECT_FLOAT_EQ(layered.user().fov, 100.0f);
+}
+
+TEST_F(RuntimeSystemConfig, NativePathsPreserveLayeringAndExplicitFailure) {
+    const auto defaults = Runtime() / "data/common/systems.json";
+    const auto overlay = Runtime() / std::filesystem::path(u8"settings-\u4e16\u754c.json");
+    const auto explicit_path = Runtime() / std::filesystem::path(u8"override-\u03a9.json");
+    Write(defaults, R"({"sim":{"plant_growth":{"enabled":false}},"user":{"video":{"fov":80}}})");
+    Write(overlay, R"({"sim":{"plant_growth":{"enabled":true}},"user":{"video":{"fov":100}}})");
+    Write(explicit_path, R"({"sim":{"erosion":{"enabled":false}},"user":{"video":{"fov":60}}})");
+    EXPECT_FALSE(SystemConfig::LoadFromFile(defaults).enabled(SysKey::SimPlantGrowth));
+    auto config = SystemConfig::LoadLayered(defaults, overlay);
+    EXPECT_FALSE(config.enabled(SysKey::SimPlantGrowth));
+    EXPECT_TRUE(config.enabled(SysKey::SimErosion));
+    EXPECT_FLOAT_EQ(config.user().fov, 100.0f);
+    EXPECT_EQ(config.ComputeConfigSubHash(),
+              SystemConfig::LoadFromRuntimeRoot(Runtime(), overlay).ComputeConfigSubHash());
+    std::string error;
+    ASSERT_TRUE(SystemConfig::TryLoadFromFile(explicit_path, config, error)) << error;
+    EXPECT_FALSE(config.enabled(SysKey::SimErosion));
+    EXPECT_FLOAT_EQ(config.user().fov, 100.0f);
+    const auto hash = config.ComputeConfigSubHash();
+    for (const auto* invalid : {"", "{", "[]", "null", "{} trailing"}) {
+        Write(explicit_path, invalid);
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(explicit_path, config, error));
+        EXPECT_EQ(config.ComputeConfigSubHash(), hash);
+        EXPECT_FLOAT_EQ(config.user().fov, 100.0f);
+    }
+    std::filesystem::remove(explicit_path);
+    EXPECT_FALSE(SystemConfig::TryLoadFromFile(explicit_path, config, error));
+    EXPECT_EQ(config.ComputeConfigSubHash(), hash);
+    ASSERT_TRUE(config.SaveUserOverlay(overlay));
+    EXPECT_FLOAT_EQ(SystemConfig::LoadLayered(defaults, overlay).user().fov, 100.0f);
+    std::filesystem::remove(overlay);
+    EXPECT_TRUE(SystemConfig::LoadLayered(defaults, overlay)
+                    .settings_load_report()
+                    .needs_first_launch_detection);
+    std::filesystem::create_directory(overlay);
+    EXPECT_EQ(SystemConfig::LoadLayered(defaults, overlay).settings_load_report().state,
+              luminumbra::core::SettingsLoadState::Recovery);
+    const auto blocked_parent = Runtime() / std::filesystem::path(u8"blocked-\u4e16\u754c");
+    Write(blocked_parent, "unchanged blocker bytes");
+    EXPECT_FALSE(config.SaveUserOverlay(blocked_parent / "settings.json"));
+    const std::ifstream blocker(blocked_parent, std::ios::binary);
+    std::ostringstream blocker_bytes;
+    blocker_bytes << blocker.rdbuf();
+    EXPECT_EQ(blocker_bytes.str(), "unchanged blocker bytes");
+}
+
+TEST_F(RuntimeSystemConfig, UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory) {
+    const auto file = Runtime() / "data/common/systems.json";
+    const auto expect_defaults = [&] {
+        const auto config = SystemConfig::LoadFromRuntimeRoot(Runtime());
+        EXPECT_TRUE(config.enabled(SysKey::SimErosion));
+        EXPECT_EQ(config.ComputeConfigSubHash(), SystemConfig::Defaults().ComputeConfigSubHash());
+        EXPECT_FLOAT_EQ(config.user().fov, SystemConfig::Defaults().user().fov);
+    };
+    expect_defaults(); // Missing defaults.
+    std::filesystem::create_directory(file);
+    expect_defaults(); // A directory cannot supply a configuration document.
+    std::filesystem::remove(file);
+    for (const auto* bytes : {"", " ", "{\"sim\":"}) {
+        Write(file, bytes);
+        expect_defaults();
+    }
+}
 
 constexpr const char* kSimulationGateNames[]{
 #define SIM_GATE_Sim(NAME) NAME,
@@ -72,11 +227,11 @@ std::string ConfigIdentity(const SystemConfig& config) {
 TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
     // Exact little-endian scalar serialization, independently computed with stdlib Python.
     // See docs/development/system-config-identity.md for the complete computation.
-    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "60ab3c242d54ce89");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "49f694fd70645bcc");
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
                       "data/common/systems.json";
     ASSERT_TRUE(std::filesystem::exists(path));
-    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path.string())), "60ab3c242d54ce89");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "49f694fd70645bcc");
     EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
               ConfigIdentity(SystemConfig::Defaults()));
 }
@@ -155,7 +310,7 @@ TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
                       "fixtures/historical-defaults-off.json";
     SystemConfig config;
     std::string error = "previous error";
-    ASSERT_TRUE(SystemConfig::TryLoadFromFile(path.string(), config, error)) << error;
+    ASSERT_TRUE(SystemConfig::TryLoadFromFile(path, config, error)) << error;
     EXPECT_TRUE(error.empty());
 #define EXPECT_HISTORICAL_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
     if (std::string(JSON_SECTION) == "sim") {                                                      \
@@ -167,7 +322,7 @@ TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
     EXPECT_TRUE(config.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_FALSE(config.enabled(SysKey::RenderCircadian));
     EXPECT_NE(ConfigIdentity(config), ConfigIdentity(SystemConfig::Defaults()));
-    EXPECT_EQ(ConfigIdentity(config), ConfigIdentity(SystemConfig::LoadFromFile(path.string())));
+    EXPECT_EQ(ConfigIdentity(config), ConfigIdentity(SystemConfig::LoadFromFile(path)));
 }
 
 TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
@@ -179,7 +334,7 @@ TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
         SystemConfig::FromJsonString(R"({"sim":{"water_high_res":{"enabled":false}}})");
     const auto identity = ConfigIdentity(config);
     std::string error;
-    EXPECT_FALSE(SystemConfig::TryLoadFromFile(path.string(), config, error));
+    EXPECT_FALSE(SystemConfig::TryLoadFromFile(path, config, error));
     EXPECT_FALSE(error.empty());
     EXPECT_EQ(ConfigIdentity(config), identity);
     for (const char* text : {"",
@@ -194,7 +349,7 @@ TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
             ASSERT_TRUE(file.good());
             file << text;
         }
-        EXPECT_FALSE(SystemConfig::TryLoadFromFile(path.string(), config, error));
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(path, config, error));
         EXPECT_FALSE(error.empty());
         EXPECT_EQ(ConfigIdentity(config), identity);
     }
@@ -451,8 +606,8 @@ TEST(SystemConfig, FramePacingPersistsEverySupportedChoice) {
             const auto config = SystemConfig::FromJsonString(document.dump());
             EXPECT_EQ(config.user().vsync, vsync);
             EXPECT_EQ(config.user().frame_cap, cap);
-            ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
-            const auto reloaded = SystemConfig::LoadLayered("", file.Path().string());
+            ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
+            const auto reloaded = SystemConfig::LoadLayered("", file.Path());
             EXPECT_EQ(reloaded.user().vsync, vsync);
             EXPECT_EQ(reloaded.user().frame_cap, cap);
             EXPECT_EQ(reloaded.ComputeConfigSubHash(),
@@ -497,8 +652,8 @@ TEST(SystemConfig, InvalidInMemoryFrameCapSavesAsUnlimited) {
     const Luminumbra::TestSupport::ScopedTempFile file("frame_pacing_", ".json");
     auto config = SystemConfig::Defaults();
     config.user().frame_cap = 61;
-    ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
-    EXPECT_EQ(SystemConfig::LoadFromFile(file.Path().string()).user().frame_cap, 0);
+    ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
+    EXPECT_EQ(SystemConfig::LoadFromFile(file.Path()).user().frame_cap, 0);
 }
 
 // -105 — keybind map resolves action->key; missing action -> fallback.
@@ -535,7 +690,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
       "user": { "video": { "fov": 95.0, "window_mode": "windowed" },
                 "controls": { "Sprint": 340 } }
     })");
-    ASSERT_TRUE(cfg.SaveUserOverlay(path.string()));
+    ASSERT_TRUE(cfg.SaveUserOverlay(path));
 
     // The written file must contain only user.* — no sim/render keys. Scope the stream so
     // its handle is closed before cleanup (Windows can't delete an open file).
@@ -550,7 +705,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     EXPECT_EQ(text.find("\"sim\""), std::string::npos);
     EXPECT_EQ(text.find("\"render\""), std::string::npos);
 
-    const SystemConfig reloaded = SystemConfig::LoadFromFile(path.string());
+    const SystemConfig reloaded = SystemConfig::LoadFromFile(path);
     EXPECT_FLOAT_EQ(reloaded.user().fov, 95.0f);
     EXPECT_EQ(reloaded.user().window_mode, "windowed");
     EXPECT_EQ(reloaded.keybind("Sprint", -1), 340);
@@ -612,7 +767,7 @@ TEST(SystemConfig, PackagedFlagsAgreeWithCompiledDefaults) {
         << json_name;
     LUMIN_CONFIG_KEY_TABLE(CHECK_PACKAGED_FLAG)
 #undef CHECK_PACKAGED_FLAG
-    const auto packaged = SystemConfig::LoadFromFile(path.string());
+    const auto packaged = SystemConfig::LoadFromFile(path);
     for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
         EXPECT_EQ(packaged.enabled(static_cast<SysKey>(key)),
                   SystemConfig::Defaults().enabled(static_cast<SysKey>(key)))

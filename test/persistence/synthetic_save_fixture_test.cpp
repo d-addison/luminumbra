@@ -100,9 +100,9 @@ TEST_F(SyntheticSaveFixture, CoordinateSpiralMatchesDocumentedPrefix) {
     for (int j = 0; j < 13; ++j) {
         for (int half = 0; half < 2; ++half) {
             const auto& c = coords[static_cast<std::size_t>(2 * j + half)];
-            EXPECT_EQ(c.x, columns[j].first) << "column " << j;
+            EXPECT_EQ(c.x, columns[static_cast<std::size_t>(j)].first) << "column " << j;
             EXPECT_EQ(c.y, half) << "column " << j;
-            EXPECT_EQ(c.z, columns[j].second) << "column " << j;
+            EXPECT_EQ(c.z, columns[static_cast<std::size_t>(j)].second) << "column " << j;
         }
     }
 }

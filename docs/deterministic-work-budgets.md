@@ -27,9 +27,13 @@ must each equal zero.
 
 Foliage counters count dirty columns sampled, individual surface samples,
 uploaded bytes, transfer operations, copied bytes, hashed bytes, deferred
-columns and positive backlog growth per step. GPU input uploads count four
-operations; a CPU mapped instance copy counts one nonempty transfer. Scratch
-allocation is already a separate attribution counter and is not an upload.
+columns and positive backlog growth per step. GPU input uploads count actual
+nonempty buffer transfers. Combined column/slot metadata and adjacent dirty-slot
+batches keep the nine-column workload within four operations per step; camera
+movement with unchanged inputs transfers only the draw command, and a one-column
+edit transfers its surface plus that command. A CPU mapped instance copy counts
+one nonempty transfer. Scratch allocation is already a separate attribution
+counter and is not an upload.
 Surface samples are accumulated once per complete candidate loop, avoiding
 additional per-candidate diagnostic calls. The byte ceilings cover at most
 nine times 8,192 packed 36-byte records, two CPU copies plus chunk metadata,
@@ -70,9 +74,13 @@ live fixture also bounds the unpublished generation/promotion/meshing items,
 idle chunks and deferred candidates, and their positive backlog growth. Ready
 chunks with an active mesh and pending LOD remain in that backlog until
 publication, even after their workers finish. Queue telemetry and the fixture
-subtract only accepted dispatches from meshing candidates; promotions refused
-by an occupied lane remain outstanding. The existing selection counters and
-work budgets are unchanged. The generation and water counters retain their units.
+subtract only accepted dispatches that belong to the current meshing candidate
+scan. A retained descriptor outside that scan remains outstanding until admission.
+An occupied promotion lane holds the sorted suffix, including ordinary remeshes
+behind the refused promotion. Scheduled meshing counts actual admissions under
+the shared 256 KiB snapshot allowance; deferred descriptors and promotion stage B
+retain the original due tick. Work ceilings are unchanged. Generation and water
+counters retain their units.
 
 Collection adds an optional `work_items` object with schema
 `luminumbra.sim_work.v1` to the enabled `sim_budget` artifact, with ordered named

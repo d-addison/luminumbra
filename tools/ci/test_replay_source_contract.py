@@ -160,6 +160,29 @@ class ReplaySourceContract(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("tools/ci/ci_paths.py python-tests", workflow)
 
+    def test_replay_calendar_admission_and_transient_snapshots_share_creation_values(self):
+        helper = read_source(MODES + "ModeHelpers.cpp")
+        for body in (helper.split("RuntimeHelloFrom(", 1)[1].split("\nLuminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(", 1)[0],
+                     helper.split("ReplayRunnerConfigFrom(", 1)[1]):
+            # A session that has not created a world still has legacy presentation
+            # defaults when active regions are off; admission needs creation values.
+            self.assertRegex(body, r'SystemConfigIdentity\(Luminumbra::world::WorldCalendar\{\}\)')
+        creation = read_source("src/luminumbra_common/world/GameSession.cpp").split(
+            "bool GameSession::CreateWorldInternal(", 1)[1].split(
+                "bool GameSession::LoadWorld(", 1)[0]
+        self.assertIn("std::string saved_preset_json = resolved.dump();", creation)
+        self.assertRegex(creation, r'std::string saved_preset_json = resolved.dump\(\);\s*'
+                         r'if \(!transient\) \{')
+        self.assertLess(creation.index("requiredPresetContentHash"),
+                        creation.index("fs::create_directories(worldPath)"))
+        self.assertLess(creation.index("LoadTerrainPresetFromJson(resolved"),
+                        creation.index("ResetWorldSystems();"))
+        self.assertIn("m_savedPresetJson = std::move(saved_preset_json);", creation)
+        native = read_source("test/common/EffectivePresetIdentity_test.cpp")
+        for name in ("ReplayAdmissionUsesTheCreatedCalendarWithActiveRegionsOnAndOff",
+                     "TransientSnapshotsRetainTheEffectivePresetAndRenderCalendar"):
+            self.assertIn(f"TEST_F(EffectivePresetIdentity, {name})", native)
+
     def test_surface_admission_precedes_boot_output_and_allocation(self):
         helper = read_source(MODES + "ModeHelpers.cpp").split("ReplayRunnerConfigFrom(", 1)[1]
         guard = "SurfaceRadiiSupported(header.surface_radius, header.collision_radius)"
@@ -183,7 +206,8 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertRegex(writer, r'SurfaceRadiiSupported\(header.surface_radius, '
                          r'header.collision_radius\)\)\s*return false;')
         primitive = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").split(
-            "bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1]
+            "bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1].split(
+                "\nfloat SHIELD_WorldSystem::GetTerrainHeightAt(", 1)[0]
         self.assertIn("World::SurfaceColumnCount(static_cast<std::uint64_t>(radius))", primitive)
         self.assertRegex(primitive, r'if \(!physics_system \|\| !column_count \|\|\s*'
                          r'!World::SurfaceRadiiSupported\(radius, collision_range\)\)\s*\{'
@@ -215,6 +239,92 @@ class ReplaySourceContract(unittest.TestCase):
                       "diameter > max_size / diameter",
                       "count > kMaxSurfaceChunks - total"):
             self.assertIn(check, budget)
+
+    def test_surface_exact_admission_precedes_all_publication_drains(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        primitive = source.split("bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1].split(
+            "\nfloat SHIELD_WorldSystem::GetTerrainHeightAt(", 1)[0]
+        # The real function must finish every admission check before any drain;
+        # searching the rest of the translation unit could accept a later call.
+        admissions = [re.search(
+            r'if \(!World::AddSurfaceColumnChunks\('
+            r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;', primitive)]
+        for vector in ("chunks_to_build", "chunks_to_consider_for_collision"):
+            admissions.append(re.search(
+                rf'if \(surface_capacity > {vector}\.max_size\(\)\)\s*return false;',
+                primitive))
+        for admission in admissions:
+            self.assertIsNotNone(admission)
+        drains = list(re.finditer(r'wait_for_(?:generation|meshing|promotion|streaming)_jobs\(\);',
+                                  primitive))
+        self.assertEqual([drain[0] for drain in drains], [
+            "wait_for_generation_jobs();", "wait_for_meshing_jobs();",
+            "wait_for_streaming_jobs();"])
+        # The full streaming barrier also settles deferred work. Pin both the
+        # direct lane drains and the finite deferred loop, not just its name.
+        admitted = source.split(
+            "void SHIELD_WorldSystem::wait_for_admitted_streaming_jobs() {", 1)[1].split(
+                "\n}", 1)[0]
+        self.assertEqual(re.findall(r'wait_for_\w+_jobs\(\);', admitted), [
+            "wait_for_generation_jobs();", "wait_for_hydro_prefetch_jobs();",
+            "wait_for_meshing_jobs();", "wait_for_promotion_jobs();",
+            "wait_for_meshing_jobs();"])
+        streaming = source.split(
+            "void SHIELD_WorldSystem::wait_for_streaming_jobs() {", 1)[1].split(
+                "\n}", 1)[0]
+        self.assertRegex(streaming, r'wait_for_admitted_streaming_jobs\(\);\s*'
+                         r'(?:/[^\n]*\n\s*)*while \(deferred_meshing_pending\(\)\) \{\s*'
+                         r'dispatch_deferred_meshing\(\);\s*wait_for_admitted_streaming_jobs\(\);\s*\}')
+        for admission in admissions:
+            self.assertLess(admission.end(), drains[0].start())
+        self.assertLess(primitive.index("JobWatchdogEnabled()"), drains[0].start())
+        for vector in ("chunks_to_build", "chunks_to_consider_for_collision"):
+            self.assertLess(drains[-1].end(), primitive.index(f"{vector}.reserve(surface_capacity)"))
+        self.assertLess(drains[-1].end(), primitive.index("m_streaming_state.chunks.emplace"))
+
+        native = read_source("test/common/SurfaceWorkBudget_test.cpp")
+        self.assertIn('#include "luminumbra_common/core/JobSystem.h"', native)
+        for lane in ("Mesh", "Generation", "Promotion"):
+            name = f"TallSurfaceRefusalRetainsUnpublished{lane}Batch"
+            marker = f"TEST(SurfaceWorkBudget, {name})"
+            self.assertEqual(native.count(marker), 1)
+            case = native.split(marker, 1)[1].split("\nTEST(", 1)[0]
+            for token in ("jobs.startup(1);", "world.begin_tick(0);",
+                          "world.quiesce_streaming_jobs_for_save();",
+                          "ASSERT_EQ(world.pending_publication_chunks(), 1u);",
+                          "EXPECT_FALSE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));",
+                          "EXPECT_FALSE(world.EnsureCollisionReadyNear(anchor, &physics, 0));",
+                          "EXPECT_EQ(world.EditTerrainVoxel(anchor, 1.0f, false, &physics), 0);",
+                          "EXPECT_EQ(world.pending_publication_chunks(), 1u);",
+                          "EXPECT_EQ(chunk->current_lod.load(), original_lod);",
+                          "EXPECT_EQ(chunk->mesh_version.load(), original_version);",
+                          "EXPECT_EQ(chunk->sdf_data, original_sdf);",
+                          "EXPECT_EQ(world.find_streamed_chunk(Luminumbra::IVec3(0)), chunk);",
+                          "EXPECT_EQ(world.snapshot_streamed_chunks().size(), 1u);",
+                          "EXPECT_EQ(world.far_lod_authority_revision(), original_revision);",
+                          "world.begin_tick(8);", "world.activate_due(8);",
+                          "EXPECT_EQ(world.pending_publication_chunks(), 0u);"):
+                self.assertIn(token, case)
+            self.assertLess(case.index("world.quiesce_streaming_jobs_for_save();"),
+                            case.index("EXPECT_FALSE(world.EnsureSurfaceReadyNear("))
+            if lane == "Generation":
+                self.assertIn("world.dispatch_generation_jobs(", case)
+                self.assertIn("ASSERT_TRUE(chunk->pending_generation_ready.load());", case)
+            else:
+                self.assertIn("world.update(registry, anchor, nullptr);", case)
+                self.assertIn("ASSERT_TRUE(world.adopt_streamed_chunk(chunk));", case)
+                ready = "mesh" if lane == "Mesh" else "promotion"
+                self.assertIn(f"ASSERT_TRUE(chunk->pending_{ready}_ready.load());", case)
+                self.assertIn("EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);", case)
+        cmake = read_source("test/CMakeLists.txt")
+        target = re.search(r'add_executable\(world_open_refusal_test\s+(.*?)\)',
+                           cmake, re.DOTALL)
+        self.assertIsNotNone(target)
+        self.assertEqual(target[1].split().count("common/SurfaceWorkBudget_test.cpp"), 1)
+        targets = cmake.split("set(LUMINUMBRA_GTEST_TARGETS", 1)[1].split("\n)", 1)[0]
+        self.assertEqual(targets.split().count("world_open_refusal_test"), 1)
+        self.assertIn("foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
     def test_surface_cli_and_direct_siblings_share_admission_and_native_owners(self):
         server = read_source("src/luminumbra_server/main_server.cpp")
@@ -421,6 +531,170 @@ class ReplaySourceContract(unittest.TestCase):
                          "EXPECT_FALSE(fs::exists(save_root));"):
             with self.subTest(helper=original), self.assertRaises(AssertionError):
                 self.assert_runtime_surface_owner(cmake, native.replace(original, "", 1))
+
+
+class SessionUsabilitySourceContract(unittest.TestCase):
+    @staticmethod
+    def function(source, name):
+        start = source.index("GameSession::" + name + "(")
+        opening = source.index("{", start)
+        # Ignore braces inside diagnostics and comments when locating the body.
+        tokens = re.finditer(r'"(?:\\.|[^"\\])*"|\{|\}', source[opening:])
+        depth = 0
+        for token in tokens:
+            if token[0] == "{":
+                depth += 1
+            elif token[0] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[start:opening + token.end()]
+        raise AssertionError("unterminated session function")
+
+    def test_operation_refusal_cannot_change_current_session_usability(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        header = read_source("src/luminumbra_common/world/GameSession.h")
+        self.assertIn("bool m_worldUsable = false;", header)
+        self.assertIn("return m_worldOpenError;", header)
+        reset = self.function(source, "ResetWorldSystems")
+        self.assertIn("m_worldUsable = false;", reset)
+        for name in ("CreateWorldInternal", "LoadWorld"):
+            body = self.function(source, name)
+            preparation, adoption = body.split("ResetWorldSystems();", 1)
+            if name == "LoadWorld":
+                preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
+                self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded))", state_read)
+                self.assertLess(state_read.index("m_worldUsable = false;"),
+                                state_read.index("m_worldSystem->clear_world("))
+            self.assertNotIn("m_worldUsable", preparation)
+            self.assertIn("m_worldOpenError =", preparation)
+            self.assertLess(adoption.index("m_speciesTable ="),
+                            adoption.index("m_worldUsable = true;"))
+        creation = self.function(source, "CreateWorldInternal")
+        metadata_failure = creation.split("if (!transient && !SaveWorld())", 1)[1]
+        self.assertLess(metadata_failure.index("m_worldUsable = false;"),
+                        metadata_failure.index("return false;"))
+        opening = self.function(source, "LoadWorld")
+        self.assertLess(opening.index("ReadWorldStateFrom(worldPath, loaded)"),
+                        opening.index("ResetWorldSystems();"))
+        self.assertLess(opening.index("AdoptWorldStateFrom(worldPath, loaded);"),
+                        opening.index("m_worldUsable = true;"))
+
+    def test_persistence_uses_session_state_and_fatal_snapshot_refusals_latch_it(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for name in ("SaveWorldMetadataTo", "SaveWorldStateToImpl", "SaveEnergyFieldRecord",
+                     "LoadWorldStateFrom"):
+            with self.subTest(consumer=name):
+                body = self.function(source, name)
+                admission = body[:body.index("LoadedWorldState state;")] \
+                    if name == "LoadWorldStateFrom" else body[:body.index("return false;")]
+                self.assertIn("!m_worldUsable", admission)
+                self.assertNotIn("m_worldOpenError", admission)
+        wrapper = self.function(source, "SaveWorldStateTo")
+        self.assertIn("return SaveWorldStateToImpl(", wrapper)
+        readiness = self.function(source, "LoadWorldState")
+        self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
+        snapshot = self.function(source, "LoadWorldStateFrom")
+        # Every staged refusal reaches the same invalidation before adoption.
+        failure = snapshot.split("if (!ReadWorldStateFrom(save_dir, state))", 1)[1]
+        self.assertLess(failure.index("m_worldUsable = false;"),
+                        failure.index("m_worldSystem->clear_world("))
+        self.assertLess(failure.index("return false;"),
+                        failure.index("AdoptWorldStateFrom(save_dir, state);"))
+        self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 1)
+        reader = self.function(source, "ReadWorldStateFrom")
+        self.assertEqual(reader.count("return false;"), 5)
+        self.assertEqual(reader.count("m_worldOpenError ="), 5)
+        for validation in ("service.load_world(", "WorldSaveService::read_clock_metadata(",
+                           "WorldSaveService::load_active_regions(", "m_regionSchedulerOverride",
+                           "chunk->sdf_data.size() != kFullSdfLattice"):
+            self.assertIn(validation, reader)
+        self.assertNotIn("m_worldUsable", reader)
+        self.assertNotIn("m_worldSystem->", reader)
+        self.assertNotIn("m_renderCalendar =", reader)
+        self.assertNotIn("RestoreWorldClock(", reader)
+        self.assertNotIn("m_worldUsable = true;", snapshot)
+        runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
+        full_snapshot = runner.split("ServerWorldRunner::SaveFullSnapshot()", 1)[1].split(
+            "ServerWorldRunner::StreamedChunkCount()", 1)[0]
+        self.assertNotIn("GetWorldOpenError()", full_snapshot)
+        self.assertIn("m_session->SaveWorldStateTo(", full_snapshot)
+
+    def test_normal_custom_validation_precedes_directory_and_uses_prepared_identity(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        creation = self.function(source, "CreateWorldInternal")
+        directory = creation.index("fs::create_directories(worldPath)")
+        for validation in ("nlohmann::json::parse(*customPresetJson)",
+                           "ResolveEffectivePreset(resolved, presetUse)",
+                           "LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath)",
+                           "if (!preset.ok)",
+                           "preset.preset_content_hash != requiredPresetContentHash"):
+            self.assertLess(creation.index(validation), directory)
+        self.assertIn('saved_preset_json = resolved.dump();', creation)
+        self.assertIn('saved_preset_json + "\\n"', creation)
+        adoption = creation.split("ResetWorldSystems();", 1)[1]
+        self.assertIn("m_presetContentHash = preset.preset_content_hash;", adoption)
+        self.assertIn("m_speciesTable = preset.params.worldgen_dependencies->species_table;", adoption)
+        self.assertNotIn("LoadTerrainPreset", adoption)
+
+
+class FarVolumeAdmissionSourceContract(unittest.TestCase):
+    """Guard bounded publication structure; native behaviour stays a native test."""
+
+    def method(self, path, start, end):
+        source = read_source("src/luminumbra_client/rendering/" + path)
+        return source.split(start, 1)[1].split(end, 1)[0]
+
+    def test_admission_uses_bounded_sorted_scratch_and_monotonic_free_cursors(self):
+        for path, start, end in (
+                ("FarVolumeHandoff.cpp", "bool FarVolumeHandoff::StageTarget(",
+                 "void FarVolumeHandoff::Reject("),
+                ("FarVolumeResidency.cpp", "bool FarVolumeResidency::ReplaceWanted(",
+                 "void FarVolumeResidency::Reject(")):
+            with self.subTest(path=path):
+                body = self.method(path, start, end)
+                self.assertIn("std::sort(incoming.begin(), incoming.end()", body)
+                self.assertIn("tier.key_index[tier.entries.size() + count++]", body)
+                self.assertLess(body.index("count == tier.entries.size()"),
+                                body.index("tier.key_index[tier.entries.size() + count++]"))
+                self.assertIn("tier.order[index] == 0", body)
+                self.assertIn("auto& cursor = next_free[number]", body)
+                self.assertIn("entry = &tier.entries[cursor++]", body)
+                self.assertIn("tier.queue.ForgetMatching", body)
+                self.assertNotIn("queue.Forget(", body)
+                self.assertNotRegex(body, r"std::(?:none_of|find_if|count_if)")
+                self.assertNotRegex(body, r"for\s*\([^;]*;\s*j\s*<\s*(?:i|index)\b")
+
+    def test_live_lookup_and_rebuild_have_no_hash_collision_chains(self):
+        for owner in ("FarVolumeHandoff", "FarVolumeResidency"):
+            with self.subTest(owner=owner):
+                lookup = self.method(owner + ".cpp", "const " + owner + "::Entry* " +
+                                     owner + "::Find(", owner + "::Entry* " + owner + "::Find(")
+                self.assertIn("std::lower_bound", lookup)
+                self.assertNotIn("for (", lookup)
+                self.assertNotIn("while (", lookup)
+                rebuild = self.method(owner + ".cpp", "void " + owner +
+                                      "::Tier::RebuildIndex(", owner + "::" + owner + "(")
+                self.assertIn("std::sort", rebuild)
+                self.assertNotIn("while (", rebuild)
+                self.assertIn("++work.key_comparisons", rebuild)
+                drain = read_source("src/luminumbra_client/rendering/" + owner + ".cpp").split(
+                    "void " + owner + "::CancelAndDrain()", 1)[1]
+                self.assertIn("index_count = 0", drain)
+
+    def test_batch_retirement_does_not_search_descriptors_per_selected_key(self):
+        header = read_source("src/luminumbra_client/rendering/FarVolumeBuildQueue.h")
+        batch = header.split("std::size_t ForgetMatching(", 1)[1].split(
+            "bool Retry(", 1)[0]
+        self.assertIn("noexcept(predicate", batch)
+        self.assertIn("index < descriptors_.size()", batch)
+        self.assertIn("ForgetAt(index)", batch)
+        self.assertNotIn("Find(", batch)
+        self.assertNotIn("Cancel(", batch)
+        forget = self.method("FarVolumeBuildQueue.cpp", "void FarVolumeBuildQueue::ForgetAt(",
+                             "bool FarVolumeBuildQueue::Retry(")
+        self.assertIn("CancelAt(index)", forget)
+        self.assertNotIn("Find(", forget)
+        self.assertNotIn("Cancel(", forget)
 
 
 if __name__ == "__main__":
