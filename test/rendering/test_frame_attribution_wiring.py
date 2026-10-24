@@ -1181,6 +1181,28 @@ class FrameAttributionWiring(unittest.TestCase):
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
         self.assertIn("m_foliage_pass->attach_job_system(job_system);", pipeline)
 
+    def test_ground_query_publication_releases_resident_payloads_on_both_paths(self):
+        synchronous = compact(block(self.foliage, "if (!mesh.query)"))
+        self.assertIn("mesh.query = std::make_shared<const FoliageGroundMesh>(", synchronous)
+        self.assertIn("mesh.payload.reset();", synchronous)
+        self.assertLess(synchronous.index("mesh.payload->indices);"),
+                        synchronous.index("mesh.payload.reset();"))
+        self.assertLess(self.foliage.index("mesh.payload.reset();"),
+                        self.foliage.index("mesh.query->sample(x, z);"))
+        polling = block(self.foliage, "void FoliagePass::poll_ground_builds(")
+        publication = compact(block(polling, "if (resident != column->second.meshes.end())"))
+        self.assertEqual(publication, "resident->second.query = mesh.query; "
+                         "resident->second.payload.reset();")
+        # Only validated completions publish; stale or failed jobs are discarded.
+        worker = read(CLIENT / "rendering/FoliageGroundWork.h")
+        polling = compact(block(worker, "void poll(Validate validate, Consume consume)"))
+        self.assertIn("if (slot.invalidated || !validate(slot.build->input)) "
+                      "++m_stats.stale_rejected; else if (!slot.build->failed) "
+                      "consume(*slot.build); slot.build.reset();", polling)
+        self.assertIn("const FoliageGroundRequest input;", worker)
+        self.assertIn("queries.push_back({mesh.id, {}, std::move(query)});", worker)
+        self.assertNotIn("queries.push_back({mesh.id, mesh.payload,", worker)
+
     def test_preview_rebuilds_current_support_even_with_cached_scatter_inputs(self):
         preview = read(CLIENT / "world/WorldgenPreview.cpp")
         rebuild = block(preview, "void WorldgenPreview::rebuild_foliage_if_needed(")

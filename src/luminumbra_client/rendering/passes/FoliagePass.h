@@ -469,6 +469,7 @@ private:
     std::uint64_t m_next_ground_revision = 0;
     std::uint64_t m_ground_epoch = 0;
     struct GroundMesh {
+        // Retained only until query publication; in-flight requests own snapshots.
         std::shared_ptr<const FoliageMeshPayload> payload;
         std::shared_ptr<const FoliageGroundMesh> query;
     };

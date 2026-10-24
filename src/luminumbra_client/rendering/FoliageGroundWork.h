@@ -122,7 +122,9 @@ public:
                 if (!query)
                     query = std::make_shared<const FoliageGroundMesh>(
                         mesh.payload->origin, mesh.payload->vertices, mesh.payload->indices);
-                queries.push_back({mesh.id, mesh.payload, std::move(query)});
+                // Results need only queries. The immutable input owns payloads
+                // until the in-flight work item is consumed or discarded.
+                queries.push_back({mesh.id, {}, std::move(query)});
             }
             // Exactly 8192 vec4s (128 KiB) per work item, independent of density.
             static_assert(kCandidates <=

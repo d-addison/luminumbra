@@ -88,6 +88,38 @@ TEST(FoliageGroundWork, WorkerSamplesMatchSynchronousBytesAndReuseImmutableQueri
         0);
 }
 
+TEST(FoliageGroundWork, QueryOnlyResultsReleasePayloadAfterLastInFlightOwner) {
+    for (const bool invalidated : {false, true}) {
+        auto resident = Request();
+        const std::weak_ptr<const FoliageMeshPayload> payload = resident.meshes.front().payload;
+        FoliageGroundQueue queue;
+        queue.begin_frame();
+        auto job = queue.enqueue(resident);
+        ASSERT_TRUE(job);
+        // Remesh/eviction may drop the resident owner while a job still needs it.
+        resident.meshes.clear();
+        EXPECT_FALSE(payload.expired());
+        if (invalidated)
+            queue.invalidate(resident.key.column);
+        job->run();
+        ASSERT_TRUE(job->ready());
+        ASSERT_FALSE(job->failed);
+        ASSERT_EQ(job->queries.size(), 1u);
+        EXPECT_FALSE(job->queries.front().payload);
+        const auto query = job->queries.front().query;
+        ASSERT_TRUE(query);
+        std::size_t consumed = 0;
+        queue.poll([](const auto&) { return true; }, [&](auto&) { ++consumed; });
+        EXPECT_EQ(consumed, invalidated ? 0u : 1u);
+        EXPECT_FALSE(payload.expired()); // The executor still owns this work item.
+        job.reset();
+        EXPECT_TRUE(payload.expired());
+        // A surviving query remains usable without the copied geometry.
+        const auto hit = query->sample(-1.0f, static_cast<float>(CHUNK_SIZE_Z) + 1.0f);
+        EXPECT_TRUE(hit.valid);
+    }
+}
+
 TEST(FoliageGroundWork, QueueBoundsIncludeRunningAndUnconsumedCompletions) {
     FoliageGroundQueue queue;
     queue.begin_frame();

@@ -350,9 +350,12 @@ FoliagePass::SurfaceSample FoliagePass::sample_ground(
         return sample;
     for (auto& [id, mesh] : column->second.meshes) {
         (void)id;
-        if (!mesh.query)
+        if (!mesh.query) {
             mesh.query = std::make_shared<const FoliageGroundMesh>(
                 mesh.payload->origin, mesh.payload->vertices, mesh.payload->indices);
+            // Jobs already in flight retain their own immutable payload owner.
+            mesh.payload.reset();
+        }
         const auto hit = mesh.query->sample(x, z);
         if (hit.valid && (!sample.valid || hit.height > sample.height)) {
             sample.valid = true;
@@ -402,8 +405,10 @@ void FoliagePass::poll_ground_builds(const std::vector<ChunkScatter>& chunks,
             if (column != m_ground_meshes.end()) {
                 for (const auto& mesh : build.queries) {
                     const auto resident = column->second.meshes.find(mesh.id);
-                    if (resident != column->second.meshes.end())
+                    if (resident != column->second.meshes.end()) {
                         resident->second.query = mesh.query;
+                        resident->second.payload.reset();
+                    }
                 }
             }
             m_surf_grid_cache.insert_or_assign(build.input.key,
