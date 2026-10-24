@@ -265,6 +265,25 @@ class RenderRunnerTests(unittest.TestCase):
     def test_v4_save_load_success(self):
         self.validate_save_load_capture(audio=True)
 
+    def test_stream_radius_refusal(self):
+        flag = '--render-benchmark-stream-radius'
+        script = self.short_save_load_script()
+        for value in ('', '-1', '13', '0junk', '1e38', '99999999999999999999'):
+            for option in ([flag, value], [flag + '=' + value]):
+                with self.subTest(option=option):
+                    log = self.run_client('radius-refused', ['--traversal', str(script), *option],
+                                          expected_exit=2, schema='v4')
+                    self.assertIn(flag + ' requires 0..12 chunks', log)
+        log = self.run_client('radius-missing', ['--traversal', str(script), flag],
+                              expected_exit=2, schema='v4')
+        self.assertIn(flag + ' requires 0..12 chunks', log)
+        for schema in ('v2', 'v3', 'v5', ''):
+            for option in ([flag, '0'], [flag + '=1']):
+                with self.subTest(schema=schema, option=option):
+                    log = self.run_client('radius-schema', option, expected_exit=2, schema=schema)
+                    self.assertIn(flag + ' requires schema v4', log)
+        self.assertFalse((self.root / 'worlds/saves').exists())
+
     def test_v4_no_audio_success(self):
         audio = self.root / 'assets/audio'
         if audio.exists():
@@ -276,8 +295,20 @@ class RenderRunnerTests(unittest.TestCase):
 
     def validate_save_load_capture(self, audio):
         script = self.save_load_script()
-        data = self.run_client('save-load', ['--traversal', str(script)], schema='v4', audio=audio)
+        # Bound both synchronous entry and asynchronous residency. The latter
+        # must survive reload, whose settle gate still drains every live queue.
+        # Radius 4 retains 81 columns for the unchanged 64-renderable/9-collider
+        # entry-readiness minima; a radius-1 surface cannot satisfy those checks.
+        overrides = {'cli:--horizon-radius': '4', 'cli:--collision-radius': '4',
+                     'cli:--render-benchmark-stream-radius': '4'}
+        declaration = self.root / 'save-load-overrides.json'
+        declaration.write_text(json.dumps(overrides), encoding='utf-8')
+        data = self.run_client('save-load', [
+            '--traversal', str(script), '--horizon-radius', '4', '--collision-radius', '4',
+            '--render-benchmark-stream-radius', '4', '--declare-render-overrides', str(declaration)],
+            schema='v4', audio=audio)
         contract.validate(data, data['adapter']['renderer'], traversal=script)
+        self.assertEqual(data['debug_overrides']['active'], overrides)
         self.assertEqual(data['schema'], contract.WORKLOAD_SCHEMA)
         self.assertEqual(data['workload']['actual_ticks'],
                          contract.traversal_manifest(script.read_text(encoding='utf-8'))['expected_ticks'])
@@ -287,15 +318,15 @@ class RenderRunnerTests(unittest.TestCase):
         return data
 
     def save_load_script(self):
-        # Hold the view while asynchronous reload/meshing completes, then resume
-        # motion inside the same chunk. The four-tick refusal script cannot
-        # supply a successful reload's quiescence and resumed-camera evidence.
+        # Reload drains residency inside its request frame before advancing the
+        # traversal tick. A short held pose and same-chunk motion still require
+        # quiescence and resumed-camera evidence without hundreds of idle frames.
         script = self.short_save_load_script()
         text = script.read_text(encoding='utf-8').split('points ', 1)[0]
-        text = text.replace('duration_seconds 0.13333333333333333', 'duration_seconds 10')
-        text = text.replace('expected_ticks 4', 'expected_ticks 300')
-        text += ('points 3\npoint 0 8 80 8 0 -6\npoint 240 8 80 8 0 -6\n'
-                 'point 300 9 80 8 0 -6\nactions 2\n'
+        text = text.replace('duration_seconds 0.13333333333333333', 'duration_seconds 0.4')
+        text = text.replace('expected_ticks 4', 'expected_ticks 12')
+        text += ('points 3\npoint 0 8 80 8 0 -6\npoint 6 8 80 8 0 -6\n'
+                 'point 12 9 80 8 0 -6\nactions 2\n'
                  'action 1 save 0 0 0 0\naction 2 reload 0 0 0 0\n')
         script.write_bytes(text.encode('utf-8'))
         return script

@@ -2560,6 +2560,11 @@ int main(int argc, char* argv[]) {
         // rendering with the (now game-owned) camera/world.
         g_app.menu.menu_backdrop_active = false;
         if (auto* world_system = gameSession->GetWorldSystem()) {
+            // Apply to both creation and reload before any entry/streaming work.
+            // Explicit capture overrides bind this diagnostic to render identity.
+            if (benchmark_v4)
+                world_system->debug_set_streaming_radius_cap(
+                    scenario_config.benchmark_stream_radius);
             // bake the live waterfall dressing once for this
             // world. Detection is a pure function of the generated world
             // (river course x steep height drop), so it is valid here even

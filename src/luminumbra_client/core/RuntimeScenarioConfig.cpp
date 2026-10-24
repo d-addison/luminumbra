@@ -155,13 +155,18 @@ bool ParseResolution(const std::string& value, int& out_width, int& out_height) 
     }
 }
 
-void ParseSurfaceRadiusOptions(int argc, char* argv[], int& surface_radius, int& collision_radius) {
+void ParseSurfaceRadiusOptions(int argc,
+                               char* argv[],
+                               int& surface_radius,
+                               int& collision_radius,
+                               int& benchmark_stream_radius) {
     // Validate both spellings and every occurrence before any scenario can
     // create a world. Missing/invalid values must not fall back to a default.
     for (int i = 1; i < argc; ++i) {
         const std::string_view argument(argv[i]);
-        for (const auto flag :
-             {std::string_view("--horizon-radius"), std::string_view("--collision-radius")}) {
+        for (const auto flag : {std::string_view("--horizon-radius"),
+                                std::string_view("--collision-radius"),
+                                std::string_view("--render-benchmark-stream-radius")}) {
             std::string_view value;
             if (argument == flag) {
                 if (i + 1 < argc)
@@ -172,11 +177,16 @@ void ParseSurfaceRadiusOptions(int argc, char* argv[], int& surface_radius, int&
             } else {
                 continue;
             }
-            int& radius = flag == "--horizon-radius" ? surface_radius : collision_radius;
+            int& radius = flag == "--horizon-radius"     ? surface_radius
+                          : flag == "--collision-radius" ? collision_radius
+                                                         : benchmark_stream_radius;
             if (!World::TryParseSurfaceRadius(value, radius))
                 throw std::invalid_argument(std::string(flag) + " requires 0..12 chunks");
         }
     }
+    if (HasCommandLineOption(argc, argv, "--render-benchmark-stream-radius") &&
+        GetCommandLineOption(argc, argv, "--render-benchmark-schema", "v2") != "v4")
+        throw std::invalid_argument("--render-benchmark-stream-radius requires schema v4");
 }
 } // namespace
 
@@ -184,7 +194,9 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
     // Admission precedes --save-root directory creation.
     int surface_radius = 0;
     int collision_radius = 0;
-    ParseSurfaceRadiusOptions(argc, argv, surface_radius, collision_radius);
+    int benchmark_stream_radius = 0;
+    ParseSurfaceRadiusOptions(
+        argc, argv, surface_radius, collision_radius, benchmark_stream_radius);
     RuntimePathOptions options;
     for (const char* flag : {"--runtime-root", "--save-root"}) {
         std::filesystem::path& path =
@@ -223,7 +235,8 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
     RuntimeScenarioConfig config;
-    ParseSurfaceRadiusOptions(argc, argv, config.horizon_radius, config.collision_radius);
+    ParseSurfaceRadiusOptions(
+        argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
     config.scenario = GetCommandLineOption(argc, argv, "--scenario", "");
     config.systems_config_path = GetCommandLineOption(argc, argv, "--systems-config", "");
     config.preset_json_path = GetCommandLineOption(argc, argv, "--preset-json", "");

@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -333,6 +334,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         command = self.calls[0][0]
         self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
         self.assertNotIn('--no-audio', command)
+        self.assert_bounded_save_load_command(command)
         capture, _ = self.paths('save-load')
         self.assertEqual(json.loads(capture.read_bytes()), data)
         receipt = self.receipt('save-load')
@@ -356,6 +358,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         command = self.calls[0][0]
         self.assertIn('--no-audio', command)
         self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assert_bounded_save_load_command(command)
         self.assertFalse((self.runtime / 'assets/audio').exists())
         self.assertEqual(json.loads(self.paths('save-load')[0].read_bytes()), data)
         self.assertEqual(self.receipt('save-load')['return_code'], 0)
@@ -366,7 +369,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
         reload = data['workload']['reload']
         request = reload['request_frame']
-        settled = request + 30
+        settled = request + 3
         for row in data['workload']['observations']:
             if request <= row['frame'] < settled:
                 row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
@@ -375,6 +378,11 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         warmup = data['warmup_frames']
         reload['elapsed_ms'] = sum(row['frame_wall_ms'] for row in
                                    samples[request - warmup:settled - warmup])
+        overrides = {'cli:--horizon-radius': '4', 'cli:--collision-radius': '4',
+                     'cli:--render-benchmark-stream-radius': '4'}
+        data['debug_overrides'] = {'active': overrides, 'declared': dict(overrides)}
+        data['settings']['render_overrides'] = dict(overrides)
+        data['render_identity'] = runner.contract.render_identity(data['settings'])
         # No streaming churn from camera movement while the reload is settling.
         poses = [runner.contract.camera_sample(manifest, tick)['position'] for tick in
                  range(manifest['actions'][-1]['tick'], settled - warmup + 2)]
@@ -382,6 +390,44 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertTrue(any(runner.contract.camera_sample(manifest, tick)['position'] != poses[0]
                             for tick in range(settled - warmup + 2, manifest['expected_ticks'] + 1)))
         return data
+
+    def assert_bounded_save_load_command(self, command):
+        overrides = {'cli:' + flag: '4' for flag in (
+            '--horizon-radius', '--collision-radius', '--render-benchmark-stream-radius')}
+        for key, value in overrides.items():
+            self.assertIn(key[4:], command)
+            self.assertEqual(command[command.index(key[4:]) + 1], value)
+        declaration = Path(command[command.index('--declare-render-overrides') + 1])
+        self.assertEqual(json.loads(declaration.read_text(encoding='utf-8')), overrides)
+        script = Path(command[command.index('--traversal') + 1])
+        manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
+        self.assertEqual((manifest['duration_seconds'], manifest['tick_rate'],
+                          manifest['expected_ticks']), (0.4, 30, 12))
+        self.assertEqual([(row['tick'], row['name']) for row in manifest['actions']],
+                         [(1, 'save'), (2, 'reload')])
+        self.assertNotIn('--render-benchmark-frames', command)
+
+    def test_small_capture_still_rejects_changed_identity_and_unresumed_camera(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        data['settings']['render_overrides']['cli:--render-benchmark-stream-radius'] = '2'
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaises(ValueError):
+            self.case.test_v4_save_load_success()
+        data = self.delayed_reload_capture()
+        # Even a quiescent reload at the last frame cannot claim resumed motion.
+        last = data['workload']['observations'][-1]['frame']
+        data['workload']['reload'].update(first_settled_frame=last)
+        for row in data['workload']['observations']:
+            if data['workload']['reload']['request_frame'] <= row['frame'] < last:
+                row.update(settled=False, stream_meshing_batches=1)
+        warmup = data['warmup_frames']
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload']['elapsed_ms'] = sum(
+            row['frame_wall_ms'] for row in data['frame_samples'][request - warmup:last - warmup])
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaisesRegex(ValueError, 'did not resume its camera path'):
+            self.case.test_v4_save_load_success()
 
     def test_v4_success_case_rejects_reload_that_never_settles(self):
         runner.OPTIONS.source = Path(__file__).resolve().parents[2]
@@ -795,6 +841,54 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
 
 
+class RenderRunnerResidencyTests(unittest.TestCase):
+    def test_capture_cap_is_validated_early_and_applied_to_creation_and_reload(self):
+        root = Path(__file__).resolve().parents[2]
+        def cpp(path):
+            source = (root / path).read_text(encoding='utf-8')
+            tokens = r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/'
+            source = re.sub(tokens, lambda m: '' if m[0].startswith('/') else m[0],
+                            source, flags=re.DOTALL)
+            return ''.join(source.split())
+        parser_source = cpp('src/luminumbra_client/core/RuntimeScenarioConfig.cpp')
+        admission = parser_source[parser_source.index('voidParseSurfaceRadiusOptions('):
+                                  parser_source.index('RuntimePathOptionsParseRuntimePathOptions(')]
+        self.assertIn('std::string_view("--render-benchmark-stream-radius")', admission)
+        self.assertIn(':benchmark_stream_radius;', admission)
+        self.assertIn('if(!World::TryParseSurfaceRadius(value,radius))throw', admission)
+        self.assertIn('HasCommandLineOption(argc,argv,"--render-benchmark-stream-radius")&&'
+                      'GetCommandLineOption(argc,argv,"--render-benchmark-schema","v2")!="v4")'
+                      'throwstd::invalid_argument(', admission)
+        paths = parser_source[parser_source.index('RuntimePathOptionsParseRuntimePathOptions('):
+                              parser_source.index('ParseRuntimeScenarioConfig(')]
+        self.assertLess(paths.index('argc,argv,surface_radius,collision_radius,benchmark_stream_radius'),
+                        paths.index('std::filesystem::create_directories('))
+        self.assertIn('argc,argv,config.horizon_radius,config.collision_radius,'
+                      'config.benchmark_stream_radius', parser_source)
+        main = cpp('src/luminumbra_client/main_client.cpp')
+        entry = main[main.index('autofinish_world_entry='):main.index('autostart_world_creation=')]
+        cap = 'world_system->debug_set_streaming_radius_cap(scenario_config.benchmark_stream_radius);'
+        self.assertIn('if(benchmark_v4)' + cap, entry)
+        self.assertLess(entry.index(cap), entry.index('EnsureSurfaceReadyNear('))
+        creation = main[main.index('autostart_world_creation='):main.index('autostart_world_load=')]
+        load = main[main.index('autostart_world_load='):main.index('if(g_uiManager){', main.index('autostart_world_load='))]
+        for path in (creation, load):
+            self.assertIn('finish_world_entry();', path)
+        # The shared gate must still visit an activation interval and every
+        # pending queue/upload; it never advances a script tick while draining.
+        drain = main[main.index('constautosettle_workload_reload='):main.index('if(reload_settling_pending)')]
+        for gate in ('reload_residency_observed(', 'streaming.quiescent()',
+                     'uploads.terrain_upload_candidates==0', 'uploads.water_upload_candidates==0',
+                     '!foliage->build_pending()', 'benchmark_queries->checkpoint_passes()'):
+            self.assertIn(gate, drain)
+        self.assertNotIn('++traversal', drain)
+        self.assertNotIn('traversal_target_tick=', drain)
+        # Remain an observable declared override, bound by the existing identity
+        # serializer, rather than joining the workload-option exemption list.
+        report = cpp('src/luminumbra_client/app/RenderBenchmarkReport.h')
+        self.assertNotIn('"--render-benchmark-stream-radius"', report)
+
+
 class RenderRunnerRegistrationTests(unittest.TestCase):
     def test_real_client_registrations_share_native_graphics_admission(self):
         root = Path(__file__).resolve().parents[2]
@@ -820,6 +914,7 @@ class RenderRunnerRegistrationTests(unittest.TestCase):
             'RenderTraversalIntegrated': 'test_traversal_twice',
             'RenderWorkloadSaveLoadIntegrated': 'test_v4_save_load_success',
             'RenderWorkloadNoAudioIntegrated': 'test_v4_no_audio_success',
+            'RenderBenchmarkStreamRadiusRefusal': 'test_stream_radius_refusal',
             'RenderEscapingAudioRefusal': 'test_escaping_audio_refusal',
             'RenderAbsoluteTextureRefusal': 'test_absolute_texture_refusal',
             'RenderParentRelativeTextureRefusal': 'test_parent_relative_texture_refusal',

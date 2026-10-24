@@ -98,6 +98,8 @@ struct RuntimeScenarioConfig {
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
     int collision_radius = 4;
+    // Explicit diagnostic residency bound for schema-v4 captures; 0 = uncapped.
+    int benchmark_stream_radius = 0;
     int coverage_radius = 3;
     size_t min_renderable_chunks = 64;
     size_t min_collision_chunks = 9;

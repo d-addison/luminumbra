@@ -5208,6 +5208,43 @@
       ]
     },
     {
+      "id": "render.benchmark-residency-fixture",
+      "source": "docs/render-benchmark.md#scripted-workloads-issue-403",
+      "statement": "Schema v4 accepts an explicit diagnostic streaming radius of 0..12 chunks, with 0 preserving uncapped streaming, and other schemas refuse the option. The cap applies before surface preparation on both creation and reload and remains a declared override bound to capture identity. Both save/load integration variants use startup, collision and streaming radii of 4 and a 0.4-second, 12-tick traversal at 30 Hz, saving at tick 1 and reloading at tick 2. The camera holds through tick 6 and resumes through tick 12. The 81 prepared columns retain the unchanged readiness minima of 64 renderable chunks and nine collision chunks. Every reload settle gate, loader, action and identity assertion remains required. Committed qualification traversals are unchanged; native rendering and timing verification remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderRunnerEvidencePython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderWorkloadSaveLoadIntegrated",
+          "planned": "native rendering and timing verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderWorkloadNoAudioIntegrated",
+          "planned": "native rendering and timing verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkStreamRadiusRefusal",
+          "planned": "native admission verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesInvalidRadiiAndAcceptsBoundariesInBothSpellings",
+          "planned": "native boundary and refusal verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesBeforeCreatingSaveRootInEitherArgumentOrder",
+          "planned": "native write-order verification; owner: ac"
+        }
+      ]
+    },
+    {
       "id": "content.foliage-directory-recovery",
       "source": "docs/engine-guide.md#shipping-defaults",
       "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",

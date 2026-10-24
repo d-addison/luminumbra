@@ -2642,6 +2642,7 @@ foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
     "RenderWorkloadSaveLoadIntegrated;test_v4_save_load_success"
     "RenderWorkloadNoAudioIntegrated;test_v4_no_audio_success"
+    "RenderBenchmarkStreamRadiusRefusal;test_stream_radius_refusal"
     "RenderEscapingAudioRefusal;test_escaping_audio_refusal"
     "RenderAbsoluteTextureRefusal;test_absolute_texture_refusal"
     "RenderParentRelativeTextureRefusal;test_parent_relative_texture_refusal"

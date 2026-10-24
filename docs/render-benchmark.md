@@ -361,6 +361,28 @@ A watchdog refuses 300 consecutive passes without a new high-water mark in
 resident chunks, ready chunks, admitted meshes or foliage build generation;
 shrinking or oscillating counters do not reset it. This bounds stalled work
 without a total-frame deadline for a progressing restream.
+
+Schema v4 also accepts `--render-benchmark-stream-radius` in separate or assignment
+form: 0 preserves uncapped streaming, and 1..12 caps the wanted streaming radius
+in chunks through the existing deterministic diagnostic cap. It is applied on
+both world creation and reload, before surface preparation. Other schemas refuse
+the option. It remains a debug override requiring an exact declaration and is
+included in capture identity. The synchronous `--horizon-radius` and
+`--collision-radius` options remain separate.
+
+`RenderWorkloadSaveLoadIntegrated` and `RenderWorkloadNoAudioIntegrated` use radius
+4 for all three controls and a 0.4-second, 12-tick fixture at 30 Hz. They save at
+tick 1, reload at tick 2, hold the camera through tick 6 and resume within the same
+chunk through tick 12. The 81 prepared columns retain the unchanged readiness
+minima of 64 renderable chunks and nine collision chunks. The reload still drains every settle gate before advancing
+the script; the short fixture removes the redundant 240-tick hold. Loader,
+action, quiescence, resumed-camera and identity checks remain required. These
+synthetic integration fixtures do not change the committed 60-second qualification
+workloads. `RenderRunnerEvidencePython` checks the actual launch options and
+declaration for both audio variants; `RenderBenchmarkStreamRadiusRefusal` and
+`RuntimeSurfaceOptionsTest` cover schema and numeric admission. Native timing and
+rendering verification remain pending.
+
 `workload.reload` records the originating `request_frame`, the
 `first_settled_frame`, the positive `settling_passes` count, and monotonic
 `elapsed_ms` from the reload request through that frame's presentation endpoint. A settled frame requires gameplay, successful
