@@ -530,6 +530,19 @@ class ContainmentLinkClosureTests(unittest.TestCase):
         cls.targets = repository_targets(ROOT)
         cls.graph = IncludeGraph(ROOT)
 
+    def test_ordinary_windows_names_return_before_expansion_io(self):
+        source = (ROOT / OWNER).read_text(encoding='utf-8')
+        body = source.split('std::filesystem::path LongNamePath(', 1)[1].split(
+            'bool PathSpellingEqual(', 1)[0]
+        condition = "path.native().find(L'~') == std::wstring::npos"
+        self.assertIn(condition, body)
+        guard = body.index(condition)
+        returned = body.index('return OrdinaryWindowsPath(spelling.native());', guard)
+        probe = body.index('GetLongPathNameW(')
+        self.assertLess(returned, probe)
+        self.assertIn('error.clear();', body[guard:returned])
+        self.assertNotRegex(body[:returned], r'\b(?:GetLongPathNameW|CreateFileW|canonical)\s*\(')
+
     def test_real_imgui_sources_and_platform_loop_are_resolved(self):
         imgui = self.targets[(Path('test/CMakeLists.txt'), 'developer_console_imgui_test')]
         self.assertIn(Path('test/client/developer_console_imgui_test.cpp'), imgui['sources'])

@@ -1,5 +1,7 @@
 #include "FilesystemPath.h"
+#include "FilesystemPathDiagnostics.h"
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -43,6 +45,8 @@ bool IsAbsolutePath(const std::filesystem::path& path) noexcept {
 namespace {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
+thread_local std::size_t long_name_expansion_count = 0;
+
 std::filesystem::path OrdinaryWindowsPath(std::wstring resolved) {
     if (resolved.starts_with(LR"(\\?\UNC\)"))
         resolved = LR"(\\)" + resolved.substr(8);
@@ -110,11 +114,29 @@ FinalWindowsPath(HANDLE handle, bool require_directory, std::error_code& error) 
 
 } // namespace
 
+std::size_t LongNameExpansionCount() noexcept {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return long_name_expansion_count;
+#else
+    return 0;
+#endif
+}
+
 std::filesystem::path LongNamePath(const std::filesystem::path& path, std::error_code& error) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (path.native().size() > 32767) {
         error = std::make_error_code(std::errc::filename_too_long);
         return {};
+    }
+    // Only components containing '~' can be 8.3 aliases. Capture policies cache
+    // expanded root spellings at enable(); ordinary loads need no expansion I/O.
+    // This caches no candidate validation: callers still resolve links on every
+    // load, so replacing a previously allowed path with a redirect is detected.
+    if (!path.empty() && path.native().find(L'~') == std::wstring::npos) {
+        auto spelling = path;
+        spelling.make_preferred();
+        error.clear();
+        return OrdinaryWindowsPath(spelling.native());
     }
     auto ancestor = path;
     ancestor.make_preferred();
@@ -123,6 +145,7 @@ std::filesystem::path LongNamePath(const std::filesystem::path& path, std::error
     // removes one component; every intermediate spelling is bounded to 32767 characters.
     std::array<wchar_t, 32768> buffer{};
     while (!ancestor.empty()) {
+        ++long_name_expansion_count;
         const DWORD length =
             GetLongPathNameW(ancestor.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
         if (length > 0 && length < buffer.size()) {

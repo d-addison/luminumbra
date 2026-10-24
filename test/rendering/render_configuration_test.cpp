@@ -1006,12 +1006,16 @@ void content_references() {
     require(case_policy.allows(case_content.root() / "assets/audio/missing.ogg"));
     require(!case_policy.refused());
     for (const auto& invalid_suffix : {std::filesystem::path("data/<invalid>"),
+                                       std::filesystem::path("data/<invalid>~"),
                                        std::filesystem::path("data/texture.ltex/child"),
+                                       std::filesystem::path("data/texture.ltex/missing~"),
                                        std::filesystem::path("data") / std::wstring(32768, L'x')}) {
-        Luminumbra::Filesystem::CaptureContentPaths invalid_policy;
-        invalid_policy.enable(short_alias);
-        require(!invalid_policy.allows(short_alias / invalid_suffix));
-        require(invalid_policy.refused());
+        for (const auto& queried : {content.root(), short_alias}) {
+            Luminumbra::Filesystem::CaptureContentPaths invalid_policy;
+            invalid_policy.enable(queried);
+            require(!invalid_policy.allows(queried / invalid_suffix));
+            require(invalid_policy.refused());
+        }
     }
     const auto native_root = std::filesystem::path(content.root()).make_preferred();
     if (!Luminumbra::Filesystem::IsWindowsUncPath(native_root)) {
@@ -1056,8 +1060,14 @@ void content_references() {
     content.write("outside & (target)!/nested/included.json", "{}");
     const auto link = content.root() / "data/redirected & (link)!";
     const auto outside = content.root() / "outside & (target)!/nested";
+    link_directory(link, content.root() / "res");
+    require(policy.allows(link / "included.json"));
+    require(policy.allows(link / "missing.json"));
+    require(std::filesystem::remove(link));
+    // A successful load must not cache validation across a later link replacement.
     link_directory(link, outside);
     require(!policy.allows(link / "included.json"));
+    require(!policy.allows(link / "missing.json"));
     require(!Luminumbra::World::ReadWorldgenFile(link / "included.json", bytes));
     require(bytes.empty());
     require_refusal([&] { workload_content(content.root()); });
