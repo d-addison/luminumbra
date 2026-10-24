@@ -1285,6 +1285,9 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
     if (ambient_anchor)
         ambient_anchor->reset();
     try {
+        // The installed ledger is simulation authority even without clock
+        // metadata, including empty and anchor-only ledgers of either version.
+        // Root-level .tmp.* siblings are uncommitted staging, never authority.
         requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
         const auto path = save_dir / "world_info.json";
         if (!std::filesystem::exists(path))

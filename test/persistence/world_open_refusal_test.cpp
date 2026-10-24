@@ -45,6 +45,7 @@
 #include <ios>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stop_token>
@@ -742,6 +743,9 @@ TEST_F(WorldOpenRefusal, ServerWaterCursorBindsEveryHashCaptureAndSurvivesReload
     config.world_id = "fixture";
     config.surface_radius = 0;
     config.collision_radius = 0;
+    // Cap ongoing boot streaming too: the initial horizon radii alone still
+    // allow thousands of chunks, each serialized by all three capture APIs.
+    config.test_streaming_radius_cap = 1;
     Server::ServerWorldRunner runner(config);
     ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
     auto* world_system = runner.Session()->GetWorldSystem();
@@ -754,8 +758,10 @@ TEST_F(WorldOpenRefusal, ServerWaterCursorBindsEveryHashCaptureAndSurvivesReload
         SCOPED_TRACE(cursor);
         world_system->SetWaterSimWindowCursor(cursor);
         runner.ComputeWorldHashAndSubHashes(saved_hash, saved_sub);
-        EXPECT_EQ(saved_hash, runner.ComputeWorldHash());
-        EXPECT_EQ(saved_sub.water, runner.ComputeWorldSubHashes().water);
+        const auto separate_hash = cursor == 0 ? legacy_hash : runner.ComputeWorldHash();
+        const auto separate_sub = cursor == 0 ? legacy_sub : runner.ComputeWorldSubHashes();
+        EXPECT_EQ(saved_hash, separate_hash);
+        EXPECT_EQ(saved_sub.water, separate_sub.water);
         EXPECT_EQ(saved_sub.terrain, legacy_sub.terrain);
         EXPECT_EQ(saved_sub.entities, legacy_sub.entities);
         if (cursor == 0) {
@@ -772,10 +778,157 @@ TEST_F(WorldOpenRefusal, ServerWaterCursorBindsEveryHashCaptureAndSurvivesReload
     runner.Shutdown();
     Server::ServerWorldRunner restored(config);
     ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
-    EXPECT_EQ(restored.Session()->GetWorldSystem()->GetWaterSimWindowCursor(), 66u);
-    EXPECT_EQ(restored.ComputeWorldHash(), saved_hash);
-    EXPECT_EQ(restored.ComputeWorldSubHashes().water, saved_sub.water);
+    auto* restored_world = restored.Session()->GetWorldSystem();
+    EXPECT_EQ(restored_world->GetWaterSimWindowCursor(), 66u);
+    std::string restored_hash;
+    Persistence::WorldStreamingStateSubHashes restored_sub;
+    restored.ComputeWorldHashAndSubHashes(restored_hash, restored_sub);
+    EXPECT_EQ(restored_sub.water, saved_sub.water);
+    EXPECT_EQ(restored_sub.entities, saved_sub.entities);
+    EXPECT_EQ(restored_sub.wind, saved_sub.wind);
+    EXPECT_EQ(restored_sub.weather, saved_sub.weather);
+    EXPECT_EQ(restored_sub.aether, saved_sub.aether);
+    EXPECT_EQ(restored_sub.aether_state, saved_sub.aether_state);
+    // The composite includes chunk lifecycle/collision availability, which
+    // adoption normalizes before boot rebuilds colliders. Only water authority
+    // and the unchanged runtime systems above must round-trip in this fixture.
+    // Compare cursor changes within the restored world, holding all else fixed.
+    restored_world->SetWaterSimWindowCursor(0);
+    std::string restored_zero_hash;
+    Persistence::WorldStreamingStateSubHashes restored_zero_sub;
+    restored.ComputeWorldHashAndSubHashes(restored_zero_hash, restored_zero_sub);
+    EXPECT_NE(restored_hash, restored_zero_hash);
+    EXPECT_NE(restored_sub.water, restored_zero_sub.water);
+    EXPECT_EQ(WaterHashDifferenceSection(restored_sub.water, restored_zero_sub.water),
+              "water/cursor");
+    EXPECT_EQ(restored_sub.terrain, restored_zero_sub.terrain);
+    EXPECT_EQ(restored_sub.entities, restored_zero_sub.entities);
+    restored_world->SetWaterSimWindowCursor(66);
+    EXPECT_EQ(restored.ComputeWorldHash(), restored_hash);
+    EXPECT_EQ(restored.ComputeWorldSubHashes().water, restored_sub.water);
     restored.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, RenderCalendarRefusesEveryInstalledLedgerWithoutClockMetadata) {
+    const world::WorldClock zero;
+    world::ActiveRegionLedger anchored;
+    anchored.set_local_anchor(Vec3(8, 18, 8));
+    world::ActiveRegionLedger populated;
+    populated.mark_edited({10, -3}, zero);
+    populated.set_populated({10, -3}, true);
+    world::ActiveRegionLedger frozen({0, 1, 1});
+    frozen.mark_edited({10, -3}, zero);
+    frozen.schedule(world::WorldClock(1));
+    const std::array work{world::RegionWork{{10, -3}, 1, 0, 0, 0}};
+    for (const std::uint64_t tick : {2u, 3u}) {
+        frozen.schedule(world::WorldClock(tick), {}, work, [](world::RegionKey) { return 17u; });
+    }
+    const auto version_two = frozen.encode();
+    ASSERT_EQ(version_two.at(4), 2);
+    // The supported legacy frozen-history envelope has no extension block.
+    // Re-seal it using the same stable FNV checksum as the ledger codec.
+    auto legacy_frozen = version_two.substr(0, version_two.size() - 8 - 11);
+    legacy_frozen[4] = 1;
+    const auto checksum = std::stoull(Persistence::StableChecksum(legacy_frozen), nullptr, 16);
+    for (unsigned byte = 0; byte < 8; ++byte)
+        legacy_frozen.push_back(static_cast<char>((checksum >> (byte * 8)) & 255u));
+    const std::vector<std::pair<std::string, std::string>> forms{
+        {"empty-v1", world::ActiveRegionLedger{}.encode()},
+        {"anchor-only-v1", anchored.encode()},
+        {"populated-v1", populated.encode()},
+        {"frozen-v1", legacy_frozen},
+        {"frozen-v2", version_two}};
+
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Unchanged", "1337", "default"));
+    auto* original_world = session.GetWorldSystem();
+    const auto original_ledger = session.GetActiveRegionLedger().encode();
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    ASSERT_FALSE(metadata.contains("simulationTick"));
+    ASSERT_FALSE(metadata.contains("calendar"));
+    for (const auto& [name, bytes] : forms) {
+        SCOPED_TRACE(name);
+        Write(save / "world_info.json", metadata.dump());
+        Write(WorldSaveService::active_regions_path(save), bytes);
+        world::ActiveRegionLedger decoded;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService::load_active_regions(decoded, save, &errors));
+        EXPECT_EQ(decoded.encode(), bytes);
+        world::WorldClock clock;
+        bool required = false;
+        std::optional<world::WorldCalendar> rendering;
+        ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+            save, clock, required, &errors, nullptr, &rendering));
+        EXPECT_TRUE(required);
+        EXPECT_FALSE(rendering.has_value());
+        auto conflicting = metadata;
+        conflicting["renderCalendar"] = TestSupport::DefaultCalendarMetadata();
+        Write(save / "world_info.json", conflicting.dump());
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(WorldSaveService::read_clock_metadata(
+            save, clock, required, &errors, nullptr, &rendering));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_EQ(errors.back(),
+                  "Corrupt world metadata: renderCalendar conflicts with active regions.");
+        EXPECT_FALSE(rendering.has_value());
+        EXPECT_FALSE(WorldSaveService::validate_save(save));
+        WorldStreamingState rejected;
+        EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save, errors));
+        EXPECT_TRUE(rejected.empty());
+        EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+        EXPECT_FALSE(session.LoadWorld("fixture"));
+        EXPECT_FALSE(session.LoadWorldStateFrom(save));
+        EXPECT_EQ(session.GetWorldSystem(), original_world);
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(), original_ledger);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, RenderCalendarLedgerRefusalUsesPresenceRatherThanPayloadOrStaging) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["renderCalendar"] = TestSupport::DefaultCalendarMetadata();
+    Write(save / "world_info.json", metadata.dump());
+    const auto path = WorldSaveService::active_regions_path(save);
+    // Staged copies are outside the strict region scan and are never loaded,
+    // even if their bytes contain a valid ledger.
+    Write(save / "active-regions.arl.tmp.abandoned", world::ActiveRegionLedger{}.encode());
+    world::WorldClock clock;
+    bool required = true;
+    std::optional<world::WorldCalendar> rendering;
+    ASSERT_TRUE(
+        WorldSaveService::read_clock_metadata(save, clock, required, nullptr, nullptr, &rendering));
+    EXPECT_FALSE(required);
+    EXPECT_TRUE(rendering.has_value());
+    EXPECT_TRUE(WorldSaveService::validate_save(save));
+    world::ActiveRegionLedger absent;
+    absent.mark_edited({10, -3}, clock);
+    ASSERT_TRUE(WorldSaveService::load_active_regions(absent, save));
+    EXPECT_TRUE(absent.records().empty());
+    for (const std::string& bytes : {std::string{}, std::string{"ARL1"}, std::string{"unknown"}}) {
+        SCOPED_TRACE(bytes);
+        Write(path, bytes);
+        const auto before = DiskBytes(root);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::read_clock_metadata(
+            save, clock, required, &errors, nullptr, &rendering));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_EQ(errors.back(),
+                  "Corrupt world metadata: renderCalendar conflicts with active regions.");
+        EXPECT_TRUE(required);
+        EXPECT_FALSE(rendering.has_value());
+        EXPECT_FALSE(WorldSaveService::validate_save(save));
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+    ASSERT_TRUE(fs::remove(path));
+    ASSERT_TRUE(fs::create_directory(path));
+    std::vector<std::string> errors;
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(WorldSaveService::read_clock_metadata(save, clock, required, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save));
+    EXPECT_EQ(DiskBytes(root), before);
 }
 
 TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting) {
