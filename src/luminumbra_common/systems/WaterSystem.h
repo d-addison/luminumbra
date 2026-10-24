@@ -188,8 +188,8 @@ public:
     // mm grids are sized by it, the seam pass hard-gates on one uniform resolution, and
     // the cell-budget window re-derives from it (4096/64 = 64 chunks at Medium 8x8;
     // 4096/256 = 16 chunks at High 16x16). Explicit Medium keeps every baseline
-    // byte-identical. Ultra (32x32) uses half-metre cells. Other values that do not
-    // divide the chunk evenly are rejected, keeping the current resolution.
+    // byte-identical. Values that do not divide the chunk evenly are rejected (the
+    // seam pass needs cell-for-cell alignment), keeping the current resolution.
     void SetSimResolution(int cells_per_side);
     [[nodiscard]] int sim_resolution() const {
         return m_sim_resolution;

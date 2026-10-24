@@ -3,10 +3,12 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/WaterAttribution.h"
 #include "luminumbra_common/core/WaterSeedInputs.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
 #include <entt/entity/registry.hpp>
 
 #include <algorithm>
@@ -21,6 +23,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -306,41 +309,50 @@ TEST(WaterSeedInputs, HighInitializationPreservesInlineRoundingAndCellLayout) {
     }
 }
 
-TEST(WaterSeedInputs, UnsupportedResolutionBootAndLiveMatchInlineHash) {
+// A 32-cell session grid is unreachable: the setter refuses it, the default is
+// High, and session creation/loading select Medium or High. Exercise refusal via
+// the public API; the scalar wiring suite directly checks the defensive predicate
+// and seed_chunk_water guard for unsupported resolutions without selecting them.
+TEST(WaterSeedInputs, RejectedResolutionBootAndLiveKeepConfiguredGridAndInlineHash) {
     JobSystem jobs;
     jobs.startup(2);
-    for (const bool boot : {false, true}) {
-        for (const bool staged : {false, true}) {
-            SeedFixture accelerated(1, &jobs);
-            SeedFixture inline_path;
-            accelerated.water().SetSimResolution(32);
-            inline_path.water().SetSimResolution(32);
-            ASSERT_EQ(accelerated.water().sim_resolution(), 32);
-            ASSERT_EQ(inline_path.water().sim_resolution(), 32);
-            accelerated.water().SetBootSettleMode(boot);
-            auto& chunk = *accelerated.chunks().begin()->second;
-            chunk.is_water_sleeping.store(true);
-            inline_path.chunks().begin()->second->is_water_sleeping.store(true);
-            if (staged) {
-                accelerated.prepare(chunk);
-                auto inputs = chunk.take_water_seed_inputs();
-                // A completed High result is still invalid for the active Ultra grid.
-                inputs->terrain.fill(10000.0f);
-                inputs->rest.fill(-10000.0f);
-                chunk.stage_water_seed_inputs(std::move(inputs));
+    for (const int resolution : {2, 4, 8, 16}) {
+        for (const bool boot : {false, true}) {
+            for (const bool staged : {false, true}) {
+                SeedFixture accelerated(1, &jobs);
+                SeedFixture inline_path;
+                accelerated.water().SetSimResolution(resolution);
+                inline_path.water().SetSimResolution(resolution);
+                ASSERT_EQ(accelerated.water().sim_resolution(), resolution);
+                accelerated.water().SetSimResolution(32);
+                ASSERT_EQ(accelerated.water().sim_resolution(), resolution);
+                ASSERT_EQ(inline_path.water().sim_resolution(), resolution);
+                accelerated.water().SetBootSettleMode(boot);
+                auto& chunk = *accelerated.chunks().begin()->second;
+                chunk.is_water_sleeping.store(true);
+                inline_path.chunks().begin()->second->is_water_sleeping.store(true);
+                if (staged) {
+                    accelerated.prepare(chunk);
+                    auto inputs = chunk.take_water_seed_inputs();
+                    // Even a published payload claiming the refused size is invalid.
+                    inputs->resolution = 32;
+                    inputs->terrain.fill(10000.0f);
+                    inputs->rest.fill(-10000.0f);
+                    chunk.stage_water_seed_inputs(std::move(inputs));
+                }
+                accelerated.tick();
+                inline_path.tick();
+                EXPECT_FALSE(chunk.water_seed_inputs());
+                ExpectSameWater(accelerated, inline_path);
+                ExpectInlineSeed(accelerated, resolution);
+                ExpectInlineSeed(inline_path, resolution);
+                // An empty initialization set preserves the seed on a later update.
+                const auto seeded_hash = accelerated.world().debug_water_state_hash().hash;
+                accelerated.tick();
+                inline_path.tick();
+                EXPECT_EQ(accelerated.world().debug_water_state_hash().hash, seeded_hash);
+                ExpectSameWater(accelerated, inline_path);
             }
-            accelerated.tick();
-            inline_path.tick();
-            EXPECT_FALSE(chunk.water_seed_inputs());
-            ExpectSameWater(accelerated, inline_path);
-            ExpectInlineSeed(accelerated, 32);
-            ExpectInlineSeed(inline_path, 32);
-            // A later update has an empty initialization set and preserves the seed.
-            const auto seeded_hash = accelerated.world().debug_water_state_hash().hash;
-            accelerated.tick();
-            inline_path.tick();
-            EXPECT_EQ(accelerated.world().debug_water_state_hash().hash, seeded_hash);
-            ExpectSameWater(accelerated, inline_path);
         }
     }
     jobs.shutdown();
@@ -392,7 +404,7 @@ TEST(WaterSeedInputs, LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash) {
     JobSystem jobs;
     jobs.startup(2);
     for (const bool boot : {false, true}) {
-        for (const int resolution : {8, 16, 32}) {
+        for (const int resolution : {2, 4, 8, 16}) {
             SeedFixture prepared(1, &jobs);
             SeedFixture inline_path;
             auto params = SeedParams();
@@ -400,7 +412,9 @@ TEST(WaterSeedInputs, LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash) {
             prepared.world().set_params(params);
             inline_path.world().set_params(params);
             prepared.water().SetSimResolution(resolution);
+            ASSERT_EQ(prepared.water().sim_resolution(), resolution);
             inline_path.water().SetSimResolution(resolution);
+            ASSERT_EQ(inline_path.water().sim_resolution(), resolution);
             prepared.water().SetBootSettleMode(boot);
             auto& chunk = *prepared.chunks().begin()->second;
             chunk.is_water_sleeping.store(true);
@@ -419,12 +433,66 @@ TEST(WaterSeedInputs, LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash) {
 }
 
 TEST(WaterSeedInputs, InvalidSessionResolutionsLeaveTheConfiguredGridUnchanged) {
-    SeedFixture fixture;
-    fixture.water().SetSimResolution(32);
-    ASSERT_EQ(fixture.water().sim_resolution(), 32);
-    for (const int resolution : {-1, 0, 1, 3, 17, 31, 33, 64, std::numeric_limits<int>::max()}) {
-        fixture.water().SetSimResolution(resolution);
-        EXPECT_EQ(fixture.water().sim_resolution(), 32);
+    for (const int configured : {2, 4, 8, 16}) {
+        SeedFixture fixture;
+        fixture.water().SetSimResolution(configured);
+        ASSERT_EQ(fixture.water().sim_resolution(), configured);
+        for (const int resolution : {std::numeric_limits<int>::min(),
+                                     -1,
+                                     0,
+                                     1,
+                                     3,
+                                     17,
+                                     31,
+                                     32,
+                                     33,
+                                     64,
+                                     std::numeric_limits<int>::max()}) {
+            fixture.water().SetSimResolution(resolution);
+            EXPECT_EQ(fixture.water().sim_resolution(), configured);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, SavedUltraChunkRestoresAndMigratesWithoutSelectingUltraSession) {
+    WorldStreamingState saved;
+    const auto chunk = saved.get_or_create_chunk(IVec3(0));
+    ASSERT_TRUE(chunk);
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(32);
+    // The saved grid is bounded to Ultra's 1024 cells; no solver step runs at 32.
+    constexpr std::size_t kSavedCells = 32u * 32u;
+    chunk->water_level_data.assign(kSavedCells, 2.0f);
+    chunk->water_flow_data.assign(kSavedCells, Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(kSavedCells, 1.0f);
+    chunk->water_bed_mm.assign(kSavedCells, 1000);
+    chunk->water_depth_mm.assign(kSavedCells, 1000);
+    chunk->water_edge_flux.assign(2u * kSavedCells, 0);
+    const auto snapshot = Persistence::SerializeWorldStreamingStateSnapshotJson(saved);
+    for (const int resolution : {8, 16}) {
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(snapshot, restored, errors));
+        ASSERT_TRUE(errors.empty());
+        const auto chunks = restored.snapshot_chunks();
+        ASSERT_EQ(chunks.size(), 1u);
+        ASSERT_TRUE(chunks.front());
+        const auto& loaded = *chunks.front();
+        ASSERT_EQ(loaded.current_water_resolution.load(), 32);
+        EXPECT_EQ(loaded.water_depth_mm, chunk->water_depth_mm);
+        SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
+        WaterSystem water(nullptr, &world);
+        water.SetSimResolution(resolution);
+        ASSERT_EQ(water.sim_resolution(), resolution);
+        world.SetWaterSystem(&water);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunks.front()));
+        EXPECT_EQ(world.MigrateWaterSimResolution(), 1u);
+        EXPECT_EQ(water.sim_resolution(), resolution);
+        EXPECT_EQ(loaded.current_water_resolution.load(), resolution);
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+        EXPECT_EQ(loaded.water_depth_mm, (std::vector<std::int32_t>(cells, 1000)));
+        EXPECT_EQ(world.MigrateWaterSimResolution(), 0u);
     }
 }
 
@@ -568,7 +636,7 @@ TEST(WaterSeedInputs, BootSurfaceAndGenerationJobsRespectPresetAndResolutionElig
     jobs.startup(2);
     for (const bool threaded : {false, true}) {
         for (const bool lakes : {false, true}) {
-            for (const int resolution : {8, 16, 32}) {
+            for (const int resolution : {2, 4, 8, 16}) {
                 const bool eligible = lakes && resolution == 16;
                 auto params = SeedParams();
                 params.lakes_enabled = lakes;
@@ -764,11 +832,13 @@ TEST(WaterSeedInputs, BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory) 
 
 TEST(WaterSeedInputs, RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing) {
     JobSystem stopped_jobs;
-    for (const int resolution : {2, 4, 8, 16, 32}) {
+    for (const int resolution : {2, 4, 8, 16}) {
         SeedFixture rejected(7, &stopped_jobs);
         SeedFixture serial(7);
         rejected.water().SetSimResolution(resolution);
+        ASSERT_EQ(rejected.water().sim_resolution(), resolution);
         serial.water().SetSimResolution(resolution);
+        ASSERT_EQ(serial.water().sim_resolution(), resolution);
         rejected.water().SetBootSettleMode(true);
         serial.water().SetBootSettleMode(true);
         rejected.water().SetBootPaused(true);

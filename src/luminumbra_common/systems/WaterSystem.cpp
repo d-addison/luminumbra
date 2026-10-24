@@ -1631,14 +1631,13 @@ WaterDetailLevel WaterSystem::CalculateRequiredDetail(const Chunk& chunk,
 }
 
 void WaterSystem::SetSimResolution(int cells_per_side) {
-    // One uniform grid for the whole session: integral-metre cells or Ultra's
-    // half-metre cells keep seams aligned cell-for-cell. Reject
+    // One uniform grid for the whole session: the resolution must divide the chunk so
+    // seam cells align cell-for-cell (see SetSimResolution's header contract). Reject
     // anything else and keep the current resolution — the caller wires this once from
     // sim.water_high_res before the first update, so a rejected value simply leaves
     // the current session resolution in place.
-    if (cells_per_side <= 1 ||
-        (cells_per_side != static_cast<int>(WaterDetailLevel::Ultra) &&
-         (CHUNK_SIZE_X % cells_per_side != 0 || CHUNK_SIZE_Z % cells_per_side != 0))) {
+    if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 ||
+        CHUNK_SIZE_Z % cells_per_side != 0) {
         return;
     }
     m_sim_resolution = cells_per_side;

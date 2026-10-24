@@ -1379,10 +1379,11 @@ class FrameAttributionWiring(unittest.TestCase):
                      "RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing",
                      "DetachedSamplerSurvivesSourceResetPrefetchAndDestruction",
                      "BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain",
-                     "UnsupportedResolutionBootAndLiveMatchInlineHash",
+                     "RejectedResolutionBootAndLiveKeepConfiguredGridAndInlineHash",
                      "UnpublishedPartialAndWrongResolutionInputsFallBackInBootAndLive",
                      "LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash",
                      "InvalidSessionResolutionsLeaveTheConfiguredGridUnchanged",
+                     "SavedUltraChunkRestoresAndMigratesWithoutSelectingUltraSession",
                      "BootSurfaceAndGenerationJobsRespectPresetAndResolutionEligibility",
                      "ReadinessRequiresPublishedSupportedAndMatchingResolution"):
             self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
@@ -1460,16 +1461,88 @@ class FrameAttributionWiring(unittest.TestCase):
 
         native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
         regression = compact(block(native, "TEST(WaterSeedInputs, "
-                                   "UnsupportedResolutionBootAndLiveMatchInlineHash)"))
+                                   "RejectedResolutionBootAndLiveKeepConfiguredGridAndInlineHash)"))
+        self.assertIn("for (const int resolution : {2, 4, 8, 16})", regression)
         self.assertIn("for (const bool boot : {false, true})", regression)
         self.assertIn("accelerated.water().SetBootSettleMode(boot);", regression)
+        self.assertIn("accelerated.water().SetSimResolution(32);", regression)
+        self.assertIn("inputs->resolution = 32;", regression)
         for fixture in ("accelerated", "inline_path"):
-            self.assertIn(f"{fixture}.water().SetSimResolution(32);", regression)
-            self.assertIn(f"ASSERT_EQ({fixture}.water().sim_resolution(), 32);", regression)
-            self.assertIn(f"ExpectInlineSeed({fixture}, 32);", regression)
+            self.assertIn(f"{fixture}.water().SetSimResolution(resolution);", regression)
+            self.assertIn(f"ASSERT_EQ({fixture}.water().sim_resolution(), resolution);", regression)
+            self.assertIn(f"ExpectInlineSeed({fixture}, resolution);", regression)
         self.assertIn("ExpectSameWater(accelerated, inline_path);", regression)
         oracle = compact(block(native, "void ExpectInlineSeed("))
         self.assertIn("EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);", oracle)
+
+    def test_water_resolution_setter_retains_integral_cell_contract(self):
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        setter = block(water, "void WaterSystem::SetSimResolution(")
+        # Pin the complete mutation/refusal path, including short circuiting before
+        # modulo zero. This is the original contract for every possible int value.
+        self.assertEqual(compact(re.sub(r"//[^\n]*", "", setter)),
+                         "if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 || "
+                         "CHUNK_SIZE_Z % cells_per_side != 0) { return; } "
+                         "m_sim_resolution = cells_per_side;")
+        refusal = re.search(r"if \((.*?)\) \{", compact(setter)).group(1)
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", types).group(1))
+                     for name in ("CHUNK_SIZE_X", "CHUNK_SIZE_Z")}
+        for requested in (-(2**31), -1, *range(66), 2**31 - 1):
+            for configured in (2, 4, 8, 16):
+                rejected = cpp_expression(refusal, cells_per_side=requested, **constants)
+                actual = configured if rejected else requested
+                self.assertEqual(actual, requested if requested in (2, 4, 8, 16) else configured)
+
+    def test_water_seed_defensive_predicates_directly_refuse_unreachable_grids(self):
+        # Use the existing scalar production-expression seam: no setter bypass or
+        # runtime route to an unsupported session grid is needed. This evaluates
+        # the actual consumer guard, independently of upstream input filtering.
+        header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", text).group(1))
+                     for name, text in (("kResolution", header), ("CHUNK_SIZE_X", types),
+                                        ("CHUNK_SIZE_Z", types))}
+        supported = re.fullmatch(r"return (.*);", compact(block(
+            header, "static constexpr bool supports_resolution("))).group(1)
+        readiness = re.fullmatch(r"return (.*);", compact(block(
+            header, "bool ready_for("))).group(1)
+        readiness = readiness.replace("supports_resolution(cells_per_side)", "supported")
+        readiness = readiness.replace("ready.load(std::memory_order_acquire)", "published")
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        initialize = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        eligibility = re.search(r"const bool use_seed_inputs = (.*?);", initialize).group(1)
+        eligibility = eligibility.replace(
+            "HighWaterSeedInputs::supports_resolution(m_sim_resolution)", "supported")
+        consumer = compact(block(water, "void WaterSystem::seed_chunk_water("))
+        guard_match = re.search(r"if \((.*?)\) inputs = nullptr;", consumer)
+        self.assertIsNotNone(guard_match, "consumer must independently reject invalid payloads")
+        guard = guard_match.group(1)
+        guard = guard.replace("inputs->ready_for(initial_resolution)", "ready_for")
+        # Both payload reads must remain behind the guard.
+        for field in ("rest", "terrain"):
+            self.assertLess(consumer.index("inputs = nullptr;"),
+                            consumer.index(f"inputs->{field}[cell]"))
+        for requested in (-(2**31), -1, 0, 1, 2, 3, 4, 8, 16, 17, 32, 2**31 - 1):
+            accepts = cpp_expression(supported, cells_per_side=requested, **constants)
+            for lakes in (False, True):
+                eligible = cpp_expression(
+                    eligibility, supported=accepts, true=True, false=False,
+                    **{"m_shield_system->get_params().lakes_enabled": lakes})
+                self.assertEqual(eligible, lakes and requested in (2, 4, 8, 16))
+            for present in (False, True):
+                for published in (False, True):
+                    # Zero metadata covers partial/uncomputed and unknown payloads;
+                    # the other values cover matching and mismatched publications.
+                    for resolution in (0, 2, 4, 8, 16, 32):
+                        ready = cpp_expression(
+                            readiness, supported=accepts, published=published,
+                            resolution=resolution, cells_per_side=requested, true=True, false=False)
+                        discarded = cpp_expression(guard, inputs=present, ready_for=ready,
+                                                   true=True, false=False)
+                        consumes = present and not discarded
+                        self.assertEqual(consumes, present and published and
+                                         requested in (2, 4, 8, 16) and resolution == requested)
 
 
 if __name__ == "__main__":
