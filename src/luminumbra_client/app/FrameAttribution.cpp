@@ -1,5 +1,6 @@
 #include "FrameAttribution.h"
 #include "../rendering/UploadBudget.h"
+#include "luminumbra_common/core/WaterAttribution.h"
 
 #include <array>
 #include <chrono>
@@ -259,7 +260,10 @@ void write_csv_header(std::ostream& out) {
            "water_adopted,water_work_bytes,water_byte_overshoot,water_pending";
     for (std::size_t index = 0; index < kPhaseCount; ++index)
         out << ',' << phase_name(static_cast<Phase>(index)) << "_ms";
-    out << ",dirty_columns\n";
+    out << ",dirty_columns,water_selection_ms,"
+           "water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms,"
+           "water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns,"
+           "water_stale_columns\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -271,7 +275,8 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t generated_count,
                    std::uint64_t count_generation,
                    const PhaseTotals& phases,
-                   const RenderUploads& uploads) {
+                   const RenderUploads& uploads,
+                   const WaterAttribution::Frame& water) {
     if (!out.good())
         return false;
     out << std::fixed << std::setprecision(6) << frame << ',' << frame_ms << ',' << buckets.sim
@@ -300,7 +305,12 @@ bool write_csv_row(std::ostream& out,
     append_uploads(uploads.water, uploads.water_pending);
     for (const double value : phases.milliseconds())
         out << ',' << value;
-    out << ',' << foliage.dirty_columns << '\n';
+    out << ',' << foliage.dirty_columns;
+    out << ',' << water.selection_ms << ',' << water.seed_inputs_ms << ','
+        << water.initialization_ms << ',' << water.sim_ms << ',' << water.seam_ms << ','
+        << water.bookkeeping_ms << ',' << water.precomputed_columns << ',' << water.fallback_columns
+        << ',' << water.stale_columns << '\n';
+
     return out.good();
 }
 bool finalize_csv(std::ofstream& out) {
@@ -337,7 +347,8 @@ bool FrameRecorder::record(std::uint64_t frame,
                            std::uint64_t generated_count,
                            std::uint64_t count_generation,
                            const PhaseTotals& phases,
-                           const RenderUploads& uploads) {
+                           const RenderUploads& uploads,
+                           const WaterAttribution::Frame& water) {
     if (!active())
         return false;
     return write_csv_row(m_out,
@@ -350,6 +361,7 @@ bool FrameRecorder::record(std::uint64_t frame,
                          generated_count,
                          count_generation,
                          phases,
-                         uploads);
+                         uploads,
+                         water);
 }
 } // namespace Luminumbra::Client::Attribution

@@ -486,8 +486,14 @@ TEST(WorldDurableResidency, ChunkNormalizeForParkDropsRenderBuffers) {
     chunk.has_collision.store(true);
     chunk.current_lod.store(2);
     chunk.sdf_data.assign(10, 1.0f);
+    const auto bytes_without_seed = chunk.estimated_heap_bytes();
+    chunk.stage_water_seed_inputs(std::make_shared<Luminumbra::HighWaterSeedInputs>());
+    EXPECT_EQ(chunk.estimated_heap_bytes(),
+              bytes_without_seed + sizeof(Luminumbra::HighWaterSeedInputs));
 
     chunk.normalize_for_park();
+
+    EXPECT_EQ(chunk.water_seed_inputs(), nullptr);
 
     EXPECT_TRUE(chunk.mesh_vertices.empty());
     EXPECT_EQ(chunk.mesh_vertices.capacity(), 0u);

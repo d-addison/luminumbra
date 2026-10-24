@@ -264,6 +264,7 @@ add_executable(common_tests
     common/PromotionSimTruthDecoupling_test.cpp
     common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
+    common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
     common/ReplicationAdmission_test.cpp
