@@ -2,8 +2,11 @@
 
 #include "WaterSystem.h"
 #include "../components/CoreComponents.h"
+#include "../core/JobSystem.h"
 #include "../core/Log.h"
+#include "../core/WaterAttribution.h"
 #include "../core/WaterComponents.h"
+#include "../core/WaterSeedInputs.h"
 #include "../world/Chunk.h"
 #include "SHIELD_WorldSystem.h"
 #include "WeatherSystem.h" // Weather-driven per-cell rain.
@@ -11,7 +14,12 @@
 #include <chrono> // (water-kernel perf) sub-phase wall timers — telemetry only, never hashed
 #include <cmath>
 #include <glm/gtx/compatibility.hpp>
+#include <limits>
+#include <memory>
 #include <numeric>
+#include <stdexcept>
+#include <thread>
+#include <utility>
 
 namespace Luminumbra::Systems {
 
@@ -582,12 +590,300 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
     return Vec3(0.0f);
 }
 
+std::vector<std::shared_ptr<HighWaterSeedInputs>>
+WaterSystem::prepare_high_water_seed_inputs(std::span<Chunk* const> to_init, bool defer_fallback) {
+    // At most six handles in live play; boot uses one per resident init candidate.
+    std::vector<std::shared_ptr<HighWaterSeedInputs>> high_seed_inputs;
+    if (m_sim_resolution == HighWaterSeedInputs::kResolution) {
+        if (to_init.size() > high_seed_inputs.max_size()) {
+            throw std::length_error("Water seed input handle count exceeds capacity");
+        }
+        high_seed_inputs.resize(to_init.size());
+        const auto terrain_generation = m_shield_system->water_seed_terrain_generation();
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            Chunk& chunk = *to_init[i];
+            auto inputs = chunk.take_water_seed_inputs();
+            const WaterSeedGeneration generation{terrain_generation,
+                                                 chunk.water_seed_edit_generation()};
+            const bool stale =
+                inputs && (inputs->generation != generation ||
+                           generation.terrain == std::numeric_limits<std::uint64_t>::max() ||
+                           generation.edit == std::numeric_limits<std::uint64_t>::max());
+            if (stale) {
+                ++m_seed_attribution.stale_columns;
+                inputs.reset();
+            }
+            if (inputs && inputs->ready_for(m_sim_resolution)) {
+                ++m_seed_attribution.precomputed_columns;
+            } else {
+                ++m_seed_attribution.fallback_columns;
+                inputs.reset();
+                if (!defer_fallback) {
+                    inputs = std::make_shared<HighWaterSeedInputs>();
+                    inputs->generation = generation;
+                    ComputeHighWaterSeedInputs(*inputs, chunk.get_coords(), *m_shield_system);
+                }
+            }
+            high_seed_inputs[i] = std::move(inputs);
+        }
+    }
+    return high_seed_inputs;
+}
+
+namespace {
+// One task owns only derived inputs and a detached sampler. At most 64 tasks
+// are in flight, each with two 256-float arrays (128 KiB total sample storage).
+struct BootWaterSeedTask {
+    std::shared_ptr<const SHIELD_WorldSystem> sampler;
+    std::shared_ptr<HighWaterSeedInputs> inputs;
+    std::shared_ptr<std::atomic<bool>> released;
+    IVec3 coords;
+    int resolution;
+    bool reuse_terrain;
+
+    BootWaterSeedTask(std::shared_ptr<const SHIELD_WorldSystem> sample_owner,
+                      std::shared_ptr<HighWaterSeedInputs> output,
+                      std::shared_ptr<std::atomic<bool>> release_fence,
+                      IVec3 chunk_coords,
+                      int cells_per_side,
+                      bool have_terrain)
+        : sampler(std::move(sample_owner))
+        , inputs(std::move(output))
+        , released(std::move(release_fence))
+        , coords(chunk_coords)
+        , resolution(cells_per_side)
+        , reuse_terrain(have_terrain) {}
+    ~BootWaterSeedTask() {
+        inputs.reset();
+        sampler.reset();
+        released->store(true, std::memory_order_release);
+    }
+    void compute() const {
+        const auto cells = static_cast<std::size_t>(resolution) * resolution;
+        const auto terrain = reuse_terrain ? std::span<const float>(inputs->terrain.data(), cells)
+                                           : std::span<const float>{};
+        ComputeWaterSeedInputs(*inputs, coords, resolution, *sampler, terrain);
+    }
+};
+} // namespace
+
+void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending) {
+    // Match the existing boot surface-build sub-batch size; live play still
+    // prepares only its six selected chunks inline. No world-sized payload list.
+    constexpr std::size_t kBootSeedBatch = 64;
+    const bool use_seed_inputs = HighWaterSeedInputs::supports_resolution(m_sim_resolution) &&
+                                 m_shield_system->get_params().lakes_enabled;
+    const bool parallel_boot = use_seed_inputs && m_boot_settle_mode && m_job_system;
+    std::shared_ptr<const SHIELD_WorldSystem> sampler;
+    for (std::size_t begin = 0; begin < pending.size();) {
+        const auto count = std::min(kBootSeedBatch, pending.size() - begin);
+        const auto to_init = pending.subspan(begin, count);
+        const auto seed_start = WaterAttribution::CurrentFrame()
+                                    ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
+        // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell
+        // (~16ms/frame, profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the
+        // heightmap the mesher already computed into heightmap_data (proven by the EXPECT_EQ parity
+        // gate), so REUSE it — a cheap array read instead of a ~125us multi-octave
+        // sample. Read it HERE on the MAIN THREAD: an active chunk's LIVE heightmap_data is only
+        // ever (re)written by the main-thread LOD publish (process_completed_meshing_jobs);
+        // off-thread meshing writes scratch/pending, never the live array. So this read cannot
+        // race, and the initializer below gets a PRIVATE copy (never touches live heightmap_data).
+        const int hm_stride = CHUNK_SIZE_X + 1; // heightmap is (CHUNK_SIZE_X+1)^2, x-fastest
+        // The heightmap-node reuse below requires each water-cell CENTRE to land on an
+        // integer heightmap node: centre = step*x + step/2 with step = CHUNK_SIZE_X /
+        // resolution, so step must divide evenly AND be even (Medium: step 2 -> node
+        // 2x+1, the historical fast path). At High (step 1) centres sit on half-metre
+        // positions with no node — use exact precomputed scalar samples when ready,
+        // otherwise the same inline sampler.
+        const int hm_step = (m_sim_resolution > 0 && CHUNK_SIZE_X % m_sim_resolution == 0)
+                                ? CHUNK_SIZE_X / m_sim_resolution
+                                : 0;
+        const bool reuse_heightmap = hm_step > 0 && hm_step % 2 == 0;
+        std::vector<std::vector<float>> terrain_seed(
+            to_init.size()); // [i] empty => use analytic terrain samples
+        if (reuse_heightmap) {
+            const int res = m_sim_resolution;
+            for (std::size_t i = 0; i < to_init.size(); ++i) {
+                const Chunk* cp = to_init[i];
+                // DETERMINISM (cold-first-run fix): reuse the heightmap ONLY at the finest LOD
+                // (current_lod == 0), where it is byte-identical to GetTerrainHeightAt (the
+                // EXPECT_EQ parity gate). A chunk that is water-initialized while still at a COARSE
+                // / not-yet- promoted LOD carries a heightmap that does NOT match the sampler, and
+                // WHETHER it has reached LOD0 by init time is streaming-timing-dependent — so the
+                // old size-only gate seeded a timing-dependent water_bed_mm (cold run-1 != warm
+                // run-2; --smoke water sub-hash flaked). For any non-LOD0 chunk we leave
+                // terrain_seed[i] empty so seed_chunk_water falls back to the pure sampler, which
+                // yields the SAME bits the LOD0 heightmap would — so water_bed_mm is deterministic
+                // regardless of streaming timing, while LOD0 chunks (the common settled case) keep
+                // the cheap heightmap-reuse fast path.
+                if (cp->current_lod.load(std::memory_order_acquire) != 0)
+                    continue;
+                if (static_cast<int>(cp->heightmap_data.size()) != hm_stride * hm_stride)
+                    continue;
+                terrain_seed[i].resize(static_cast<std::size_t>(res) *
+                                       static_cast<std::size_t>(res));
+                for (int z = 0; z < res; ++z) {
+                    for (int x = 0; x < res; ++x) {
+                        // Water cell centre is chunk-local (step*x + step/2, step*z + step/2) — an
+                        // integer heightmap node (2x+1 at Medium's step 2), and heightmap[node] ==
+                        // GetTerrainHeightAt(node) to the BIT (parity gate) -> byte-exact.
+                        terrain_seed[i][static_cast<std::size_t>(z * res + x)] =
+                            cp->heightmap_data[static_cast<std::size_t>(
+                                (hm_step * x + hm_step / 2) +
+                                (hm_step * z + hm_step / 2) * hm_stride)];
+                    }
+                }
+            }
+        }
+
+        // A ready payload only avoids sampling; it never affects selection, the cap,
+        // publication, or cell order. Retire the request even on fallback so a late
+        // worker cannot retain storage in an already initialized column.
+        // At most six handles in live play; boot uses one per resident init candidate.
+        auto high_seed_inputs = use_seed_inputs
+                                    ? prepare_high_water_seed_inputs(to_init, parallel_boot)
+                                    : std::vector<std::shared_ptr<HighWaterSeedInputs>>{};
+        if (parallel_boot) {
+            high_seed_inputs.resize(to_init.size());
+            std::vector<Job> jobs;
+            std::vector<std::shared_ptr<std::atomic<bool>>> released;
+            jobs.reserve(to_init.size());
+            released.reserve(to_init.size());
+            for (std::size_t i = 0; i < to_init.size(); ++i) {
+                if (high_seed_inputs[i])
+                    continue;
+                if (!sampler)
+                    sampler = m_shield_system->capture_water_seed_sampler();
+                auto inputs = std::make_shared<HighWaterSeedInputs>();
+                if (!terrain_seed[i].empty())
+                    std::copy(
+                        terrain_seed[i].begin(), terrain_seed[i].end(), inputs->terrain.begin());
+                high_seed_inputs[i] = inputs;
+                auto fence = std::make_shared<std::atomic<bool>>(false);
+                auto task = std::make_shared<BootWaterSeedTask>(sampler,
+                                                                inputs,
+                                                                fence,
+                                                                to_init[i]->get_coords(),
+                                                                m_sim_resolution,
+                                                                !terrain_seed[i].empty());
+                jobs.emplace_back([task = std::move(task)] { task->compute(); });
+                released.push_back(std::move(fence));
+            }
+            const auto handle = m_job_system->dispatch_batch(jobs);
+            jobs.clear();
+            m_job_system->wait(handle);
+            // JobSystem's completion decrement precedes destruction of its callable.
+            // Drain the final capture release as well, including rejected dispatches.
+            for (const auto& fence : released) {
+                while (!fence->load(std::memory_order_acquire))
+                    std::this_thread::yield();
+            }
+            for (std::size_t i = 0; i < to_init.size(); ++i) {
+                auto& inputs = high_seed_inputs[i];
+                if (!inputs->ready_for(m_sim_resolution)) {
+                    ComputeWaterSeedInputs(*inputs,
+                                           to_init[i]->get_coords(),
+                                           m_sim_resolution,
+                                           *sampler,
+                                           terrain_seed[i]);
+                }
+            }
+        }
+        if (WaterAttribution::CurrentFrame()) {
+            m_dbg_water.seed_inputs += std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - seed_start)
+                                           .count();
+        }
+
+        // Initialization is always main-thread ordered, including bulk boot settle.
+        // Worker jobs prepare inputs only and never publish simulation state.
+        const auto initialization_start = WaterAttribution::CurrentFrame()
+                                              ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point{};
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            if (!use_seed_inputs)
+                to_init[i]->stage_water_seed_inputs({});
+            const auto* inputs = high_seed_inputs.empty() ? nullptr : high_seed_inputs[i].get();
+            seed_chunk_water(to_init[i],
+                             terrain_seed[i],
+                             inputs && inputs->ready_for(m_sim_resolution) ? inputs : nullptr);
+        }
+        if (WaterAttribution::CurrentFrame()) {
+            m_dbg_water.initialization +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          initialization_start)
+                    .count();
+        }
+        begin += count;
+    }
+}
+
+void WaterSystem::seed_chunk_water(Chunk* cp,
+                                   const std::vector<float>& terrain,
+                                   const HighWaterSeedInputs* inputs) {
+    //  init directly at the fixed camera-independent sim resolution (no later
+    // camera-driven resize -> the hashed grid is uniform + stable on every peer).
+    const int initial_resolution = m_sim_resolution;
+    // Acceleration data is optional. Never index unpublished, partial or differently
+    // sized samples; retain the exact inline queries and rounding on fallback.
+    if (inputs && !inputs->ready_for(initial_resolution))
+        inputs = nullptr;
+    cp->current_water_resolution.store(initial_resolution);
+    const size_t sim_size =
+        static_cast<size_t>(initial_resolution) * static_cast<size_t>(initial_resolution);
+    cp->water_level_data.assign(sim_size, SEA_LEVEL);
+    cp->water_flow_data.assign(sim_size, Vec2(0.0f));
+    cp->water_sim_terrain_height.resize(sim_size);
+    cp->water_rest_level.assign(sim_size, SEA_LEVEL);
+    // fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
+    // above bed; lakes/sea start filled, dry land + perched channels fill from the sources.
+    cp->water_depth_mm.assign(sim_size, 0);
+    cp->water_bed_mm.assign(sim_size, 0);
+    cp->water_edge_flux.assign(2 * sim_size, 0);
+    const IVec3 c_coords = cp->get_coords();
+    const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
+    const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
+    const bool have_terrain = (terrain.size() == sim_size); // main thread pre-read the heightmap
+    for (int z = 0; z < initial_resolution; ++z) {
+        for (int x = 0; x < initial_resolution; ++x) {
+            float world_x = static_cast<float>(c_coords.x * CHUNK_SIZE_X) +
+                            (static_cast<float>(x) + 0.5f) * cell_width_x;
+            float world_z = static_cast<float>(c_coords.z * CHUNK_SIZE_Z) +
+                            (static_cast<float>(z) + 0.5f) * cell_width_z;
+            const std::size_t cell = static_cast<std::size_t>(z * initial_resolution + x);
+            // Seed the resting surface from worldgen: sea level, raised to the local lake
+            // surface inside basins so perched lakes start (and stay) filled.
+            const float rest =
+                inputs ? inputs->rest[cell] : m_shield_system->WaterLevelAt(world_x, world_z);
+            // Reuse the mesher's heightmap (byte-identical) when the main thread provided it;
+            // else sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical
+            // either way.
+            const float terrain_h =
+                inputs ? inputs->terrain[cell]
+                       : (have_terrain ? terrain[cell]
+                                       : m_shield_system->GetTerrainHeightAt(world_x, world_z));
+            cp->water_level_data[cell] = rest;
+            cp->water_rest_level[cell] = rest;
+            cp->water_sim_terrain_height[cell] = terrain_h;
+            cp->water_bed_mm[cell] = static_cast<std::int32_t>(std::lround(terrain_h * MM_PER_M));
+            const long depth0 = std::lround(static_cast<double>(rest - terrain_h) * MM_PER_M);
+            cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
+        }
+    }
+    cp->has_water_sim.store(true);
+    m_water_activity_cache.erase(cp->get_id());
+    cp->water_mesh_generated.store(false);
+    cp->water_mesh_dirty_ticks = 0;
+}
+
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
     m_cells_stepped_last_update = 0;
     // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
     // the _dbg_split pattern from SHIELD_WorldSystem::update.
     m_dbg_water = {};
+    m_seed_attribution = {};
     auto dbg_prev = std::chrono::steady_clock::now();
     auto dbg_split = [&](double& slot) {
         const auto now = std::chrono::steady_clock::now();
@@ -630,13 +926,7 @@ void WaterSystem::update(entt::registry& registry,
         WaterDetailLevel level;
     };
     std::vector<ResizeRequest> resize_requests;
-    // (water-perf-200fps init follow-on) First-time water INIT is the dominant water-frame cost:
-    // per cell it samples the worldgen (WaterLevelAt + GetTerrainHeightAt), time-sliced to
-    // MAX_WATER_INITS_PER_TICK chunks/tick. Collect THIS tick's chunks in the SAME
-    // selection order + cap as before, then SEED THEM IN PARALLEL. Each chunk writes ONLY its own
-    // arrays from read-only worldgen queries — already thread-safe (the streamer generates chunks
-    // on these same workers and terrain is byte-identical run-to-run) — so parallel seeding is
-    // BYTE-IDENTICAL to sequential. run==replay / host==peer hold (validated by --smoke).
+    // Preserve the historical active-map order and deterministic initialization cap.
     std::vector<Chunk*> to_init;
     bool init_cap_reached = false;
     for (const auto& active_chunk : active_chunks) {
@@ -678,146 +968,21 @@ void WaterSystem::update(entt::registry& registry,
         m_water_resize_cursor = (m_water_resize_cursor + budget) % total;
     }
 
+    if (WaterAttribution::CurrentFrame())
+        dbg_split(m_dbg_water.selection);
+
     auto source_view =
         registry
             .view<const Components::TransformComponent, const Components::WaterSourceComponent>();
 
-    // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell
-    // (~16ms/frame, profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the
-    // heightmap the mesher already computed into heightmap_data (proven by the EXPECT_EQ parity
-    // gate), so REUSE it — a cheap array read instead of a ~125us multi-octave
-    // sample. Read it HERE on the MAIN THREAD: an active chunk's LIVE heightmap_data is only ever
-    // (re)written by the main-thread LOD publish (process_completed_meshing_jobs); off-thread
-    // meshing writes scratch/pending, never the live array. So this read cannot race, and the
-    // workers below get a PRIVATE copy (never touch heightmap_data) — unlike the old worker-side
-    // read. Workers use the analytic sampler when no reusable heightmap is available.
-    const int hm_stride = CHUNK_SIZE_X + 1; // heightmap is (CHUNK_SIZE_X+1)^2, x-fastest
-    // The heightmap-node reuse below requires each water-cell CENTRE to land on an
-    // integer heightmap node: centre = step*x + step/2 with step = CHUNK_SIZE_X /
-    // resolution, so step must divide evenly AND be even (Medium: step 2 -> node
-    // 2x+1, the historical fast path). At High (step 1) centres sit on half-metre
-    // positions with no node — every chunk takes the pure-sampler fallback, which
-    // yields the SAME bits (the parity-gate argument below), just slower.
-    const int hm_step = (m_sim_resolution > 0 && CHUNK_SIZE_X % m_sim_resolution == 0)
-                            ? CHUNK_SIZE_X / m_sim_resolution
-                            : 0;
-    const bool reuse_heightmap = hm_step > 0 && hm_step % 2 == 0;
-    std::vector<std::vector<float>> terrain_seed(
-        to_init.size()); // [i] empty => worker samples the sampler
-    if (reuse_heightmap) {
-        const int res = m_sim_resolution;
-        for (std::size_t i = 0; i < to_init.size(); ++i) {
-            const Chunk* cp = to_init[i];
-            // DETERMINISM (cold-first-run fix): reuse the heightmap ONLY at the finest LOD
-            // (current_lod == 0), where it is byte-identical to GetTerrainHeightAt (the EXPECT_EQ
-            // parity gate). A chunk that is water-initialized while still at a COARSE / not-yet-
-            // promoted LOD carries a heightmap that does NOT match the sampler, and WHETHER it has
-            // reached LOD0 by init time is streaming-timing-dependent — so the old size-only gate
-            // seeded a timing-dependent water_bed_mm (cold run-1 != warm run-2; --smoke water
-            // sub-hash flaked). For any non-LOD0 chunk we leave terrain_seed[i] empty so
-            // seed_chunk_water falls back to the pure sampler, which yields the SAME bits the LOD0
-            // heightmap would — so water_bed_mm is deterministic regardless of streaming timing,
-            // while LOD0 chunks (the common settled case) keep the cheap heightmap-reuse fast path.
-            if (cp->current_lod.load(std::memory_order_acquire) != 0)
-                continue;
-            if (static_cast<int>(cp->heightmap_data.size()) != hm_stride * hm_stride)
-                continue;
-            terrain_seed[i].resize(static_cast<std::size_t>(res) * static_cast<std::size_t>(res));
-            for (int z = 0; z < res; ++z) {
-                for (int x = 0; x < res; ++x) {
-                    // Water cell centre is chunk-local (step*x + step/2, step*z + step/2) — an
-                    // integer heightmap node (2x+1 at Medium's step 2), and heightmap[node] ==
-                    // GetTerrainHeightAt(node) to the BIT (parity gate) -> byte-exact.
-                    terrain_seed[i][static_cast<std::size_t>(z * res + x)] =
-                        cp->heightmap_data[static_cast<std::size_t>(
-                            (hm_step * x + hm_step / 2) + (hm_step * z + hm_step / 2) * hm_stride)];
-                }
-            }
-        }
-    }
-
-    auto seed_chunk_water = [this](Chunk* cp, const std::vector<float>& terrain) {
-        //  init directly at the fixed camera-independent sim resolution (no later
-        // camera-driven resize -> the hashed grid is uniform + stable on every peer).
-        const int initial_resolution = m_sim_resolution;
-        cp->current_water_resolution.store(initial_resolution);
-        const size_t sim_size =
-            static_cast<size_t>(initial_resolution) * static_cast<size_t>(initial_resolution);
-        cp->water_level_data.assign(sim_size, SEA_LEVEL);
-        cp->water_flow_data.assign(sim_size, Vec2(0.0f));
-        cp->water_sim_terrain_height.resize(sim_size);
-        cp->water_rest_level.assign(sim_size, SEA_LEVEL);
-        // fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
-        // above bed; lakes/sea start filled, dry land + perched channels fill from the sources.
-        cp->water_depth_mm.assign(sim_size, 0);
-        cp->water_bed_mm.assign(sim_size, 0);
-        cp->water_edge_flux.assign(2 * sim_size, 0);
-        const IVec3 c_coords = cp->get_coords();
-        const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
-        const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
-        const bool have_terrain =
-            (terrain.size() == sim_size); // main thread pre-read the heightmap
-        for (int z = 0; z < initial_resolution; ++z) {
-            for (int x = 0; x < initial_resolution; ++x) {
-                float world_x = static_cast<float>(c_coords.x * CHUNK_SIZE_X) +
-                                (static_cast<float>(x) + 0.5f) * cell_width_x;
-                float world_z = static_cast<float>(c_coords.z * CHUNK_SIZE_Z) +
-                                (static_cast<float>(z) + 0.5f) * cell_width_z;
-                const std::size_t cell = static_cast<std::size_t>(z * initial_resolution + x);
-                // Seed the resting surface from worldgen: sea level, raised to the local lake
-                // surface inside basins so perched lakes start (and stay) filled.
-                const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
-                // Reuse the mesher's heightmap (byte-identical) when the main thread provided it;
-                // else sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical
-                // either way.
-                const float terrain_h = have_terrain
-                                            ? terrain[cell]
-                                            : m_shield_system->GetTerrainHeightAt(world_x, world_z);
-                cp->water_level_data[cell] = rest;
-                cp->water_rest_level[cell] = rest;
-                cp->water_sim_terrain_height[cell] = terrain_h;
-                cp->water_bed_mm[cell] =
-                    static_cast<std::int32_t>(std::lround(terrain_h * MM_PER_M));
-                const long depth0 = std::lround(static_cast<double>(rest - terrain_h) * MM_PER_M);
-                cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
-            }
-        }
-        cp->has_water_sim.store(true);
-        m_water_activity_cache.erase(cp->get_id());
-        cp->water_mesh_generated.store(false);
-        cp->water_mesh_dirty_ticks = 0;
-    };
-    // (worst-frame fix) Seed INLINE on the main thread — NOT dispatch_batch + wait. With the
-    // terrain half now a free heightmap read, the per-chunk compute is cheap (WaterLevelAt +
-    // integer fill). The old parallel path's wait was HEAD-OF-LINE blocked behind the flooded
-    // streaming/meshing job queue (the same pathology the water-SIM hit — see moving-lag notes: "18
-    // trivial jobs took ~1300ms because wait blocked behind the streaming flood"), so most of its
-    // ~16ms was QUEUE WAIT, not work. Inline pays only the (now small) compute and skips the wait.
-    // Each chunk writes only its own arrays -> byte-identical to the parallel version -> world_hash
-    // unchanged (no re-pin).
-    //
-    //  boot-settle mode: the bulk backlog (thousands of chunks, mostly coarse-LOD so
-    // the heightmap fast path doesn't apply and each pays the full sampler) IS worth the
-    // parallel path — at boot the queue is post-residency-settle idle, so the head-of-line
-    // hazard above does not apply. Each chunk writes only its own arrays from read-only
-    // worldgen queries (the streamer generates chunks on these same workers), so parallel is
-    // byte-identical to sequential — the ORDER chunks are seeded in never changes the bits.
-    if (m_boot_settle_mode && to_init.size() > 8 && m_job_system) {
-        std::vector<Job> seed_jobs;
-        seed_jobs.reserve(to_init.size());
-        for (std::size_t i = 0; i < to_init.size(); ++i) {
-            Chunk* cp = to_init[i];
-            const std::vector<float>* terrain = &terrain_seed[i];
-            seed_jobs.emplace_back(
-                [&seed_chunk_water, cp, terrain]() { seed_chunk_water(cp, *terrain); });
-        }
-        m_job_system->wait(m_job_system->dispatch_batch(seed_jobs));
+    initialize_water_chunks(to_init);
+    if (WaterAttribution::CurrentFrame()) {
+        dbg_prev = std::chrono::steady_clock::now();
+        m_dbg_water.init =
+            m_dbg_water.selection + m_dbg_water.seed_inputs + m_dbg_water.initialization;
     } else {
-        for (std::size_t i = 0; i < to_init.size(); ++i) {
-            seed_chunk_water(to_init[i], terrain_seed[i]);
-        }
+        dbg_split(m_dbg_water.init);
     }
-    dbg_split(m_dbg_water.init);
 
     for (auto entity : source_view) {
         auto& transform = source_view.get<const Components::TransformComponent>(entity);
@@ -1199,6 +1364,13 @@ void WaterSystem::update(entt::registry& registry,
         }
     }
     dbg_split(m_dbg_water.bookkeeping);
+    m_seed_attribution.selection_ms = m_dbg_water.selection;
+    m_seed_attribution.seed_inputs_ms = m_dbg_water.seed_inputs;
+    m_seed_attribution.initialization_ms = m_dbg_water.initialization;
+    m_seed_attribution.sim_ms = m_dbg_water.sim;
+    m_seed_attribution.seam_ms = m_dbg_water.seam;
+    m_seed_attribution.bookkeeping_ms = m_dbg_water.bookkeeping;
+    WaterAttribution::Record(m_seed_attribution);
 }
 
 f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
@@ -1427,6 +1599,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
             }
         }
         if (edited) {
+            c.stage_water_seed_inputs({});
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
