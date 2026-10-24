@@ -77,41 +77,88 @@ inline std::string content_digest(std::istream& input) {
     return content_digest_hex(hash);
 }
 
-inline std::string content_digest(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input)
-        throw std::runtime_error("cannot open workload content");
-    return content_digest(input);
-}
-
-// Open once, reject special files through that handle, and bound reads even if a
-// writer grows the file. Nonblocking POSIX opens cannot hang on a replaced FIFO.
+// Read through an owning no-follow handle, verifying its resolution and type
+// before use. Nonblocking POSIX opens cannot hang on a replaced FIFO.
 class SavedFileInput {
 public:
-    explicit SavedFileInput(const std::filesystem::path& path) {
+    enum class Kind : std::uint8_t {
+        File,
+        Directory
+    };
+
+    explicit SavedFileInput(const std::filesystem::path& path, Kind kind = Kind::File) {
+        // Match the extended Windows path bound on both platforms; this also
+        // bounds the POSIX component walk used to verify the checked resolution.
+        if (path.native().size() > 32767)
+            throw std::runtime_error("workload path exceeds bounds");
 #ifdef _WIN32
         handle_ = CreateFileW(path.c_str(),
                               GENERIC_READ,
                               FILE_SHARE_READ,
                               nullptr,
                               OPEN_EXISTING,
-                              FILE_FLAG_OPEN_REPARSE_POINT,
+                              FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
                               nullptr);
         BY_HANDLE_FILE_INFORMATION info{};
         if (handle_ == INVALID_HANDLE_VALUE || GetFileType(handle_) != FILE_TYPE_DISK ||
             !GetFileInformationByHandle(handle_, &info) ||
-            (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) !=
+                (kind == Kind::Directory)) {
             close();
             throw std::runtime_error("unsupported workload save file");
         }
+        // Resolve the owning handle, including intermediate junctions and 8.3
+        // aliases. The fixed buffer includes the extended-path terminator.
+        std::array<wchar_t, 32768> buffer{};
+        const DWORD length = GetFinalPathNameByHandleW(
+            handle_, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED);
+        if (length == 0 || length >= buffer.size()) {
+            close();
+            throw std::runtime_error("cannot resolve opened workload path");
+        }
+        try {
+            std::wstring resolved(buffer.data(), length);
+            if (resolved.starts_with(LR"(\\?\UNC\)"))
+                resolved = LR"(\\)" + resolved.substr(8);
+            else if (resolved.starts_with(LR"(\\?\)"))
+                resolved.erase(0, 4);
+            resolved_ = std::filesystem::path(std::move(resolved));
+        } catch (...) {
+            close();
+            throw;
+        }
         size_ = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
 #else
+        resolved_ = std::filesystem::canonical(path);
+        if (resolved_.native().size() > 32767)
+            throw std::runtime_error("workload path exceeds bounds");
         handle_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         struct stat info {};
-        if (handle_ < 0 || ::fstat(handle_, &info) != 0 || !S_ISREG(info.st_mode) ||
+        if (handle_ < 0 || ::fstat(handle_, &info) != 0 ||
+            (kind == Kind::Directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode)) ||
             info.st_size < 0) {
             close();
             throw std::runtime_error("unsupported workload save file");
+        }
+        // A no-follow leaf alone does not cover replaced parent symlinks.
+        // Independently anchor every component of the checked canonical path,
+        // then compare that descriptor's device/inode with the reader's handle.
+        int checked = -1;
+        try {
+            checked = open_resolved(resolved_);
+        } catch (...) {
+            close();
+            throw;
+        }
+        struct stat expected {};
+        const bool matches = checked >= 0 && ::fstat(checked, &expected) == 0 &&
+                             expected.st_dev == info.st_dev && expected.st_ino == info.st_ino;
+        if (checked >= 0)
+            ::close(checked);
+        if (!matches) {
+            close();
+            throw std::runtime_error("opened workload path changed resolution");
         }
         size_ = static_cast<std::uint64_t>(info.st_size);
 #endif
@@ -120,6 +167,10 @@ public:
     SavedFileInput& operator=(const SavedFileInput&) = delete;
     ~SavedFileInput() {
         close();
+    }
+    // This spelling is bound to the opened object, never a fresh path lookup.
+    const std::filesystem::path& resolved_path() const {
+        return resolved_;
     }
     std::uint64_t size() const {
         return size_;
@@ -142,6 +193,41 @@ public:
     }
 
 private:
+#ifndef _WIN32
+    static int open_resolved(const std::filesystem::path& path) {
+        // Search-only descriptors avoid requiring directory read permission.
+#if defined(O_PATH)
+        constexpr int access = O_PATH;
+#elif defined(O_SEARCH)
+        constexpr int access = O_SEARCH;
+#else
+        constexpr int access = O_RDONLY;
+#endif
+        constexpr int directory_flags = access | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+        int parent = ::open(path.root_path().c_str(), directory_flags);
+        if (parent < 0)
+            return -1;
+        try {
+            const auto relative = path.relative_path();
+            for (auto component = relative.begin(); component != relative.end(); ++component) {
+                auto next = component;
+                ++next;
+                const int flags = next == relative.end()
+                                      ? O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                                      : directory_flags;
+                const int child = ::openat(parent, component->c_str(), flags);
+                ::close(parent);
+                parent = child;
+                if (parent < 0)
+                    return -1;
+            }
+        } catch (...) {
+            ::close(parent);
+            throw;
+        }
+        return parent;
+    }
+#endif
     void close() {
 #ifdef _WIN32
         if (handle_ != INVALID_HANDLE_VALUE)
@@ -159,7 +245,40 @@ private:
     int handle_ = -1;
 #endif
     std::uint64_t size_ = 0;
+    std::filesystem::path resolved_;
 };
+
+inline std::string content_digest(SavedFileInput& input) {
+    std::uint64_t hash = 14695981039346656037ull;
+    std::uint64_t consumed = 0;
+    std::array<char, 65536> buffer{}; // At most 64 KiB of asset bytes in memory.
+    for (;;) {
+        const auto count = input.read(buffer);
+        if (count == 0)
+            break;
+        if (count > input.size() - consumed)
+            throw std::runtime_error("workload content changed while reading");
+        consumed += count;
+        for (std::size_t index = 0; index < count; ++index)
+            hash = (hash ^ static_cast<unsigned char>(buffer[index])) * 1099511628211ull;
+    }
+    if (consumed != input.size())
+        throw std::runtime_error("workload content changed while reading");
+    return content_digest_hex(hash);
+}
+
+inline std::string content_digest(const std::filesystem::path& path) {
+    SavedFileInput input(path);
+    return content_digest(input);
+}
+
+inline std::string content_digest(const std::filesystem::path& path,
+                                  const Filesystem::CaptureContentPaths& containment) {
+    SavedFileInput input(path);
+    if (!containment.allows_resolved(path, input.resolved_path()))
+        throw std::runtime_error("unsupported workload content path");
+    return content_digest(input);
+}
 
 struct SavedFileBytes {
     std::string relative;
@@ -173,7 +292,8 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
                                     std::vector<SavedFileBytes>* snapshot = nullptr) {
     if (std::filesystem::is_symlink(directory) || !std::filesystem::is_directory(directory))
         throw std::runtime_error("unsupported workload save directory");
-    const auto canonical_directory = std::filesystem::canonical(directory);
+    const SavedFileInput opened_directory(directory, SavedFileInput::Kind::Directory);
+    const auto& canonical_directory = opened_directory.resolved_path();
     std::vector<std::string> paths;
     std::size_t entries = 0;
     for (auto iterator = std::filesystem::recursive_directory_iterator(directory);
@@ -186,14 +306,23 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
         const auto relative = entry.path().lexically_relative(directory).generic_u8string();
         if (relative.size() > 4096 || relative.find_first_of(u8"\\:") != std::u8string::npos ||
             entry.is_symlink() ||
-            std::filesystem::canonical(entry.path()) !=
+            !Filesystem::PathSpellingEqual(
+                Filesystem::WeaklyCanonicalPath(entry.path()),
                 canonical_directory /
                     Filesystem::PathFromUtf8(std::string_view(
-                        reinterpret_cast<const char*>(relative.data()), relative.size())))
+                        reinterpret_cast<const char*>(relative.data()), relative.size()))))
             throw std::runtime_error("unsupported workload save path");
         if (entry.is_regular_file())
             paths.emplace_back(reinterpret_cast<const char*>(relative.data()), relative.size());
-        else if (!entry.is_directory())
+        else if (entry.is_directory()) {
+            const SavedFileInput opened_entry(entry.path(), SavedFileInput::Kind::Directory);
+            if (!Filesystem::PathSpellingEqual(
+                    opened_entry.resolved_path(),
+                    canonical_directory /
+                        Filesystem::PathFromUtf8(std::string_view(
+                            reinterpret_cast<const char*>(relative.data()), relative.size()))))
+                throw std::runtime_error("unsupported workload save directory");
+        } else
             throw std::runtime_error("unsupported workload save file");
     }
     std::sort(paths.begin(), paths.end());
@@ -202,6 +331,9 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
     std::uint64_t total = 0;
     for (const auto& relative : paths) {
         SavedFileInput input(directory / Filesystem::PathFromUtf8(relative));
+        if (!Filesystem::PathSpellingEqual(
+                input.resolved_path(), canonical_directory / Filesystem::PathFromUtf8(relative)))
+            throw std::runtime_error("unsupported workload save path");
         const auto size = input.size();
         if (size > max_bytes - total)
             throw std::runtime_error("workload save bytes exceed bounds");
@@ -392,6 +524,9 @@ inline nlohmann::json workload_content(const std::filesystem::path& root) {
         }
         if (std::filesystem::is_symlink(root / tree) || !std::filesystem::is_directory(root / tree))
             throw std::runtime_error("missing workload content tree");
+        const SavedFileInput opened_tree(root / tree, SavedFileInput::Kind::Directory);
+        if (!containment.allows_resolved(root / tree, opened_tree.resolved_path(), true))
+            throw std::runtime_error("unsupported workload content tree");
         for (auto iterator = std::filesystem::recursive_directory_iterator(root / tree);
              iterator != std::filesystem::recursive_directory_iterator();
              ++iterator) {
@@ -406,8 +541,11 @@ inline nlohmann::json workload_content(const std::filesystem::path& root) {
             if (path.find_first_of("\\:") != std::string::npos)
                 throw std::runtime_error("unsupported workload content path");
             if (entry.is_regular_file())
-                result[path] = content_digest(entry.path());
+                result[path] = content_digest(entry.path(), containment);
             else if (entry.is_directory()) {
+                const SavedFileInput opened_entry(entry.path(), SavedFileInput::Kind::Directory);
+                if (!containment.allows_resolved(entry.path(), opened_entry.resolved_path()))
+                    throw std::runtime_error("unsupported workload content directory");
                 if (path.size() == 4096)
                     throw std::runtime_error("unsupported workload content path");
                 // A file key cannot end in '/', so empty directories are unambiguous.

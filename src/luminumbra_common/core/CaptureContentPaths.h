@@ -57,6 +57,22 @@ public:
         if (!active_)
             return true;
         std::error_code error;
+        const auto resolved = WeaklyCanonicalPath(path, error);
+        if (!error)
+            return allows_resolved(path, resolved);
+        refused_.store(true, std::memory_order_relaxed);
+        return false;
+    }
+
+    // The caller supplies a resolution verified against its owning open handle.
+    // Do not resolve that pathname again: it may have been replaced since open.
+    // Inventory scans may include the tree root itself; loaders require a child.
+    bool allows_resolved(const std::filesystem::path& path,
+                         const std::filesystem::path& resolved,
+                         bool include_tree_root = false) const {
+        if (!active_)
+            return true;
+        std::error_code error;
         const auto absolute = AbsolutePath(path, error);
         if (!error) {
             const auto lexical = LongNamePath(LexicallyNormalPath(absolute), error);
@@ -64,30 +80,29 @@ public:
                 refused_.store(true, std::memory_order_relaxed);
                 return false;
             }
-            const auto resolved = WeaklyCanonicalPath(absolute, error);
-            if (!error) {
-                for (std::size_t index = 0; index < trees_.size(); ++index)
-                    // Expand short names on both lexical sides without resolving
-                    // links: an external redirect into an allowed tree still fails.
-                    if ((within(lexical, lexical_trees_[index]) ||
-                         within(lexical, trees_[index])) &&
-                        within(resolved, trees_[index]))
-                        return true;
-            }
+            for (std::size_t index = 0; index < trees_.size(); ++index)
+                // Expand short names on both lexical sides without resolving
+                // links: an external redirect into an allowed tree still fails.
+                if ((within(lexical, lexical_trees_[index], include_tree_root) ||
+                     within(lexical, trees_[index], include_tree_root)) &&
+                    within(resolved, trees_[index], include_tree_root))
+                    return true;
         }
         refused_.store(true, std::memory_order_relaxed);
         return false;
     }
 
 private:
-    static bool within(const std::filesystem::path& path, const std::filesystem::path& tree) {
+    static bool within(const std::filesystem::path& path,
+                       const std::filesystem::path& tree,
+                       bool include_tree_root) {
         auto component = path.begin();
         for (const auto& parent : tree) {
             if (component == path.end() || !PathSpellingEqual(*component, parent))
                 return false;
             ++component;
         }
-        return component != path.end();
+        return component != path.end() || include_tree_root;
     }
 
     std::filesystem::path root_;

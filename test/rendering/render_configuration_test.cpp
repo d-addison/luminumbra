@@ -335,6 +335,118 @@ void link_directory(const std::filesystem::path& link, const std::filesystem::pa
 #endif
 }
 
+void opened_content_identity() {
+    const TemporaryContent content;
+    content.write("data/inside/payload", "inside\r\n");
+    content.write("res/other/payload", "other tree");
+    content.write("outside/payload", "private bytes");
+    content.write("outside/nested/marker", "private marker");
+    content.write("data/empty", "");
+    Luminumbra::Filesystem::CaptureContentPaths policy;
+    policy.enable(content.root());
+    {
+        const auto tree = content.root() / "data";
+        const SavedFileInput opened_tree(tree, SavedFileInput::Kind::Directory);
+        require(policy.allows_resolved(tree, opened_tree.resolved_path(), true));
+        require(!policy.allows_resolved(tree, opened_tree.resolved_path()));
+        require(!policy.allows_resolved(content.root() / "res", opened_tree.resolved_path(), true));
+    }
+    const auto link = content.root() / "data/redirected";
+    const auto path = link / "payload";
+    link_directory(link, content.root() / "data/inside");
+    require(policy.allows(path));
+    require(content_digest(path, policy) == content_digest(content.root() / "data/inside/payload"));
+    require(content_digest(content.root() / "data/empty", policy) == "fnv1a64:cbf29ce484222325");
+
+    // Retarget an intermediate link after the pathname check, before open.
+    // Junctions exercise this on Windows without symbolic-link privileges.
+    require(std::filesystem::remove(link));
+    link_directory(link, content.root() / "outside");
+    require_refusal([&] { content_digest(path, policy); });
+    require_refusal([&] { const SavedFileInput directory(link, SavedFileInput::Kind::Directory); });
+    {
+        const SavedFileInput opened(path);
+        require(!policy.allows_resolved(path, opened.resolved_path()));
+        require(!Luminumbra::Filesystem::PathSpellingEqual(opened.resolved_path(),
+                                                           content.root() / "data/inside/payload"));
+        const SavedFileInput directory(link / "nested", SavedFileInput::Kind::Directory);
+        require(!policy.allows_resolved(link / "nested", directory.resolved_path()));
+    }
+    require(std::filesystem::remove(link));
+    link_directory(link, content.root() / "res/other");
+    // Both ends are inventoried, but the lexical and resolved tree indices differ.
+    require_refusal([&] { content_digest(path, policy); });
+    require(std::filesystem::remove(link));
+    link_directory(link, content.root() / "data/inside");
+    {
+        SavedFileInput opened(path);
+        require(policy.allows_resolved(path, opened.resolved_path()));
+#ifndef _WIN32
+        // Once opened, a later redirect cannot change the bytes being hashed.
+        require(std::filesystem::remove(link));
+        link_directory(link, content.root() / "outside");
+#endif
+        require(content_digest(opened) == content_digest(content.root() / "data/inside/payload"));
+    }
+    require(std::filesystem::remove(link));
+    require_refusal([&] { content_digest(content.root() / "data/missing", policy); });
+    require_refusal([&] { content_digest(content.root() / "data/inside", policy); });
+    require_refusal([&] {
+        const SavedFileInput directory(content.root() / "data/empty",
+                                       SavedFileInput::Kind::Directory);
+    });
+    require_refusal(
+        [&] { const SavedFileInput excessive(std::filesystem::path(std::string(32768, 'x'))); });
+#ifndef _WIN32
+    const auto leaf = content.root() / "data/leaf";
+    std::filesystem::create_symlink(content.root() / "data/inside/payload", leaf);
+    require(policy.allows(leaf));
+    require(std::filesystem::remove(leaf));
+    std::filesystem::create_symlink(content.root() / "outside/payload", leaf);
+    // The old path-only digest followed this replaced leaf and read private bytes.
+    require_refusal([&] { content_digest(leaf); });
+    require(std::filesystem::remove(leaf));
+    require(::mkfifo(leaf.c_str(), 0600) == 0);
+    require_refusal([&] { content_digest(leaf, policy); });
+    require(std::filesystem::remove(leaf));
+    // Size changes are refused from the owning descriptor, including partial reads.
+    for (const auto size : {0u, 3u, 32u}) {
+        content.write("data/changing", "original");
+        SavedFileInput opened(content.root() / "data/changing");
+        std::filesystem::resize_file(content.root() / "data/changing", size);
+        require_refusal([&] { content_digest(opened); });
+    }
+#else
+    content.write("data/locked", std::string(65540, 'x'));
+    const auto locked_path = content.root() / "data/locked";
+    // Refuse both an unreadable first range and a failure after one full buffer.
+    for (const DWORD offset : {0ul, 65536ul}) {
+        const auto locked = CreateFileW(locked_path.c_str(),
+                                        GENERIC_READ,
+                                        FILE_SHARE_READ,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+        require(locked != INVALID_HANDLE_VALUE);
+        OVERLAPPED range{};
+        range.Offset = offset;
+        try {
+            require(
+                LockFileEx(
+                    locked, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 4, 0, &range) !=
+                0);
+            require_refusal([&] { content_digest(locked_path, policy); });
+            require(UnlockFileEx(locked, 0, 4, 0, &range) != 0);
+        } catch (...) {
+            CloseHandle(locked);
+            throw;
+        }
+        require(CloseHandle(locked) != 0);
+    }
+#endif
+}
+
 void saved_authority() {
     const TemporaryContent content;
     content.write("save/world.json", "{\"worldId\":\"capture-world\",\"seed\":424242}\r\n");
@@ -1013,6 +1125,9 @@ void content_references() {
     short_policy.enable(short_alias);
     require(short_policy.allows(short_alias / "data/texture.ltex"));
     require(short_policy.allows(content.root() / "data/texture.ltex"));
+    require(workload_content(short_alias) == workload_content(content.root()));
+    require(saved_world_digest(short_alias / "data") ==
+            saved_world_digest(content.root() / "data"));
     const auto canonical_root = Luminumbra::Filesystem::WeaklyCanonicalPath(content.root());
     const auto mixed_alias = short_alias.parent_path() / content.root().filename();
     // Case changes exercise the mismatch even when the volume disables 8.3 names.
@@ -1025,6 +1140,8 @@ void content_references() {
         for (const auto& queried :
              {content.root(), short_alias, mixed_alias, canonical_root, case_root}) {
             require(spelling_policy.allows(queried / "data/texture.ltex"));
+            require(content_digest(queried / "data/texture.ltex", spelling_policy) ==
+                    content_digest(content.root() / "data/texture.ltex"));
             require(spelling_policy.allows(queried / "DATA/TEXTURE.LTEX"));
             require(spelling_policy.allows(queried / "DATA/MISSING/asset.json"));
         }
@@ -1141,6 +1258,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "content-references") {
+            opened_content_identity();
             content_references();
             return 0;
         }

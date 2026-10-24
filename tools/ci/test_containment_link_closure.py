@@ -530,6 +530,47 @@ class ContainmentLinkClosureTests(unittest.TestCase):
         cls.targets = repository_targets(ROOT)
         cls.graph = IncludeGraph(ROOT)
 
+    def test_capture_identity_reads_verified_handles(self):
+        source = (ROOT / 'src/luminumbra_client/app/RenderConfiguration.h').read_text(encoding='utf-8')
+        policy = (ROOT / POLICY).read_text(encoding='utf-8')
+        reader = source.split('class SavedFileInput {', 1)[1].split('struct SavedFileBytes', 1)[0]
+        self.assertNotIn('std::ifstream', source)
+        for required in ('O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW', '::fstat(handle_, &info)',
+                         'S_ISREG(info.st_mode)', 'FILE_FLAG_OPEN_REPARSE_POINT',
+                         'FILE_ATTRIBUTE_REPARSE_POINT', 'GetFinalPathNameByHandleW(',
+                         'FILE_NAME_NORMALIZED', '::openat(parent, component->c_str(), flags)',
+                         'O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC',
+                         'expected.st_dev == info.st_dev', 'expected.st_ino == info.st_ino'):
+            self.assertIn(required, reader)
+        digest = reader.split('const Filesystem::CaptureContentPaths& containment)', 1)[1]
+        self.assertLess(digest.index('SavedFileInput input(path);'),
+                        digest.index('containment.allows_resolved(path, input.resolved_path())'))
+        self.assertLess(digest.index('containment.allows_resolved('),
+                        digest.index('return content_digest(input);'))
+        saved = source.split('inline std::string read_saved_world(', 1)[1].split(
+            'inline std::string saved_world_digest(', 1)[0]
+        self.assertIn('opened_directory.resolved_path()', saved)
+        self.assertIn('opened_entry.resolved_path()', saved)
+        self.assertIn('canonical_directory / Filesystem::PathFromUtf8(relative)', saved)
+        saved_compact = ''.join(saved.split())
+        self.assertLess(saved_compact.index('PathSpellingEqual(input.resolved_path(),'),
+                        saved_compact.index('input.read(buffer)'))
+        inventory = source.split('inline nlohmann::json workload_content(', 1)[1].split(
+            'inline nlohmann::json render_systems(', 1)[0]
+        self.assertIn('content_digest(entry.path(), containment)', inventory)
+        self.assertLess(inventory.index('allows_resolved(root / tree, opened_tree.resolved_path(), true)'),
+                        inventory.index('recursive_directory_iterator(root / tree)'))
+        self.assertLess(inventory.index('allows_resolved(entry.path(), opened_entry.resolved_path())'),
+                        inventory.index("result[path + '/'] = nullptr"))
+        resolved = policy.split('bool allows_resolved(', 1)[1].split('private:', 1)[0]
+        self.assertIn('within(lexical, lexical_trees_[index], include_tree_root)', resolved)
+        self.assertIn('within(lexical, trees_[index], include_tree_root)', resolved)
+        self.assertIn('within(resolved, trees_[index], include_tree_root)', resolved)
+        self.assertNotIn('WeaklyCanonicalPath(', resolved)
+        native = (ROOT / 'test/rendering/render_configuration_test.cpp').read_text(encoding='utf-8')
+        registered = native.split('std::string_view(argv[1]) == "content-references"', 1)[1]
+        self.assertLess(registered.index('opened_content_identity();'), registered.index('return 0;'))
+
     def test_ordinary_windows_names_return_before_expansion_io(self):
         source = (ROOT / OWNER).read_text(encoding='utf-8')
         body = source.split('std::filesystem::path LongNamePath(', 1)[1].split(
