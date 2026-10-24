@@ -1442,7 +1442,9 @@ class FrameAttributionWiring(unittest.TestCase):
         parallel = compact(block(water, "if (parallel_boot)"))
         self.assertIn("std::make_shared<HighWaterSeedInputs>()", parallel)
         self.assertIn("ComputeWaterSeedInputs(*inputs,", parallel)
-        self.assertIn("if (!use_seed_inputs) to_init[i]->stage_water_seed_inputs({});", boot)
+        self.assertIn("if (!use_seed_inputs || m_sim_resolution != "
+                      "HighWaterSeedInputs::kResolution) "
+                      "to_init[i]->stage_water_seed_inputs({});", boot)
         self.assertIn("seed_chunk_water(to_init[i], terrain_seed[i], "
                       "inputs && inputs->ready_for(m_sim_resolution) ? inputs : nullptr);", boot)
         live = compact(block(water, "WaterSystem::prepare_high_water_seed_inputs("))
