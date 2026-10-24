@@ -902,8 +902,9 @@ field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
 `other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
 remains rebuild time only.
 
-The CSV has 63 fields. Existing fields retain their zero-based indices; only
-`dirty_columns` is appended, at index 62, after all terrain, water and phase fields.
+The CSV has 72 fields. Existing fields retain their zero-based indices;
+`dirty_columns` remains at index 62, after all terrain, water and phase fields.
+The nine water subzone fields below follow it at indices 63–71.
 Within each range below, columns appear in the listed order:
 
 | Indices | Columns |
@@ -916,6 +917,7 @@ Within each range below, columns appear in the listed order:
 | 44–50 | `water_work_ms`, `water_overshoot_ms`, `water_attempts`, `water_adopted`, `water_work_bytes`, `water_byte_overshoot`, `water_pending` |
 | 51–61 | The phase columns below |
 | 62 | `dirty_columns` |
+| 63–71 | `water_selection_ms`, `water_seed_inputs_ms`, `water_initialization_ms`, `water_sim_ms`, `water_seam_ms`, `water_bookkeeping_ms`, `water_precomputed_columns`, `water_fallback_columns`, `water_stale_columns` |
 
 Issue #402's CPU wall-time phase columns follow the terrain and water fields,
 at indices 51–61, in order:
@@ -955,6 +957,28 @@ frame_ms = sim_ms + stream_ms + render_ms + present_ms + foliage_ms
 CSV rounding can introduce a small difference. The remainder is not clamped:
 a negative value exposes overlapping inputs. These are CPU submission costs;
 first-use collection adds no GPU waits or readbacks.
+
+Water subzones (issue #400) are nested inside `stream_ms`. At indices 63–71,
+the CSV appends
+`water_selection_ms`, `water_seed_inputs_ms`, `water_initialization_ms`,
+`water_sim_ms`, `water_seam_ms` and `water_bookkeeping_ms`; the opt-in
+`water-split` slow-frame log reports the same split. They aggregate every water
+update in the frame and must not be added to the exclusive buckets.
+Selection includes grid migration. Seed-input time covers cache adoption and
+fallback sampling; at High, initialization then only fills the grids from those
+exact inputs. Live initialization at other resolutions retains the existing
+inline rest-level sampling. Boot prepares all session resolutions in batches of
+at most 64 columns, then initializes them on the owner thread in selection order.
+Input jobs retain a detached sampler and copied terrain inputs, never live chunk
+storage. Rejected or incomplete jobs use the same inputs on the owner thread.
+
+`water_precomputed_columns` counts ready High payloads used during initialization;
+`water_fallback_columns` counts missing, unfinished or stale High payloads needing
+fresh sampling, and `water_stale_columns` counts generation mismatches discarded within
+those fallbacks. Existing terrain jobs prepare the half-cell terrain/rest arrays
+under the world sampling scope. Terrain and edit generations guard their use;
+readiness never changes initialization selection, its six-column live cap, or
+simulation publication. These counters and inputs are neither hashed nor persisted.
 
 Foliage stage times are CPU wall time, including GL submission calls, without
 GPU waits or new readbacks. `signature_ms` includes polling existing evidence

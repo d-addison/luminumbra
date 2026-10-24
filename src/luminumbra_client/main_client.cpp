@@ -82,6 +82,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h" // user.* video/audio/controls settings
+#include "luminumbra_common/core/WaterAttribution.h"
 #include "luminumbra_common/game/CodexView.h" // pure presentation model for the codex browse screen
 #include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
@@ -3834,6 +3835,7 @@ int main(int argc, char* argv[]) {
         LUMIN_PROFILE_ZONE_N("Client frame");
         const auto _frameStart = std::chrono::steady_clock::now();
         const Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
+        const Luminumbra::WaterAttribution::FrameScope water_scope(frame_attribution_enabled);
         Attribution::PhaseFrameScope phase_scope(frame_attribution_enabled);
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
@@ -5871,7 +5873,8 @@ int main(int argc, char* argv[]) {
                                            foliage_frame.generated_count,
                                            foliage_frame.count_generation,
                                            phase_scope.snapshot(),
-                                           foliage_frame.uploads))
+                                           foliage_frame.uploads,
+                                           water_scope.snapshot()))
                     LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
             }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
@@ -5927,6 +5930,20 @@ int main(int argc, char* argv[]) {
                             "  phase {}={:.3f}ms",
                             Attribution::phase_name(static_cast<Attribution::Phase>(index)),
                             phases.milliseconds()[index]);
+                    const auto& water = water_scope.snapshot();
+                    LUMINUMBRA_CORE_WARN(
+                        "  water-split: selection={:.3f} seed_inputs={:.3f} "
+                        "initialization={:.3f} sim={:.3f} seam={:.3f} bookkeeping={:.3f} "
+                        "precomputed={} fallback={} stale={}",
+                        water.selection_ms,
+                        water.seed_inputs_ms,
+                        water.initialization_ms,
+                        water.sim_ms,
+                        water.seam_ms,
+                        water.bookkeeping_ms,
+                        water.precomputed_columns,
+                        water.fallback_columns,
+                        water.stale_columns);
                 }
                 if (frame_attribution_enabled)
                     LUMINUMBRA_CORE_WARN(

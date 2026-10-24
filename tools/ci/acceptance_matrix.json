@@ -367,7 +367,7 @@
     {
       "id": "perf.timer-attribution",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "The software sample ring preserves frame identity when results are assigned directly out of order. GpuQueryRing with fake queries exercises delayed result collection and leaves unsupported GPU timings and incomplete pass timings unavailable. The query fixture uses identical durations for every frame; frame-distinct GPU-query attribution remains unproven.",
+      "statement": "The software sample ring preserves frame identity when results are assigned directly out of order. GpuQueryRing with fake queries exercises delayed result collection and leaves unsupported GPU timings and incomplete pass timings unavailable. The query fixture uses identical durations for every frame; frame-distinct GPU-query attribution remains unproven. Water timing subzones remain nested in streaming. The source wiring regression checks bounded boot input batches, detached sampler ownership and owner publication after readiness and callback release. Registered native regressions cover Medium and High boot seed equivalence, mixed readiness, rejected dispatch and detached sampler lifetime; native execution remains required.",
       "status": "covered",
       "evidence": [
         {
@@ -377,6 +377,34 @@
         {
           "kind": "ctest",
           "ref": "RenderMeasurementGpuQueries"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.BootMediumAndHighFallbackQueueBoundedInputsBeforeOwnerPublication"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.DetachedSamplerSurvivesSourceResetPrefetchAndDestruction"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrameAttributionWiringPython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md"
         }
       ]
     },
@@ -5602,7 +5630,6 @@
         {
           "kind": "ctest",
           "ref": "RenderContractPython"
-
         }
       ]
     },
