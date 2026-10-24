@@ -2591,9 +2591,9 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
             if (!scope->ok())
                 return false;
         }
-        const std::filesystem::path parent = region_file.parent_path();
-        if (!parent.empty()) {
-            std::filesystem::create_directories(parent);
+        const std::filesystem::path region_parent = region_file.parent_path();
+        if (!region_parent.empty()) {
+            std::filesystem::create_directories(region_parent);
         }
 
         std::vector<RegionRecord> raw_records;

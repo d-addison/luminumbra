@@ -1204,7 +1204,7 @@ TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
     Luminumbra::Persistence::SnapshotIndex index;
     ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
     const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
-        return m.path() == "chunks/region/ground-objects.json";
+        return m.path == "chunks/region/ground-objects.json";
     });
     ASSERT_NE(member, index.members.end());
     EXPECT_FALSE(member->present);
@@ -1361,7 +1361,7 @@ TEST(WorldSaveService, FieldPagesSaveLoadRoundTripAndEmptyStateRemovesFile) {
     Luminumbra::Persistence::SnapshotIndex index;
     ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
     const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
-        return m.path() == FieldPageState::kRelativePath;
+        return m.path == FieldPageState::kRelativePath;
     });
     ASSERT_NE(member, index.members.end());
     EXPECT_FALSE(member->present);
@@ -1522,7 +1522,7 @@ TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
     ASSERT_TRUE(P::read_snapshot_index(save_dir.path(), index, &errors));
     const auto energy =
         std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
-            return member.path() == "aether_state.efs";
+            return member.path == "aether_state.efs";
         });
     ASSERT_NE(energy, index.members.end());
     ASSERT_FALSE(energy->present);
@@ -1536,7 +1536,7 @@ TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
     ASSERT_EQ(decoded.header_tick(), clock.tick());
     const auto arl =
         std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
-            return member.path() == "chunks/region/active-regions.arl";
+            return member.path == "chunks/region/active-regions.arl";
         });
     ASSERT_NE(arl, index.members.end());
     arl->bytes = corrupt.size();
