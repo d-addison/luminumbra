@@ -50,9 +50,14 @@ class LoadEvent(C.Structure):
                 ('name', PTR), ('unicode', C.c_uint16)]
 
 
+class UnloadEvent(C.Structure):
+    _fields_ = [('base', PTR)]
+
+
 class EventData(C.Union):
     _fields_ = [('exception', ExceptionEvent), ('create', CreateEvent),
-                ('load', LoadEvent), ('handle', PTR), ('exit_code', U32)]
+                ('load', LoadEvent), ('unload', UnloadEvent),
+                ('handle', PTR), ('exit_code', U32)]
 
 
 class DebugEvent(C.Structure):
@@ -435,7 +440,7 @@ def monitored_run(command, *, cwd, env, stdout, stderr, timeout, check, receipt,
                 elif event.kind == 6:  # LOAD_DLL_DEBUG_EVENT
                     evidence.add(backend, event.data.load.file, event.data.load.base)
                 elif event.kind == 7:  # UNLOAD_DLL_DEBUG_EVENT
-                    evidence.unload(event.data.load.base)
+                    evidence.unload(event.data.unload.base)
                 elif event.kind == 1:
                     exception = event.data.exception
                     # Only consume the loader's first breakpoint. Application

@@ -19,20 +19,8 @@ std::filesystem::path AbsolutePath(const std::filesystem::path& path, std::error
 std::filesystem::path AbsolutePath(const std::filesystem::path& path);
 /// Normalizes dot/separator components without resolving filesystem links.
 std::filesystem::path LexicallyNormalPath(const std::filesystem::path& path);
-// Expand Windows short names in an absolute, lexically normalized path without
-// resolving links. Retain missing suffixes; return the input unchanged on POSIX.
-std::filesystem::path LongNamePath(const std::filesystem::path& path, std::error_code& error);
-// Compare components with Windows ordinal case folding, or byte-for-byte on POSIX.
-// Separators are compared through path components; this does not resolve aliases.
-bool PathSpellingEqual(const std::filesystem::path& left, const std::filesystem::path& right);
 /// Produces generic separators while retaining both leading UNC separators.
 std::string GenericPathString(const std::filesystem::path& path);
-
-// Resolve links through existing ancestors, including NTFS junctions and short names.
-// A missing suffix is retained; other lookup failures are reported.
-std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path,
-                                          std::error_code& error);
-std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path);
 
 // Explicit UTF-8 conversion, independent of the Windows active code page.
 std::filesystem::path PathFromUtf8(std::string_view text);

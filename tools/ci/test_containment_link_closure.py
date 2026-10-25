@@ -532,7 +532,7 @@ class ContainmentLinkClosureTests(unittest.TestCase):
 
     def test_capture_identity_reads_verified_handles(self):
         source = (ROOT / 'src/luminumbra_client/app/RenderConfiguration.h').read_text(encoding='utf-8')
-        policy = (ROOT / POLICY).read_text(encoding='utf-8')
+        policy = (ROOT / OWNER).read_text(encoding='utf-8')
         reader = source.split('class SavedFileInput {', 1)[1].split('struct SavedFileBytes', 1)[0]
         self.assertNotIn('std::ifstream', source)
         for required in ('O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW', '::fstat(handle_, &info)',
@@ -562,7 +562,8 @@ class ContainmentLinkClosureTests(unittest.TestCase):
                         inventory.index('recursive_directory_iterator(root / tree)'))
         self.assertLess(inventory.index('allows_resolved(entry.path(), opened_entry.resolved_path())'),
                         inventory.index("result[path + '/'] = nullptr"))
-        resolved = policy.split('bool allows_resolved(', 1)[1].split('private:', 1)[0]
+        resolved = policy.split('bool CaptureContentPaths::allows_resolved(', 1)[1].split(
+            'bool CaptureContentPaths::within(', 1)[0]
         self.assertIn('within(lexical, lexical_trees_[index], include_tree_root)', resolved)
         self.assertIn('within(lexical, trees_[index], include_tree_root)', resolved)
         self.assertIn('within(resolved, trees_[index], include_tree_root)', resolved)

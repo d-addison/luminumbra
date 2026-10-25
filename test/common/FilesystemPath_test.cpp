@@ -1,5 +1,6 @@
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_client/app/RuntimeRoot.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/FilesystemPathDiagnostics.h"
 #include <gtest/gtest.h>

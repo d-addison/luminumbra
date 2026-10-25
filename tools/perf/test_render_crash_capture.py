@@ -47,6 +47,10 @@ def event(kind, *, code=0, first=0):
         result.data.create.file, result.data.create.base = 11, 0x140000000
     elif kind == 6:
         result.data.load.file, result.data.load.base = 12, 0x180000000
+    elif kind == 7:
+        # Win32 UNLOAD_DLL_DEBUG_INFO is one pointer at payload offset zero.
+        # Write raw ABI bytes so the fixture cannot repeat a ctypes layout bug.
+        C.memmove(C.addressof(result.data), struct.pack('<Q', 0x180000000), 8)
     elif kind == 5:
         result.data.exit_code = code
     return result
@@ -336,9 +340,31 @@ class CaptureTests(unittest.TestCase):
         self.launch([event(3), missing, event(1, code=CRASH), event(5, code=CRASH)])
         self.assertEqual(self.receipt['native_diagnostics']['status'], 'incomplete')
         unload = event(7)
-        unload.data.load.base = 0x180000000
         self.launch([event(3), event(6), unload, event(1, code=CRASH), event(5, code=CRASH)])
         self.assertFalse(any(item['role'] == 'module' for item in self.receipt['native_diagnostics']['files']))
+        self.assertEqual([item['base'] for item in self.receipt['native_diagnostics']['modules']],
+                         [0x140000000])
+
+    def test_module_churn_releases_handles_before_the_next_load(self):
+        events = [event(3)]
+        for _ in range(3):
+            events.extend((event(6), event(7)))
+        # Unknown and repeated unloads have no owned stream to release.
+        events.extend((event(7), event(5)))
+        backend = Backend(self.images, events)
+        resume = backend.resume
+
+        def observe_resume(current, status):
+            if current.kind == 7:
+                self.assertTrue(all(source.closed for source in backend.streams[1:]))
+                self.assertFalse(backend.streams[0].closed)
+            resume(current, status)
+
+        backend.resume = observe_resume
+        with mock.patch.object(capture, 'MAX_MODULES', 2):
+            self.assertEqual(self.launch(events, backend=backend).returncode, 0)
+        self.assertEqual(self.receipt['native_diagnostics']['status'], 'normal_exit')
+        self.assertEqual(len(backend.streams), 4)
 
     def test_empty_image_set_never_claims_matching_executable(self):
         self.launch([event(1, code=CRASH), event(5, code=CRASH)])
@@ -508,6 +534,7 @@ class AdapterTests(unittest.TestCase):
     def test_win64_structure_sizes_and_offsets(self):
         self.assertEqual((C.sizeof(capture.ExceptionRecord), C.sizeof(capture.DebugEvent)), (152, 176))
         self.assertEqual(capture.DebugEvent.data.offset, 16)
+        self.assertEqual((C.sizeof(capture.UnloadEvent), capture.UnloadEvent.base.offset), (8, 0))
         self.assertEqual((C.sizeof(capture.DumpException), capture.DumpException.pointers.offset), (16, 4))
         self.assertEqual((C.sizeof(capture.CallbackInput), capture.CallbackInput.kind.offset), (16, 12))
         self.assertEqual((C.sizeof(capture.IoCallback), capture.IoCallback.buffer.offset), (28, 16))

@@ -1,8 +1,11 @@
 #include "FilesystemPath.h"
+#include "CaptureContentPaths.h"
 #include "FilesystemPathDiagnostics.h"
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -340,5 +343,91 @@ std::string GenericUtf8PathString(const std::filesystem::path& path) {
     const auto utf8 = path.generic_u8string();
     return std::string(utf8.begin(), utf8.end());
 }
+
+void CaptureContentPaths::enable(const std::filesystem::path& root) {
+    root_ = LexicallyNormalPath(AbsolutePath(root));
+    root_.make_preferred();
+    const auto canonical_root = WeaklyCanonicalPath(root_);
+    std::error_code error;
+    const auto lexical_root = LongNamePath(root_, error);
+    if (error)
+        throw std::filesystem::filesystem_error("expand content root names", root_, error);
+    // The shared resolver uses Win32 handles for junctions, short names and UNC roots.
+    for (std::size_t index = 0; index < trees_.size(); ++index) {
+        const auto tree = (root_ / kCaptureContentTrees[index]).make_preferred();
+        const bool absent_audio = kCaptureContentTrees[index] == kOptionalCaptureContentTree &&
+                                  !std::filesystem::exists(tree);
+        if (std::filesystem::is_symlink(tree) ||
+            (!absent_audio && !std::filesystem::is_directory(tree)))
+            throw std::runtime_error("unsupported capture content tree");
+        trees_[index] = WeaklyCanonicalPath(tree);
+        lexical_trees_[index] = lexical_root / kCaptureContentTrees[index];
+        if (!PathSpellingEqual(trees_[index], canonical_root / kCaptureContentTrees[index]))
+            throw std::runtime_error("redirected capture content tree");
+    }
+    active_ = true;
+}
+
+bool CaptureContentPaths::active() const {
+    return active_;
+}
+
+const std::filesystem::path& CaptureContentPaths::root() const {
+    return root_;
+}
+
+bool CaptureContentPaths::refused() const {
+    return refused_.load(std::memory_order_relaxed);
+}
+
+bool CaptureContentPaths::allows(const std::filesystem::path& path) const {
+    if (!active_)
+        return true;
+    std::error_code error;
+    const auto resolved = WeaklyCanonicalPath(path, error);
+    if (!error)
+        return allows_resolved(path, resolved);
+    refused_.store(true, std::memory_order_relaxed);
+    return false;
+}
+
+bool CaptureContentPaths::allows_resolved(const std::filesystem::path& path,
+                                          const std::filesystem::path& resolved,
+                                          bool include_tree_root) const {
+    if (!active_)
+        return true;
+    std::error_code error;
+    const auto absolute = AbsolutePath(path, error);
+    if (!error) {
+        const auto lexical = LongNamePath(LexicallyNormalPath(absolute), error);
+        if (error) {
+            refused_.store(true, std::memory_order_relaxed);
+            return false;
+        }
+        for (std::size_t index = 0; index < trees_.size(); ++index)
+            // Expand short names on both lexical sides without resolving
+            // links: an external redirect into an allowed tree still fails.
+            if ((within(lexical, lexical_trees_[index], include_tree_root) ||
+                 within(lexical, trees_[index], include_tree_root)) &&
+                within(resolved, trees_[index], include_tree_root))
+                return true;
+    }
+    refused_.store(true, std::memory_order_relaxed);
+    return false;
+}
+
+bool CaptureContentPaths::within(const std::filesystem::path& path,
+                                 const std::filesystem::path& tree,
+                                 bool include_tree_root) {
+    auto component = path.begin();
+    for (const auto& parent : tree) {
+        if (component == path.end() || !PathSpellingEqual(*component, parent))
+            return false;
+        ++component;
+    }
+    return component != path.end() || include_tree_root;
+}
+
+CaptureContentPaths capture_content_paths;
 
 } // namespace Luminumbra::Filesystem

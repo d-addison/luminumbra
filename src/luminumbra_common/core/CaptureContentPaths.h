@@ -5,10 +5,21 @@
 #include <array>
 #include <atomic>
 #include <filesystem>
-#include <stdexcept>
 #include <string_view>
 
 namespace Luminumbra::Filesystem {
+
+// Expand Windows short names in an absolute, lexically normalized path without
+// resolving links. Retain missing suffixes; return the input unchanged on POSIX.
+std::filesystem::path LongNamePath(const std::filesystem::path& path, std::error_code& error);
+// Compare components with Windows ordinal case folding, or byte-for-byte on POSIX.
+// Separators are compared through path components; this does not resolve aliases.
+bool PathSpellingEqual(const std::filesystem::path& left, const std::filesystem::path& right);
+// Resolve links through existing ancestors, including NTFS junctions and short names.
+// A missing suffix is retained; other lookup failures are reported.
+std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path,
+                                          std::error_code& error);
+std::filesystem::path WeaklyCanonicalPath(const std::filesystem::path& path);
 
 inline constexpr std::array kCaptureContentTrees = {
     "data", "res", "config", "game-assets", "assets/audio"};
@@ -19,91 +30,25 @@ inline constexpr std::string_view kOptionalCaptureContentTree = "assets/audio";
 // A refusal survives callers that normally recover from missing optional assets.
 class CaptureContentPaths {
 public:
-    void enable(const std::filesystem::path& root) {
-        root_ = LexicallyNormalPath(AbsolutePath(root));
-        root_.make_preferred();
-        const auto canonical_root = WeaklyCanonicalPath(root_);
-        std::error_code error;
-        const auto lexical_root = LongNamePath(root_, error);
-        if (error)
-            throw std::filesystem::filesystem_error("expand content root names", root_, error);
-        // The shared resolver uses Win32 handles for junctions, short names and UNC roots.
-        for (std::size_t index = 0; index < trees_.size(); ++index) {
-            const auto tree = (root_ / kCaptureContentTrees[index]).make_preferred();
-            const bool absent_audio = kCaptureContentTrees[index] == kOptionalCaptureContentTree &&
-                                      !std::filesystem::exists(tree);
-            if (std::filesystem::is_symlink(tree) ||
-                (!absent_audio && !std::filesystem::is_directory(tree)))
-                throw std::runtime_error("unsupported capture content tree");
-            trees_[index] = WeaklyCanonicalPath(tree);
-            lexical_trees_[index] = lexical_root / kCaptureContentTrees[index];
-            if (!PathSpellingEqual(trees_[index], canonical_root / kCaptureContentTrees[index]))
-                throw std::runtime_error("redirected capture content tree");
-        }
-        active_ = true;
-    }
+    void enable(const std::filesystem::path& root);
 
-    bool active() const {
-        return active_;
-    }
-    const std::filesystem::path& root() const {
-        return root_;
-    }
-    bool refused() const {
-        return refused_.load(std::memory_order_relaxed);
-    }
+    bool active() const;
+    const std::filesystem::path& root() const;
+    bool refused() const;
 
-    bool allows(const std::filesystem::path& path) const {
-        if (!active_)
-            return true;
-        std::error_code error;
-        const auto resolved = WeaklyCanonicalPath(path, error);
-        if (!error)
-            return allows_resolved(path, resolved);
-        refused_.store(true, std::memory_order_relaxed);
-        return false;
-    }
+    bool allows(const std::filesystem::path& path) const;
 
     // The caller supplies a resolution verified against its owning open handle.
     // Do not resolve that pathname again: it may have been replaced since open.
     // Inventory scans may include the tree root itself; loaders require a child.
     bool allows_resolved(const std::filesystem::path& path,
                          const std::filesystem::path& resolved,
-                         bool include_tree_root = false) const {
-        if (!active_)
-            return true;
-        std::error_code error;
-        const auto absolute = AbsolutePath(path, error);
-        if (!error) {
-            const auto lexical = LongNamePath(LexicallyNormalPath(absolute), error);
-            if (error) {
-                refused_.store(true, std::memory_order_relaxed);
-                return false;
-            }
-            for (std::size_t index = 0; index < trees_.size(); ++index)
-                // Expand short names on both lexical sides without resolving
-                // links: an external redirect into an allowed tree still fails.
-                if ((within(lexical, lexical_trees_[index], include_tree_root) ||
-                     within(lexical, trees_[index], include_tree_root)) &&
-                    within(resolved, trees_[index], include_tree_root))
-                    return true;
-        }
-        refused_.store(true, std::memory_order_relaxed);
-        return false;
-    }
+                         bool include_tree_root = false) const;
 
 private:
     static bool within(const std::filesystem::path& path,
                        const std::filesystem::path& tree,
-                       bool include_tree_root) {
-        auto component = path.begin();
-        for (const auto& parent : tree) {
-            if (component == path.end() || !PathSpellingEqual(*component, parent))
-                return false;
-            ++component;
-        }
-        return component != path.end() || include_tree_root;
-    }
+                       bool include_tree_root);
 
     std::filesystem::path root_;
     std::array<std::filesystem::path, kCaptureContentTrees.size()> trees_{};
@@ -112,6 +57,6 @@ private:
     bool active_ = false;
 };
 
-inline CaptureContentPaths capture_content_paths;
+extern CaptureContentPaths capture_content_paths;
 
 } // namespace Luminumbra::Filesystem
