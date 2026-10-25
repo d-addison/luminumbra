@@ -140,8 +140,8 @@ protected:
     void CheckRetainedWorld(LoadFailure failure,
                             const fs::path& save,
                             const std::string& id,
-                            bool whole_world) {
-        SCOPED_TRACE(whole_world);
+                            int load_path) {
+        SCOPED_TRACE(load_path);
         GameSession reader;
         Configure(reader);
         if (failure == LoadFailure::Scheduler)
@@ -157,7 +157,9 @@ protected:
         const auto previous_id = reader.GetMetadata().worldId;
         const auto* previous_system = reader.GetWorldSystem();
         ASSERT_NE(calendar, world::WorldCalendar::Legacy());
-        if (whole_world) {
+        if (load_path == 2) {
+            EXPECT_FALSE(reader.LoadWorldFrom(id, root));
+        } else if (load_path == 1) {
             EXPECT_FALSE(reader.LoadWorld(id));
         } else {
             EXPECT_FALSE(reader.LoadWorldStateFrom(save));
@@ -185,7 +187,7 @@ protected:
         const auto retained = reader.GetWorldSystem()->snapshot_streamed_chunks();
         // Catalog refusals precede the state readers and retain the old world.
         // SDF and scheduler checks run after preflight; all snapshot refusals clear.
-        if (!whole_world || failure == LoadFailure::Sdf || failure == LoadFailure::Scheduler) {
+        if (load_path == 0 || failure == LoadFailure::Sdf || failure == LoadFailure::Scheduler) {
             EXPECT_TRUE(retained.empty());
             const auto refused_export = root / "refused-export";
             EXPECT_FALSE(reader.SaveWorldStateTo(refused_export));
@@ -252,8 +254,8 @@ protected:
             EXPECT_EQ(unopened.GetRenderCalendar(), calendar);
             EXPECT_EQ(unopened.GetWorldOpenError(), "corrupt world chunk SDF lattice");
         }
-        for (const bool whole_world : {false, true}) {
-            ASSERT_NO_FATAL_FAILURE(CheckRetainedWorld(failure, save, id, whole_world));
+        for (const int load_path : {0, 1, 2}) {
+            ASSERT_NO_FATAL_FAILURE(CheckRetainedWorld(failure, save, id, load_path));
         }
         // Restore the malformed container before preparing the next failure.
         fs::remove_all(WorldSaveService::region_directory(save));

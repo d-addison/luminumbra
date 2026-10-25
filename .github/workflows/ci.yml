@@ -686,13 +686,15 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           # Developer-shell setup can change PATH; retain the selected runtime.
           Set-Alias -Name python -Value $pythonExecutable
-          # Release uses Ninja without /Zi under the project's CMake 3.20
-          # policy baseline. Keep launchers local to this configure.
+          # Preserve Release optimization and retain embedded compiler symbols
+          # plus the linked PDB for render-child failure evidence.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
           }
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
+            -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
           # when optional PowerShell discovery would omit it from the suite.
@@ -945,6 +947,7 @@ jobs:
         run: >-
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_C_FLAGS=-g -DCMAKE_CXX_FLAGS=-g
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true

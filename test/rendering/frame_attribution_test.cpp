@@ -38,6 +38,15 @@ TEST(FrameAttribution, RebuildReasonsIdentifyEachSignatureComponent) {
               Config | CameraCell | GroundRevision | ScatterChunks | Backlog);
 }
 
+TEST(FrameAttribution, ConstScopeTokenRetainsRegisteredObservations) {
+    const FoliageFrameScope frame(true);
+    record_foliage_rebuild({}, 10, 262144, 123, 7);
+    EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 1u);
+    EXPECT_DOUBLE_EQ(frame.snapshot().rebuild_ms, 10);
+    EXPECT_EQ(frame.snapshot().generated_count, 123u);
+    EXPECT_EQ(frame.snapshot().count_generation, 7u);
+}
+
 TEST(FrameAttribution, CapacityMarkerIsNeverAnObservedCount) {
     constexpr std::size_t capacity = 262144;
     EXPECT_FALSE(generated_instance_count(true, false, false, capacity).has_value());

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderMeasurement.h"
+#include "RenderWorkload.h"
 #include "luminumbra_common/core/Environment.h"
 #include <filesystem>
 #include <fstream>
@@ -95,7 +96,7 @@ inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
         if (values.size() != ring.size() || values.empty())
             return nullptr;
         double sum = 0.0;
-        for (double value : values)
+        for (const double value : values)
             sum += value;
         return sum / static_cast<double>(values.size());
     };
@@ -125,7 +126,47 @@ inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
             : nlohmann::json(nullptr);
 }
 
-// Flush explicitly so buffered/partial output failures are visible to both schemas.
+// Report-boundary serialization only: no JSON allocation during measured frames.
+inline nlohmann::json workload_observation_json(const WorkloadObservation& record,
+                                                const TransitionRecords& transitions) {
+    nlohmann::json result = {{"tick", record.tick},
+                             {"presentation_seconds", record.presentation_seconds},
+                             {"frame", record.frame},
+                             {"state", record.state},
+                             {"ui_document", record.ui_document},
+                             {"paused", record.paused},
+                             {"region", record.region},
+                             {"far_requested", record.far_requested},
+                             {"far_effective", record.far_effective},
+                             {"underground", record.underground},
+                             {"camera_in_air", record.camera_in_air},
+                             {"foliage_build_generation", record.foliage_build_generation},
+                             {"terrain_uploads", record.terrain_uploads},
+                             {"stream_queue_depth", record.stream_queue_depth},
+                             {"stream_generation_batches", record.stream_generation_batches},
+                             {"stream_meshing_batches", record.stream_meshing_batches},
+                             {"stream_pending_lod_chunks", record.stream_pending_lod_chunks},
+                             {"stream_promotion_pending", record.stream_promotion_pending},
+                             {"region_scheduler_fault", record.region_scheduler_fault},
+                             {"terrain_upload_candidates", record.terrain_upload_candidates},
+                             {"water_upload_candidates", record.water_upload_candidates},
+                             {"foliage_pending", record.foliage_pending},
+                             {"world_ready", record.world_ready},
+                             {"settled", record.settled}};
+    result["cave_requested"] =
+        record.cave_requested ? nlohmann::json(*record.cave_requested) : nlohmann::json(nullptr);
+    result["cave_effective"] =
+        record.cave_effective ? nlohmann::json(*record.cave_effective) : nlohmann::json(nullptr);
+    result["transitions"] = nlohmann::json::array();
+    for (auto index = record.transitions_begin; index < record.transitions_end; ++index) {
+        const auto& transition = transitions.at(index);
+        result["transitions"].push_back(
+            {{"region", transition.region}, {"from", transition.from}, {"to", transition.to}});
+    }
+    return result;
+}
+
+// Flush explicitly so buffered/partial output failures are visible to all three schemas.
 inline bool write_render_benchmark(std::ostream& output, const nlohmann::json& report) {
     output << report.dump(2);
     output.flush();
@@ -172,19 +213,21 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
                                               "--window-mode"};
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (std::find(flags.begin(), flags.end(), arg) != flags.end())
-            continue;
         const auto assignment = arg.find('=');
-        const std::string option = arg.substr(0, assignment);
-        const bool assigned = assignment != std::string::npos;
-        const bool hasValue =
-            !assigned && i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
-        if (std::find(options.begin(), options.end(), option) != options.end()) {
+        const auto name = arg.substr(0, assignment);
+        if (assignment == std::string::npos &&
+            std::find(flags.begin(), flags.end(), name) != flags.end())
+            continue;
+        const bool hasValue = assignment == std::string::npos && i + 1 < argc &&
+                              std::string_view(argv[i + 1]).rfind("--", 0) != 0;
+        if (std::find(options.begin(), options.end(), name) != options.end()) {
             if (hasValue)
                 ++i;
             continue;
         }
-        result["cli:" + arg] = hasValue ? std::string(argv[++i]) : "true";
+        result["cli:" + name] = assignment != std::string::npos ? arg.substr(assignment + 1)
+                                : hasValue                      ? std::string(argv[++i])
+                                                                : "true";
     }
     for (const char* name : {"LUMIN_GL_DEBUG",
                              "LUMIN_RENDER_SCALE",

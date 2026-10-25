@@ -894,10 +894,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
             "gns-compile-probe": "7c0b1c6387113510ed76ffc66108cbf9efc3fa01617a68ca79b112fc3998a642",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
-            # Pin Python 3.14.8, partitioned local-check evidence and shard-1-only Python contracts.
-            "windows-msvc": "506b17d834cf2a749c7bf46fd7fe0ad719e38f219e92e921697528f56680dd61",
-            # Pin Python 3.14.8 and pass the selected runtime to UCRT64 configuration.
-            "windows-ucrt64": "00890b97a7e49d22c50d046972b2f272fe0a63ca8ff90fb132f99fb410797eb1",
+            # Pin the selected Python, partitioned local checks, render failure symbols and shard-1-only Python contracts.
+            "windows-msvc": "aa65dcdc4203bc335faa2a194ac0f747c6a7a260d4701ccedb520fd1811b3254",
+            # Pin the selected Python and retain render failure symbols in UCRT64.
+            "windows-ucrt64": "02c521e9e8443706ed302472918034faaed34e9cd1f5bf34701fd3e8f71e4037",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",

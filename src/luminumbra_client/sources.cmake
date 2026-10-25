@@ -190,6 +190,12 @@ set(CLIENT_APP_SOURCES
 set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
     COMPILE_DEFINITIONS "main=LuminumbraApplicationMain")
 
+# Both client executables need room for the entry TU's COFF sections on MSVC.
+if(MSVC)
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+endif()
+
 # Complete executable source set for legacy consumers that include this file
 # directly.
 set(CLIENT_SOURCES

@@ -4,6 +4,7 @@
 #include "app/FrameAttribution.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "rendering/AttributedGl.h"
 #include <algorithm>
@@ -30,7 +31,7 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
         return false;
     }
 
-    std::ifstream input(normalized, std::ios::binary);
+    Filesystem::ContentInput input(normalized, std::ios::binary);
     if (!input) {
         diagnostic = "cannot open shader source: " + key;
         include_stack.erase(key);

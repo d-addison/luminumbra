@@ -21,8 +21,10 @@
 #include "UploadBudget.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/DeterministicMath.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
@@ -2496,7 +2498,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
     //  TAAU: also remember this frame's wind wall-clock so next frame's instanced vertex shader
     // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts
     // tree-tops).
-    m_prev_time = static_cast<float>(glfwGetTime());
+    m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
     // Scatter preparation happens before render_frame. Open admission for the
     // next rendered frame here, so nested sweeps/previews need no outer loop.
     m_foliage_pass->begin_ground_frame();
@@ -2625,10 +2627,10 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_frame_stage_trace.clear();
     m_cpu_frame_t0 = std::chrono::steady_clock::now(); // CPU per-phase submit cost
 
-    //  (Group K): ONE wall-clock snapshot per frame, shared by every pass
+    // One presentation snapshot per frame, shared by every pass
     // via RenderContext.time_seconds so converted passes are deterministic w.r.t.
     // each other (no per-pass glfwGetTime drift). Render-only (u_time sway etc.).
-    m_wall_clock_time = static_cast<float>(glfwGetTime());
+    m_wall_clock_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
 
     update_time_of_day(deltaTime);
 
@@ -5329,7 +5331,7 @@ void RenderPipeline::register_static_model_textures() {
     // albedo/normal.ltex + an alpha-test flag (leaves). Render-only; absent file
     // is a graceful no-op (parts keep the flat fallback / terrain look).
     const std::filesystem::path manifest = m_root_path / "data/models/trees/tree_textures.json";
-    std::ifstream in(manifest);
+    Filesystem::ContentInput in(manifest);
     if (!in)
         return;
     try {
@@ -5372,7 +5374,7 @@ void RenderPipeline::load_material_texture_lut() {
     // material that omits the columns or for a missing file.
     m_material_texture_lut = MaterialTextureLut{};
     const std::filesystem::path path = m_root_path / "data/common/materials.json";
-    std::ifstream in(path);
+    Filesystem::ContentInput in(path);
     if (!in) {
         LUMINUMBRA_CORE_WARN(
             "Material texture LUT: materials.json not found at '{}', terrain stays untextured.",
@@ -5608,7 +5610,7 @@ constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
 
 template<typename T>
-bool ReadPod(std::ifstream& in, T& value) {
+bool ReadPod(std::istream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));
     return static_cast<bool>(in);
 }
@@ -5616,7 +5618,7 @@ bool ReadPod(std::ifstream& in, T& value) {
 } // namespace
 
 bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) {
-    std::ifstream in(path, std::ios::binary);
+    Filesystem::ContentInput in(path, std::ios::binary);
     if (!in) {
         LUMINUMBRA_CORE_ERROR("Texture residency: could not open.ltex '{}'", path.string());
         return false;
@@ -5664,7 +5666,9 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, Ltex
     }
 
     std::error_code size_error;
-    const auto file_bytes = std::filesystem::file_size(path, size_error);
+    const auto file_bytes = Filesystem::capture_content_paths().active()
+                                ? in.verified_size()
+                                : std::filesystem::file_size(path, size_error);
     constexpr size_t kHeaderBytes = 17;
     if (size_error || total_bytes > 256u * 1024u * 1024u ||
         file_bytes != kHeaderBytes + total_bytes) {
@@ -5698,7 +5702,11 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
             m_dayLengthOverride ? m_dayLengthTicks : m_renderClock.calendar().dayLengthTicks;
         m_dayDurationSeconds = static_cast<double>(day_ticks) /
                                luminumbra::core::SimulationClock::kCanonicalTickRateHz;
-        m_elapsedDayPhase = std::fmod(m_elapsedDayPhase + deltaTime / m_dayDurationSeconds, 1.0);
+        if (const auto& seconds = Client::presentation_clock.capture_seconds())
+            m_elapsedDayPhase = std::fmod(*seconds / m_dayDurationSeconds, 1.0);
+        else
+            m_elapsedDayPhase =
+                std::fmod(m_elapsedDayPhase + deltaTime / m_dayDurationSeconds, 1.0);
         m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock);
     }
     m_todTickDriven = false;
@@ -6036,7 +6044,10 @@ void RenderPipeline::advance_cloud_phase(float deltaTime) {
     if (!m_cloud_state.enabled) {
         return;
     }
-    m_cloud_phase += deltaTime;
+    if (const auto& seconds = Client::presentation_clock.capture_seconds())
+        m_cloud_phase = static_cast<float>(*seconds);
+    else
+        m_cloud_phase += deltaTime;
     // Wind comes from the replicated weather render state (one-way bridge). A
     // gentle base drift so clouds still move when no wind has been pushed yet.
     glm::vec2 wind_xz(m_weather_state.wind_direction.x, m_weather_state.wind_direction.z);
