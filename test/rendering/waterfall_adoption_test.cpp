@@ -1,8 +1,10 @@
 #include "rendering/passes/ParticlePass.h"
 #include "rendering/passes/WaterfallPass.h"
+#include "world/TerrainPresetLoader.h"
 
 #include <glad/glad.h>
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -52,12 +54,13 @@ public:
     std::size_t current_page_base = 0;
     unsigned deleted_buffers = 0;
     unsigned deleted_arrays = 0;
+    bool fail_generation = false;
 
 private:
     static inline UploadCapture* active = nullptr;
     static void GLAPIENTRY Gen(GLsizei count, GLuint* names) {
         for (GLsizei index = 0; index < count; ++index)
-            names[index] = static_cast<GLuint>(index + 1);
+            names[index] = active->fail_generation ? 0u : static_cast<GLuint>(index + 1);
     }
     static void GLAPIENTRY BindArray(GLuint) {}
     static void GLAPIENTRY BindBuffer(GLenum, GLuint) {}
@@ -199,6 +202,145 @@ TEST(WaterfallAdoption, InvalidPayloadIsRefusedBeforeGlAllocation) {
     EXPECT_TRUE(pass.adopt_next(nullptr, {}));
 }
 
+TEST(WaterfallAdoption, SameSeedAndEpochWithDifferentPresetResurveysSites) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    // Dependency-free, single-octave terrain and a narrow river band keep
+    // the fixed survey inexpensive.
+    auto preset = nlohmann::json::parse(R"({
+        "schema_rev": 6,
+        "generation_params": {
+            "terrain": {
+                "base_frequency": 0.04, "base_amplitude": 70.0, "octaves": 1,
+                "persistence": 0.5, "lacunarity": 2.0, "height_offset": 20.0
+            },
+            "features": {
+                "caves_enabled": false, "cave_frequency": 0.02,
+                "rivers_enabled": true, "river_pv_min": -0.5, "river_pv_max": -0.49,
+                "river_max_carve": 0.0
+            }
+        }
+    })");
+    const auto wet = Luminumbra::world::LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(wet.ok);
+    preset["generation_params"]["features"]["rivers_enabled"] = false;
+    const auto dry = Luminumbra::world::LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(dry.ok);
+    ASSERT_NE(wet.preset_content_hash, dry.preset_content_hash);
+    const Luminumbra::Systems::SHIELD_WorldSystem wet_world(nullptr, nullptr, wet.params, 424242);
+    const Luminumbra::Systems::SHIELD_WorldSystem dry_world(nullptr, nullptr, dry.params, 424242);
+    ASSERT_EQ(wet_world.get_seed(), dry_world.get_seed());
+    ASSERT_EQ(wet_world.water_epoch(), dry_world.water_epoch());
+
+    WaterfallPass pass;
+    const auto wet_geometry = pass.build_geometry(wet_world);
+    ASSERT_FALSE(wet_geometry.sites.empty());
+    const auto dry_geometry = pass.build_geometry(dry_world);
+    EXPECT_TRUE(dry_geometry.sites.empty());
+    EXPECT_TRUE(dry_geometry.vertices.empty());
+    EXPECT_TRUE(pass.waterfall_sites(dry_world).empty());
+}
+
+TEST(WaterfallAdoption, RepeatedLoadCyclesReplaceSprayAndKeepOtherEmitters) {
+    UploadCapture capture;
+    WaterfallPass pass;
+    ParticlePass particles;
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto particle_root = root / "data/common/particles";
+    const auto sparkle = particles.add_emitter(particle_root / "fixture_sparkle.json",
+                                               glm::vec3(-50.0f, 0.0f, 0.0f));
+    ASSERT_NE(sparkle, ParticlePass::kInvalidEmitter);
+    for (unsigned cycle = 0; cycle < 6; ++cycle) {
+        auto geometry = Geometry(30);
+        for (auto& site : geometry.sites)
+            site.foot.x = static_cast<float>(100 + cycle);
+        pass.begin_adoption(std::move(geometry));
+        for (unsigned frame = 0; frame < 24; ++frame) {
+            EXPECT_EQ(pass.adopt_next(&particles, root), frame == 23);
+            // Interleave weather and a splash template with spray so replacement
+            // also exercises the cached indices of surviving emitters.
+            if (cycle == 0 && frame == 0) {
+                particles.set_precipitation(particle_root, glm::vec3(0.0f), 1.0f, 1.0f);
+                ASSERT_NE(particles.add_splash_emitter(particle_root / "precip_splash.json"),
+                          ParticlePass::kInvalidEmitter);
+            }
+            particles.rebuild_emitter_descriptors(123, 0);
+            ASSERT_EQ(particles.emitter_descriptors().size(), frame + 5u);
+            EXPECT_EQ(particles.emitter_descriptors().back().origin_region[0],
+                      frame == 0 && cycle == 0 ? 0 : static_cast<int>((100 + cycle) * 1000));
+        }
+        particles.set_precipitation(particle_root, glm::vec3(0.0f), 1.0f, 1.0f);
+        EXPECT_TRUE(pass.adopt_next(&particles, root));
+        particles.rebuild_emitter_descriptors(123, 0);
+        ASSERT_EQ(particles.emitter_descriptors().size(), 28u);
+        EXPECT_EQ(particles.emitter_descriptors().front().id, sparkle);
+        EXPECT_EQ(particles.emitter_descriptors().front().origin_region[0], -50000);
+    }
+    pass.begin_adoption(Geometry(0));
+    EXPECT_TRUE(pass.adopt_next(&particles, root));
+    particles.rebuild_emitter_descriptors(123, 0);
+    EXPECT_EQ(particles.emitter_descriptors().size(), 4u);
+    pass.destroy_geometry();
+}
+
+TEST(WaterfallAdoption, CancellationBeforeAdoptionPreservesOldSpray) {
+    UploadCapture capture;
+    WaterfallPass pass;
+    ParticlePass particles;
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    pass.begin_adoption(Geometry(2));
+    EXPECT_FALSE(pass.adopt_next(&particles, root));
+    ASSERT_TRUE(pass.adopt_next(&particles, root));
+    particles.rebuild_emitter_descriptors(123, 0);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 2u);
+    const auto old_hash = particles.emitter_descriptor_hash();
+
+    Luminumbra::Systems::TerrainGenParams params;
+    params.rivers_enabled = false;
+    const Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 123);
+    auto pending = pass.build_geometry(world);
+    particles.rebuild_emitter_descriptors(123, 0);
+    EXPECT_EQ(particles.emitter_descriptor_hash(), old_hash);
+    pass.begin_adoption(std::move(pending));
+    pass.destroy_geometry();
+    EXPECT_TRUE(pass.adopt_next(&particles, root));
+    particles.rebuild_emitter_descriptors(123, 0);
+    EXPECT_EQ(particles.emitter_descriptor_hash(), old_hash);
+    EXPECT_EQ(particles.emitter_descriptors().size(), 2u);
+}
+
+TEST(WaterfallAdoption, RefusedReplacementPreservesOldSprayAndAllowsRetry) {
+    UploadCapture capture;
+    WaterfallPass pass;
+    ParticlePass particles;
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    pass.begin_adoption(Geometry(2));
+    EXPECT_FALSE(pass.adopt_next(&particles, root));
+    ASSERT_TRUE(pass.adopt_next(&particles, root));
+    particles.rebuild_emitter_descriptors(123, 0);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 2u);
+    const auto old_hash = particles.emitter_descriptor_hash();
+
+    auto invalid = Geometry(1);
+    invalid.vertices.pop_back();
+    EXPECT_THROW(pass.begin_adoption(std::move(invalid)), std::length_error);
+    EXPECT_TRUE(pass.adopt_next(&particles, root));
+    particles.rebuild_emitter_descriptors(123, 0);
+    EXPECT_EQ(particles.emitter_descriptor_hash(), old_hash);
+
+    pass.begin_adoption(Geometry(1));
+    capture.fail_generation = true;
+    EXPECT_THROW(pass.adopt_next(&particles, root), std::runtime_error);
+    particles.rebuild_emitter_descriptors(123, 0);
+    EXPECT_EQ(particles.emitter_descriptor_hash(), old_hash);
+    pass.destroy_geometry();
+    capture.fail_generation = false;
+    pass.begin_adoption(Geometry(1));
+    ASSERT_TRUE(pass.adopt_next(&particles, root));
+    particles.rebuild_emitter_descriptors(123, 0);
+    EXPECT_EQ(particles.emitter_descriptors().size(), 1u);
+    pass.destroy_geometry();
+}
+
 TEST(WaterfallAdoption, CancellationRecreatesAmbientMotesWithoutMovingReusedSprayId) {
     ParticlePass particles;
     const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
@@ -228,6 +370,32 @@ TEST(WaterfallAdoption, CancellationRecreatesAmbientMotesWithoutMovingReusedSpra
     particles.rebuild_emitter_descriptors(123, 3);
     ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
     EXPECT_EQ(particles.emitter_descriptors().front().origin_region[0], 300000);
+}
+
+TEST(WaterfallAdoption, SprayRemovalPreservesAmbientCacheInEitherEmitterOrder) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    for (const bool ambient_first : {false, true}) {
+        ParticlePass particles;
+        // Empty removal must also leave the uncached ambient state usable.
+        particles.clear_waterfall_spray();
+        if (ambient_first)
+            particles.update_ambient_motes(root, glm::vec3(0));
+        ASSERT_NE(
+            particles.add_waterfall_spray(
+                root / "data/common/particles/waterfall_spray.json", glm::vec3(10, 0, 0), 20, 4),
+            ParticlePass::kInvalidEmitter);
+        particles.update_ambient_motes(root, glm::vec3(100, 0, 0));
+        particles.rebuild_emitter_descriptors(123, 0);
+        ASSERT_EQ(particles.emitter_descriptors().size(), 2u);
+        const auto ambient_id = particles.emitter_descriptors()[ambient_first ? 0u : 1u].id;
+        particles.clear_waterfall_spray();
+        particles.clear_waterfall_spray();
+        particles.update_ambient_motes(root, glm::vec3(200, 0, 0));
+        particles.rebuild_emitter_descriptors(123, 1);
+        ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
+        EXPECT_EQ(particles.emitter_descriptors().front().id, ambient_id);
+        EXPECT_EQ(particles.emitter_descriptors().front().origin_region[0], 200000);
+    }
 }
 
 TEST(WaterfallAdoption, FailedAmbientCreationCanRetryAfterMissingDataOrFullPass) {

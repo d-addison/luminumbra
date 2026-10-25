@@ -75,6 +75,7 @@ private:
     std::vector<float> m_pending_vertices;
     std::size_t m_uploaded_floats = 0;
     std::size_t m_adopted_spray = 0;
+    bool m_replace_spray = false;
 };
 
 } // namespace Luminumbra::Rendering
