@@ -96,6 +96,21 @@ def file_identity(path):
     return info.st_dev, info.st_ino
 
 
+class StatFields:
+    """Override selected fields without losing native named stat metadata.
+
+    Rebuilding from the stat tuple drops Windows file attributes and reparse
+    tags, as well as nanosecond timestamps on all platforms.
+    """
+
+    def __init__(self, original, **fields):
+        self.original = original
+        self.__dict__.update(fields)
+
+    def __getattr__(self, field):
+        return getattr(self.original, field)
+
+
 def clear_fixture_readonly(path, expected):
     """Clear only the readonly attribute through an exclusively opened own file."""
     import ctypes
@@ -548,10 +563,11 @@ class SourceFiles(unittest.TestCase):
         name = next(iter(self.spec.files))
         path = source / name
         original = path.read_bytes()
-        original_mode = stat.S_IMODE(os.lstat(path).st_mode)
+        original_info = os.lstat(path)
+        original_mode = stat.S_IMODE(original_info.st_mode)
         path.unlink()
         try:
-            with mock.patch.object(M.os, "lstat", return_value=mock.Mock(st_mode=stat.S_IFLNK, st_file_attributes=0)):
+            with mock.patch.object(M.os, "lstat", return_value=StatFields(original_info, st_mode=stat.S_IFLNK)):
                 with self.assertRaises(M.Refusal):
                     M.read_file(path, len(original))
             if os.name == "posix":
@@ -1108,7 +1124,8 @@ class DeliveryRefusals(unittest.TestCase):
         for name in ("", "C:relative", "a/../b"):
             with self.subTest(name=name), self.assertRaises(M.Refusal):
                 M.canonical(name)
-        info = mock.Mock(st_mode=stat.S_IFDIR, st_file_attributes=M.REPARSE)
+        info = StatFields(os.lstat(self.w.root.parent), st_mode=stat.S_IFDIR,
+                          st_file_attributes=M.REPARSE)
         with mock.patch.object(M.os, "lstat", return_value=info):
             with self.assertRaises(M.Refusal):
                 M.canonical(self.w.root.parent)
@@ -1222,30 +1239,38 @@ class DeliveryRefusals(unittest.TestCase):
     def test_live_git_inventory_refuses_source_links_and_unknown_link_counts(self):
         cases = (("source", (1,)), ("nested/.git/object", (1,)),
                  (".git-object", (1,)), (".git/object", (1, 2)))
-        for name, accepted in cases:
-            for links in (0, 1, 2):
-                with self.subTest(name=name, links=links), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    path = root / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(b"object")
-                    real_lstat = os.lstat
-                    def lstat(candidate):
-                        info = real_lstat(candidate)
-                        if Path(candidate) == path:
-                            fields = list(info)
-                            fields[3] = links
-                            return os.stat_result(fields)
-                        return info
-                    with mock.patch.object(M.os, "lstat", side_effect=lstat):
-                        if links in accepted:
-                            self.assertEqual(set(M.inventory(root, live_git=True)), {name})
-                        else:
-                            with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
-                                M.inventory(root, live_git=True)
-                        if links != 1:
-                            with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
-                                M.inventory(root)
+        for (name, accepted), links, reparse in itertools.product(cases, (0, 1, 2), (False, True)):
+            with self.subTest(name=name, links=links, reparse=reparse), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"object")
+                real_lstat = os.lstat
+                def lstat(candidate):
+                    info = real_lstat(candidate)
+                    if Path(candidate) == path:
+                        if reparse:
+                            # Supply Windows metadata even on POSIX: changing the
+                            # link count must not erase a native reparse refusal.
+                            info = StatFields(info, st_file_attributes=M.REPARSE,
+                                              st_reparse_tag=0xA000000C)
+                        return StatFields(info, st_nlink=links)
+                    return info
+                with mock.patch.object(M.os, "lstat", side_effect=lstat):
+                    if links in accepted and not reparse:
+                        actual = M.inventory(root, live_git=True)
+                        self.assertEqual(set(actual), {name})
+                        native = real_lstat(path)
+                        for field in dir(native):
+                            if field.startswith("st_") and field != "st_nlink":
+                                self.assertEqual(getattr(actual[name], field), getattr(native, field), field)
+                        self.assertEqual(actual[name].st_nlink, links)
+                    else:
+                        with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                            M.inventory(root, live_git=True)
+                    if links != 1 or reparse:
+                        with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                            M.inventory(root)
 
     def test_population_is_empty_ordinary_and_never_evaluates_foreign_cmake(self):
         self.w.initialize()
@@ -3245,15 +3270,9 @@ class FixtureCleanupCustody(unittest.TestCase):
                     path.write_bytes(b"owned object")
                     identity = file_identity(root)
                     real_stat = os.lstat
-                    class Info:
-                        def __init__(self, original):
-                            self.original = original
-                            self.st_file_attributes = attributes
-                        def __getattr__(self, field):
-                            return getattr(self.original, field)
                     def lstat(candidate, *args, **kwargs):
                         info = real_stat(candidate, *args, **kwargs)
-                        return Info(info) if Path(candidate) == path else info
+                        return StatFields(info, st_file_attributes=attributes) if Path(candidate) == path else info
                     error = PermissionError("controlled Windows removal refusal")
                     error.winerror = winerror
                     def rmtree(candidate, onerror=None):
