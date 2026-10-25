@@ -363,6 +363,15 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_save_fixture_support
 )
 
+# These large test translation units need room for their COFF sections on MSVC.
+# Keep the option source-local, as for the client entry translation unit.
+if(MSVC)
+    set_source_files_properties(
+        common/GameSessionHeadlessWorld_test.cpp
+        rendering/render_smoke_test.cpp
+        PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()
+
 # Frozen-water rendering exercises the client bridge and mesh implementation.
 add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
 target_link_libraries(far_frozen_water_mesh_test PRIVATE gtest_main luminumbra_client)

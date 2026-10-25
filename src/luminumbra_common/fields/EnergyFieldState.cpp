@@ -701,11 +701,22 @@ std::string EnergyFieldState::RegionBytes(RegionKey owner) const {
              pz <= FloorDiv(end_z - 1, kEnergyPageCells);
              ++pz)
             keys[key_count++] = PackPageKey(px, pz);
-    std::sort(keys.begin(), keys.begin() + static_cast<std::ptrdiff_t>(key_count));
+    // Insertion sort keeps every access explicitly within the nine-key buffer,
+    // without a variable iterator range through the library's heap-sort path.
+    const auto sorted_count = std::min(key_count, keys.size());
+    for (std::size_t i = 1; i < sorted_count; ++i) {
+        const auto key = keys[i];
+        auto position = i;
+        while (position > 0 && key < keys[position - 1]) {
+            keys[position] = keys[position - 1];
+            --position;
+        }
+        keys[position] = key;
+    }
     std::ostringstream bytes;
     bytes.imbue(std::locale::classic());
     bool any = false;
-    for (std::size_t page_index = 0; page_index < key_count; ++page_index) {
+    for (std::size_t page_index = 0; page_index < sorted_count; ++page_index) {
         const auto key = keys[page_index];
         const auto found = m_pages.find(key);
         if (found == m_pages.end())

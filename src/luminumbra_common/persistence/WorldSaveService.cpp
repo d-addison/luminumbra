@@ -3481,6 +3481,9 @@ bool WorldSaveService::copy_authoritative_chunks(const std::filesystem::path& so
         TransactionScope scope(destination, members, errors, true);
         if (!scope.ok() || !validate_save(destination, errors))
             return false;
+        // A new save-as destination has only its journal so far. Region publication
+        // requires the same parent hierarchy as write_snapshot, on every platform.
+        std::filesystem::create_directories(region_directory(destination));
         for (const auto& [key, ids] : regions) {
             const auto relative = RelativeRegionMember(key.first, key.second);
             const auto member = indexed.find(relative);

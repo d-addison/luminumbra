@@ -755,6 +755,26 @@ class SaveWorkSourceContract(unittest.TestCase):
     def service(self):
         return self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
 
+    def test_snapshot_load_refuses_pending_catalog_before_parsing_and_binds_regional_fields(self):
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        load = session[session.index("boolGameSession::LoadWorldFrom("):
+                       session.index("boolGameSession::ClockConfigurationCompatible(")]
+        self.assertIn("if(m_worldOpenError.empty()&&saved.pending_recovery)", load)
+        self.assertIn("BindRegionalFieldQueries();", load)
+        self.assertIn("GetInitialChunkLoadList(saved.metadata.spawnPoint)", load)
+        self.assertLess(load.index("saved.pending_recovery"),
+                        load.index("nlohmann::json::parse(saved.preset_json)"))
+        self.assertLess(load.index("BindRegionalFieldQueries();"),
+                        load.index("AdoptWorldStateFrom(worldPath,loaded);"))
+        self.assertLess(load.index("GetInitialChunkLoadList(saved.metadata.spawnPoint)"),
+                        load.index("ReadWorldStateFrom(worldPath,loaded)"))
+        self.assertIn("m_worldSystem=std::move(staged_world);", load)
+
+    def test_all_benchmark_versions_share_refusal_persistence_policy(self):
+        client = self.source("src/luminumbra_client/main_client.cpp")
+        self.assertIn('constboolbenchmark_v3=benchmark_schema=="v3"||benchmark_v4;', client)
+        self.assertIn("SessionPersistenceAllowed(benchmark_v3,exit_code,scenario_failed,", client)
+
     def test_commit_reuses_exact_record_validation_with_bounded_storage(self):
         source = self.service()
         digest = source[source.index("boolWorldSaveService::member_digest("):
@@ -799,6 +819,10 @@ class SaveWorkSourceContract(unittest.TestCase):
             self.assertIn(refusal, copy)
         self.assertLess(copy.index("TransactionScopescope("), copy.index("WriteRegionFile("))
         self.assertLess(copy.index("validate_save(destination,errors)"), copy.index("WriteRegionFile("))
+        parents = "std::filesystem::create_directories(region_directory(destination))"
+        self.assertIn(parents, copy)
+        self.assertLess(copy.index("validate_save(destination,errors)"), copy.index(parents))
+        self.assertLess(copy.index(parents), copy.index("WriteRegionFile("))
         self.assertIn("scope.commit(errors)", copy)
         session = self.source("src/luminumbra_common/world/GameSession.cpp")
         save = session[session.index("boolGameSession::SaveWorldStateToImpl("):
@@ -1013,11 +1037,18 @@ class SaveWorkSourceContract(unittest.TestCase):
         for required in ("if(!ValidEnergyOwner(owner))return{};", "std::array<std::int64_t,9>keys{};",
                          "RegionalCellRange(owner.x)", "RegionalCellRange(owner.z)",
                          "FloorDiv(end_x-1,kEnergyPageCells)", "FloorDiv(end_z-1,kEnergyPageCells)",
-                         "std::sort(keys.begin(),keys.begin()+static_cast<std::ptrdiff_t>(key_count))",
+                         "constautosorted_count=std::min(key_count,keys.size());",
+                         "for(std::size_ti=1;i<sorted_count;++i)",
+                         "constautokey=keys[i];autoposition=i;",
+                         "while(position>0&&key<keys[position-1])",
+                         "keys[position]=keys[position-1];--position;",
+                         "keys[position]=key;",
+                         "page_index<sorted_count",
                          "constautofound=m_pages.find(key);", "if(found==m_pages.end())continue;",
                          "OwnerOfCell(static_cast<int>(cx),static_cast<int>(cz))!=owner"):
             self.assertIn(required, region)
         self.assertNotIn(":m_pages)", region)
+        self.assertNotIn("std::sort(", region)
 
     def test_load_from_uses_staged_energy_and_merge_retains_both_simulation_gates(self):
         session = self.source("src/luminumbra_common/world/GameSession.cpp")

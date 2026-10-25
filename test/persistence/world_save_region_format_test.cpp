@@ -194,6 +194,66 @@ TEST(WorldSaveRegionFormat, ChunkIdDecodeRoundTripsSignedPackedCoordinates) {
     }
 }
 
+TEST(WorldSaveRegionFormat, AuthorityCopyCreatesParentsAndRefusesIncompleteSources) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir source("copy_source"), destination("copy_destination");
+    const WorldSaveService service;
+    WorldStreamingState state;
+    const std::vector<IVec3> inventory{{1280, 0, -1280}, {1281, 0, -1280}};
+    for (const auto& coords : inventory) {
+        const auto chunk = state.get_or_create_chunk(coords);
+        chunk->sdf_data.assign(17 * 17 * 17, -4.0f);
+        chunk->mark_voxel_data_dirty();
+    }
+    std::vector<std::string> errors;
+    {
+        P::SaveTransaction transaction(source.path, 0, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(service.save_world(state, source.path, &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    const auto empty = destination.path / "empty";
+    EXPECT_TRUE(WorldSaveService::copy_authoritative_chunks(source.path, empty, {}, &errors));
+    EXPECT_FALSE(std::filesystem::exists(empty));
+    const auto copied = destination.path / "nested" / "copy";
+    ASSERT_FALSE(std::filesystem::exists(copied));
+    ASSERT_TRUE(
+        WorldSaveService::copy_authoritative_chunks(source.path, copied, inventory, &errors));
+    EXPECT_TRUE(errors.empty());
+    WorldStreamingState loaded;
+    ASSERT_TRUE(service.load_world(loaded, copied, errors));
+    EXPECT_EQ(loaded.size(), inventory.size());
+    for (const auto& coords : inventory) {
+        const auto chunk = loaded.find_chunk(Chunk::calculate_id(coords));
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_EQ(chunk->sdf_data, state.find_chunk(chunk->get_id())->sdf_data);
+    }
+    const auto expect_refused = [&](const std::vector<IVec3>& requested, const std::string& name) {
+        const auto target = destination.path / name;
+        errors.clear();
+        EXPECT_FALSE(
+            WorldSaveService::copy_authoritative_chunks(source.path, target, requested, &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_FALSE(P::snapshot_index_exists(target));
+        EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_file_path(target, 40, -40)));
+    };
+    // A valid region that lacks one requested member must roll back its partial transfer.
+    auto incomplete = inventory;
+    incomplete.emplace_back(1282, 0, -1280);
+    expect_refused(incomplete, "missing_chunk");
+    for (const char* bytes : std::array<const char*, 3>{nullptr, "", "LMR1"}) {
+        const auto path = WorldSaveService::region_file_path(source.path, 40, -40);
+        if (bytes) {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << bytes;
+            ASSERT_TRUE(output.good());
+        } else {
+            ASSERT_TRUE(std::filesystem::remove(path));
+        }
+        expect_refused(inventory, "invalid_region");
+    }
+}
+
 TEST(WorldSaveRegionFormat, SaveWritesLmr1RegionFilesAndManifest) {
     TempSaveDir save_dir("layout");
     WorldSaveService service;

@@ -6180,7 +6180,9 @@ TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAn
     EXPECT_EQ(loaded.GetWorldSystem()->durable_chunk_inventory().size(), 1u);
     EXPECT_EQ(loaded.ComputeChunkStateHash(), before);
     const auto destination = root.path() / "disk-authority-copy";
+    ASSERT_FALSE(fs::exists(destination));
     ASSERT_TRUE(loaded.SaveWorldStateTo(destination));
+    EXPECT_TRUE(P::WorldSaveService::validate_save(destination));
     // Metadata-only persistence to the named world must retain the disk-only backing source.
     ASSERT_TRUE(loaded.SaveWorld());
     EXPECT_EQ(loaded.ComputeChunkStateHash(), before);

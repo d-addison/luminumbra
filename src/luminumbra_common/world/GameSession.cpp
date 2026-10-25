@@ -1615,6 +1615,10 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     m_lastLoadedChunkCount = 0;
     const auto saved = Persistence::InspectSavedWorld(save_root, RuntimeRoot(m_rootPath), worldId);
     m_worldOpenError = saved.error;
+    // Snapshot sources are immutable. Never parse best-effort catalog metadata or recover
+    // a journal in the verified directory; the writable LoadWorld path recovers first.
+    if (m_worldOpenError.empty() && saved.pending_recovery)
+        m_worldOpenError = "World unavailable: snapshot has an interrupted save pending recovery.";
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
     if (!m_worldOpenError.empty()) {
@@ -1647,7 +1651,13 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     ClampTerrainParams(params);
 
     // Validate all refusing state readers before replacing the live world.
+    const int world_seed = static_cast<int>(StringToSeed(saved.metadata.seed));
+    auto staged_world =
+        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
     LoadedWorldState loaded;
+    if (m_activeRegionsEnabled)
+        for (const auto& coords : staged_world->GetInitialChunkLoadList(saved.metadata.spawnPoint))
+            loaded.wanted.insert(Chunk::calculate_id(coords));
     if (!ReadWorldStateFrom(worldPath, loaded)) {
         m_worldUsable = false;
         if (m_worldSystem)
@@ -1665,14 +1675,11 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
-    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
-
     // Initialize Physics System after config and preset validation passes.
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    m_worldSystem = std::move(staged_world);
     // Worldgen seam for audio-raycast surface materials (non-owning; physics
     // is destroyed before the world system by member order, so the pointer
     // cannot dangle).
@@ -1691,6 +1698,7 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+    BindRegionalFieldQueries();
 
     // unlike the re-derivable trio above, the stateful
     // energy layer is AUTHORITATIVE state — when enabled, a persisted record
@@ -2390,7 +2398,7 @@ void GameSession::AttachRegionEditObserver() {
                         result.error.empty() ? "expected durable chunk is missing" : result.error);
                 return result.chunk;
             },
-            [this](std::string error) { LatchRegionFault(m_worldClock.tick(), std::move(error)); });
+            [this](const std::string& error) { LatchRegionFault(m_worldClock.tick(), error); });
         m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
             int x = 0, z = 0;
             Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);

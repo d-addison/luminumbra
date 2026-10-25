@@ -2510,7 +2510,7 @@ int main(int argc, char* argv[]) {
     // refusal leaves the previous session loaded but must not rewrite its save.
     const auto session_persistence_allowed = [&]() {
         return Luminumbra::Client::SessionPersistenceAllowed(
-            benchmark_v4,
+            benchmark_v3,
             exit_code,
             scenario_failed,
             Luminumbra::Filesystem::capture_content_paths().refused());
