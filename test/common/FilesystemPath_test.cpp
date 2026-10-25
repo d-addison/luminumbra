@@ -1,6 +1,8 @@
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_client/app/RuntimeRoot.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/core/FilesystemPathDiagnostics.h"
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -12,6 +14,82 @@
 
 namespace fs = std::filesystem;
 namespace paths = Luminumbra::Filesystem;
+
+TEST(FilesystemPath, OrdinaryLongNamesDoNotProbeForExpansion) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    const fs::path root(LR"(C:\content with long names)");
+#else
+    const fs::path root("/content with long names");
+#endif
+    // These spellings need no existing files, short-name support or link privilege.
+    for (const auto* suffix : {"data/asset.json",
+                               "DATA/ASSET.JSON",
+                               "data/missing/asset.json",
+                               "data/<invalid>",
+                               "data/file.json/child"}) {
+        auto input = root / suffix;
+        input.make_preferred();
+        ASSERT_EQ(input.native().find(fs::path::value_type('~')), fs::path::string_type::npos);
+        auto error = std::make_error_code(std::errc::permission_denied);
+        const auto before = paths::LongNameExpansionCount();
+        EXPECT_EQ(paths::LongNamePath(input, error).native(), input.native());
+        EXPECT_FALSE(error);
+        EXPECT_EQ(paths::LongNameExpansionCount(), before);
+    }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    for (const fs::path& input : {fs::path(LR"(\\?\C:\content with long names\data\missing)"),
+                                  fs::path(LR"(\\?\UNC\server\share\data\missing)")}) {
+        const auto expected = input.native().starts_with(LR"(\\?\UNC\)")
+                                  ? fs::path(LR"(\\server\share\data\missing)")
+                                  : root / "data/missing";
+        std::error_code error;
+        const auto before = paths::LongNameExpansionCount();
+        EXPECT_TRUE(paths::PathSpellingEqual(paths::LongNamePath(input, error), expected));
+        EXPECT_FALSE(error);
+        EXPECT_EQ(paths::LongNameExpansionCount(), before);
+    }
+#endif
+}
+
+TEST(FilesystemPath, LongNameExpansionPreservesEmptyAndOverlongPathErrors) {
+    for (const fs::path& input :
+         {fs::path{}, fs::path(std::string(32768, 'x')), fs::path(std::string(32767, 'x') + '~')}) {
+        auto error = std::make_error_code(std::errc::permission_denied);
+        const auto before = paths::LongNameExpansionCount();
+        const auto expanded = paths::LongNamePath(input, error);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        EXPECT_TRUE(expanded.empty());
+        EXPECT_EQ(error,
+                  input.empty() ? std::errc::no_such_file_or_directory
+                                : std::errc::filename_too_long);
+#else
+        EXPECT_EQ(expanded.native(), input.native());
+        EXPECT_FALSE(error);
+#endif
+        EXPECT_EQ(paths::LongNameExpansionCount(), before);
+    }
+}
+
+TEST(FilesystemPath, TildeNamesStillExpandAndRetainMissingSuffixes) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("long-name-", ".tmp");
+    const auto directory = temp.Path().parent_path();
+    const auto tilde = directory / "literal~name";
+    ASSERT_TRUE(fs::create_directory(tilde));
+    std::error_code error;
+    const auto expanded_directory = paths::LongNamePath(directory, error);
+    ASSERT_FALSE(error);
+    for (const fs::path& input : {tilde, tilde / "missing/asset.json"}) {
+        const auto expected = expanded_directory / input.lexically_relative(directory);
+        const auto before = paths::LongNameExpansionCount();
+        EXPECT_TRUE(paths::PathSpellingEqual(paths::LongNamePath(input, error), expected));
+        EXPECT_FALSE(error);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        EXPECT_GT(paths::LongNameExpansionCount(), before);
+#else
+        EXPECT_EQ(paths::LongNameExpansionCount(), before);
+#endif
+    }
+}
 
 TEST(FilesystemPath, OrdinaryPathsKeepStandardNormalizationAndClassification) {
     for (const fs::path& input : {fs::path("."),

@@ -77,7 +77,10 @@ const char* WorldHashSchema();
 const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
+// When requested, finite_values reports whether all emitted floating values survive JSON
+// encoding as numbers. The owning serializer emits every other field with its canonical type.
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     bool* finite_values = nullptr);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors);

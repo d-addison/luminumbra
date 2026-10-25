@@ -1,6 +1,7 @@
 #include "ui/Rml_UIManager.h"
 #include "app/FrameAttribution.h"
 #include "audio/IAudioManager.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
@@ -1176,6 +1177,10 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     const fs::path thumbs_dir = m_galleryCaptureDir.empty()
                                     ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
                                     : m_galleryCaptureDir;
+    // Enumeration supplies names only; RmlFileInterface verifies each image's
+    // owning read handle even if this directory is replaced after discovery.
+    if (!Filesystem::capture_content_paths().allows(thumbs_dir))
+        return;
     if (fs::exists(thumbs_dir, ec)) {
         for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
             if (entry.path().extension() != ".tga")
@@ -1202,17 +1207,22 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     for (int id : ids) {
         if (shown++ >= 12)
             break; // one page of the most recent captures
-        // Star rating from the sidecar (<root>/photos/photo-<N>.photo.json), if it's there.
+        // Personal ratings are optional user data outside the capture inventory.
+        // Capture uses only the validated thumbnails, without consulting ratings
+        // or marking their intentional omission as a content refusal.
         int stars = 0;
-        std::ifstream sf(fs::path(m_assetRoot) / "photos" /
-                         ("photo-" + std::to_string(id) + ".photo.json"));
-        if (sf) {
-            try {
-                nlohmann::json j;
-                sf >> j;
-                if (j.contains("stars") && j["stars"].is_number_integer())
-                    stars = j["stars"].get<int>();
-            } catch (...) {}
+        if (!Filesystem::capture_content_paths().active()) {
+            const auto sidecar =
+                fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json");
+            std::ifstream sf(sidecar);
+            if (sf) {
+                try {
+                    nlohmann::json j;
+                    sf >> j;
+                    if (j.contains("stars") && j["stars"].is_number_integer())
+                        stars = j["stars"].get<int>();
+                } catch (...) {}
+            }
         }
         html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"" + m_galleryImgPrefix +
                 "cap_" + std::to_string(id) + ".tga\"/>";

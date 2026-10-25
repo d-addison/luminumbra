@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -365,9 +366,22 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
 }
 
+// This visits only the owning serializer's fixed-depth tree, never external JSON.
+bool HasOnlyFiniteFloats(const nlohmann::json& value) {
+    if (value.is_number_float())
+        return std::isfinite(value.get<double>());
+    if (value.is_structured())
+        for (const auto& child : value)
+            if (!HasOnlyFiniteFloats(child))
+                return false;
+    return true;
+}
+
 std::string StableDump(const nlohmann::json& value) {
     std::ostringstream stream;
     stream << std::setw(4) << value << '\n';
+    if (!stream)
+        throw std::runtime_error("failed to serialize world snapshot JSON");
     return stream.str();
 }
 
@@ -739,7 +753,8 @@ const char* EntitySnapshotArtifactSchema() {
     return kEntitySnapshotArtifactSchema;
 }
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     bool* finite_values) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         if (!lhs || !rhs) {
@@ -760,6 +775,8 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
                                {"chunk_count", chunk_array.size()},
                                {"persisted_fields", PersistedFields()},
                                {"chunks", std::move(chunk_array)}};
+    if (finite_values)
+        *finite_values = HasOnlyFiniteFloats(snapshot);
     return StableDump(snapshot);
 }
 

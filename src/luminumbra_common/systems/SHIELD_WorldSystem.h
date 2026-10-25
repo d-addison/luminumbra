@@ -350,6 +350,18 @@ public:
         std::size_t cumulative_deferred_meshing = 0;
         uint64_t max_deferred_age_frames = 0;
         std::size_t last_queue_depth = 0;
+        // Latest post-dispatch snapshot, including completed but unpublished work.
+        // A zero candidate backlog alone does not imply streaming quiescence.
+        std::size_t generation_batches = 0;
+        std::size_t meshing_batches = 0;
+        std::size_t pending_lod_chunks = 0;
+        bool promotion_pending = false;
+
+        bool quiescent() const {
+            return last_queue_depth == 0 && generation_batches == 0 && meshing_batches == 0 &&
+                   pending_lod_chunks == 0 && !promotion_pending;
+        }
+
         //  the SETTLED backlog floor — the minimum
         // queue depth observed across the trailing activation window
         // (STREAMING_ACTIVATION_INTERVAL_FRAMES). Chunk activation runs only
@@ -445,11 +457,16 @@ public:
     // to this, so existing callers + single-anchor behaviour are byte-identical (one
     // anchor -> one disc, identical eviction). Streaming sets RESIDENCY only, not chunk
     // content, so world_hash is unaffected for a given anchor set.
+    // Disabling simulation preserves water state while streaming, meshing and
+    // collision preparation continue. Existing callers retain live stepping.
     void update(entt::registry& registry,
                 const std::vector<Vec3>& anchor_positions,
-                PhysicsSystem* physics_system);
-    void
-    update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
+                PhysicsSystem* physics_system,
+                bool advance_simulation = true);
+    void update(entt::registry& registry,
+                const Vec3& camera_position,
+                PhysicsSystem* physics_system,
+                bool advance_simulation = true);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
@@ -834,6 +851,11 @@ public:
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
+    // Host-thread preparation for bounded scripted edits (radius <= 16 m,
+    // coordinates within +/-32000 m). Drains streaming, then supplies full SDF
+    // lattices throughout the edit AABB, including chunks below the surface.
+    // False means unavailable/malformed terrain, never an already-air no-op.
+    bool PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m);
     int EditTerrainVoxel(const Vec3& world_pos,
                          float radius_m,
                          bool fill,
@@ -1145,6 +1167,7 @@ private:
     };
     std::unordered_map<ChunkID, ParkedChunk> m_parked;
     std::map<ChunkID, IVec3> m_durable_chunks;
+    std::optional<std::uint64_t> m_water_authority_epoch;
     std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
     std::function<void(std::string)> m_durable_chunk_fault;
     mutable bool m_durable_read_failed = false;

@@ -2215,6 +2215,7 @@ TEST_F(WorldOpenRefusal, ClientExitCompleteSavePublishesCapturedSpawnInBothRegio
         bool reported = false;
         Client::SaveSessionOnExit(
             session,
+            true,
             [&] { session->SetSpawnPoint(spawn); },
             [&] {
                 reported = true;
@@ -2292,6 +2293,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
         bool spawn_captured = false;
         Client::SaveSessionOnExit(
             session,
+            true,
             [&] {
                 spawn_captured = true;
                 session->SetSpawnPoint(Vec3(29, 31, 37));

@@ -54,6 +54,8 @@ constexpr std::uint16_t DecayOnce(std::uint16_t v) noexcept {
 } // namespace
 
 bool EnergyFieldState::Page::all_zero() const noexcept {
+    if (regional_summary)
+        return !regional_summary->any;
     for (const std::uint16_t v : values) {
         if (v != 0)
             return false;
@@ -123,6 +125,7 @@ EnergyFieldState::Page& EnergyFieldState::EnsurePage(int px, int pz) {
         page.last_step = m_fires_completed;
         it = m_pages.emplace(key, std::move(page)).first;
     }
+    it->second.regional_summary.reset();
     return it->second;
 }
 
@@ -146,6 +149,7 @@ void EnergyFieldState::CatchUpWindowPages() {
             if (page.last_step >= m_fires_completed)
                 continue;
             const std::uint64_t elapsed = m_fires_completed - page.last_step;
+            page.regional_summary.reset();
             for (std::uint16_t& v : page.values) {
                 v = DecaySteps(v, elapsed);
             }
@@ -306,6 +310,7 @@ void EnergyFieldState::DecayAndDiffuseWindow() {
                     }
                     Page& page =
                         (it != m_pages.end()) ? it->second : EnsurePage(px0 + px, pz0 + pz);
+                    page.regional_summary.reset();
                     for (int lz = 0; lz < kEnergyPageCells; ++lz) {
                         for (int lx = 0; lx < kEnergyPageCells; ++lx) {
                             page.values[(static_cast<std::size_t>(lz) * kEnergyPageCells +
@@ -433,6 +438,7 @@ void EnergyFieldState::NormalizeAllPages() {
         if (page.last_step >= m_fires_completed)
             continue;
         const std::uint64_t elapsed = m_fires_completed - page.last_step;
+        page.regional_summary.reset();
         for (std::uint16_t& v : page.values) {
             v = DecaySteps(v, elapsed);
         }
@@ -622,11 +628,89 @@ bool EnergyFieldState::OwnsRegion(RegionKey owner) const {
     return false;
 }
 
+const EnergyFieldState::RegionalPageFacts&
+EnergyFieldState::Page::regional_facts(std::int64_t key, int channels) const {
+    if (regional_summary)
+        return *regional_summary;
+    RegionalPageFacts facts;
+    int px = 0, pz = 0;
+    UnpackCellKey(key, px, pz);
+    facts.valid = channels >= 1 && channels <= 64 &&
+                  values.size() == std::size_t{kEnergyPageCells} * kEnergyPageCells *
+                                       static_cast<std::size_t>(channels) &&
+                  px >= -43691 && px <= 43690 && pz >= -43691 && pz <= 43690;
+    const auto width = [](std::size_t value) {
+        std::size_t digits = 1;
+        while (value >= 10) {
+            value /= 10;
+            ++digits;
+        }
+        return digits;
+    };
+    const auto header_bytes = 4 + std::to_string(px).size() + std::to_string(pz).size();
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (values[i] == 0)
+            continue;
+        if (!facts.any)
+            facts.record_bytes = header_bytes;
+        facts.any = true;
+        // Saturate the diagnostic at refusal, so even an incompatible legacy page
+        // cannot overflow the length calculation. No emitted record changes.
+        const auto token_bytes = 2 + width(i) + width(values[i]);
+        if (facts.record_bytes > kMaxRegionalRecordBytes ||
+            token_bytes > kMaxRegionalRecordBytes - facts.record_bytes)
+            facts.record_bytes = kMaxRegionalRecordBytes + 1;
+        else
+            facts.record_bytes += token_bytes;
+        if (!facts.valid)
+            continue;
+        const auto cell = i / static_cast<std::size_t>(channels);
+        const auto owner =
+            OwnerOfCell(px * kEnergyPageCells + static_cast<int>(cell % kEnergyPageCells),
+                        pz * kEnergyPageCells + static_cast<int>(cell / kEnergyPageCells));
+        if (!ValidEnergyOwner(owner)) {
+            facts.valid = false;
+            continue;
+        }
+        bool listed = false;
+        for (std::size_t j = 0; j < facts.owner_count; ++j)
+            listed = listed || facts.owners[j] == owner;
+        if (!listed) {
+            if (facts.owner_count == facts.owners.size())
+                facts.valid = false;
+            else
+                facts.owners[facts.owner_count++] = owner;
+        }
+    }
+    regional_summary = facts;
+    return *regional_summary;
+}
+
 std::string EnergyFieldState::RegionBytes(RegionKey owner) const {
+    if (!ValidEnergyOwner(owner))
+        return {};
+    // One 512 m owner intersects at most 3 x 3 physical pages. Preserve the
+    // canonical signed packed-key order, including across negative z coordinates.
+    std::array<std::int64_t, 9> keys{};
+    std::size_t key_count = 0;
+    const auto [min_x, end_x] = RegionalCellRange(owner.x);
+    const auto [min_z, end_z] = RegionalCellRange(owner.z);
+    for (int px = FloorDiv(min_x, kEnergyPageCells); px <= FloorDiv(end_x - 1, kEnergyPageCells);
+         ++px)
+        for (int pz = FloorDiv(min_z, kEnergyPageCells);
+             pz <= FloorDiv(end_z - 1, kEnergyPageCells);
+             ++pz)
+            keys[key_count++] = PackPageKey(px, pz);
+    std::sort(keys.begin(), keys.begin() + static_cast<std::ptrdiff_t>(key_count));
     std::ostringstream bytes;
     bytes.imbue(std::locale::classic());
     bool any = false;
-    for (const auto& [key, page] : m_pages) {
+    for (std::size_t page_index = 0; page_index < key_count; ++page_index) {
+        const auto key = keys[page_index];
+        const auto found = m_pages.find(key);
+        if (found == m_pages.end())
+            continue;
+        const auto& page = found->second;
         int px = 0, pz = 0;
         UnpackCellKey(key, px, pz);
         bool page_any = false;
@@ -724,19 +808,11 @@ bool EnergyFieldState::RegionalRecordFits(const EnergyFieldState* replacements) 
     };
     std::size_t bytes = 8 + width(static_cast<std::size_t>(m_channels));
     const auto measure = [&](std::int64_t key, const Page& page) {
-        if (page.all_zero())
-            return true;
-        int px = 0, pz = 0;
-        UnpackCellKey(key, px, pz);
-        bytes += 4 + std::to_string(px).size() + std::to_string(pz).size();
-        for (std::size_t i = 0; i < page.values.size(); ++i) {
-            if (page.values[i] == 0)
-                continue;
-            bytes += 2 + width(i) + width(page.values[i]);
-            if (bytes > kMaxRegionalRecordBytes)
-                return false;
-        }
-        return bytes <= kMaxRegionalRecordBytes;
+        const auto count = page.regional_facts(key, m_channels).record_bytes;
+        if (count > kMaxRegionalRecordBytes - bytes)
+            return false;
+        bytes += count;
+        return true;
     };
     for (const auto& [key, page] : m_pages)
         if ((!replacements || !replacements->m_pages.contains(key)) && !measure(key, page))
@@ -840,25 +916,13 @@ bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
             age >= Luminumbra::world::WorldClock::kTickLimit)
             return false;
     for (const auto& [key, page] : m_pages) {
-        int px = 0, pz = 0;
-        UnpackCellKey(key, px, pz);
-        if (page.values.size() != std::size_t{kEnergyPageCells} * kEnergyPageCells * m_channels)
+        const auto& facts = page.regional_facts(key, m_channels);
+        if (!facts.valid)
             return false;
-        if (px < -43691 || px > 43690 || pz < -43691 || pz > 43690)
-            return false;
-        bool any = false;
-        for (std::size_t i = 0; i < page.values.size(); ++i) {
-            if (page.values[i] == 0)
-                continue;
-            any = true;
-            const auto cell = i / static_cast<std::size_t>(m_channels);
-            const auto owner =
-                OwnerOfCell(px * kEnergyPageCells + static_cast<int>(cell % kEnergyPageCells),
-                            pz * kEnergyPageCells + static_cast<int>(cell / kEnergyPageCells));
-            if (!ValidEnergyOwner(owner) || !records.contains(owner) || !ages.contains(owner))
+        for (std::size_t i = 0; i < facts.owner_count; ++i)
+            if (!records.contains(facts.owners[i]) || !ages.contains(facts.owners[i]))
                 return false;
-        }
-        if (!any && empty_pages)
+        if (!facts.any && empty_pages)
             empty_pages->push_back(key);
     }
     return true;
@@ -917,11 +981,16 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
     const auto stage_page = [&](int px, int pz) -> Page& {
         const auto key = PackPageKey(px, pz);
         const auto existing = staged.m_pages.find(key);
-        if (existing != staged.m_pages.end())
+        if (existing != staged.m_pages.end()) {
+            existing->second.regional_summary.reset();
             return existing->second;
+        }
         const auto original = m_pages.find(key);
-        if (original != m_pages.end())
-            return staged.m_pages.emplace(key, original->second).first->second;
+        if (original != m_pages.end()) {
+            auto& page = staged.m_pages.emplace(key, original->second).first->second;
+            page.regional_summary.reset();
+            return page;
+        }
         return staged.EnsurePage(px, pz);
     };
     std::set<std::pair<RegionKey, std::int64_t>> touched;

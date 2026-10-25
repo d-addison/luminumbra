@@ -109,7 +109,8 @@ add_executable(morph_asset_test
     tools/test_morph_asset.cpp
     "${ASSET_PROCESSOR_SOURCE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/../tools/morph_asset_processor.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/animation/MorphMesh.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/animation/MorphMesh.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/core/FilesystemPath.cpp")
 target_include_directories(morph_asset_test PRIVATE ../src)
 target_include_directories(morph_asset_test SYSTEM PRIVATE ../vendor/cgltf)
 target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshoptimizer stb_headers)
@@ -386,6 +387,7 @@ luminumbra_configure_first_party_target(unique_temp_path_test)
 add_executable(game_assets_test
     tools/game_assets_test.cpp
     ../src/luminumbra_client/app/GameAssets.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
 )
 target_include_directories(game_assets_test PRIVATE ../src)
 target_link_libraries(game_assets_test PRIVATE gtest_main nlohmann_json)
@@ -1586,6 +1588,7 @@ add_executable(world_open_refusal_test
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
+    persistence/verified_snapshot_region_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
     ../src/luminumbra_server/modes/Replay.cpp
@@ -2584,18 +2587,40 @@ add_test(NAME AudioShutdownSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py")
 
 add_executable(render_measurement_test rendering/render_measurement_test.cpp)
+target_link_libraries(render_measurement_test PRIVATE gtest)
 target_include_directories(render_measurement_test PRIVATE ../src)
 target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 luminumbra_configure_first_party_target(render_measurement_test)
 add_test(NAME RenderMeasurementStatistics COMMAND render_measurement_test statistics)
 add_test(NAME RenderTraversalDeterministic COMMAND render_measurement_test traversal)
 add_test(NAME RenderTraversalRefusal COMMAND render_measurement_test refusal)
+add_test(NAME RenderWorkloadDefinitions COMMAND render_measurement_test workloads)
+add_test(NAME RenderWorkloadDispatch COMMAND render_measurement_test dispatch)
+add_test(NAME RenderReloadInterval COMMAND render_measurement_test reload)
+add_test(NAME RenderPresentationClock COMMAND render_measurement_test presentation)
+add_test(NAME RenderWorkloadWorldAuthority COMMAND render_measurement_test world-authority)
+add_test(NAME RenderMenuObservations COMMAND render_measurement_test menus)
+add_test(NAME RenderFoliageObservations COMMAND render_measurement_test foliage)
 add_test(NAME RenderMeasurementFrameRing COMMAND render_measurement_test ring)
 add_test(NAME RenderMeasurementGpuQueries COMMAND render_measurement_test queries)
+add_executable(render_configuration_test rendering/render_configuration_test.cpp)
+target_include_directories(render_configuration_test PRIVATE ../src)
+target_compile_definitions(render_configuration_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(render_configuration_test PRIVATE luminumbra_common)
+luminumbra_configure_first_party_target(render_configuration_test)
+add_test(NAME RenderResolvedConfiguration COMMAND render_configuration_test)
+add_test(NAME RenderObservationRecordBounds COMMAND render_configuration_test observation-records)
+set_tests_properties(RenderObservationRecordBounds PROPERTIES TIMEOUT 30)
+add_test(NAME RenderSavedAuthorityTampering COMMAND render_configuration_test saved-authority)
+add_test(NAME RenderContentReferenceContainment COMMAND render_configuration_test content-references)
+add_test(NAME RenderAudioReferenceContainment COMMAND render_configuration_test audio-references)
+add_test(NAME RenderOptionalAudioContent COMMAND render_configuration_test optional-audio)
 if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -2607,6 +2632,22 @@ add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+add_test(NAME RenderCrashCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/perf/test_render_crash_capture.py)
+set_tests_properties(RenderCrashCapturePython PROPERTIES TIMEOUT 30)
+if(WIN32)
+    # Exercise real debug events and bounded minidump I/O with tiny child
+    # processes. Keep these out of the device-free Python path classifier.
+    foreach(smoke_case IN ITEMS test_success_and_expected_refusal test_unhandled_access_violation)
+        add_test(NAME RenderCrashCaptureWindows.${smoke_case}
+            COMMAND "${Python3_EXECUTABLE}" -I -B
+            ${CMAKE_SOURCE_DIR}/tools/perf/test_render_crash_capture.py
+            --native-windows-smoke
+            --smoke-artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-debugger
+            WindowsSmokeTests.${smoke_case})
+        set_tests_properties(RenderCrashCaptureWindows.${smoke_case} PROPERTIES TIMEOUT 30)
+    endforeach()
+endif()
 add_test(NAME AudioPropagationMetricsContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_audio_propagation_metrics.py)
 add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -2623,6 +2664,18 @@ add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
 set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
+    "RenderWorkloadSaveLoadIntegrated;test_v4_save_load_success"
+    "RenderWorkloadNoAudioIntegrated;test_v4_no_audio_success"
+    "RenderBenchmarkStreamRadiusRefusal;test_stream_radius_refusal"
+    "RenderEscapingAudioRefusal;test_escaping_audio_refusal"
+    "RenderAbsoluteTextureRefusal;test_absolute_texture_refusal"
+    "RenderParentRelativeTextureRefusal;test_parent_relative_texture_refusal"
+    "RenderSceneConfigSeparateRefusal;test_scene_config_separate_refusal"
+    "RenderSceneConfigAssignmentRefusal;test_scene_config_assignment_refusal"
+    "RenderExistingWorldOptionFormsRefusal;test_existing_world_option_forms_refusal"
+    "RenderTraversalDurationOptionFormsRefusal;test_traversal_duration_option_forms_refusal"
+    "RenderCaptureOptionMissingValuesRefusal;test_capture_option_missing_values_refusal"
+    "RenderTraversalOwnerOptionFormsRefusal;test_traversal_owner_option_forms_refusal"
     "RenderBenchmarkImplicitCreationFailure;test_implicit_creation_failure"
     "RenderBenchmarkMeasuredFrameBounds;test_v2_measured_frame_bounds"
     "RenderBenchmarkIsolationSubmission;test_isolation_submission_reporting"

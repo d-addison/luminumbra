@@ -4,6 +4,24 @@
 
 namespace Luminumbra {
 
+namespace {
+std::atomic<std::uint64_t>& WaterMutationEpoch() {
+    static std::atomic<std::uint64_t> epoch{0};
+    return epoch;
+}
+} // namespace
+
+std::uint64_t Chunk::water_mutation_epoch() {
+    return WaterMutationEpoch().load(std::memory_order_acquire);
+}
+void Chunk::NoteWaterMutation() {
+    auto& epoch = WaterMutationEpoch();
+    auto previous = epoch.load(std::memory_order_acquire);
+    while (previous != std::numeric_limits<std::uint64_t>::max() &&
+           !epoch.compare_exchange_weak(
+               previous, previous + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {}
+}
+
 Chunk::Chunk(const IVec3& coords)
     : m_coords(coords)
     , m_id(calculate_id(coords))

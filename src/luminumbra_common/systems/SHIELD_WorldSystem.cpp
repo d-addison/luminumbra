@@ -3119,15 +3119,17 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const Vec3& camera_position,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
     // Single-anchor convenience overload — forwards to the multi-anchor path with one
     // anchor (byte-identical streaming/world_hash to the historical single-anchor code).
-    update(registry, std::vector<Vec3>{camera_position}, physics_system);
+    update(registry, std::vector<Vec3>{camera_position}, physics_system, advance_simulation);
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const std::vector<Vec3>& anchor_positions,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
     if (m_durable_read_failed)
         return;
     const MeshingSnapshotPass snapshot_pass(m_last_meshing_snapshot_bytes,
@@ -3223,7 +3225,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
-    if (m_water_system) {
+    if (advance_simulation && m_water_system) {
         m_water_system->update(registry, m_streaming_state.chunks);
     }
     _dbg_split(m_dbg_stream.water); // runtime telemetry
@@ -3627,11 +3629,15 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
+    m_streaming_telemetry_stats.pending_lod_chunks = 0;
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         (void)id;
         if (!chunk_ptr) {
             continue;
         }
+
+        if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0)
+            ++m_streaming_telemetry_stats.pending_lod_chunks;
 
         const ChunkState state = chunk_ptr->get_state();
         if (state == ChunkState::Ready) {
@@ -3648,6 +3654,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
     }
 
+    m_streaming_telemetry_stats.generation_batches = m_streaming_state.generation_batches.size();
+    m_streaming_telemetry_stats.meshing_batches = m_streaming_state.meshing_batches.size();
+    m_streaming_telemetry_stats.promotion_pending = promotion_pipeline_pending();
     // Pending items leave the candidate set at dispatch, even when their
     // active mesh keeps them Ready. Count them through publication, plus
     // candidates not submitted this frame (including a backpressured lane).
@@ -4997,6 +5006,45 @@ void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
         m_water_system->SetSimWindowCursor(cursor);
 }
 
+bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m) {
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > 16.0f ||
+        !std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z) ||
+        std::abs(world_pos.x) > 32000.0f || std::abs(world_pos.y) > 32000.0f ||
+        std::abs(world_pos.z) > 32000.0f)
+        return false;
+
+    wait_for_streaming_jobs();
+    if (promotion_pipeline_pending())
+        return false;
+    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m));
+    const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m));
+    const auto worldgen_scope = acquire_worldgen_sample_scope();
+    // The validated bounds above cover at most 27 chunks of 17^3 samples.
+    // Generate synchronously before editing; never replace saved/edited SDFs.
+    for (int cz = lo.z; cz <= hi.z; ++cz)
+        for (int cy = lo.y; cy <= hi.y; ++cy)
+            for (int cx = lo.x; cx <= hi.x; ++cx) {
+                const IVec3 coords(cx, cy, cz);
+                const ChunkID id = Chunk::calculate_id(coords);
+                auto iterator = m_streaming_state.chunks.find(id);
+                if (iterator == m_streaming_state.chunks.end())
+                    iterator = m_streaming_state.chunks
+                                   .emplace(id, std::make_shared<Luminumbra::Chunk>(coords))
+                                   .first;
+                auto& chunk = iterator->second;
+                if (!chunk)
+                    return false;
+                if (chunk->sdf_data.empty()) {
+                    GenerateChunkData(*chunk, 1);
+                    chunk->current_lod.store(-1, std::memory_order_release);
+                    chunk->set_state(ChunkState::Idle);
+                }
+                if (chunk->sdf_data.size() != kFullSdfLattice)
+                    return false;
+            }
+    return true;
+}
+
 // PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
 // then couple the water to the new bed. Edits the signed density field (sdf_data) of
 // every streamed chunk the sphere overlaps. Positive density is air (same convention
@@ -6213,6 +6261,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_streaming_state.chunks.clear();
     m_parked.clear();
     m_durable_chunks.clear();
+    m_water_authority_epoch.reset();
     m_durable_read_failed = false;
     m_evictions_suspended = false;
     m_parked_bytes = 0;
@@ -6600,12 +6649,17 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
         chunk->current_lod.store(-1, std::memory_order_release);
         chunk->set_state(Luminumbra::ChunkState::Idle);
         m_streaming_state.chunks.emplace(id, std::move(chunk));
+        m_water_authority_epoch.reset();
         ++m_dirty_generation;
     }
     return true;
 }
 
 void SHIELD_WorldSystem::sync_water_authority() {
+    // Capture before scanning: a concurrent mutation must be visible on the next call.
+    const auto epoch = Chunk::water_mutation_epoch();
+    if (epoch != std::numeric_limits<std::uint64_t>::max() && m_water_authority_epoch == epoch)
+        return;
     const auto promote = [this](const std::shared_ptr<Luminumbra::Chunk>& chunk) {
         if (!chunk || !chunk->is_water_state_dirty()) {
             return;
@@ -6626,6 +6680,7 @@ void SHIELD_WorldSystem::sync_water_authority() {
         (void)id;
         promote(parked.chunk);
     }
+    m_water_authority_epoch = epoch;
 }
 
 bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::Chunk>& chunk) {
@@ -6660,6 +6715,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted) {
+        m_water_authority_epoch.reset();
         // Derived payloads belong to the producing world, never to a saved or
         // externally adopted chunk (world-local generation numbers can coincide).
         chunk->stage_water_seed_inputs({});

@@ -235,7 +235,9 @@ class UploadBudgetWiring(unittest.TestCase):
 
         # The main loop uses the same wait selector for elapsed time and drawing.
         source = compact(self.main)
-        wait = source[source.index("const bool settling_benchmark_uploads"):]
+        wait = source[source.index("const bool settling_capture_uploads"):]
+        reload = compact(body(self.main, "const auto settle_workload_reload ="))
+        self.assertIn("*g_camera, 0.0f, g_app.overlay.wireframe_mode);", reload)
         call = re.search(r"\.render_frame\((.*?)\);", wait).group(1)
         arguments = [argument.strip() for argument in call.split(",")]
         self.assertEqual(len(arguments), 6)

@@ -132,6 +132,10 @@ public:
     // the current world and save eligibility. Snapshot reader refusals clear
     // resident chunks and disable saving without publishing staged members.
     bool LoadWorld(const std::string& worldId);
+    // Read a caller-owned immutable save snapshot. Keep it alive until the next successful
+    // canonical save or world replacement: region freezes also read its durable directory.
+    // Runtime content and subsequent persistence retain this session's configured roots.
+    bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
 
     // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
@@ -598,11 +602,9 @@ private:
     std::vector<RegionWork> m_regionCompletedWork; // Transient successful consumer work this tick.
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
-    // Authoritative in-memory ground objects (S5). Empty unless spawned with the flag on.
     GroundObjectStore m_groundObjects;
-    // Authoritative in-memory field pages (S6). Empty unless the region flag is on.
     FieldPageState m_fieldPages;
-    void LatchRegionFault(std::uint64_t tick, std::string message);
+    void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     // Sorted, de-duplicated due regions of the current schedule.
     [[nodiscard]] std::vector<RegionKey> SortedDueRegions() const;

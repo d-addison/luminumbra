@@ -557,10 +557,11 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("return m_worldOpenError;", header)
         reset = self.function(source, "ResetWorldSystems")
         self.assertIn("m_worldUsable = false;", reset)
-        for name in ("CreateWorldInternal", "LoadWorld"):
+        for name in ("CreateWorldInternal", "LoadWorld", "LoadWorldFrom"):
             body = self.function(source, name)
             preparation, adoption = body.split("ResetWorldSystems();", 1)
-            if name == "LoadWorld":
+            if name in ("LoadWorld", "LoadWorldFrom"):
+                self.assertIn("LoadedWorldState loaded;", preparation)
                 preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
                 self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded))", state_read)
                 self.assertLess(state_read.index("m_worldUsable = false;"),
@@ -578,6 +579,25 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         opening.index("ResetWorldSystems();"))
         self.assertLess(opening.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         opening.index("m_worldUsable = true;"))
+
+        body = self.function(source, "LoadWorldFrom")
+        preparation, adoption = body.split("ResetWorldSystems();", 1)
+        preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
+        self.assertNotIn("m_worldUsable", preparation)
+        self.assertIn("m_worldOpenError =", preparation)
+        self.assertIn("Persistence::InspectSavedWorld(save_root, RuntimeRoot(m_rootPath), worldId)",
+                      preparation)
+        self.assertIn('const auto worldPath = save_root / "worlds/saves" / worldId;', preparation)
+        self.assertNotIn("m_saveRootPath =", body)
+        self.assertLess(adoption.index("m_speciesTable ="),
+                        adoption.index("m_worldUsable = true;"))
+        self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded))", state_read)
+        self.assertLess(body.index("ReadWorldStateFrom(worldPath, loaded)"),
+                        body.index("ResetWorldSystems();"))
+        self.assertLess(adoption.index("AdoptWorldStateFrom(worldPath, loaded);"),
+                        adoption.index("m_worldUsable = true;"))
+        self.assertIn("m_renderCalendar = loaded.render_calendar;", adoption)
+        self.assertIn("m_worldClock = loaded.clock;", adoption)
 
     def test_persistence_uses_session_state_and_fatal_snapshot_refusals_latch_it(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")

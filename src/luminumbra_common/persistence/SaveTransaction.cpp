@@ -266,7 +266,13 @@ bool ReadBoundedBytes(const fs::path& file,
 }
 
 bool SamePath(const fs::path& lhs, const fs::path& rhs) {
+    if (lhs == rhs)
+        return true;
     std::error_code ec;
+    // Existing directory aliases (including Windows short names) share file identity.
+    if (fs::equivalent(lhs, rhs, ec))
+        return true;
+    ec.clear();
     fs::path lhs_canonical = fs::weakly_canonical(lhs, ec);
     if (ec) {
         lhs_canonical = lhs.lexically_normal();

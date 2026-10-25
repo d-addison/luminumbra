@@ -138,7 +138,10 @@ public:
                    revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
         m_water_state_dirty.store(true, std::memory_order_release);
+        NoteWaterMutation();
     }
+    // Process-wide mutation diagnostic, never serialized or hashed. Saturation forces scans.
+    static std::uint64_t water_mutation_epoch();
     bool is_water_state_dirty() const {
         return m_water_state_dirty.load(std::memory_order_acquire);
     }
@@ -371,6 +374,7 @@ public:
     bool try_set_state(ChunkState expected_state, ChunkState new_state);
 
 private:
+    static void NoteWaterMutation();
     void advance_water_seed_edit_generation() {
         auto generation = m_water_seed_edit_generation.load(std::memory_order_acquire);
         while (

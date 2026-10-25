@@ -247,6 +247,12 @@ public:
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
                                       const IVec3& coords,
                                       bool require_index = false);
+    // Transfers disk-only authority with one source-index read and one replacement per region.
+    // Live/parked replacements are excluded by the caller. Failures roll back the destination.
+    static bool copy_authoritative_chunks(const std::filesystem::path& source,
+                                          const std::filesystem::path& destination,
+                                          const std::vector<IVec3>& inventory,
+                                          std::vector<std::string>* errors = nullptr);
     // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
     // or saturated revision retains its dirty obligation.
     static std::function<void()>
@@ -381,8 +387,8 @@ public:
         SaveFactsScope& operator=(const SaveFactsScope&) = delete;
         ~SaveFactsScope();
         static SaveFactsScope* active_for(const std::filesystem::path& save_dir);
-        // First call decodes the world once; later calls return the cached verdict.
-        bool validate(std::vector<std::string>* errors);
+        // Refresh rereads installed members, reusing exact-record proofs within this save.
+        bool validate(std::vector<std::string>* errors, bool refresh = false);
         void defer_until_commit(std::function<void()> action);
         // Runs and clears the deferred actions (after a successful commit).
         void run_deferred();
@@ -443,6 +449,15 @@ public:
                                            bool acknowledge_dirty = true) const;
 
 private:
+    // Non-null validation_chunks requests validation without retaining chunks. Exact-record
+    // proofs may then replace decoding; public loads always materialize their requested state.
+    bool load_world_impl(WorldStreamingState& state,
+                         const std::filesystem::path& save_dir,
+                         std::vector<std::string>& errors,
+                         const std::stop_token& stop,
+                         const std::function<bool(const IVec3&)>& retain_chunk,
+                         std::vector<IVec3>* authoritative_inventory,
+                         bool* validation_chunks) const;
     // The single v2 write seam: serializes the given chunks into LMR1 region
     // files, merging with on-disk records, and refreshes the world manifest.
     // regions_written receives the

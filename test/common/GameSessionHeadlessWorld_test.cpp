@@ -2114,6 +2114,7 @@ TEST_P(SavedWorldPresetTest, NormalCreationRefusalsRetainDirtySessionAndExitSave
             bool saved_reported = false;
             Luminumbra::Client::SaveSessionOnExit(
                 &session,
+                true,
                 [&] {
                     session.SetSpawnPoint(Luminumbra::Vec3(19, 23, -17));
                     spawn_updated = true;
@@ -2223,6 +2224,7 @@ TEST_P(SavedWorldPresetTest, FatalSnapshotAndFinalMetadataRefusalsCannotBeCleare
         unsigned spawn_updates = 0;
         Luminumbra::Client::SaveSessionOnExit(
             &session,
+            true,
             [&] { ++spawn_updates; },
             [] { FAIL() << "Fatal session reported save success"; });
         EXPECT_EQ(spawn_updates, 1u);

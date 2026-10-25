@@ -574,8 +574,9 @@ jobs:
             build/local-check-contracts/Testing/Temporary
           if-no-files-found: warn
           retention-days: 14
+      # One Windows shard is enough: the contracts do not depend on the shard's test partition.
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
+        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
@@ -685,13 +686,15 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           # Developer-shell setup can change PATH; retain the selected runtime.
           Set-Alias -Name python -Value $pythonExecutable
-          # Release uses Ninja without /Zi under the project's CMake 3.20
-          # policy baseline. Keep launchers local to this configure.
+          # Preserve Release optimization and retain embedded compiler symbols
+          # plus the linked PDB for render-child failure evidence.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
           }
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
+            -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
           # when optional PowerShell discovery would omit it from the suite.
@@ -944,6 +947,7 @@ jobs:
         run: >-
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_C_FLAGS=-g -DCMAKE_CXX_FLAGS=-g
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
@@ -1381,13 +1385,13 @@ jobs:
         run: |
           cmake -S . -B build/fast-gcc -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
-            -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           cmake --build build/fast-gcc --target glad --parallel 2
           cmake -S . -B build/fast-clang -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
-            -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build/fast-clang --target glad --parallel 2

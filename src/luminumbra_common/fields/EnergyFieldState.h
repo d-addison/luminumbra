@@ -62,8 +62,11 @@
 // recorded for collision-avoidance only and intentionally never consumed
 // (the PhotoScoring +24 / PhotoFilters +35 precedent).
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -203,10 +206,21 @@ public:
     }
 
 private:
+    // Derived only from one page's stored values; never serialized or hashed. A 384 m
+    // physical page overlaps at most four 512 m owners. Writers invalidate before editing.
+    struct RegionalPageFacts {
+        std::size_t record_bytes = 0;
+        std::array<RegionKey, 4> owners{};
+        std::size_t owner_count = 0;
+        bool valid = false;
+        bool any = false;
+    };
     struct Page {
         // cell-major, channel-interleaved: values[(lz*kEnergyPageCells+lx)*channels+ch]
         std::vector<std::uint16_t> values;
         std::uint64_t last_step = 0; // cadence step this page was last current at
+        mutable std::optional<RegionalPageFacts> regional_summary;
+        [[nodiscard]] const RegionalPageFacts& regional_facts(std::int64_t key, int channels) const;
         [[nodiscard]] bool all_zero() const noexcept;
     };
 
