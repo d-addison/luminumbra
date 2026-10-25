@@ -275,6 +275,7 @@ void ParticlePass::clear_emitters() {
     m_active_emitters.clear();
     m_descriptors.clear();
     m_next_emitter_id = 0;
+    m_ambient_emitter_index = kMaxEmitters;
     m_precip_emitters.fill(kInvalidEmitter);
     m_precip_load_attempted.fill(false);
     m_splash_emitter_index = kNoSplashEmitter;
@@ -299,6 +300,18 @@ void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base
             emitter.world_origin = base_origin + emitter.data.origin;
             return;
         }
+    }
+}
+
+void ParticlePass::update_ambient_motes(const std::filesystem::path& root_path,
+                                        const glm::vec3& camera_position) {
+    if (m_ambient_emitter_index == kMaxEmitters) {
+        if (add_emitter(root_path / "data/common/particles/ambient_motes.json", camera_position) !=
+            kInvalidEmitter)
+            m_ambient_emitter_index = m_active_emitters.size() - 1;
+    } else {
+        auto& emitter = m_active_emitters[m_ambient_emitter_index];
+        emitter.world_origin = camera_position + emitter.data.origin;
     }
 }
 

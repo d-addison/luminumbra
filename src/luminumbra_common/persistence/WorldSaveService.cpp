@@ -1,4 +1,5 @@
 #include "WorldSaveService.h"
+#include "CreatedWorldArtifacts.h"
 #include "core/Profiler.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
@@ -148,7 +149,8 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                       const std::string& bytes,
                       const std::filesystem::path& staging,
                       std::vector<std::string>* errors,
-                      FileIdentity* published_identity = nullptr);
+                      FileIdentity* published_identity = nullptr,
+                      CreatedWorldArtifacts* artifacts = nullptr);
 
 bool FlushAncestorEntries(const std::filesystem::path& destination,
                           std::vector<std::string>* errors);
@@ -332,7 +334,11 @@ std::filesystem::path NextRegionTempPath(const std::filesystem::path& destinatio
     return temp;
 }
 
-void RemoveTemporaryFile(const std::filesystem::path& path) {
+void RemoveTemporaryFile(const std::filesystem::path& path,
+                         CreatedWorldArtifacts* artifacts = nullptr) {
+    // Creation rollback owns these files and checks identity after writers drain.
+    if (artifacts)
+        return;
     std::error_code remove_error;
     std::filesystem::remove(path, remove_error);
 }
@@ -347,8 +353,7 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     const auto directory =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
     // Compare native filename code units, including Unicode on Windows.
-    auto prefix = destination.filename();
-    prefix += ".tmp.";
+    const auto prefix = destination.filename().native() + std::filesystem::path(".tmp.").native();
     std::size_t reclaimed = 0;
     std::filesystem::directory_iterator it(directory, list_error);
     if (list_error)
@@ -359,7 +364,7 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
         std::error_code kind_error;
         if (!entry.is_regular_file(kind_error) || kind_error)
             continue;
-        if (entry.path().filename().native().rfind(prefix.native(), 0) != 0)
+        if (entry.path().filename().native().rfind(prefix, 0) != 0)
             continue;
         std::error_code remove_error;
         if (std::filesystem::remove(entry.path(), remove_error) && !remove_error)
@@ -377,22 +382,34 @@ std::string WindowsErrorMessage(DWORD error) {
 bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             const std::string& bytes,
                             std::filesystem::path& out_temp,
-                            std::vector<std::string>* errors) {
+                            std::vector<std::string>* errors,
+                            CreatedWorldArtifacts* artifacts = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save write");
     HANDLE file = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
+        if (artifacts)
+            artifacts->reserve_file(out_temp);
         file = ::CreateFileW(out_temp.c_str(),
                              GENERIC_WRITE,
-                             0,
+                             artifacts ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : 0,
                              nullptr,
                              CREATE_NEW,
                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
                              nullptr);
         if (file != INVALID_HANDLE_VALUE) {
+            try {
+                if (artifacts)
+                    artifacts->file_created(out_temp, file);
+            } catch (...) {
+                ::CloseHandle(file);
+                throw;
+            }
             break;
         }
         const DWORD error = ::GetLastError();
+        if (artifacts)
+            artifacts->abandon_file_reservation();
         if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
             AddError(errors,
                      "failed to create temporary region file: " +
@@ -421,7 +438,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                 error = ERROR_WRITE_FAULT;
             }
             ::CloseHandle(file);
-            RemoveTemporaryFile(out_temp);
+            RemoveTemporaryFile(out_temp, artifacts);
             AddError(errors,
                      "failed to write temporary region file: " +
                          Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -434,7 +451,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     if (!::FlushFileBuffers(file)) {
         const DWORD error = ::GetLastError();
         ::CloseHandle(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to durably flush temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -443,7 +460,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     }
     if (!::CloseHandle(file)) {
         const DWORD error = ::GetLastError();
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to close temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -455,10 +472,15 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
 
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
-                                 std::vector<std::string>* errors) {
+                                 std::vector<std::string>* errors,
+                                 CreatedWorldArtifacts* artifacts = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
+    if (artifacts) {
+        artifacts->publish_file(temp, destination);
+        return true;
+    }
     const DWORD attributes = ::GetFileAttributesW(destination.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         if (::ReplaceFileW(destination.c_str(),
@@ -505,17 +527,29 @@ std::string PosixErrorMessage(int error) {
 bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             const std::string& bytes,
                             std::filesystem::path& out_temp,
-                            std::vector<std::string>* errors) {
+                            std::vector<std::string>* errors,
+                            CreatedWorldArtifacts* artifacts = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save write");
     int file = -1;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
+        if (artifacts)
+            artifacts->reserve_file(out_temp);
         file = ::open(out_temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
         if (file >= 0) {
+            try {
+                if (artifacts)
+                    artifacts->file_created(out_temp, file);
+            } catch (...) {
+                ::close(file);
+                throw;
+            }
             break;
         }
-        if (errno != EEXIST) {
-            const int error = errno;
+        const int error = errno;
+        if (artifacts)
+            artifacts->abandon_file_reservation();
+        if (error != EEXIST) {
             AddError(errors,
                      "failed to create temporary region file: " +
                          Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -542,7 +576,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         if (written <= 0) {
             const int error = written < 0 ? errno : EIO;
             ::close(file);
-            RemoveTemporaryFile(out_temp);
+            RemoveTemporaryFile(out_temp, artifacts);
             AddError(errors,
                      "failed to write temporary region file: " +
                          Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -558,7 +592,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         }
         const int error = errno;
         ::close(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to durably flush temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
@@ -566,7 +600,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     }
     if (::close(file) != 0) {
         const int error = errno;
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to close temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
@@ -577,14 +611,17 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
 
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
-                                 std::vector<std::string>* errors) {
+                                 std::vector<std::string>* errors,
+                                 CreatedWorldArtifacts* artifacts = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
     // POSIX rename replaces an existing same-filesystem destination atomically.
     // World members stage in the save root outside the chunks scan; standalone
     // containers stage beside the file. Cross-filesystem rename fails safely.
-    if (std::rename(temp.c_str(), destination.c_str()) != 0) {
+    if (artifacts) {
+        artifacts->publish_file(temp, destination);
+    } else if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
                  "failed to atomically replace region file: " +
@@ -1169,7 +1206,8 @@ WorldSaveService::region_staging_path(const std::filesystem::path& destination) 
 
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
-                                     std::vector<std::string>* errors) {
+                                     std::vector<std::string>* errors,
+                                     CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
     if (!validate_save(save_dir, errors))
         return false;
@@ -1213,17 +1251,20 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     const std::string output_bytes =
         (has_clock || has_render_calendar) ? metadata.dump(4) + "\n" : bytes;
     const auto destination = save_dir / "world_info.json";
-    ReclaimAbandonedStaging(destination);
+    if (artifacts)
+        artifacts->reserve_file(destination);
+    else
+        ReclaimAbandonedStaging(destination);
     std::filesystem::path temp;
-    if (!WriteDurableRegionTemp(destination, output_bytes, temp, errors))
+    if (!WriteDurableRegionTemp(destination, output_bytes, temp, errors, artifacts))
         return false;
     if (InterruptBeforeRegionReplaceForTesting().exchange(false)) {
-        RemoveTemporaryFile(temp);
+        RemoveTemporaryFile(temp, artifacts);
         AddError(errors, "interrupted before metadata replacement");
         return false;
     }
-    if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
-        RemoveTemporaryFile(temp);
+    if (!ReplaceRegionFileAtomically(temp, destination, errors, artifacts)) {
+        RemoveTemporaryFile(temp, artifacts);
         return false;
     }
     return true;
@@ -1232,7 +1273,8 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
 bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes,
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
-                                                        std::vector<std::string>* errors) {
+                                                        std::vector<std::string>* errors,
+                                                        CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
     world::WorldClock clock;
@@ -1262,10 +1304,10 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     // Each writer validates the installed pair. On rewind, replace the ledger
     // first so it cannot be newer than the clock, even if metadata writing fails.
     if (clock.tick() < previous_clock.tick())
-        return save_active_regions(ledger, clock, save_dir, errors) &&
-               save_metadata(bytes, save_dir, errors);
-    return save_metadata(bytes, save_dir, errors) &&
-           save_active_regions(ledger, clock, save_dir, errors);
+        return save_active_regions(ledger, clock, save_dir, errors, artifacts) &&
+               save_metadata(bytes, save_dir, errors, artifacts);
+    return save_metadata(bytes, save_dir, errors, artifacts) &&
+           save_active_regions(ledger, clock, save_dir, errors, artifacts);
 }
 
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
@@ -1456,7 +1498,8 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
 bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            const world::WorldClock& clock,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
     if (!validate_save(save_dir, errors))
         return false;
@@ -1470,7 +1513,8 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         return false;
     }
     const auto staging = save_dir / active_regions_path(save_dir).filename();
-    ReclaimAbandonedStaging(staging);
+    if (!artifacts)
+        ReclaimAbandonedStaging(staging);
     // Keep an anchor-only ledger: it restores last walking feet before activation.
     if (ledger.records().empty() && !ledger.local_anchor() &&
         !std::filesystem::exists(active_regions_path(save_dir)))
@@ -1487,20 +1531,26 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
     try {
         const auto path = active_regions_path(save_dir);
-        std::filesystem::create_directories(path.parent_path());
+        if (artifacts) {
+            artifacts->create_directory(path.parent_path().parent_path());
+            artifacts->create_directory(path.parent_path());
+            artifacts->reserve_file(path);
+        } else {
+            std::filesystem::create_directories(path.parent_path());
+        }
         std::filesystem::path temp;
         // Keep abandoned staging files outside the strict region integrity scan.
         // The save root is on the save filesystem; replacement refuses EXDEV
         // if a separately mounted chunks/region/ directory violates that layout.
-        if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
+        if (!WriteDurableRegionTemp(staging, bytes, temp, errors, artifacts))
             return false;
         if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
-            RemoveTemporaryFile(temp);
+            RemoveTemporaryFile(temp, artifacts);
             AddError(errors, "interrupted before active-region ledger replacement");
             return false;
         }
-        if (!ReplaceRegionFileAtomically(temp, path, errors)) {
-            RemoveTemporaryFile(temp);
+        if (!ReplaceRegionFileAtomically(temp, path, errors, artifacts)) {
+            RemoveTemporaryFile(temp, artifacts);
             return false;
         }
         ledger = std::move(saved);
@@ -1782,10 +1832,11 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                       const std::string& bytes,
                       const std::filesystem::path& staging,
                       std::vector<std::string>* errors,
-                      FileIdentity* published_identity) {
+                      FileIdentity* published_identity,
+                      CreatedWorldArtifacts* artifacts) {
     // Callers hold SaveGuard and reclaim staging before reaching this helper.
     std::error_code directory_error;
-    if (destination.has_parent_path()) {
+    if (!artifacts && destination.has_parent_path()) {
         std::filesystem::create_directories(destination.parent_path(), directory_error);
     }
     if (directory_error) {
@@ -1795,27 +1846,28 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                      directory_error.message());
         return false;
     }
-
+    if (artifacts)
+        artifacts->reserve_file(destination);
     std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors)) {
+    if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors, artifacts)) {
         return false;
     }
     // Capture the exclusive staging file's identity before publication. Alias
     // rollback later checks this identity at replacement under SaveGuard.
     if (published_identity && !ReadFileIdentity(temp_path, *published_identity)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         AddError(errors, "cannot retain replacement identity");
         return false;
     }
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         AddError(errors,
                  "file replacement interrupted by test seam before replacing: " +
                      Filesystem::GenericUtf8PathString(destination));
         return false;
     }
-    if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
-        RemoveTemporaryFile(temp_path);
+    if (!ReplaceRegionFileAtomically(temp_path, destination, errors, artifacts)) {
+        RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }
     return true;
@@ -1824,10 +1876,12 @@ bool WriteFileDurably(const std::filesystem::path& destination,
 
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
-                                          std::vector<std::string>* errors) {
+                                          std::vector<std::string>* errors,
+                                          CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    ReclaimAbandonedStaging(destination);
-    return WriteFileDurably(destination, bytes, destination, errors);
+    if (!artifacts)
+        ReclaimAbandonedStaging(destination);
+    return WriteFileDurably(destination, bytes, destination, errors, nullptr, artifacts);
 }
 
 bool WorldSaveService::create_file_durably(const std::filesystem::path& destination,

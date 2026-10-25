@@ -19,6 +19,7 @@ PYTHON_TESTS = (
     "test/tools/check_audio_shutdown_contract.py",
     "tools/ci/test_audio_propagation_metrics.py",
     "test/tools/check_profiler_contract.py",
+    "test/persistence/test_world_entry_filesystem_wiring.py",
     "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_replay_workspace.py",
     "test/rendering/test_upload_budget_wiring.py",

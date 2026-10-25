@@ -54,8 +54,11 @@
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
+#include "../core/FilesystemPath.h"
+#include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
+#include "../persistence/CreatedWorldArtifacts.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SavedWorldCatalog.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
@@ -212,6 +215,7 @@ void GameSession::ResetWorldSystems() {
     // Keep all dependencies alive while the world destructor fences admitted work.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
+    ++m_worldRevision;
     m_worldSystem.reset();
     m_physicsSystem.reset();
     m_waterSystem.reset();
@@ -1161,7 +1165,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     const fs::path root = RuntimeRoot(root_path);
     result.preset_path = PresetPathFor(root_path, worldType);
     if (!fs::exists(result.preset_path)) {
-        AddValidationError(result, "missing world preset: " + result.preset_path.string());
+        AddValidationError(result,
+                           "missing world preset: " +
+                               Filesystem::GenericUtf8PathString(result.preset_path));
     }
 
     // Preset loading below validates simulation dependencies. Further runtime
@@ -1170,7 +1176,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {
-            AddValidationError(result, "missing required runtime asset: " + path.string());
+            AddValidationError(result,
+                               "missing required runtime asset: " +
+                                   Filesystem::GenericUtf8PathString(path));
         }
     }
 
@@ -1197,16 +1205,32 @@ bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
                               const std::string* customPresetJson,
+                              Persistence::CreatedWorldArtifacts& artifacts) {
+    return CreateWorldInternal(
+        name, seed, worldType, customPresetJson, false, &artifacts, TerrainPresetUse::NewWorld);
+}
+
+bool GameSession::CreateWorld(const std::string& name,
+                              const std::string& seed,
+                              const std::string& worldType,
+                              const std::string* customPresetJson,
                               TerrainPresetUse presetUse,
                               const std::string& requiredPresetContentHash) {
-    return CreateWorldInternal(
-        name, seed, worldType, customPresetJson, false, presetUse, requiredPresetContentHash);
+    return CreateWorldInternal(name,
+                               seed,
+                               worldType,
+                               customPresetJson,
+                               false,
+                               nullptr,
+                               presetUse,
+                               requiredPresetContentHash);
 }
 
 bool GameSession::CreateTransientWorld(const std::string& name,
                                        const std::string& seed,
                                        const std::string& worldType) {
-    return CreateWorldInternal(name, seed, worldType, nullptr, true, TerrainPresetUse::NewWorld);
+    return CreateWorldInternal(
+        name, seed, worldType, nullptr, true, nullptr, TerrainPresetUse::NewWorld);
 }
 
 bool GameSession::CreateWorldInternal(const std::string& name,
@@ -1214,6 +1238,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& worldType,
                                       const std::string* customPresetJson,
                                       bool transient,
+                                      Persistence::CreatedWorldArtifacts* artifacts,
                                       TerrainPresetUse presetUse,
                                       const std::string& requiredPresetContentHash) {
     m_worldOpenError.clear();
@@ -1276,7 +1301,11 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     }
     if (!transient) {
         try {
-            fs::create_directories(worldPath);
+            fs::create_directories(worldPath.parent_path());
+            if (artifacts)
+                artifacts->create_root(worldPath);
+            else if (!fs::create_directory(worldPath))
+                throw std::runtime_error("Refusing to reuse an existing world save directory.");
         } catch (const std::exception& e) {
             m_worldOpenError = "Could not create world save directory: " + std::string(e.what());
             LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
@@ -1287,9 +1316,16 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     // Save inspection uses compact UTF-8 JSON; identity uses ASCII escapes of these choices.
     std::string saved_preset_json = resolved.dump();
     if (!transient) {
-        if (!Persistence::WorldSaveService::write_file_durably(worldPath / "preset.json",
-                                                               saved_preset_json + "\n")) {
-            m_worldOpenError = "Could not save this world's resolved preset.";
+        const fs::path world_preset = worldPath / "preset.json";
+        try {
+            if (!Persistence::WorldSaveService::write_file_durably(
+                    world_preset, saved_preset_json + "\n", nullptr, artifacts)) {
+                m_worldOpenError = "Could not save this world's resolved preset.";
+                return false;
+            }
+        } catch (const std::exception& error) {
+            m_worldOpenError =
+                "Could not save this world's resolved preset: " + std::string(error.what());
             return false;
         }
     }
@@ -1391,7 +1427,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         RestoreWorldClock(m_worldClock);
     // Systems, clock and identity are coherent; allow the initial metadata save.
     m_worldUsable = true;
-    if (!transient && !SaveWorld()) {
+    if (!transient && !SaveWorldMetadataTo(GetWorldSaveDir(), artifacts)) {
         m_worldUsable = false;
         m_worldOpenError = "Could not save the new world's metadata.";
         LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
@@ -1419,11 +1455,12 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     for (const auto& asset : m_requiredClientAssets) {
         if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
-            m_worldOpenError = "Missing required runtime asset: " + asset.string();
+            m_worldOpenError =
+                "Missing required runtime asset: " + Filesystem::GenericUtf8PathString(asset);
             return false;
         }
     }
-    const auto worldPath = GetSaveRootPath() / "worlds/saves" / worldId;
+    const fs::path worldPath = GetSaveRootPath() / "worlds/saves" / worldId;
     // Generate from the same canonical bytes whose saved identity was verified.
     const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
         nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
@@ -1441,6 +1478,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
     if (!ReadWorldStateFrom(worldPath, loaded)) {
+        ++m_worldRevision;
         m_worldUsable = false;
         if (m_worldSystem)
             m_worldSystem->clear_world(m_physicsSystem.get());
@@ -1503,7 +1541,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
                                      m_energyFieldState->page_count());
             } else {
                 LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
+                                     Filesystem::GenericUtf8PathString(recordPath));
             }
         }
     }
@@ -1550,7 +1588,8 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     }
     for (const auto& asset : m_requiredClientAssets) {
         if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
-            m_worldOpenError = "Missing required runtime asset: " + asset.string();
+            m_worldOpenError =
+                "Missing required runtime asset: " + Filesystem::GenericUtf8PathString(asset);
             return false;
         }
     }
@@ -1572,6 +1611,7 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
     if (!ReadWorldStateFrom(worldPath, loaded)) {
+        ++m_worldRevision;
         m_worldUsable = false;
         if (m_worldSystem)
             m_worldSystem->clear_world(m_physicsSystem.get());
@@ -1634,7 +1674,7 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
                                      m_energyFieldState->page_count());
             } else {
                 LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
+                                     Filesystem::GenericUtf8PathString(recordPath));
             }
         }
     }
@@ -1885,7 +1925,9 @@ bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
 }
 
 namespace {
-bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) {
+bool PersistSavedPreset(const fs::path& save_dir,
+                        const std::string& canonical,
+                        Persistence::CreatedWorldArtifacts* artifacts = nullptr) {
     if (canonical.empty())
         return false;
     try {
@@ -1894,14 +1936,16 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
             std::ifstream input(path);
             return nlohmann::json::parse(input).dump() == canonical;
         }
-        return Persistence::WorldSaveService::write_file_durably(path, canonical + "\n");
+        return Persistence::WorldSaveService::write_file_durably(
+            path, canonical + "\n", nullptr, artifacts);
     } catch (const std::exception&) {
         return false;
     }
 }
 } // namespace
 
-bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
+bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
+                                      Persistence::CreatedWorldArtifacts* artifacts) const {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&
@@ -1916,7 +1960,7 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
         if (error)
             return false;
     }
-    if (!PersistSavedPreset(save_dir, m_savedPresetJson))
+    if (!PersistSavedPreset(save_dir, m_savedPresetJson, artifacts))
         return false;
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
@@ -1953,10 +1997,10 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
         // The persistence service serializes the whole pair with other writers.
         auto ledger = m_activeRegionLedger;
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
-                metadata_json.dump(4) + "\n", ledger, save_dir))
+                metadata_json.dump(4) + "\n", ledger, save_dir, nullptr, artifacts))
             return false;
-    } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
-                                                             save_dir)) {
+    } else if (!Persistence::WorldSaveService::save_metadata(
+                   metadata_json.dump(4) + "\n", save_dir, nullptr, artifacts)) {
         return false;
     }
     return true;
@@ -2122,6 +2166,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
     LoadedWorldState state;
     if (!ReadWorldStateFrom(save_dir, state)) {
+        ++m_worldRevision;
         m_worldUsable = false;
         // Refused snapshots invalidate resident chunks, but never publish staged members.
         m_worldSystem->clear_world(m_physicsSystem.get());
@@ -2294,7 +2339,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
                                      m_energyFieldState->page_count());
             } else {
                 LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
+                                     Filesystem::GenericUtf8PathString(recordPath));
             }
         }
     }
@@ -2305,7 +2350,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     LUMINUMBRA_CORE_INFO("World state loaded: {} chunks adopted ({} in snapshot) from {}",
                          adopted,
                          loaded.size(),
-                         save_dir.string());
+                         Filesystem::GenericUtf8PathString(save_dir));
 }
 
 std::string GameSession::GenerateWorldId() {

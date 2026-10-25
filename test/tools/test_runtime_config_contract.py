@@ -186,11 +186,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         start = service.index("boolWriteFileDurably(", service.index("boolWriteFileDurably(") + 1)
         write = service[start:service.index("boolWorldSaveService::write_file_durably(", start)]
         interrupt = "InterruptBeforeRegionReplaceForTesting().exchange(false,std::memory_order_acq_rel)"
-        self.assertLess(write.index("WriteDurableRegionTemp(staging,bytes,temp_path,errors)"),
+        self.assertLess(write.index("WriteDurableRegionTemp(staging,bytes,temp_path,errors,artifacts)"),
                         write.index(interrupt))
         self.assertLess(write.index(interrupt), write.index("ReplaceRegionFileAtomically("))
         interrupted = write[write.index(interrupt):write.index("ReplaceRegionFileAtomically(")]
-        self.assertIn("RemoveTemporaryFile(temp_path);", interrupted)
+        self.assertIn("RemoveTemporaryFile(temp_path,artifacts);", interrupted)
         self.assertIn("returnfalse;", interrupted)
         fixture = compact_cpp((ROOT / "test/common/GraphicsPresets_test.cpp")
                               .read_text(encoding="utf-8"))

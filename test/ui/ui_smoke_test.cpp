@@ -51,6 +51,7 @@
 #include "ui/core/UIComponent.h"
 #include "ui/core/UIHotReload.h"
 #include "ui/core/UIStateManager.h"
+#include "world/WorldEntry.h"
 #include "world/WorldgenOverride.h"
 
 namespace fs = std::filesystem;
@@ -1549,6 +1550,58 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     }
     EXPECT_TRUE(found) << "worldgen param override must reach the create callback";
 
+    ui.Shutdown();
+}
+
+TEST(UiSmokeTest, CreateThenBackInOneEventPumpCancelsBeforeOpeningWorld) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::Client::WorldEntry<std::string> entry;
+    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    ui.SetNavigationAwayCallback([&] { entry.cancel_input(true); });
+    ui.SetWorldCreationCallback([&](const std::string& name,
+                                    const std::string&,
+                                    const std::string&,
+                                    const std::vector<Luminumbra::Client::WorldGenParam>&) {
+        EXPECT_TRUE(entry.request(name));
+    });
+    auto* document = LoadDocumentAndFind(ui, "world_creation.rml", "world_creation");
+    ASSERT_NE(document, nullptr);
+    auto* create = document->GetElementById("create_btn");
+    auto* back = document->GetElementById("back_btn");
+    ASSERT_NE(create, nullptr);
+    ASSERT_NE(back, nullptr);
+    // No host advance or UI update between these two events.
+    create->Click();
+    ASSERT_EQ(entry.state(), Luminumbra::Client::WorldEntryState::Requested);
+    back->Click();
+    unsigned stages = 0;
+    unsigned opens = 0;
+    unsigned drains = 0;
+    entry.loading_painted();
+    for (std::size_t frame = 0;
+         frame <= static_cast<std::size_t>(Luminumbra::Client::WorldEntryStage::Count);
+         ++frame) {
+        entry.advance(
+            [&](Luminumbra::Client::WorldEntryStage stage, const std::string&) {
+                ++stages;
+                if (stage == Luminumbra::Client::WorldEntryStage::OpenWorld)
+                    ++opens;
+                return Luminumbra::Client::WorldEntryResult::Complete;
+            },
+            [&] {
+                ++drains;
+                return Luminumbra::Client::WorldEntryResult::Complete;
+            });
+    }
+    EXPECT_EQ(entry.state(), Luminumbra::Client::WorldEntryState::Cancelled);
+    EXPECT_EQ(stages, 0u);
+    EXPECT_EQ(opens, 0u);
+    EXPECT_EQ(drains, 1u);
+    ui.Update();
+    EXPECT_NE(FindDocumentByElementId(ui.GetContext(), "main_menu"), nullptr);
     ui.Shutdown();
 }
 

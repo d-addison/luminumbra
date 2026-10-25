@@ -25,7 +25,6 @@
 #include "rendering/ScentFieldRenderMirror.h"
 #include "rendering/SnowCoverModel.h"
 #include "rendering/passes/FoliagePass.h"
-#include "rendering/passes/ParticlePass.h"
 
 #include <glm/glm.hpp>
 
@@ -337,7 +336,6 @@ struct FoliageRenderState {
     std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> cachedScatter;
     std::uint64_t cachedScatterSig = ~0ull;
     std::unordered_map<Luminumbra::ChunkID, FoliageScatterEntry> scatterByChunk;
-    std::uint32_t ambientMotes = Luminumbra::Rendering::ParticlePass::kInvalidEmitter;
 };
 
 // Edge-trigger bookkeeping for interactive farming and terraforming controls.

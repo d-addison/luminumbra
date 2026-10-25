@@ -904,7 +904,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "522c626dce80dc98e1f474bea381d9eaac93eb17979a2d5389e2d4358ca2ded6",
             "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
-            "public-tree": "f9f59910f6674d861330ee21b21acdf61043b00dfee998939f8c59564cdd58e2",
+            "public-tree": "d625a3d9f5d03c57814032ce196e253c17a52965209bdc08590e75547b4e6d24",
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertEqual(set(actual), set(expected) | {"fast-compile"})

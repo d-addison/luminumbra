@@ -174,7 +174,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertRegex(creation, r'std::string saved_preset_json = resolved.dump\(\);\s*'
                          r'if \(!transient\) \{')
         self.assertLess(creation.index("requiredPresetContentHash"),
-                        creation.index("fs::create_directories(worldPath)"))
+                        creation.index("fs::create_directories(worldPath.parent_path())"))
         self.assertLess(creation.index("LoadTerrainPresetFromJson(resolved"),
                         creation.index("ResetWorldSystems();"))
         self.assertIn("m_savedPresetJson = std::move(saved_preset_json);", creation)
@@ -453,12 +453,23 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertLess(entry.index("if (!horizon_ready)"), entry.index("g_camera ="))
         self.assertRegex(main, r'if \(!gameSession->GetWorldSystem\(\)->EnsureSurfaceReadyNear\('
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
-        loading = main.split('"CONSTRUCTING WORLD GEOMETRY..."', 1)[1].split(
-            '"World generation phase complete. Entering world."', 1)[0]
-        self.assertRegex(loading, r'if \(!gameSession->GetWorldSystem\(\)->'
-                         r'EnsureSurfaceReadyNear\([\s\S]*?\)\)\s*\{[\s\S]*'
+        horizon = main.split("auto prepare_entry_horizon =", 1)[1].split(
+            "auto drain_entry =", 1)[0]
+        self.assertRegex(horizon, r'return gameSession->GetWorldSystem\(\)->'
+                         r'EnsureSurfaceReadyNear\([^;]*,\s*'
+                         r'capture_horizon \? scenario_config.horizon_radius : 12,\s*'
+                         r'capture_horizon \? scenario_config.collision_radius : 4\);')
+        staged = main.split("case WorldEntryStage::PrepareHorizon:", 1)[1].split(
+            "case WorldEntryStage::Activate:", 1)[0]
+        self.assertRegex(staged, r'if \(!prepare_entry_horizon\(\)\)\s*\{\s*'
+                         r'refuse_world_entry\([^;]*;\s*return WorldEntryResult::Failed;')
+        loading = main.split("case GameState::WORLD_LOADING: {", 1)[1].split(
+            "case GameState::IN_GAME:", 1)[0]
+        self.assertRegex(loading, r'if \(!prepare_entry_horizon\(\)\)\s*\{[\s\S]*'
                          r'refuse_world_entry\([^;]*;\s*break;')
         self.assertIn('g_uiManager->RequestLoadDocument("main_menu.rml");', loading)
+        self.assertLess(loading.index("if (!prepare_entry_horizon())"),
+                        loading.index("activate_loaded_world();"))
         backdrop = main.split('CreateTransientWorld("Menu Vista"', 1)[1].split(
             "int exit_code = 0;", 1)[0]
         self.assertRegex(backdrop, r'if \(auto\* ws = gameSession->GetWorldSystem\(\);\s*'
@@ -571,7 +582,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             self.assertLess(adoption.index("m_speciesTable ="),
                             adoption.index("m_worldUsable = true;"))
         creation = self.function(source, "CreateWorldInternal")
-        metadata_failure = creation.split("if (!transient && !SaveWorld())", 1)[1]
+        metadata_failure = creation.split("if (!transient && !SaveWorldMetadataTo(GetWorldSaveDir(), artifacts))", 1)[1]
         self.assertLess(metadata_failure.index("m_worldUsable = false;"),
                         metadata_failure.index("return false;"))
         opening = self.function(source, "LoadWorld")
@@ -642,7 +653,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
     def test_normal_custom_validation_precedes_directory_and_uses_prepared_identity(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
         creation = self.function(source, "CreateWorldInternal")
-        directory = creation.index("fs::create_directories(worldPath)")
+        directory = creation.index("fs::create_directories(worldPath.parent_path())")
         for validation in ("nlohmann::json::parse(*customPresetJson)",
                            "ResolveEffectivePreset(resolved, presetUse)",
                            "LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath)",
