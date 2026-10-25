@@ -894,8 +894,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
             "gns-compile-probe": "7c0b1c6387113510ed76ffc66108cbf9efc3fa01617a68ca79b112fc3998a642",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
-            # Pin Python 3.14.8 across consumers and require partitioned local-check evidence.
-            "windows-msvc": "763218a207e024d39c82df14c933c89ac1d090342d7f4a794baa046a7a8d10f5",
+            # Pin Python 3.14.8, partitioned local-check evidence and shard-1-only Python contracts.
+            "windows-msvc": "506b17d834cf2a749c7bf46fd7fe0ad719e38f219e92e921697528f56680dd61",
             # Pin Python 3.14.8 and pass the selected runtime to UCRT64 configuration.
             "windows-ucrt64": "00890b97a7e49d22c50d046972b2f272fe0a63ca8ff90fb132f99fb410797eb1",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
