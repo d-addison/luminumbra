@@ -574,8 +574,9 @@ jobs:
             build/local-check-contracts/Testing/Temporary
           if-no-files-found: warn
           retention-days: 14
+      # One Windows shard is enough: the contracts do not depend on the shard's test partition.
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
+        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
@@ -1384,13 +1385,13 @@ jobs:
         run: |
           cmake -S . -B build/fast-gcc -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
-            -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           cmake --build build/fast-gcc --target glad --parallel 2
           cmake -S . -B build/fast-clang -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
-            -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build/fast-clang --target glad --parallel 2

@@ -894,8 +894,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
             "gns-compile-probe": "7c0b1c6387113510ed76ffc66108cbf9efc3fa01617a68ca79b112fc3998a642",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
-            # Pin the selected Python, partitioned local checks and render failure symbols.
-            "windows-msvc": "2c9e785e2009e5ce265b99b71b228a5cac520ddd52916c22ee7df1a22a260d31",
+            # Pin the selected Python, partitioned local checks, render failure symbols and shard-1-only Python contracts.
+            "windows-msvc": "aa65dcdc4203bc335faa2a194ac0f747c6a7a260d4701ccedb520fd1811b3254",
             # Pin the selected Python and retain render failure symbols in UCRT64.
             "windows-ucrt64": "02c521e9e8443706ed302472918034faaed34e9cd1f5bf34701fd3e8f71e4037",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
