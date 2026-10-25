@@ -518,11 +518,7 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     const Attribution::PhaseScope shader_phase(Attribution::Phase::ShaderLoad);
     // Load + compile the scatter compute shader. On any failure the pass keeps
     // m_gpu_scatter=false and the CPU rebuild loop is used (graceful fallback).
-    if (!Filesystem::capture_content_paths().allows(root_path / "res/shaders/grass_scatter.comp") ||
-        !Filesystem::capture_content_paths().allows(root_path /
-                                                    "res/shaders/grass_compact_prefix.comp"))
-        return;
-    std::ifstream in(root_path / "res/shaders/grass_scatter.comp");
+    Filesystem::ContentInput in(root_path / "res/shaders/grass_scatter.comp");
     if (!in) {
         LUMINUMBRA_CORE_WARN("FoliagePass: grass_scatter.comp not found; using CPU scatter.");
         return;
@@ -533,7 +529,7 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     if (m_compute_prog == 0) {
         return; // CPU fallback
     }
-    std::ifstream prefix_in(root_path / "res/shaders/grass_compact_prefix.comp");
+    Filesystem::ContentInput prefix_in(root_path / "res/shaders/grass_compact_prefix.comp");
     std::stringstream prefix_source;
     prefix_source << prefix_in.rdbuf();
     m_prefix_prog =
@@ -665,9 +661,7 @@ void FoliagePass::destroy_compute() {
 }
 
 bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
-    if (!Filesystem::capture_content_paths().allows(json_path))
-        return false;
-    std::ifstream in(json_path);
+    Filesystem::ContentInput in(json_path);
     if (!in) {
         LUMINUMBRA_CORE_WARN("FoliagePass: scatter set not found '{}'.", json_path.string());
         return false;

@@ -212,11 +212,7 @@ public:
             });
             std::size_t loaded = 0;
             for (const auto& [filename, file] : files) {
-                if (!Luminumbra::Filesystem::capture_content_paths().allows(file)) {
-                    fail("species file escapes inventoried trees");
-                    return 0;
-                }
-                std::ifstream in(file, std::ios::binary);
+                Luminumbra::Filesystem::ContentInput in(file, std::ios::binary);
                 if (!in) {
                     fail("cannot open species file: " + filename);
                     return 0;

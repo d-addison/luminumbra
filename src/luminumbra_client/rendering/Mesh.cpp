@@ -74,7 +74,8 @@ std::vector<std::filesystem::path> BuildMeshPathCandidates(const std::string& pa
     return candidates;
 }
 
-std::ifstream OpenMeshFile(const std::string& path, std::filesystem::path& resolvedPath) {
+Filesystem::ContentInput OpenMeshFile(const std::string& path,
+                                      std::filesystem::path& resolvedPath) {
     // Capture resolution never falls back to a different build/source data tree.
     if (Filesystem::capture_content_paths().active()) {
         const std::filesystem::path requested(path);
@@ -89,12 +90,10 @@ std::ifstream OpenMeshFile(const std::string& path, std::filesystem::path& resol
                 ? requested
                 : Filesystem::capture_content_paths().root() /
                       (rooted_content ? requested : std::filesystem::path("data") / requested);
-        if (!Filesystem::capture_content_paths().allows(resolvedPath))
-            return {};
-        return std::ifstream(resolvedPath, std::ios::binary);
+        return Filesystem::ContentInput(resolvedPath, std::ios::binary);
     }
     for (const auto& candidate : BuildMeshPathCandidates(path)) {
-        std::ifstream file(candidate, std::ios::binary);
+        Filesystem::ContentInput file(candidate, std::ios::binary);
         if (file) {
             resolvedPath = candidate;
             return file;
@@ -115,7 +114,7 @@ struct LMeshHeader {
 
 std::unique_ptr<Mesh> MeshLoader::Load(const std::string& path) {
     std::filesystem::path resolvedPath;
-    std::ifstream inFile = OpenMeshFile(path, resolvedPath);
+    Filesystem::ContentInput inFile = OpenMeshFile(path, resolvedPath);
     if (!inFile) {
         LUMINUMBRA_CORE_ERROR("Failed to open mesh file: {}", path);
         return nullptr;
@@ -142,7 +141,9 @@ std::unique_ptr<Mesh> MeshLoader::Load(const std::string& path) {
         static_cast<std::uintmax_t>(sizeof(LMeshHeader)) + vertexBytes + indexBytes;
 
     std::error_code fileSizeError;
-    const auto actualSize = std::filesystem::file_size(resolvedPath, fileSizeError);
+    const auto actualSize = Filesystem::capture_content_paths().active()
+                                ? inFile.verified_size()
+                                : std::filesystem::file_size(resolvedPath, fileSizeError);
     if (fileSizeError || actualSize != expectedSize) {
         LUMINUMBRA_CORE_ERROR("Mesh file size mismatch for: {}", resolvedPath.string());
         return nullptr;
@@ -242,7 +243,7 @@ std::unique_ptr<Mesh> MeshLoader::LoadSkinned(const std::string& path) {
     {
         // Reuse the candidate resolution the v1 loader uses, then hand the
         // resolved file to the shared LMS2 reader.
-        std::ifstream probe = OpenMeshFile(path, resolvedPath);
+        Filesystem::ContentInput probe = OpenMeshFile(path, resolvedPath);
         if (!probe) {
             LUMINUMBRA_CORE_ERROR("Failed to open skinned mesh file: {}", path);
             return nullptr;

@@ -52,9 +52,7 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
             return false;
         // Lazy init: both kernels + both 3D volumes, together.
         auto load_comp = [&](const char* rel) -> AttributedGl::Program {
-            if (!Filesystem::capture_content_paths().allows(std::filesystem::path(root_path) / rel))
-                return {};
-            std::ifstream file(std::filesystem::path(root_path) / rel);
+            Filesystem::ContentInput file(std::filesystem::path(root_path) / rel);
             if (!file) {
                 LUMINUMBRA_CORE_ERROR("froxel: missing {}", rel);
                 return {};

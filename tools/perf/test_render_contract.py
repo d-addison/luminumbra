@@ -97,6 +97,9 @@ class RenderContractTests(unittest.TestCase):
         self.assertNotIn('allows(sidecar)', gallery)
         self.assertIn('if (!Filesystem::capture_content_paths().allows(thumbs_dir))\n        return;', gallery)
         self.assertLess(gallery.index('allows(thumbs_dir)'), gallery.index('fs::directory_iterator'))
+        file_interface = (root / 'src/luminumbra_client/ui/Rml_Interfaces.cpp').read_text(encoding='utf-8')
+        self.assertIn('capture_content_paths().read_file(', file_interface)
+        self.assertIn('std::make_unique<std::istringstream>(std::move(bytes)', file_interface)
         self.assertIn('if (stars >= 4)', gallery)
 
     def test_valid_capture(self):

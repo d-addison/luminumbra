@@ -5331,9 +5331,7 @@ void RenderPipeline::register_static_model_textures() {
     // albedo/normal.ltex + an alpha-test flag (leaves). Render-only; absent file
     // is a graceful no-op (parts keep the flat fallback / terrain look).
     const std::filesystem::path manifest = m_root_path / "data/models/trees/tree_textures.json";
-    if (!Filesystem::capture_content_paths().allows(manifest))
-        return;
-    std::ifstream in(manifest);
+    Filesystem::ContentInput in(manifest);
     if (!in)
         return;
     try {
@@ -5376,9 +5374,7 @@ void RenderPipeline::load_material_texture_lut() {
     // material that omits the columns or for a missing file.
     m_material_texture_lut = MaterialTextureLut{};
     const std::filesystem::path path = m_root_path / "data/common/materials.json";
-    if (!Filesystem::capture_content_paths().allows(path))
-        return;
-    std::ifstream in(path);
+    Filesystem::ContentInput in(path);
     if (!in) {
         LUMINUMBRA_CORE_WARN(
             "Material texture LUT: materials.json not found at '{}', terrain stays untextured.",
@@ -5614,7 +5610,7 @@ constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
 
 template<typename T>
-bool ReadPod(std::ifstream& in, T& value) {
+bool ReadPod(std::istream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));
     return static_cast<bool>(in);
 }
@@ -5622,9 +5618,7 @@ bool ReadPod(std::ifstream& in, T& value) {
 } // namespace
 
 bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) {
-    if (!Filesystem::capture_content_paths().allows(path))
-        return false;
-    std::ifstream in(path, std::ios::binary);
+    Filesystem::ContentInput in(path, std::ios::binary);
     if (!in) {
         LUMINUMBRA_CORE_ERROR("Texture residency: could not open.ltex '{}'", path.string());
         return false;
@@ -5672,7 +5666,9 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, Ltex
     }
 
     std::error_code size_error;
-    const auto file_bytes = std::filesystem::file_size(path, size_error);
+    const auto file_bytes = Filesystem::capture_content_paths().active()
+                                ? in.verified_size()
+                                : std::filesystem::file_size(path, size_error);
     constexpr size_t kHeaderBytes = 17;
     if (size_error || total_bytes > 256u * 1024u * 1024u ||
         file_bytes != kHeaderBytes + total_bytes) {

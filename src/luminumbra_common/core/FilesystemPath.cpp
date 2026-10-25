@@ -5,16 +5,18 @@
 #include <atomic>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include <algorithm>
 #include <array>
-#include <limits>
-#include <utility>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -23,6 +25,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace Luminumbra::Filesystem {
@@ -417,6 +424,336 @@ bool CaptureContentPaths::allows_resolved(const std::filesystem::path& path,
     }
     refused_.store(true, std::memory_order_relaxed);
     return false;
+}
+
+void CaptureContentPaths::refuse() const {
+    if (active_)
+        refused_.store(true, std::memory_order_relaxed);
+}
+
+struct VerifiedFileInput::State {
+    explicit State(const std::filesystem::path& path, Kind kind = Kind::File) {
+        // Match the extended Windows path bound on both platforms; this also
+        // bounds the POSIX component walk used to verify the checked resolution.
+        if (path.native().size() > 32767)
+            throw std::runtime_error("workload path exceeds bounds");
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        handle_ = CreateFileW(path.c_str(),
+                              GENERIC_READ,
+                              FILE_SHARE_READ,
+                              nullptr,
+                              OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                              nullptr);
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (handle_ == INVALID_HANDLE_VALUE || GetFileType(handle_) != FILE_TYPE_DISK ||
+            !GetFileInformationByHandle(handle_, &info) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) !=
+                (kind == Kind::Directory)) {
+            close();
+            throw std::runtime_error("unsupported workload save file");
+        }
+        // Resolve the owning handle, including intermediate junctions and 8.3
+        // aliases. The fixed buffer includes the extended-path terminator.
+        std::array<wchar_t, 32768> buffer{};
+        const DWORD length = GetFinalPathNameByHandleW(
+            handle_, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED);
+        if (length == 0 || length >= buffer.size()) {
+            close();
+            throw std::runtime_error("cannot resolve opened workload path");
+        }
+        try {
+            std::wstring resolved(buffer.data(), length);
+            if (resolved.starts_with(LR"(\\?\UNC\)"))
+                resolved = LR"(\\)" + resolved.substr(8);
+            else if (resolved.starts_with(LR"(\\?\)"))
+                resolved.erase(0, 4);
+            resolved_ = std::filesystem::path(std::move(resolved));
+        } catch (...) {
+            close();
+            throw;
+        }
+        size_ = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+#else
+        resolved_ = std::filesystem::canonical(path);
+        if (resolved_.native().size() > 32767)
+            throw std::runtime_error("workload path exceeds bounds");
+        handle_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+        struct stat info {};
+        if (handle_ < 0 || ::fstat(handle_, &info) != 0 ||
+            (kind == Kind::Directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode)) ||
+            info.st_size < 0) {
+            close();
+            throw std::runtime_error("unsupported workload save file");
+        }
+        // A no-follow leaf alone does not cover replaced parent symlinks.
+        // Independently anchor every component of the checked canonical path,
+        // then compare that descriptor's device/inode with the reader's handle.
+        int checked = -1;
+        try {
+            checked = open_resolved(resolved_);
+        } catch (...) {
+            close();
+            throw;
+        }
+        struct stat expected {};
+        const bool matches = checked >= 0 && ::fstat(checked, &expected) == 0 &&
+                             expected.st_dev == info.st_dev && expected.st_ino == info.st_ino;
+        if (checked >= 0)
+            ::close(checked);
+        if (!matches) {
+            close();
+            throw std::runtime_error("opened workload path changed resolution");
+        }
+        size_ = static_cast<std::uint64_t>(info.st_size);
+#endif
+    }
+    ~State() {
+        close();
+    }
+    // This spelling is bound to the opened object, never a fresh path lookup.
+    const std::filesystem::path& resolved_path() const {
+        return resolved_;
+    }
+    std::uint64_t size() const {
+        return size_;
+    }
+    std::size_t read(std::array<char, 65536>& buffer) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        DWORD count = 0;
+        if (!ReadFile(handle_, buffer.data(), static_cast<DWORD>(buffer.size()), &count, nullptr))
+            throw std::runtime_error("cannot read workload save");
+        return count;
+#else
+        ssize_t count = 0;
+        do {
+            count = ::read(handle_, buffer.data(), buffer.size());
+        } while (count < 0 && errno == EINTR);
+        if (count < 0)
+            throw std::runtime_error("cannot read workload save");
+        return static_cast<std::size_t>(count);
+#endif
+    }
+
+#if !defined(_WIN32) || defined(__CYGWIN__)
+    static int open_resolved(const std::filesystem::path& path) {
+        // Search-only descriptors avoid requiring directory read permission.
+#if defined(O_PATH)
+        constexpr int access = O_PATH;
+#elif defined(O_SEARCH)
+        constexpr int access = O_SEARCH;
+#else
+        constexpr int access = O_RDONLY;
+#endif
+        constexpr int directory_flags = access | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+        int parent = ::open(path.root_path().c_str(), directory_flags);
+        if (parent < 0)
+            return -1;
+        try {
+            const auto relative = path.relative_path();
+            for (auto component = relative.begin(); component != relative.end(); ++component) {
+                auto next = component;
+                ++next;
+                const int flags = next == relative.end()
+                                      ? O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                                      : directory_flags;
+                const int child = ::openat(parent, component->c_str(), flags);
+                ::close(parent);
+                parent = child;
+                if (parent < 0)
+                    return -1;
+            }
+        } catch (...) {
+            ::close(parent);
+            throw;
+        }
+        return parent;
+    }
+#endif
+    void close() {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        if (handle_ != INVALID_HANDLE_VALUE)
+            CloseHandle(handle_);
+        handle_ = INVALID_HANDLE_VALUE;
+#else
+        if (handle_ >= 0)
+            ::close(handle_);
+        handle_ = -1;
+#endif
+    }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+    int handle_ = -1;
+#endif
+    std::uint64_t size_ = 0;
+    std::filesystem::path resolved_;
+};
+
+VerifiedFileInput::VerifiedFileInput(const std::filesystem::path& path,
+                                     Kind kind,
+                                     const CaptureContentPaths* policy) {
+    try {
+        state_ = std::make_unique<State>(path, kind);
+        if (policy &&
+            !policy->allows_resolved(path, state_->resolved_path(), kind == Kind::Directory))
+            throw std::runtime_error("capture content reference escapes inventoried trees");
+    } catch (...) {
+        if (policy)
+            policy->refuse();
+        throw;
+    }
+}
+VerifiedFileInput::~VerifiedFileInput() = default;
+const std::filesystem::path& VerifiedFileInput::resolved_path() const {
+    return state_->resolved_path();
+}
+std::uint64_t VerifiedFileInput::size() const {
+    return state_->size();
+}
+std::size_t VerifiedFileInput::read(std::array<char, 65536>& buffer) {
+    return state_->read(buffer);
+}
+bool VerifiedFileInput::seek(std::uint64_t offset) {
+    if (offset > size())
+        return false;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    LARGE_INTEGER distance{};
+    distance.QuadPart = static_cast<LONGLONG>(offset);
+    return SetFilePointerEx(state_->handle_, distance, nullptr, FILE_BEGIN) != 0;
+#else
+    return ::lseek(state_->handle_, static_cast<off_t>(offset), SEEK_SET) >= 0;
+#endif
+}
+
+bool CaptureContentPaths::read_file(const std::filesystem::path& path,
+                                    std::string& bytes,
+                                    std::size_t max_bytes) const {
+    try {
+        VerifiedFileInput input(path, VerifiedFileInput::Kind::File, this);
+        std::string candidate;
+        if (input.size() > max_bytes || input.size() > candidate.max_size())
+            throw std::runtime_error("capture content exceeds byte budget");
+        // Allocation and total copied bytes are bounded by the owning size,
+        // the caller's byte budget and string::max_size, checked before reserve.
+        candidate.reserve(static_cast<std::size_t>(input.size()));
+        std::array<char, 65536> buffer{}; // At most 64 KiB per handle read.
+        for (;;) {
+            const auto count = input.read(buffer);
+            if (count == 0)
+                break;
+            if (count > input.size() - candidate.size())
+                throw std::runtime_error("capture content grew while reading");
+            candidate.append(buffer.data(), count);
+        }
+        if (candidate.size() != input.size())
+            throw std::runtime_error("capture content truncated while reading");
+        bytes.swap(candidate);
+        return true;
+    } catch (...) {
+        refuse();
+        return false;
+    }
+}
+
+namespace {
+class VerifiedContentBuffer : public std::streambuf {
+public:
+    explicit VerifiedContentBuffer(const std::filesystem::path& path)
+        : input_(path, VerifiedFileInput::Kind::File, &capture_content_paths()) {}
+    std::uint64_t size() const {
+        return input_.size();
+    }
+
+protected:
+    int_type underflow() override {
+        try {
+            const auto count = input_.read(buffer_);
+            if (count > input_.size() - consumed_ || (count == 0 && consumed_ != input_.size()))
+                throw std::runtime_error("capture content changed while reading");
+            consumed_ += count;
+            setg(buffer_.data(), buffer_.data(), buffer_.data() + count);
+            return count == 0 ? traits_type::eof() : traits_type::to_int_type(*gptr());
+        } catch (...) {
+            capture_content_paths().refuse();
+            throw;
+        }
+    }
+    pos_type seekoff(off_type offset, std::ios::seekdir origin, std::ios::openmode mode) override {
+        if ((mode & std::ios::in) == 0)
+            return pos_type(off_type(-1));
+        const auto buffered = gptr() ? static_cast<std::uint64_t>(egptr() - gptr()) : 0;
+        const auto base = origin == std::ios::beg   ? 0
+                          : origin == std::ios::cur ? consumed_ - buffered
+                                                    : input_.size();
+        // Avoid negating the minimum signed offset or overflowing addition.
+        const auto distance = offset < 0 ? static_cast<std::uint64_t>(-(offset + 1)) + 1
+                                         : static_cast<std::uint64_t>(offset);
+        if ((offset < 0 && distance > base) || (offset >= 0 && distance > input_.size() - base))
+            return pos_type(off_type(-1));
+        const auto target = offset < 0 ? base - distance : base + distance;
+        if (target > static_cast<std::uint64_t>(std::numeric_limits<off_type>::max()) ||
+            !input_.seek(target))
+            return pos_type(off_type(-1));
+        consumed_ = target;
+        setg(nullptr, nullptr, nullptr);
+        return pos_type(static_cast<off_type>(target));
+    }
+    pos_type seekpos(pos_type position, std::ios::openmode mode) override {
+        return seekoff(static_cast<off_type>(position), std::ios::beg, mode);
+    }
+
+private:
+    VerifiedFileInput input_;
+    std::uint64_t consumed_ = 0;
+    std::array<char, 65536> buffer_{}; // Fixed 64 KiB; independent of asset size.
+};
+} // namespace
+
+struct ContentInput::State {
+    std::ifstream ordinary;
+    std::unique_ptr<VerifiedContentBuffer> verified;
+    std::streambuf* buffer() {
+        if (verified)
+            return verified.get();
+        return ordinary.rdbuf();
+    }
+};
+ContentInput::ContentInput()
+    : std::istream(nullptr) {}
+ContentInput::ContentInput(const std::filesystem::path& path, std::ios::openmode mode)
+    : std::istream(nullptr)
+    , state_(std::make_unique<State>()) {
+    if (!capture_content_paths().active()) {
+        state_->ordinary.open(path, mode);
+        rdbuf(state_->ordinary.rdbuf());
+        clear(state_->ordinary.rdstate());
+        return;
+    }
+    try {
+        state_->verified = std::make_unique<VerifiedContentBuffer>(path);
+        rdbuf(state_->verified.get());
+        if ((mode & std::ios::ate) != 0)
+            seekg(0, std::ios::end);
+    } catch (...) {
+        capture_content_paths().refuse();
+        setstate(std::ios::failbit);
+    }
+}
+ContentInput::ContentInput(ContentInput&& other) noexcept
+    : ContentInput() {
+    std::istream::swap(other);
+    state_.swap(other.state_);
+    set_rdbuf(state_ ? state_->buffer() : nullptr);
+    other.set_rdbuf(nullptr);
+}
+ContentInput::~ContentInput() = default;
+bool ContentInput::is_open() const {
+    return state_ && (state_->verified || state_->ordinary.is_open());
+}
+std::uint64_t ContentInput::verified_size() const {
+    return state_ && state_->verified ? state_->verified->size() : 0;
 }
 
 bool CaptureContentPaths::within(const std::filesystem::path& path,

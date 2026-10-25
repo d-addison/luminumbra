@@ -5,12 +5,99 @@
 #include "core/Log.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <random>
 
 namespace Luminumbra::Client {
 namespace {
+// Capture's VFS owns encoded bytes read through the common verified handle.
+// Streaming decoders retain this memory file until onClose; later jobs and
+// resource-manager cache hits never reopen a previously checked source path.
+struct CaptureAudioFile {
+    std::string bytes;
+    std::size_t position = 0;
+};
+template<typename Character>
+ma_result OpenCaptureAudio(const Character* path, ma_uint32 mode, ma_vfs_file* file) {
+    *file = nullptr;
+    if (mode != MA_OPEN_MODE_READ)
+        return MA_ACCESS_DENIED;
+    try {
+        auto input = std::make_unique<CaptureAudioFile>();
+        if (!Filesystem::capture_content_paths().read_file(
+                std::filesystem::path(path),
+                input->bytes,
+                static_cast<std::size_t>(std::numeric_limits<ma_int64>::max())))
+            return MA_IO_ERROR;
+        *file = input.release();
+        return MA_SUCCESS;
+    } catch (...) {
+        Filesystem::capture_content_paths().refuse();
+        return MA_IO_ERROR;
+    }
+}
+ma_vfs_callbacks CaptureAudioCallbacks() {
+    return {.onOpen =
+                [](ma_vfs*, const char* path, ma_uint32 mode, ma_vfs_file* file) {
+                    return OpenCaptureAudio(path, mode, file);
+                },
+            .onOpenW =
+                [](ma_vfs*, const wchar_t* path, ma_uint32 mode, ma_vfs_file* file) {
+                    return OpenCaptureAudio(path, mode, file);
+                },
+            .onClose =
+                [](ma_vfs*, ma_vfs_file file) {
+                    delete static_cast<CaptureAudioFile*>(file);
+                    return MA_SUCCESS;
+                },
+            .onRead =
+                [](ma_vfs*, ma_vfs_file file, void* output, std::size_t size, std::size_t* count) {
+                    auto& input = *static_cast<CaptureAudioFile*>(file);
+                    const auto available = std::min(size, input.bytes.size() - input.position);
+                    if (available != 0)
+                        std::memcpy(output, input.bytes.data() + input.position, available);
+                    input.position += available;
+                    *count = available;
+                    return available == 0 && size != 0 ? MA_AT_END : MA_SUCCESS;
+                },
+            .onWrite =
+                [](ma_vfs*, ma_vfs_file, const void*, std::size_t, std::size_t* count) {
+                    *count = 0;
+                    return MA_ACCESS_DENIED;
+                },
+            .onSeek =
+                [](ma_vfs*, ma_vfs_file file, ma_int64 offset, ma_seek_origin origin) {
+                    auto& input = *static_cast<CaptureAudioFile*>(file);
+                    if (origin != ma_seek_origin_start && origin != ma_seek_origin_current &&
+                        origin != ma_seek_origin_end)
+                        return MA_BAD_SEEK;
+                    const auto base = origin == ma_seek_origin_start     ? 0
+                                      : origin == ma_seek_origin_current ? input.position
+                                                                         : input.bytes.size();
+                    const auto distance = offset < 0 ? static_cast<ma_uint64>(-(offset + 1)) + 1
+                                                     : static_cast<ma_uint64>(offset);
+                    if ((offset < 0 && distance > base) ||
+                        (offset >= 0 && distance > input.bytes.size() - base))
+                        return MA_BAD_SEEK;
+                    input.position = offset < 0 ? base - static_cast<std::size_t>(distance)
+                                                : base + static_cast<std::size_t>(distance);
+                    return MA_SUCCESS;
+                },
+            .onTell =
+                [](ma_vfs*, ma_vfs_file file, ma_int64* cursor) {
+                    *cursor = static_cast<ma_int64>(static_cast<CaptureAudioFile*>(file)->position);
+                    return MA_SUCCESS;
+                },
+            .onInfo =
+                [](ma_vfs*, ma_vfs_file file, ma_file_info* info) {
+                    info->sizeInBytes = static_cast<CaptureAudioFile*>(file)->bytes.size();
+                    return MA_SUCCESS;
+                }};
+}
+
 ma_result InitSoundFromFile(ma_engine* engine,
                             const char* path,
                             ma_uint32 flags,
@@ -62,7 +149,13 @@ bool MiniaudioManager::Init() {
 
 bool MiniaudioManager::Init(EngineInitializer initialize_engine) {
     m_engine = std::make_unique<ma_engine>();
-    ma_result result = initialize_engine(nullptr, m_engine.get());
+    ma_engine_config capture_config = ma_engine_config_init();
+    const bool capture = Filesystem::capture_content_paths().active();
+    if (capture) {
+        m_captureVfs = CaptureAudioCallbacks();
+        capture_config.pResourceManagerVFS = &m_captureVfs;
+    }
+    ma_result result = initialize_engine(capture ? &capture_config : nullptr, m_engine.get());
     if (result != MA_SUCCESS) {
         LUMINUMBRA_CORE_ERROR("Failed to initialize miniaudio engine.");
         m_engine = nullptr;
@@ -285,9 +378,7 @@ void MiniaudioManager::Shutdown() {
 
 bool MiniaudioManager::LoadBank(const std::string& bankPath) {
     const std::string full_path = m_rootPath + bankPath;
-    if (!Filesystem::capture_content_paths().allows(full_path))
-        return false;
-    std::ifstream f(full_path);
+    Filesystem::ContentInput f(full_path);
     if (!f.is_open()) {
         LUMINUMBRA_CORE_ERROR("Failed to open sound bank: " + full_path);
         return false;
@@ -301,14 +392,28 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
         return false;
     }
 
+    // Refuse every capture reference before installing any event definitions.
+    // Playback still verifies its own VFS open; discovery never authorizes it.
+    if (Filesystem::capture_content_paths().active()) {
+        try {
+            for (const auto& event : bank_json["events"])
+                for (const auto& file : event.at("files")) {
+                    const Filesystem::VerifiedFileInput input(
+                        m_rootPath + file.get<std::string>(),
+                        Filesystem::VerifiedFileInput::Kind::File,
+                        &Filesystem::capture_content_paths());
+                }
+        } catch (...) {
+            Filesystem::capture_content_paths().refuse();
+            return false;
+        }
+    }
+
     bool is_streaming = bank_json.value("streaming", false);
 
     for (auto& [event_id, event_def_json] : bank_json["events"].items()) {
         AudioEventDefinition def;
         def.files = event_def_json["files"].get<std::vector<std::string>>();
-        for (const auto& file : def.files)
-            if (!Filesystem::capture_content_paths().allows(m_rootPath + file))
-                return false;
         def.volume = event_def_json.value("volume", 1.0f);
         def.pitch_variation = event_def_json.value("pitch_variation", 0.0f);
         def.is_2d = event_def_json.value("is_2d", false);
@@ -358,8 +463,6 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel_path;
-    if (!Filesystem::capture_content_paths().allows(full_path))
-        return false;
 
     uint32_t flags = MA_SOUND_FLAG_DECODE;
     if (def->is_2d)
@@ -431,8 +534,6 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel;
-    if (!Filesystem::capture_content_paths().allows(full_path))
-        return false;
 
     // routed as a MANAGED one-shot instead of the old
     // ma_engine_play_sound fire-and-forget so (a) the voice attaches to its bus
@@ -469,8 +570,6 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID,
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel_path;
-    if (!Filesystem::capture_content_paths().allows(full_path))
-        return false;
 
     auto sound = std::make_unique<ma_sound>();
     uint32_t flags = MA_SOUND_FLAG_DECODE;
@@ -527,8 +626,6 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
     }
 
     const std::string full_path = m_rootPath + def->files[0];
-    if (!Filesystem::capture_content_paths().allows(full_path))
-        return;
 
     uint32_t flags = MA_SOUND_FLAG_STREAM;
     if (def->is_2d) {
@@ -752,8 +849,6 @@ void MiniaudioManager::SetWindParameters(const glm::vec3& direction, float stren
     if (strength > 0.0f && !m_windSound && m_engine) {
         // You would need a wind sound file
         const std::string windPath = m_rootPath + "assets/audio/sfx/weather/wind_loop.ogg";
-        if (!Filesystem::capture_content_paths().allows(windPath))
-            return;
         m_windSound = std::make_unique<ma_sound>();
 
         // The wind bed is a looping ambience: route through the ambient bus.
@@ -864,8 +959,6 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID,
 
     auto sound = std::make_unique<ma_sound>();
     const std::string full_path = m_rootPath + def->files[0];
-    if (!Filesystem::capture_content_paths().allows(full_path))
-        return;
 
     // Decode the (short) loop fully into memory instead of streaming: ogg streaming can fail
     // silently, and a pre-decoded buffer loops seamlessly. Log failure so a missing/!decodable

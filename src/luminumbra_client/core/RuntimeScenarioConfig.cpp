@@ -314,10 +314,8 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
         GetCommandLineOption(argc, argv, "--skinned-albedo-texture", "");
     config.skinned_normal_texture =
         GetCommandLineOption(argc, argv, "--skinned-normal-texture", "");
-    if (config.skinned_albedo_texture.empty() && !config.creature_archetype.empty() &&
-        Luminumbra::Filesystem::capture_content_paths().allows(root_dir /
-                                                               config.creature_archetype)) {
-        std::ifstream archetype_in(root_dir / config.creature_archetype);
+    if (config.skinned_albedo_texture.empty() && !config.creature_archetype.empty()) {
+        Luminumbra::Filesystem::ContentInput archetype_in(root_dir / config.creature_archetype);
         if (archetype_in.is_open()) {
             try {
                 nlohmann::json archetype;

@@ -177,9 +177,7 @@ inline bool ValidateAnimTrack(const AnimTrack& track, float duration) {
 }
 
 inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out) {
-    if (!Luminumbra::Filesystem::capture_content_paths().allows(path))
-        return false;
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    Luminumbra::Filesystem::ContentInput in(path, std::ios::binary | std::ios::ate);
     if (!in)
         return false;
     const auto size = in.tellg();
@@ -264,9 +262,7 @@ inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out)
 }
 
 inline bool LoadAnimClipAsset(const std::string& path, AnimClipAsset& out) {
-    if (!Luminumbra::Filesystem::capture_content_paths().allows(path))
-        return false;
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    Luminumbra::Filesystem::ContentInput in(path, std::ios::binary | std::ios::ate);
     if (!in)
         return false;
     const auto size = in.tellg();

@@ -73,10 +73,7 @@ bool LuminanceMeterPass::execute(const RenderContext& ctx, const std::filesystem
     if (m_reduce_program == 0) {
         const Client::Attribution::PhaseScope shader_phase(Client::Attribution::Phase::ShaderLoad);
         // Lazy init: compile the reduce kernel + the 1-float SSBO on first use.
-        if (!Filesystem::capture_content_paths().allows(root_path /
-                                                        "res/shaders/luminance_reduce.comp"))
-            return false;
-        std::ifstream file(root_path / "res/shaders/luminance_reduce.comp");
+        Filesystem::ContentInput file(root_path / "res/shaders/luminance_reduce.comp");
         if (!file) {
             LUMINUMBRA_CORE_ERROR("luminance_meter: missing res/shaders/luminance_reduce.comp");
             return false;

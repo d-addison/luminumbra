@@ -200,9 +200,7 @@ uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path,
                              json_path.string());
         return kInvalidEmitter;
     }
-    if (!Filesystem::capture_content_paths().allows(json_path))
-        return kInvalidEmitter;
-    std::ifstream in(json_path);
+    Filesystem::ContentInput in(json_path);
     if (!in) {
         LUMINUMBRA_CORE_WARN("ParticlePass: emitter file not found '{}'.", json_path.string());
         return kInvalidEmitter;

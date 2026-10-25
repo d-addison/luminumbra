@@ -1177,6 +1177,8 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     const fs::path thumbs_dir = m_galleryCaptureDir.empty()
                                     ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
                                     : m_galleryCaptureDir;
+    // Enumeration supplies names only; RmlFileInterface verifies each image's
+    // owning read handle even if this directory is replaced after discovery.
     if (!Filesystem::capture_content_paths().allows(thumbs_dir))
         return;
     if (fs::exists(thumbs_dir, ec)) {

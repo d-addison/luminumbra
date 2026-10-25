@@ -31,12 +31,7 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
         return false;
     }
 
-    if (!Filesystem::capture_content_paths().allows(normalized)) {
-        diagnostic = "capture content reference escapes inventoried trees";
-        include_stack.erase(key);
-        return false;
-    }
-    std::ifstream input(normalized, std::ios::binary);
+    Filesystem::ContentInput input(normalized, std::ios::binary);
     if (!input) {
         diagnostic = "cannot open shader source: " + key;
         include_stack.erase(key);

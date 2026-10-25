@@ -82,15 +82,13 @@ std::filesystem::path CheckedPath(const std::filesystem::path& root, const std::
             throw std::runtime_error(
                 "Game asset path traverses a symbolic link or reparse point: " + result.string());
     }
-    if (!Luminumbra::Filesystem::capture_content_paths().allows(result))
-        throw std::runtime_error("Capture asset reference escapes inventoried trees");
     return result;
 }
 
 } // namespace
 
 std::string AssetFileSha256(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    Luminumbra::Filesystem::ContentInput input(path, std::ios::binary);
     if (!input)
         throw std::runtime_error("Could not read required asset: " + path.string());
     std::array<std::uint32_t, 8> state = {0x6a09e667,
@@ -139,7 +137,7 @@ std::string VerifyGameAssets(const std::filesystem::path& root) {
         const auto manifestPath = root / "config/game-asset-packs.json";
         if (std::filesystem::file_size(manifestPath) > 1024u * 1024u)
             throw std::runtime_error("Game asset manifest exceeds 1 MiB");
-        std::ifstream stream(manifestPath);
+        Luminumbra::Filesystem::ContentInput stream(manifestPath);
         const auto manifest = nlohmann::json::parse(stream);
         const auto& pack = manifest.at("packs").at("tree-small-02-runtime");
         if (manifest.at("schema") != "luminumbra.game.asset-packs.v1" ||

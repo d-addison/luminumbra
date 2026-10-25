@@ -76,8 +76,15 @@ std::filesystem::path Child(const std::filesystem::path& parent, const std::stri
 }
 
 std::vector<std::uint8_t> Read(const std::filesystem::path& path, std::size_t limit) {
-    Require(Filesystem::capture_content_paths().allows(path),
-            "Capture prefab reference escapes inventoried trees");
+    // Capture obtains type, size and bytes from one owner; ordinary loading
+    // retains its existing filesystem checks and stream.
+    if (Filesystem::capture_content_paths().active()) {
+        std::string owned;
+        Require(Filesystem::capture_content_paths().read_file(path, owned, limit),
+                "Cannot read verified prefab member");
+        Require(!owned.empty(), "Prefab member exceeds its byte budget");
+        return {owned.begin(), owned.end()};
+    }
     Require(std::filesystem::is_regular_file(path), "Missing regular prefab member");
     const auto size = std::filesystem::file_size(path);
     Require(size > 0 && size <= limit, "Prefab member exceeds its byte budget");

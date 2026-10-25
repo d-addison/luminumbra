@@ -15,6 +15,7 @@
 #include "audio/MiniaudioManager.h"
 #include "core/Log.h"
 #include "luminumbra_common/components/audio/AudioTypes.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 
 #include <spdlog/sinks/base_sink.h>
 
@@ -28,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -259,4 +261,117 @@ TEST(AudioPhysicsBinding, FailedFileLoadsReleaseAllocationsAndLeaveNoWindNode) {
     }
     Log::GetCoreLogger() = previous;
     EXPECT_EQ(AudioAllocations().load(), 0u);
+}
+
+// CTest discovers this case in its own process: the capture policy is configured
+// once, before the initializer receives miniaudio's public VFS interface.
+TEST(CaptureAudioInput, DeferredReadersOwnVerifiedBytes) {
+    namespace fs = std::filesystem;
+    namespace paths = Luminumbra::Filesystem;
+    const Luminumbra::TestSupport::ScopedTempFile temp("audio-content-", ".tmp");
+    const auto root = temp.Path().parent_path();
+    for (const auto* tree : paths::kCaptureContentTrees)
+        fs::create_directories(root / tree);
+    const auto payload = root / "data/payload";
+    std::ofstream(payload, std::ios::binary) << "verified\r\n";
+    std::ofstream(root / "outside", std::ios::binary) << "private bytes";
+    paths::capture_content_paths().enable(root);
+    const auto previous = Log::GetCoreLogger();
+    Log::GetCoreLogger() =
+        std::make_shared<spdlog::logger>("AUDIO_INPUT_PROBE", std::make_shared<CountingSink>());
+    Luminumbra::Client::MiniaudioManager manager(paths::GenericPathString(root) + '/');
+    const bool initialized = manager.Init([](const ma_engine_config* config, ma_engine*) {
+        if (!config || !config->pResourceManagerVFS) {
+            ADD_FAILURE() << "Capture must supply an owning byte VFS";
+            return MA_NO_DEVICE;
+        }
+        auto* vfs = config->pResourceManagerVFS;
+        const auto path = paths::capture_content_paths().root() / "data/payload";
+        ma_vfs_file file = nullptr;
+        const auto narrow = path.string();
+        EXPECT_EQ(ma_vfs_open(vfs, narrow.c_str(), MA_OPEN_MODE_READ, &file), MA_SUCCESS);
+        if (!file)
+            return MA_NO_DEVICE;
+        // No source handle remains open: replacing source bytes is legal on
+        // Windows too, and delayed decoder reads must still see the owned copy.
+        std::ofstream(path, std::ios::binary | std::ios::trunc) << "replaced";
+        std::array<char, 32> bytes{};
+        std::size_t count = 0;
+        EXPECT_EQ(ma_vfs_read(vfs, file, bytes.data(), bytes.size(), &count), MA_SUCCESS);
+        EXPECT_EQ(std::string(bytes.data(), count), "verified\r\n");
+        EXPECT_EQ(ma_vfs_read(vfs, file, bytes.data(), bytes.size(), &count), MA_AT_END);
+        EXPECT_EQ(count, 0u);
+        EXPECT_EQ(ma_vfs_read(vfs, file, bytes.data(), 0, &count), MA_SUCCESS);
+        ma_file_info info{};
+        EXPECT_EQ(ma_vfs_info(vfs, file, &info), MA_SUCCESS);
+        EXPECT_EQ(info.sizeInBytes, 10u);
+        EXPECT_EQ(ma_vfs_seek(vfs, file, -2, ma_seek_origin_end), MA_SUCCESS);
+        ma_int64 cursor = 0;
+        EXPECT_EQ(ma_vfs_tell(vfs, file, &cursor), MA_SUCCESS);
+        EXPECT_EQ(cursor, 8);
+        EXPECT_EQ(ma_vfs_seek(vfs, file, -8, ma_seek_origin_current), MA_SUCCESS);
+        EXPECT_EQ(ma_vfs_seek(vfs, file, 11, ma_seek_origin_start), MA_BAD_SEEK);
+        EXPECT_EQ(
+            ma_vfs_seek(vfs, file, std::numeric_limits<ma_int64>::min(), ma_seek_origin_current),
+            MA_BAD_SEEK);
+        EXPECT_EQ(ma_vfs_seek(vfs, file, 0, static_cast<ma_seek_origin>(3)), MA_BAD_SEEK);
+        EXPECT_EQ(ma_vfs_tell(vfs, file, &cursor), MA_SUCCESS);
+        EXPECT_EQ(cursor, 0);
+        EXPECT_EQ(ma_vfs_write(vfs, file, bytes.data(), 1, &count), MA_ACCESS_DENIED);
+        EXPECT_EQ(count, 0u);
+        EXPECT_EQ(ma_vfs_close(vfs, file), MA_SUCCESS);
+        const auto wide = path.wstring();
+        EXPECT_EQ(ma_vfs_open_w(vfs, wide.c_str(), MA_OPEN_MODE_READ, &file), MA_SUCCESS);
+        if (file)
+            EXPECT_EQ(ma_vfs_close(vfs, file), MA_SUCCESS);
+        EXPECT_EQ(ma_vfs_open(vfs, narrow.c_str(), MA_OPEN_MODE_WRITE, &file), MA_ACCESS_DENIED);
+        EXPECT_EQ(file, nullptr);
+        for (const auto* relative : {"outside", "data/missing", "data"}) {
+            const auto refused = (paths::capture_content_paths().root() / relative).string();
+            EXPECT_EQ(ma_vfs_open(vfs, refused.c_str(), MA_OPEN_MODE_READ, &file), MA_IO_ERROR);
+            EXPECT_EQ(file, nullptr);
+        }
+        EXPECT_TRUE(paths::capture_content_paths().refused());
+        return MA_NO_DEVICE;
+    });
+    EXPECT_FALSE(initialized);
+    manager.Shutdown();
+    {
+        // Two mono PCM16 samples; the existing decoder accepts this 48-byte file.
+        constexpr std::array<unsigned char, 48> wave = {
+            'R', 'I', 'F', 'F', 40,  0,   0,   0,   'W',  'A',  'V', 'E', 'f', 'm',  't', ' ',
+            16,  0,   0,   0,   1,   0,   1,   0,   0x80, 0xbb, 0,   0,   0,   0x77, 1,   0,
+            2,   0,   16,  0,   'd', 'a', 't', 'a', 4,    0,    0,   0,   0,   0,    0,   0};
+        std::ofstream output(root / "data/valid.wav", std::ios::binary);
+        output.write(reinterpret_cast<const char*>(wave.data()),
+                     static_cast<std::streamsize>(wave.size()));
+        EXPECT_TRUE(output.good());
+    }
+    std::ofstream(root / "data/initial.bank.json")
+        << R"({"events":{"retained":{"files":["data/valid.wav"]}}})";
+    std::ofstream(root / "data/refused.bank.json")
+        << R"({"events":{"a-new":{"files":["data/valid.wav"]},"retained":{"files":["data/missing.wav"]}}})";
+    std::ofstream(root / "data/malformed.bank.json") << R"({"events":{"retained":{}}})";
+    std::ofstream(root / "data/invalid.bank.json") << R"({"events":{"retained":{"files":[42]}}})";
+    const bool silent_initialized =
+        manager.Init([](const ma_engine_config* capture, ma_engine* engine) {
+            if (!capture || !capture->pResourceManagerVFS)
+                return MA_INVALID_ARGS;
+            auto config = *capture;
+            config.noDevice = MA_TRUE;
+            config.channels = 2;
+            config.sampleRate = 48000;
+            return ma_engine_init(&config, engine);
+        });
+    EXPECT_TRUE(silent_initialized);
+    if (silent_initialized) {
+        EXPECT_TRUE(manager.LoadBank("data/initial.bank.json"));
+        EXPECT_FALSE(manager.LoadBank("data/refused.bank.json"));
+        EXPECT_FALSE(manager.LoadBank("data/malformed.bank.json"));
+        EXPECT_FALSE(manager.LoadBank("data/invalid.bank.json"));
+        EXPECT_FALSE(manager.PlayOneShot2D("a-new"));
+        EXPECT_TRUE(manager.PlayOneShot2D("retained"));
+    }
+    manager.Shutdown();
+    Log::GetCoreLogger() = previous;
 }

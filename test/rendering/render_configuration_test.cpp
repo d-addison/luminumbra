@@ -342,6 +342,24 @@ void opened_content_identity() {
     content.write("outside/payload", "private bytes");
     content.write("outside/nested/marker", "private marker");
     content.write("data/empty", "");
+    {
+        // Inactive streams keep the original ifstream mode and binary bytes,
+        // including after moving a live or unopened stream.
+        namespace paths = Luminumbra::Filesystem;
+        require(!paths::capture_content_paths().active());
+        paths::ContentInput unopened;
+        paths::ContentInput empty(std::move(unopened));
+        require(!empty.is_open() && empty.fail());
+        paths::ContentInput input(content.root() / "data/inside/payload",
+                                  std::ios::binary | std::ios::ate);
+        require(input.tellg() == 8);
+        paths::ContentInput moved(std::move(input));
+        moved.seekg(0);
+        std::string bytes(8, '\0');
+        moved.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        require(bytes == "inside\r\n" && moved.good());
+        require(moved.peek() == std::char_traits<char>::eof());
+    }
     Luminumbra::Filesystem::CaptureContentPaths policy;
     policy.enable(content.root());
     {
@@ -437,6 +455,137 @@ void opened_content_identity() {
                     locked, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 4, 0, &range) !=
                 0);
             require_refusal([&] { content_digest(locked_path, policy); });
+            require(UnlockFileEx(locked, 0, 4, 0, &range) != 0);
+        } catch (...) {
+            CloseHandle(locked);
+            throw;
+        }
+        require(CloseHandle(locked) != 0);
+    }
+#endif
+}
+
+void verified_loader_bytes(const TemporaryContent& content) {
+    namespace fs = std::filesystem;
+    namespace paths = Luminumbra::Filesystem;
+    content.write("data/reader/payload", "validated\r\n");
+    content.write("outside/reader/payload", "private bytes");
+    content.write("data/reader/empty", "");
+    const auto link = content.root() / "data/reader-link";
+    const auto path = link / "payload";
+    link_directory(link, content.root() / "data/reader");
+    {
+        // No byte is buffered before the redirect. The first read and all seeks
+        // must consume the already validated owner, never the current pathname.
+        paths::ContentInput input(path, std::ios::binary | std::ios::ate);
+        require(input.is_open());
+        require(input.tellg() == 11);
+        paths::ContentInput moved(std::move(input));
+#ifndef _WIN32
+        require(fs::remove(link));
+        link_directory(link, content.root() / "outside/reader");
+#endif
+        moved.seekg(0);
+        std::string bytes(11, '\0');
+        moved.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        require(moved.good());
+        require(bytes == "validated\r\n");
+        require(moved.peek() == std::char_traits<char>::eof());
+        moved.clear();
+        moved.seekg(-2, std::ios::end);
+        require(moved.get() == '\r');
+        require(moved.tellg() == 10);
+        moved.seekg(-10, std::ios::cur);
+        require(moved.get() == 'v');
+        moved.seekg(std::numeric_limits<std::streamoff>::min(), std::ios::beg);
+        require(moved.fail());
+    }
+    require(fs::remove(link));
+    link_directory(link, content.root() / "outside/reader");
+    {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        require(!policy.refused());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(path, bytes, bytes.max_size()));
+        require(bytes == "unchanged");
+        require(policy.refused());
+        paths::ContentInput refused(path);
+        require(!refused.is_open() && refused.fail());
+    }
+    require(fs::remove(link));
+    for (const char* relative : {"data/reader/missing", "data/reader"}) {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(content.root() / relative, bytes, bytes.max_size()));
+        require(policy.refused() && bytes == "unchanged");
+    }
+    {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(policy.read_file(content.root() / "data/reader/empty", bytes, 0));
+        require(bytes.empty() && !policy.refused());
+        require(policy.read_file(content.root() / "data/reader/payload", bytes, 11));
+        require(bytes == "validated\r\n" && !policy.refused());
+        require(!policy.read_file(content.root() / "data/reader/payload", bytes, 10));
+        require(bytes == "validated\r\n" && policy.refused());
+    }
+#ifndef _WIN32
+    const auto leaf = content.root() / "data/reader-leaf";
+    fs::create_symlink(content.root() / "outside/reader/payload", leaf);
+    {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(leaf, bytes, bytes.max_size()));
+        require(policy.refused() && bytes == "unchanged");
+    }
+    require(fs::remove(leaf));
+    require(::mkfifo(leaf.c_str(), 0600) == 0);
+    {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(leaf, bytes, bytes.max_size()));
+        require(policy.refused() && bytes == "unchanged");
+    }
+    require(fs::remove(leaf));
+    for (const auto size : {0u, 3u, 32u}) {
+        content.write("data/reader-changing", "original");
+        const auto changing = content.root() / "data/reader-changing";
+        paths::ContentInput input(changing, std::ios::binary);
+        require(input.is_open());
+        fs::resize_file(changing, size);
+        std::string bytes(64, '\0');
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        require(input.bad());
+    }
+#else
+    content.write("data/reader-locked", std::string(65540, 'x'));
+    const auto locked_path = content.root() / "data/reader-locked";
+    for (const DWORD offset : {0ul, 65536ul}) {
+        const auto locked = CreateFileW(locked_path.c_str(),
+                                        GENERIC_READ,
+                                        FILE_SHARE_READ,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+        require(locked != INVALID_HANDLE_VALUE);
+        OVERLAPPED range{};
+        range.Offset = offset;
+        try {
+            require(
+                LockFileEx(
+                    locked, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 4, 0, &range) !=
+                0);
+            paths::CaptureContentPaths policy;
+            policy.enable(content.root());
+            std::string bytes = "unchanged";
+            require(!policy.read_file(locked_path, bytes, bytes.max_size()));
+            require(policy.refused() && bytes == "unchanged");
             require(UnlockFileEx(locked, 0, 4, 0, &range) != 0);
         } catch (...) {
             CloseHandle(locked);
@@ -1050,6 +1199,25 @@ void species_capture_references(const TemporaryContent& content) {
                 registry.FindByName("deer") != nullptr &&
                 registry.FindByName("outside") == nullptr);
     }
+    content.write("data/species-read-failure/a-new.json", R"({"id":"new-species"})");
+    content.write("data/species-read-failure/z-failure.json", R"({"id":"unreadable"})");
+    for (const bool report_failure : {false, true}) {
+        std::size_t observed = 0;
+        const Luminumbra::World::WorldgenFileReader partial_reader =
+            [&](const std::filesystem::path& file, std::string& bytes) {
+                ++observed;
+                return file.filename() != "z-failure.json" &&
+                       Luminumbra::World::ReadWorldgenFile(file, bytes);
+            };
+        errors.clear();
+        io_failed = false;
+        require(registry.LoadFromDirectory(content.root() / "data/species-read-failure",
+                                           errors,
+                                           partial_reader,
+                                           report_failure ? &io_failed : nullptr) == 0);
+        require(observed == 2 && !errors.empty() && io_failed == report_failure);
+        require(registry.size() == 2 && registry.FindByName("new-species") == nullptr);
+    }
     luminumbra::foliage::SpeciesRegistry foliage_registry;
     require(foliage_registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
     errors.clear();
@@ -1142,6 +1310,9 @@ void content_references() {
             require(spelling_policy.allows(queried / "data/texture.ltex"));
             require(content_digest(queried / "data/texture.ltex", spelling_policy) ==
                     content_digest(content.root() / "data/texture.ltex"));
+            std::string loaded;
+            require(spelling_policy.read_file(queried / "DATA/TEXTURE.LTEX", loaded, 64));
+            require(loaded == "inventoried bytes");
             require(spelling_policy.allows(queried / "DATA/TEXTURE.LTEX"));
             require(spelling_policy.allows(queried / "DATA/MISSING/asset.json"));
         }
@@ -1208,6 +1379,7 @@ void content_references() {
     require(bytes.empty());
     require(Luminumbra::Filesystem::capture_content_paths().refused());
 
+    verified_loader_bytes(content);
     species_capture_references(content);
 
     // Both command arguments include generic separators and shell-sensitive characters.

@@ -238,9 +238,14 @@ public:
                         report_io_failure("creature species filename is not valid UTF-8");
                         return 0;
                     }
-                    if (!Luminumbra::Filesystem::capture_content_paths().allows(entry.path())) {
-                        report_io_failure("creature species file escapes capture content trees");
-                        return 0;
+                    if (::Luminumbra::Filesystem::capture_content_paths().active()) {
+                        // Discovery must refuse before invoking observers or mutating
+                        // the registry. The reader below independently verifies its
+                        // own byte-consuming handle through ReadWorldgenFile.
+                        const ::Luminumbra::Filesystem::VerifiedFileInput opened(
+                            entry.path(),
+                            ::Luminumbra::Filesystem::VerifiedFileInput::Kind::File,
+                            &::Luminumbra::Filesystem::capture_content_paths());
                     }
                     files.push_back(entry.path());
                 }
@@ -262,6 +267,11 @@ public:
                 if (!read_file(f, bytes)) {
                     report_io_failure("cannot read " +
                                       ::Luminumbra::Filesystem::GenericUtf8PathString(f));
+                    if (::Luminumbra::Filesystem::capture_content_paths().active()) {
+                        ::Luminumbra::Filesystem::capture_content_paths().refuse();
+                        m_species.resize(original_size);
+                        return 0;
+                    }
                     continue;
                 }
                 std::string err;

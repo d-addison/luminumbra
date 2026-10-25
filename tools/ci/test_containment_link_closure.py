@@ -548,7 +548,9 @@ class ContainmentLinkClosureTests(unittest.TestCase):
     def test_capture_identity_reads_verified_handles(self):
         source = (ROOT / 'src/luminumbra_client/app/RenderConfiguration.h').read_text(encoding='utf-8')
         policy = (ROOT / OWNER).read_text(encoding='utf-8')
-        reader = source.split('class SavedFileInput {', 1)[1].split('struct SavedFileBytes', 1)[0]
+        reader = policy.split('struct VerifiedFileInput::State {', 1)[1].split(
+            'VerifiedFileInput::VerifiedFileInput(', 1)[0]
+        self.assertIn('using SavedFileInput = Filesystem::VerifiedFileInput;', source)
         self.assertNotIn('std::ifstream', source)
         for required in ('O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW', '::fstat(handle_, &info)',
                          'S_ISREG(info.st_mode)', 'FILE_FLAG_OPEN_REPARSE_POINT',
@@ -557,7 +559,7 @@ class ContainmentLinkClosureTests(unittest.TestCase):
                          'O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC',
                          'expected.st_dev == info.st_dev', 'expected.st_ino == info.st_ino'):
             self.assertIn(required, reader)
-        digest = reader.split('const Filesystem::CaptureContentPaths& containment)', 1)[1]
+        digest = source.split('const Filesystem::CaptureContentPaths& containment)', 1)[1]
         self.assertLess(digest.index('SavedFileInput input(path);'),
                         digest.index('containment.allows_resolved(path, input.resolved_path())'))
         self.assertLess(digest.index('containment.allows_resolved('),
@@ -586,6 +588,109 @@ class ContainmentLinkClosureTests(unittest.TestCase):
         native = (ROOT / 'test/rendering/render_configuration_test.cpp').read_text(encoding='utf-8')
         registered = native.split('std::string_view(argv[1]) == "content-references"', 1)[1]
         self.assertLess(registered.index('opened_content_identity();'), registered.index('return 0;'))
+
+    def test_capture_loaders_consume_verified_owners(self):
+        # Keep the whole reader inventory explicit: a path-only authorization
+        # must never return to any of these byte-consuming boundaries.
+        streams = (
+            'src/luminumbra_common/animation/SkinnedMeshFormat.h',
+            'src/luminumbra_common/animation/MorphMesh.cpp',
+            'src/luminumbra_common/foliage/SpeciesRegistry.h',
+            'src/luminumbra_client/core/RuntimeScenarioConfig.cpp',
+            'src/luminumbra_client/rendering/Shader.cpp',
+            'src/luminumbra_client/rendering/Mesh.cpp',
+            'src/luminumbra_client/app/GameAssets.cpp',
+            'src/luminumbra_client/rendering/RenderPipeline.cpp',
+            'src/luminumbra_client/rendering/passes/FoliagePass.cpp',
+            'src/luminumbra_client/rendering/passes/FroxelPass.cpp',
+            'src/luminumbra_client/rendering/passes/ParticlePass.cpp',
+            'src/luminumbra_client/rendering/passes/LuminanceMeterPass.cpp',
+            'src/luminumbra_client/audio/MiniaudioManager.cpp',
+        )
+        for name in streams:
+            with self.subTest(source=name):
+                body = (ROOT / name).read_text(encoding='utf-8')
+                self.assertIn('ContentInput', body)
+                self.assertNotIn('std::ifstream', body)
+        for name in ('src/luminumbra_common/world/WorldgenFileReader.h',
+                     'src/luminumbra_common/authoring/PrefabAsset.cpp'):
+            with self.subTest(source=name):
+                body = (ROOT / name).read_text(encoding='utf-8')
+                self.assertIn('capture_content_paths().read_file(', body)
+                self.assertIn('capture_content_paths().active()', body)
+        creature = (ROOT / 'src/luminumbra_common/ai/CreatureSpeciesRegistry.h').read_text(encoding='utf-8')
+        self.assertIn('::Luminumbra::Filesystem::VerifiedFileInput opened(', creature)
+        self.assertIn('::Luminumbra::World::ReadWorldgenFile,', creature)
+        self.assertIn('if (!read_file(f, bytes))', creature)
+        self.assertIn('capture_content_paths().refuse();', creature)
+        owner = (ROOT / OWNER).read_text(encoding='utf-8')
+        opened = owner.split('VerifiedFileInput::VerifiedFileInput(', 1)[1].split(
+            'VerifiedFileInput::~VerifiedFileInput()', 1)[0]
+        self.assertLess(opened.index('std::make_unique<State>(path, kind)'),
+                        opened.index('policy->allows_resolved('))
+        self.assertIn('policy->refuse();', opened)
+        read = owner.split('bool CaptureContentPaths::read_file(', 1)[1].split(
+            'class VerifiedContentBuffer', 1)[0]
+        self.assertIn('VerifiedFileInput input(path, VerifiedFileInput::Kind::File, this);', read)
+        self.assertLess(read.index('input.size() > max_bytes'), read.index('candidate.reserve('))
+        self.assertLess(read.index('candidate.size() != input.size()'), read.index('bytes.swap(candidate)'))
+        self.assertIn('input.read(buffer)', read)
+        self.assertNotIn('std::ifstream', read)
+        buffered = owner.split('class VerifiedContentBuffer', 1)[1].split('struct ContentInput::State', 1)[0]
+        self.assertIn('input_.read(buffer_)', buffered)
+        self.assertIn('input_.seek(target)', buffered)
+        self.assertIn('capture_content_paths().refuse();', buffered)
+        self.assertNotIn('std::ifstream', buffered)
+        self.assertNotIn('std::filesystem::file_size', buffered)
+        # The only pathname-only guards discover names. Their byte consumers
+        # are covered above (gallery images go through RmlFileInterface).
+        guards = set()
+        for directory in ('src', 'test'):
+            for path in (ROOT / directory).rglob('*'):
+                if path.suffix in ('.h', '.cpp') and 'capture_content_paths().allows(' in path.read_text(encoding='utf-8'):
+                    guards.add(path.relative_to(ROOT).as_posix())
+        self.assertEqual(guards, {
+            'src/luminumbra_common/foliage/SpeciesRegistry.h',
+            'src/luminumbra_common/ai/CreatureSpeciesRegistry.h',
+            'src/luminumbra_client/ui/Rml_UIManager.cpp',
+        })
+        native = (ROOT / 'test/rendering/render_configuration_test.cpp').read_text(encoding='utf-8')
+        self.assertIn('verified_loader_bytes(content);', native)
+        for required in ('paths::ContentInput moved(std::move(input))',
+                         'moved.read(bytes.data()', 'policy.read_file(path, bytes, bytes.max_size())',
+                         'policy.refused() && bytes == "unchanged"',
+                         'policy.read_file(locked_path, bytes, bytes.max_size())',
+                         'require(input.bad())'):
+            self.assertIn(required, native)
+
+    def test_capture_decoders_consume_memory(self):
+        image = (ROOT / 'src/luminumbra_client/core/AssetManager.h').read_text(encoding='utf-8')
+        rml = (ROOT / 'src/luminumbra_client/ui/Rml_Interfaces.cpp').read_text(encoding='utf-8')
+        audio = (ROOT / 'src/luminumbra_client/audio/MiniaudioManager.cpp').read_text(encoding='utf-8')
+        for body in (image, rml, audio):
+            self.assertIn('capture_content_paths().read_file(', body)
+            self.assertNotIn('capture_content_paths().allows(', body)
+        self.assertIn('stbi_load_from_memory(', image)
+        self.assertIn('SOIL_load_OGL_texture_from_memory(', rml)
+        self.assertIn('std::make_unique<std::istringstream>(std::move(bytes)', rml)
+        self.assertIn('capture_config.pResourceManagerVFS = &m_captureVfs;', audio)
+        self.assertIn('initialize_engine(capture ? &capture_config : nullptr, m_engine.get())', audio)
+        self.assertIn('m_captureVfs = CaptureAudioCallbacks();', audio)
+        callbacks = audio.split('ma_vfs_callbacks CaptureAudioCallbacks()', 1)[1].split(
+            'ma_result InitSoundFromFile(', 1)[0]
+        for callback in ('onOpen', 'onOpenW', 'onClose', 'onRead', 'onWrite', 'onSeek', 'onTell', 'onInfo'):
+            self.assertIn('.' + callback + ' =', callbacks)
+        bank = audio.split('bool MiniaudioManager::LoadBank(', 1)[1].split(
+            'void MiniaudioManager::UnloadBank(', 1)[0]
+        self.assertLess(bank.index('const Filesystem::VerifiedFileInput input('),
+                        bank.index('m_eventDefinitions[event_id] = def;'))
+        self.assertLess(bank.index('catch (...)'), bank.index('for (auto& [event_id,'))
+        native = (ROOT / 'test/audio/audio_physics_binding_test.cpp').read_text(encoding='utf-8')
+        self.assertIn('TEST(CaptureAudioInput, DeferredReadersOwnVerifiedBytes)', native)
+        self.assertIn('EXPECT_FALSE(manager.PlayOneShot2D("a-new"));', native)
+        self.assertIn('EXPECT_TRUE(manager.PlayOneShot2D("retained"));', native)
+        self.assertEqual(audio.count('ma_sound_init_from_file('), 1)
+        self.assertNotIn('ma_engine_play_sound(', audio)
 
     def test_ordinary_windows_names_return_before_expansion_io(self):
         source = (ROOT / OWNER).read_text(encoding='utf-8')

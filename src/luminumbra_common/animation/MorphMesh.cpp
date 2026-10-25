@@ -217,9 +217,7 @@ bool DecodeMorphMeshAsset(std::span<const std::uint8_t> bytes,
 bool LoadMorphMeshAsset(const std::filesystem::path& path,
                         std::shared_ptr<const MorphMeshAsset>& out,
                         std::string* error) {
-    if (!Luminumbra::Filesystem::capture_content_paths().allows(path))
-        return Fail(error, "Capture morph reference escapes inventoried trees");
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    Luminumbra::Filesystem::ContentInput input(path, std::ios::binary | std::ios::ate);
     const auto size = input.tellg();
     if (!input || size < 0 || static_cast<std::uint64_t>(size) > kMorphMaxBytes)
         return Fail(error, "Cannot read bounded LMOR file");
