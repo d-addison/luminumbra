@@ -545,6 +545,39 @@ class ContainmentLinkClosureTests(unittest.TestCase):
         self.assertIn('return LongNameExpansionCountStorage();', source)
         self.assertIn('++LongNameExpansionCountStorage();', source)
 
+    def test_optional_capture_probes_preserve_refusals(self):
+        header = (ROOT / POLICY).read_text(encoding='utf-8')
+        owner = (ROOT / OWNER).read_text(encoding='utf-8')
+        self.assertIn('MissingContent missing = MissingContent::Refuse', header)
+        missing = owner.split('bool AllowsMissingContent(', 1)[1].split(
+            'struct VerifiedFileInput::State', 1)[0]
+        for required in ('symlink_status(ancestor, error)',
+                         'file_type::not_found', 'std::filesystem::is_directory(status)',
+                         'VerifiedFileInput opened(ancestor, VerifiedFileInput::Kind::Directory)',
+                         'policy.allows_resolved(path, opened.resolved_path() / suffix)'):
+            self.assertIn(required, missing)
+        opened = owner.split('VerifiedFileInput::VerifiedFileInput(', 1)[1].split(
+            'VerifiedFileInput::~VerifiedFileInput()', 1)[0]
+        self.assertIn('error.code() == std::errc::no_such_file_or_directory', opened)
+        self.assertIn('AllowsMissingContent(path, *policy)', opened)
+        self.assertIn('policy->refuse();', opened)
+        for source in ('src/luminumbra_client/audio/MiniaudioManager.cpp',
+                       'src/luminumbra_client/core/AssetManager.h',
+                       'src/luminumbra_client/ui/Rml_Interfaces.cpp',
+                       'src/luminumbra_common/world/WorldgenFileReader.h'):
+            with self.subTest(source=source):
+                self.assertIn('MissingContent::Optional', (ROOT / source).read_text(encoding='utf-8'))
+        native = (ROOT / 'test/rendering/render_configuration_test.cpp').read_text(encoding='utf-8')
+        self.assertIn('optional_capture_inputs(content);', native)
+        for path in ('game-assets/tree-small-02/1.0.0/data/models/trees/staged.lmesh',
+                     'data/models/creatures/grovestrider/grovestrider.lmesh',
+                     'assets/audio/sfx/ui/button_click.mp3',
+                     'worlds/saves/optional/missing.json'):
+            self.assertIn(path, native)
+        audio = (ROOT / 'test/audio/audio_physics_binding_test.cpp').read_text(encoding='utf-8')
+        self.assertIn('EXPECT_TRUE(manager.LoadBank("data/optional.bank.json"));', audio)
+        self.assertIn('EXPECT_FALSE(paths::capture_content_paths().refused());', audio)
+
     def test_capture_identity_reads_verified_handles(self):
         source = (ROOT / 'src/luminumbra_client/app/RenderConfiguration.h').read_text(encoding='utf-8')
         policy = (ROOT / OWNER).read_text(encoding='utf-8')
@@ -631,7 +664,7 @@ class ContainmentLinkClosureTests(unittest.TestCase):
         self.assertIn('policy->refuse();', opened)
         read = owner.split('bool CaptureContentPaths::read_file(', 1)[1].split(
             'class VerifiedContentBuffer', 1)[0]
-        self.assertIn('VerifiedFileInput input(path, VerifiedFileInput::Kind::File, this);', read)
+        self.assertIn('VerifiedFileInput input(path, VerifiedFileInput::Kind::File, this, missing);', read)
         self.assertLess(read.index('input.size() > max_bytes'), read.index('candidate.reserve('))
         self.assertLess(read.index('candidate.size() != input.size()'), read.index('bytes.swap(candidate)'))
         self.assertIn('input.read(buffer)', read)
@@ -682,7 +715,7 @@ class ContainmentLinkClosureTests(unittest.TestCase):
             self.assertIn('.' + callback + ' =', callbacks)
         bank = audio.split('bool MiniaudioManager::LoadBank(', 1)[1].split(
             'void MiniaudioManager::UnloadBank(', 1)[0]
-        self.assertLess(bank.index('const Filesystem::VerifiedFileInput input('),
+        self.assertLess(bank.index('const Filesystem::ContentInput input('),
                         bank.index('m_eventDefinitions[event_id] = def;'))
         self.assertLess(bank.index('catch (...)'), bank.index('for (auto& [event_id,'))
         native = (ROOT / 'test/audio/audio_physics_binding_test.cpp').read_text(encoding='utf-8')

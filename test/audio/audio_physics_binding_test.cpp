@@ -263,6 +263,20 @@ TEST(AudioPhysicsBinding, FailedFileLoadsReleaseAllocationsAndLeaveNoWindNode) {
     EXPECT_EQ(AudioAllocations().load(), 0u);
 }
 
+namespace {
+void CheckOptionalCaptureAudio(ma_vfs* vfs) {
+    namespace paths = Luminumbra::Filesystem;
+    const auto absent = paths::capture_content_paths().root() / "assets/audio/missing.wav";
+    ma_vfs_file missing = nullptr;
+    EXPECT_EQ(ma_vfs_open(vfs, absent.string().c_str(), MA_OPEN_MODE_READ, &missing), MA_IO_ERROR);
+    EXPECT_EQ(missing, nullptr);
+    EXPECT_EQ(ma_vfs_open_w(vfs, absent.wstring().c_str(), MA_OPEN_MODE_READ, &missing),
+              MA_IO_ERROR);
+    EXPECT_EQ(missing, nullptr);
+    EXPECT_FALSE(paths::capture_content_paths().refused());
+}
+} // namespace
+
 // CTest discovers this case in its own process: the capture policy is configured
 // once, before the initializer receives miniaudio's public VFS interface.
 TEST(CaptureAudioInput, DeferredReadersOwnVerifiedBytes) {
@@ -280,12 +294,17 @@ TEST(CaptureAudioInput, DeferredReadersOwnVerifiedBytes) {
     Log::GetCoreLogger() =
         std::make_shared<spdlog::logger>("AUDIO_INPUT_PROBE", std::make_shared<CountingSink>());
     Luminumbra::Client::MiniaudioManager manager(paths::GenericPathString(root) + '/');
+    std::ofstream(root / "data/optional.bank.json")
+        << R"({"events":{"optional":{"files":["assets/audio/sfx/ui/button_click.mp3"]}}})";
+    EXPECT_TRUE(manager.LoadBank("data/optional.bank.json"));
+    EXPECT_FALSE(paths::capture_content_paths().refused());
     const bool initialized = manager.Init([](const ma_engine_config* config, ma_engine*) {
         if (!config || !config->pResourceManagerVFS) {
             ADD_FAILURE() << "Capture must supply an owning byte VFS";
             return MA_NO_DEVICE;
         }
         auto* vfs = config->pResourceManagerVFS;
+        CheckOptionalCaptureAudio(vfs);
         const auto path = paths::capture_content_paths().root() / "data/payload";
         ma_vfs_file file = nullptr;
         const auto narrow = path.string();
@@ -322,8 +341,9 @@ TEST(CaptureAudioInput, DeferredReadersOwnVerifiedBytes) {
         EXPECT_EQ(ma_vfs_close(vfs, file), MA_SUCCESS);
         const auto wide = path.wstring();
         EXPECT_EQ(ma_vfs_open_w(vfs, wide.c_str(), MA_OPEN_MODE_READ, &file), MA_SUCCESS);
-        if (file)
+        if (file) {
             EXPECT_EQ(ma_vfs_close(vfs, file), MA_SUCCESS);
+        }
         EXPECT_EQ(ma_vfs_open(vfs, narrow.c_str(), MA_OPEN_MODE_WRITE, &file), MA_ACCESS_DENIED);
         EXPECT_EQ(file, nullptr);
         for (const auto* relative : {"outside", "data/missing", "data"}) {

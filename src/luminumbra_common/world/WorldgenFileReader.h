@@ -28,7 +28,8 @@ inline bool ReadWorldgenFileWithStatus(const std::filesystem::path& path,
                                        const WorldgenFileStatusReader& read_status) {
     bytes.clear();
     if (Filesystem::capture_content_paths().active())
-        return Filesystem::capture_content_paths().read_file(path, bytes, bytes.max_size());
+        return Filesystem::capture_content_paths().read_file(
+            path, bytes, bytes.max_size(), Filesystem::MissingContent::Optional);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(read_status(path, ec)) || ec)
         return false;

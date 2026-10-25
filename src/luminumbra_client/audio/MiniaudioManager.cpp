@@ -30,7 +30,8 @@ ma_result OpenCaptureAudio(const Character* path, ma_uint32 mode, ma_vfs_file* f
         if (!Filesystem::capture_content_paths().read_file(
                 std::filesystem::path(path),
                 input->bytes,
-                static_cast<std::size_t>(std::numeric_limits<ma_int64>::max())))
+                static_cast<std::size_t>(std::numeric_limits<ma_int64>::max()),
+                Filesystem::MissingContent::Optional))
             return MA_IO_ERROR;
         *file = input.release();
         return MA_SUCCESS;
@@ -398,10 +399,12 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
         try {
             for (const auto& event : bank_json["events"])
                 for (const auto& file : event.at("files")) {
-                    const Filesystem::VerifiedFileInput input(
-                        m_rootPath + file.get<std::string>(),
-                        Filesystem::VerifiedFileInput::Kind::File,
-                        &Filesystem::capture_content_paths());
+                    // Banks may name optional audio that is not installed. The
+                    // stream still verifies every present file's owning handle
+                    // and refuses missing references outside the content trees.
+                    const Filesystem::ContentInput input(m_rootPath + file.get<std::string>());
+                    if (!input && Filesystem::capture_content_paths().refused())
+                        return false;
                 }
         } catch (...) {
             Filesystem::capture_content_paths().refuse();

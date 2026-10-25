@@ -18,7 +18,10 @@ public:
         if (Luminumbra::Filesystem::capture_content_paths().active()) {
             std::string bytes;
             if (Luminumbra::Filesystem::capture_content_paths().read_file(
-                    path, bytes, static_cast<std::size_t>(std::numeric_limits<int>::max())))
+                    path,
+                    bytes,
+                    static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                    Luminumbra::Filesystem::MissingContent::Optional))
                 data = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(bytes.data()),
                                              static_cast<int>(bytes.size()),
                                              &width,

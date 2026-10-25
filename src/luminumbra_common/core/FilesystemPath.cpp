@@ -431,6 +431,42 @@ void CaptureContentPaths::refuse() const {
         refused_.store(true, std::memory_order_relaxed);
 }
 
+namespace {
+class MissingContentFile : public std::runtime_error {
+public:
+    MissingContentFile()
+        : std::runtime_error("optional capture content is absent") {}
+};
+
+bool AllowsMissingContent(const std::filesystem::path& path, const CaptureContentPaths& policy) {
+    // Only absent components may form a suffix. A dangling link, non-directory,
+    // denied lookup or redirect is never an optional miss. The 32767-character
+    // path bound also bounds this ancestor walk and its retained suffix.
+    auto ancestor = AbsolutePath(path);
+    if (ancestor.native().size() > 32767)
+        return false;
+    std::filesystem::path suffix;
+    while (!ancestor.empty()) {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(ancestor, error);
+        if (status.type() != std::filesystem::file_type::not_found) {
+            if (error || !std::filesystem::is_directory(status) || suffix.empty())
+                return false;
+            const VerifiedFileInput opened(ancestor, VerifiedFileInput::Kind::Directory);
+            return policy.allows_resolved(path, opened.resolved_path() / suffix);
+        }
+        if (error && error != std::errc::no_such_file_or_directory)
+            return false;
+        const auto parent = ancestor.parent_path();
+        if (parent == ancestor)
+            return false;
+        suffix = suffix.empty() ? ancestor.filename() : ancestor.filename() / suffix;
+        ancestor = parent;
+    }
+    return false;
+}
+} // namespace
+
 struct VerifiedFileInput::State {
     explicit State(const std::filesystem::path& path, Kind kind = Kind::File) {
         // Match the extended Windows path bound on both platforms; this also
@@ -445,6 +481,13 @@ struct VerifiedFileInput::State {
                               OPEN_EXISTING,
                               FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
                               nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            const auto failure = GetLastError();
+            throw std::filesystem::filesystem_error(
+                "open workload content",
+                path,
+                std::error_code(static_cast<int>(failure), std::system_category()));
+        }
         BY_HANDLE_FILE_INFORMATION info{};
         if (handle_ == INVALID_HANDLE_VALUE || GetFileType(handle_) != FILE_TYPE_DISK ||
             !GetFileInformationByHandle(handle_, &info) ||
@@ -593,12 +636,30 @@ struct VerifiedFileInput::State {
 
 VerifiedFileInput::VerifiedFileInput(const std::filesystem::path& path,
                                      Kind kind,
-                                     const CaptureContentPaths* policy) {
+                                     const CaptureContentPaths* policy,
+                                     MissingContent missing) {
     try {
         state_ = std::make_unique<State>(path, kind);
         if (policy &&
             !policy->allows_resolved(path, state_->resolved_path(), kind == Kind::Directory))
             throw std::runtime_error("capture content reference escapes inventoried trees");
+    } catch (const std::filesystem::filesystem_error& error) {
+        bool optional_absence = false;
+        try {
+            optional_absence = policy && kind == Kind::File &&
+                               missing == MissingContent::Optional &&
+                               error.code() == std::errc::no_such_file_or_directory &&
+                               AllowsMissingContent(path, *policy);
+        } catch (...) {
+            if (policy)
+                policy->refuse();
+            throw;
+        }
+        if (optional_absence)
+            throw MissingContentFile();
+        if (policy)
+            policy->refuse();
+        throw;
     } catch (...) {
         if (policy)
             policy->refuse();
@@ -629,9 +690,10 @@ bool VerifiedFileInput::seek(std::uint64_t offset) {
 
 bool CaptureContentPaths::read_file(const std::filesystem::path& path,
                                     std::string& bytes,
-                                    std::size_t max_bytes) const {
+                                    std::size_t max_bytes,
+                                    MissingContent missing) const {
     try {
-        VerifiedFileInput input(path, VerifiedFileInput::Kind::File, this);
+        VerifiedFileInput input(path, VerifiedFileInput::Kind::File, this, missing);
         std::string candidate;
         if (input.size() > max_bytes || input.size() > candidate.max_size())
             throw std::runtime_error("capture content exceeds byte budget");
@@ -651,6 +713,8 @@ bool CaptureContentPaths::read_file(const std::filesystem::path& path,
             throw std::runtime_error("capture content truncated while reading");
         bytes.swap(candidate);
         return true;
+    } catch (const MissingContentFile&) {
+        return false;
     } catch (...) {
         refuse();
         return false;
@@ -661,7 +725,10 @@ namespace {
 class VerifiedContentBuffer : public std::streambuf {
 public:
     explicit VerifiedContentBuffer(const std::filesystem::path& path)
-        : input_(path, VerifiedFileInput::Kind::File, &capture_content_paths()) {}
+        : input_(path,
+                 VerifiedFileInput::Kind::File,
+                 &capture_content_paths(),
+                 MissingContent::Optional) {}
     std::uint64_t size() const {
         return input_.size();
     }
@@ -736,6 +803,8 @@ ContentInput::ContentInput(const std::filesystem::path& path, std::ios::openmode
         rdbuf(state_->verified.get());
         if ((mode & std::ios::ate) != 0)
             seekg(0, std::ios::end);
+    } catch (const MissingContentFile&) {
+        setstate(std::ios::failbit);
     } catch (...) {
         capture_content_paths().refuse();
         setstate(std::ios::failbit);

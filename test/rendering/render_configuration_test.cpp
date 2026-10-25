@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <source_location>
 #include <sstream>
@@ -465,6 +466,90 @@ void opened_content_identity() {
 #endif
 }
 
+void optional_capture_inputs(const TemporaryContent& content) {
+    namespace fs = std::filesystem;
+    namespace paths = Luminumbra::Filesystem;
+    const auto optional = paths::MissingContent::Optional;
+    // Match staged packages: a real (possibly hard-linked) package asset and
+    // absent ambient wildlife/audio next to it, with saves outside the inventory.
+    const auto package = "game-assets/tree-small-02/1.0.0/data/models/trees/staged.lmesh";
+    content.write(package, "staged bytes");
+    content.write("worlds/saves/optional/world.json", "{}");
+    const auto hardlink = content.root() / "data/staged-link.lmesh";
+    fs::create_hard_link(content.root() / package, hardlink);
+    for (const auto& path : {content.root() / package, hardlink}) {
+        paths::ContentInput input(path, std::ios::binary);
+        const std::string bytes{std::istreambuf_iterator<char>(input), {}};
+        require(bytes == "staged bytes");
+    }
+    const auto audio = content.root() / "assets/audio";
+    require(fs::remove(audio / "included.json"));
+    require(fs::remove(audio));
+    for (const auto* relative : {"data/models/creatures/grovestrider/grovestrider.lmesh",
+                                 "assets/audio/sfx/ui/button_click.mp3",
+                                 "game-assets/tree-small-02/1.0.0/data/missing.lmesh"}) {
+        const auto path = content.root() / relative;
+        paths::ContentInput input(path);
+        require(!input.is_open() && input.fail());
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(path, bytes, 64, optional));
+        require(bytes == "unchanged" && !policy.refused());
+        // Identity/inventory reads retain their strict missing-file contract.
+        require(!policy.read_file(path, bytes, 64));
+        require(bytes == "unchanged" && policy.refused());
+    }
+    require(!paths::capture_content_paths().refused());
+    require(fs::create_directory(audio));
+    content.write("assets/audio/included.json", "{}");
+    content.write("data/optional-parent", "not a directory");
+    for (const auto* relative : {"worlds/saves/optional/missing.json",
+                                 "external-missing.lmesh",
+                                 "data",
+                                 "data/optional-parent/child",
+                                 "data/optional-parent"}) {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        const auto path = content.root() / relative;
+        const auto limit = path.filename() == "optional-parent" ? 0u : 64u;
+        require(!policy.read_file(path, bytes, limit, optional));
+        require(bytes == "unchanged" && policy.refused());
+    }
+    content.write("outside/optional-target/payload", "private bytes");
+    const auto redirect = content.root() / "data/optional-redirect";
+    link_directory(redirect, content.root() / "outside/optional-target");
+    for (const auto* name : {"payload", "missing"}) {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(redirect / name, bytes, 64, optional));
+        require(bytes == "unchanged" && policy.refused());
+    }
+    require(fs::remove(redirect));
+#ifndef _WIN32
+    fs::create_symlink(content.root() / "outside/absent", redirect);
+    {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(redirect, bytes, 64, optional));
+        require(bytes == "unchanged" && policy.refused());
+    }
+    require(fs::remove(redirect));
+    require(::mkfifo(redirect.c_str(), 0600) == 0);
+    {
+        paths::CaptureContentPaths policy;
+        policy.enable(content.root());
+        std::string bytes = "unchanged";
+        require(!policy.read_file(redirect, bytes, 64, optional));
+        require(bytes == "unchanged" && policy.refused());
+    }
+    require(fs::remove(redirect));
+#endif
+}
+
 void verified_loader_bytes(const TemporaryContent& content) {
     namespace fs = std::filesystem;
     namespace paths = Luminumbra::Filesystem;
@@ -586,6 +671,11 @@ void verified_loader_bytes(const TemporaryContent& content) {
             std::string bytes = "unchanged";
             require(!policy.read_file(locked_path, bytes, bytes.max_size()));
             require(policy.refused() && bytes == "unchanged");
+            paths::CaptureContentPaths optional_policy;
+            optional_policy.enable(content.root());
+            require(!optional_policy.read_file(
+                locked_path, bytes, bytes.max_size(), paths::MissingContent::Optional));
+            require(optional_policy.refused() && bytes == "unchanged");
             require(UnlockFileEx(locked, 0, 4, 0, &range) != 0);
         } catch (...) {
             CloseHandle(locked);
@@ -1313,6 +1403,11 @@ void content_references() {
             std::string loaded;
             require(spelling_policy.read_file(queried / "DATA/TEXTURE.LTEX", loaded, 64));
             require(loaded == "inventoried bytes");
+            require(!spelling_policy.read_file(queried / "DATA/MISSING/OPTIONAL.LTEX",
+                                               loaded,
+                                               64,
+                                               Luminumbra::Filesystem::MissingContent::Optional));
+            require(loaded == "inventoried bytes" && !spelling_policy.refused());
             require(spelling_policy.allows(queried / "DATA/TEXTURE.LTEX"));
             require(spelling_policy.allows(queried / "DATA/MISSING/asset.json"));
         }
@@ -1373,6 +1468,7 @@ void content_references() {
     Luminumbra::Filesystem::capture_content_paths().enable(content.root());
     require(Luminumbra::World::ReadWorldgenFile(content.root() / "res/included.json", bytes));
     require(bytes == "{}");
+    optional_capture_inputs(content);
     require(!Luminumbra::World::ReadWorldgenFile(content.root() / "external.ltex", bytes));
     require(bytes.empty());
     require(!Luminumbra::World::ReadWorldgenFile(content.root() / "data/../external.ltex", bytes));
@@ -1408,7 +1504,22 @@ void content_references() {
     aliased_policy.enable(alias);
     require(aliased_policy.allows(alias / "data/texture.ltex"));
     require(aliased_policy.allows(content.root() / "data/texture.ltex"));
+    std::string optional_bytes = "unchanged";
+    for (const auto& selected_root : {alias, content.root()}) {
+        require(!aliased_policy.read_file(selected_root / "data/absent/optional.json",
+                                          optional_bytes,
+                                          64,
+                                          Luminumbra::Filesystem::MissingContent::Optional));
+        require(optional_bytes == "unchanged" && !aliased_policy.refused());
+    }
     require(!aliased_policy.refused());
+    Luminumbra::Filesystem::CaptureContentPaths unselected_policy;
+    unselected_policy.enable(content.root());
+    require(!unselected_policy.read_file(alias / "data/absent/optional.json",
+                                         optional_bytes,
+                                         64,
+                                         Luminumbra::Filesystem::MissingContent::Optional));
+    require(optional_bytes == "unchanged" && unselected_policy.refused());
     // Resolving names for lexical comparison must not resolve an unselected link.
     require(!policy.allows(alias / "data/texture.ltex"));
     require(!policy.allows(alias / "data/missing/asset.json"));

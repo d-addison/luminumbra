@@ -29,6 +29,11 @@ inline constexpr std::array kCaptureContentTrees = {
     "data", "res", "config", "game-assets", "assets/audio"};
 inline constexpr std::string_view kOptionalCaptureContentTree = "assets/audio";
 
+enum class MissingContent : std::uint8_t {
+    Refuse,
+    Optional
+};
+
 // Configured once on the host thread before starting capture loaders/workers.
 // Only file-load boundaries perform filesystem work; inactive checks are O(1).
 // A refusal survives callers that normally recover from missing optional assets.
@@ -45,8 +50,11 @@ public:
     // Record an open/read refusal even when an optional loader recovers.
     void refuse() const;
     // Read only through a verified owning handle. Output is unchanged on failure.
-    bool
-    read_file(const std::filesystem::path& path, std::string& bytes, std::size_t max_bytes) const;
+    // Optional absence returns false without refusing; all other failures refuse.
+    bool read_file(const std::filesystem::path& path,
+                   std::string& bytes,
+                   std::size_t max_bytes,
+                   MissingContent missing = MissingContent::Refuse) const;
 
     // The caller supplies a resolution verified against its owning open handle.
     // Do not resolve that pathname again: it may have been replaced since open.
@@ -79,7 +87,8 @@ public:
     };
     explicit VerifiedFileInput(const std::filesystem::path& path,
                                Kind kind = Kind::File,
-                               const CaptureContentPaths* policy = nullptr);
+                               const CaptureContentPaths* policy = nullptr,
+                               MissingContent missing = MissingContent::Refuse);
     VerifiedFileInput(const VerifiedFileInput&) = delete;
     VerifiedFileInput& operator=(const VerifiedFileInput&) = delete;
     ~VerifiedFileInput();
@@ -95,7 +104,9 @@ private:
 
 // Inactive: the original ifstream, mode and filebuf, without policy syscalls.
 // Active: a seekable stream over the verified handle, with at most 64 KiB buffered.
-// Open/read failures set the policy's sticky refusal flag and the stream state.
+// Missing optional inputs fail the stream without refusing capture, after checking
+// containment through the existing ancestor's owning handle. Other open/read
+// failures set the policy's sticky refusal flag and the stream state.
 class ContentInput : public std::istream {
 public:
     ContentInput();

@@ -53,7 +53,8 @@ Rml::FileHandle RmlFileInterface::Open(const Rml::String& path) {
         if (!Filesystem::capture_content_paths().read_file(
                 full_path,
                 bytes,
-                static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())))
+                static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()),
+                Filesystem::MissingContent::Optional))
             return 0;
         // RmlUi owns this memory stream until Close; it never reopens the source.
         auto input = std::make_unique<std::istringstream>(std::move(bytes), std::ios::binary);
@@ -286,7 +287,10 @@ Rml::TextureHandle RmlRenderer::LoadTexture(Rml::Vector2i& texture_dimensions,
     if (Filesystem::capture_content_paths().active()) {
         std::string bytes;
         if (!Filesystem::capture_content_paths().read_file(
-                full_path, bytes, static_cast<std::size_t>(std::numeric_limits<int>::max())))
+                full_path,
+                bytes,
+                static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                Filesystem::MissingContent::Optional))
             return 0;
         texture_id = SOIL_load_OGL_texture_from_memory(
             reinterpret_cast<const unsigned char*>(bytes.data()),
