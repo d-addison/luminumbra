@@ -238,6 +238,27 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertRegex(refusal, r"if \(!prepare_entry_horizon\(\)\) \{[^}]*"
                          r"return WorldEntryResult::Failed;")
 
+    def test_far_cache_drains_before_saves_cleanup_and_live_preset_changes(self):
+        source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        pause = source.split('} else if (act == "quit") {', 1)[1].split(
+            'SetGameState(window, gameStateManager, GameState::MAIN_MENU)', 1)[0]
+        self.assertLess(pause.index("if (!session_persistence_allowed())"),
+                        pause.index("prepare_world_entry();"))
+        self.assertLess(pause.index("prepare_world_entry();"), pause.index("SaveWorld()"))
+        benchmark = source.split("[&](bool main_menu) {", 1)[1].split("[&](bool reload)", 1)[0]
+        self.assertLess(benchmark.index("prepare_world_entry();"), benchmark.index("SaveWorld()"))
+        boot = source.split("const bool wrote_metrics = runtime_boot_recorder.write_artifacts();", 1)[1]
+        self.assertLess(boot.index("prepare_world_entry();"), boot.index("clear_world(nullptr)"))
+        viewer = (ROOT / "src/luminumbra_client/debug/WorldGenViewer.cpp").read_text(encoding="utf-8")
+        application = viewer.split('if (ImGui::Button("Apply & Regenerate"))', 1)[1]
+        self.assertLess(application.index("pipeline.prepare_world_swap();"),
+                        application.index("main_world_system->set_params(m_params)"))
+        self.assertIn("worldGenViewer->DrawContents(liveWorld, renderPipeline);", source)
+        scenario = (ROOT / "src/luminumbra_client/core/ScenarioRunnerDrive.cpp").read_text(encoding="utf-8")
+        saving = body(scenario, "bool ScenarioRunnerImpl::drivePersistenceRoundtrip()")
+        self.assertLess(saving.index("renderPipeline.prepare_world_swap();"),
+                        saving.index("RunPersistenceRoundtripSavePhase("))
+
     def test_native_regressions_and_legacy_fault_discrimination_remain_registered(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")

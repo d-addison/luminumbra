@@ -2585,6 +2585,22 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRef
     CheckLegacyFullSnapshotRefusalAndRecovery();
 }
 
+TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["extension"] = std::string(std::size_t{1024} * 1024, 'x');
+    Write(save / "world_info.json", metadata.dump());
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false); // Legacy keyless snapshots have no clock metadata.
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    EXPECT_TRUE(session.SaveWorldStateTo(save));
+    // Metadata reconciliation retains extensions and persists the legacy water cursor.
+    metadata["waterSimCursor"] = 0;
+    EXPECT_EQ(Read(save / "world_info.json"), metadata.dump(4) + "\n");
+}
+
 TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeExtensions) {
     auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
     metadata["extension"] = std::string(std::size_t{1024} * 1024, 'x');

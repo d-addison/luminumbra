@@ -2,11 +2,13 @@
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
+#include "FarLodIntegrationBudget.h"
 #include "Shader.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/Crc32.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/MarchingCubes.h"
 #include "passes/PassGlHelpers.h"
 
@@ -793,7 +795,11 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
             !is_halo_chunk(entry.coords.x, entry.coords.z, rx, rz)) {
             continue;
         }
-        const World::FarLodSdfSnapshot reduction = entry.as_reduction_snapshot();
+        if (!entry.payload) {
+            outcome.error = "live authoritative far snapshot is missing its immutable payload";
+            return outcome;
+        }
+        const World::FarLodSdfSnapshot& reduction = entry.as_reduction_snapshot();
         if (!overlay_authority(reduction, belongs_to_region(entry, rx, rz), "live authoritative")) {
             return outcome;
         }
@@ -951,6 +957,14 @@ FarLodSystem::~FarLodSystem() {
     // context was current; here we only make sure no build job can outlive
     // the world pointer it samples.
     wait_for_builds();
+    m_tile_saves.close();
+}
+
+void FarLodSystem::set_save_dir(std::filesystem::path save_dir) {
+    if (m_save_dir == save_dir)
+        return;
+    prepare_world_swap();
+    m_save_dir = std::move(save_dir);
 }
 
 u64 FarLodSystem::region_key(int rx, int rz) {
@@ -964,7 +978,11 @@ void FarLodSystem::wait_for_builds() {
         }
     }
     m_inflight_handles.clear();
+    // Builds and ready uploads not yet accepted for persistence are cancelled.
+    // Already accepted saves are flushed to their captured paths below.
     m_pending.clear();
+    m_ready_builds.clear();
+    m_tile_saves.flush();
     LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
     m_shared->completed.clear();
 }
@@ -1044,65 +1062,81 @@ std::size_t FarLodSystem::total_resident_bytes() const {
     return bytes;
 }
 
-void FarLodSystem::integrate_completed_builds() {
-    std::vector<BuildResult> completed;
-    {
-        LUMIN_PROFILE_LOCK(
-            std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
-        if (m_shared->completed.empty()) {
-            return;
-        }
-        const std::size_t take = std::min(kMaxUploadsPerFrame, m_shared->completed.size());
-        completed.assign(std::make_move_iterator(m_shared->completed.begin()),
-                         std::make_move_iterator(m_shared->completed.begin() +
-                                                 static_cast<std::ptrdiff_t>(take)));
-        m_shared->completed.erase(m_shared->completed.begin(),
-                                  m_shared->completed.begin() + static_cast<std::ptrdiff_t>(take));
-    }
+bool FarLodSystem::build_result_current(const BuildResult& result) const {
+    return m_world && result.epoch == m_epoch && result.sdf_snapshot &&
+           result.capture_epoch == result.sdf_snapshot->capture_epoch &&
+           result.params_hash == result.sdf_snapshot->params_hash &&
+           result.params_hash == m_params_hash &&
+           result.authority_revision == result.sdf_snapshot->authority_revision &&
+           result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&
+           result.region_authority_revision ==
+               m_world->far_lod_region_authority_revision(result.rx, result.rz) &&
+           m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);
+}
 
-    for (BuildResult& result : completed) {
+void FarLodSystem::queue_completed_saves() {
+    // Persistence admission is independent of the GL upload budget. Both
+    // queues are bounded by the shared pending-build admission limit.
+    for (std::size_t processed = 0; processed < kMaxBuildDispatchesPerFrame; ++processed) {
+        if (m_tile_saves.diagnostics().pending >= World::AsyncFarLodStore::kMaxPendingSaves)
+            break;
+        BuildResult result;
+        {
+            LUMIN_PROFILE_LOCK(
+                std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
+            if (m_shared->completed.empty())
+                break;
+            result = std::move(m_shared->completed.front());
+            m_shared->completed.pop_front();
+        }
+        if (!build_result_current(result) || result.authority_build_failed ||
+            result.mesh.vertices.empty() || result.mesh.indices.empty()) {
+            if (result.authority_build_failed)
+                ++m_stats.authority_build_failures;
+            else
+                ++m_stats.stale_results_rejected;
+            ++m_stats.builds_integrated_failed;
+            ++m_stats.builds_failed_total;
+            m_pending.erase(region_key(result.rx, result.rz));
+            continue;
+        }
+        if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed) {
+            // The owner is the sole producer; after the capacity check the
+            // consumer can only free slots. Moving transfers all tile arrays.
+            if (!m_tile_saves.enqueue(result.save_dir, std::move(result.tile))) {
+                LUMIN_PROFILE_LOCK(
+                    std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
+                m_shared->completed.push_front(std::move(result));
+                break;
+            }
+        }
+        result.queued_frame = m_frame;
+        m_ready_builds.push_back(std::move(result));
+    }
+}
+
+void FarLodSystem::integrate_completed_builds() {
+    queue_completed_saves();
+    FarLodIntegrationBudget budget;
+    for (std::size_t processed = 0; processed < kMaxUploadsPerFrame && !m_ready_builds.empty();
+         ++processed) {
+        const BuildResult& head = m_ready_builds.front();
+        const bool current = build_result_current(head);
+        if (current &&
+            !budget.admit(head.upload_bytes, m_frame - head.queued_frame, m_pending.size()))
+            break;
+        BuildResult result = std::move(m_ready_builds.front());
+        m_ready_builds.pop_front();
         const u64 key = region_key(result.rx, result.rz);
         m_pending.erase(key);
-        const bool snapshot_stale =
-            !m_world || !result.sdf_snapshot ||
-            result.capture_epoch != result.sdf_snapshot->capture_epoch ||
-            result.params_hash != result.sdf_snapshot->params_hash ||
-            result.params_hash != m_params_hash ||
-            result.authority_revision != result.sdf_snapshot->authority_revision ||
-            result.region_authority_revision != result.sdf_snapshot->region_authority_revision ||
-            result.region_authority_revision !=
-                m_world->far_lod_region_authority_revision(result.rx, result.rz) ||
-            !m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);
-        if (snapshot_stale) {
+        if (!current) {
             ++m_stats.stale_results_rejected;
-        }
-        if (result.authority_build_failed) {
-            ++m_stats.authority_build_failures;
-        }
-        if (result.epoch != m_epoch || snapshot_stale || result.mesh.vertices.empty() ||
-            result.mesh.indices.empty()) {
-            //  a build that returned an empty mesh (or raced an epoch swap)
-            // never becomes resident — counted so the gate can tell empty-mesh failures
-            // apart from build-throttle starvation on the mountains preset.
             ++m_stats.builds_integrated_failed;
             ++m_stats.builds_failed_total;
             continue;
         }
-        bool persistence_pending = false;
-        if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed) {
-            std::vector<std::string> errors;
-            if (!World::FarLodStore(result.save_dir).save_tile(result.tile, &errors)) {
-                ++m_stats.authority_build_failures;
-                ++m_stats.builds_integrated_failed;
-                ++m_stats.builds_failed_total;
-                continue;
-            }
-        } else if (result.tile_changed && !result.save_dir.empty()) {
-            // Dirty authoritative chunks are persisted by WorldSaveService
-            // first. Keep the resident visual result, but schedule another CPU
-            // build after the dirty bit clears so derived FSD2 can follow.
-            persistence_pending = true;
-        }
+        const bool persistence_pending =
+            result.tile_changed && !result.save_dir.empty() && !result.persistence_allowed;
 
         ResidentRegion region;
         region.tier = result.tier;
@@ -1206,10 +1240,7 @@ void FarLodSystem::integrate_completed_builds() {
         region.persistence_pending = persistence_pending;
         if (m_coverage_enabled) {
             region.edited_samples_observed = true;
-            region.has_edited_samples =
-                std::any_of(result.tile.flags.begin(), result.tile.flags.end(), [](u8 flags) {
-                    return (flags & World::kFarLodSampleFlagEdited) != 0;
-                });
+            region.has_edited_samples = result.has_edited_samples;
         }
 
         auto existing = m_residents.find(key);
@@ -1222,6 +1253,7 @@ void FarLodSystem::integrate_completed_builds() {
         ++m_stats.builds_completed_total;
         ++m_stats.builds_integrated_ok; //  completed build became resident this frame
     }
+    m_stats.integration_uploads_deferred = m_ready_builds.size();
 }
 
 void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
@@ -1247,6 +1279,13 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
     m_stats.builds_integrated_ok = 0;
     m_stats.builds_integrated_failed = 0;
     m_stats.evictions_this_frame = 0;
+    m_stats.snapshot_bytes_copied = 0;
+    m_stats.integration_uploads_deferred = m_ready_builds.size();
+    const auto saves = m_tile_saves.diagnostics();
+    m_stats.tiles_saved_async = saves.saved - m_saved_observed;
+    m_saved_observed = saves.saved;
+    m_stats.pending_saves = saves.pending;
+    m_stats.tile_save_failures = saves.failed;
 
     if (!m_enabled || !m_job_system) {
         m_stats.pending_depth = m_pending.size();
@@ -1317,10 +1356,11 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
         if (resident == m_residents.end()) {
             ++missing;
         }
-        if (m_pending.count(key) != 0 && m_pending[key] == want.tier) {
+        if (m_pending.count(key) != 0) {
             continue;
         }
-        if (dispatched >= kMaxBuildDispatchesPerFrame) {
+        if (dispatched >= kMaxBuildDispatchesPerFrame ||
+            m_pending.size() >= FarLodIntegrationBudget::kMaxBacklog) {
             continue;
         }
 
@@ -1346,6 +1386,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
         if (!sdf_snapshot) {
             continue;
         }
+        m_stats.snapshot_bytes_copied += sdf_snapshot->bytes_copied;
         const bool persistence_allowed =
             std::none_of(sdf_snapshot->entries.begin(),
                          sdf_snapshot->entries.end(),
@@ -1411,6 +1452,34 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                 // build the flat water sheet from the same
                 // tile's water flags (river channels + seabeds beyond the live ring).
                 BuildFarLodWaterSheet(tile, result.water_mesh);
+                result.has_edited_samples =
+                    std::any_of(tile.flags.begin(), tile.flags.end(), [](u8 flags) {
+                        return (flags & World::kFarLodSampleFlagEdited) != 0;
+                    });
+                // Check each exact GL byte size and the combined sum before any
+                // GLsizeiptr/u32 conversion or frame-budget accounting.
+                const auto add_bytes = [&result](std::size_t count, std::size_t stride) {
+                    const auto limit =
+                        static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max());
+                    if (count > limit / stride)
+                        return false;
+                    const std::size_t bytes = count * stride;
+                    if (bytes > std::numeric_limits<std::size_t>::max() - result.upload_bytes)
+                        return false;
+                    result.upload_bytes += bytes;
+                    return true;
+                };
+                result.authority_build_failed =
+                    result.mesh.indices.size() >
+                        static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()) ||
+                    result.water_mesh.indices.size() >
+                        static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()) ||
+                    !add_bytes(result.mesh.vertices.size(), sizeof(VoxelVertex)) ||
+                    !add_bytes(result.mesh.indices.size(), sizeof(u32)) ||
+                    !add_bytes(result.water_mesh.vertices.size(), sizeof(VoxelVertex)) ||
+                    !add_bytes(result.water_mesh.indices.size(), sizeof(u32)) ||
+                    result.tile_bytes >
+                        std::numeric_limits<std::size_t>::max() - result.upload_bytes;
                 result.tile = std::move(tile);
 
                 LUMIN_PROFILE_LOCK(
@@ -1422,6 +1491,8 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
             m_inflight_handles.push_back(handle);
         }
     }
+
+    m_stats.pending_saves = m_tile_saves.diagnostics().pending;
 
     // Drop completed handles so the wait list stays bounded.
     m_inflight_handles.erase(std::remove_if(m_inflight_handles.begin(),

@@ -4499,8 +4499,8 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     EXPECT_FALSE(worker_generates_chunk(generation_call));
     EXPECT_FALSE(worker_generates_chunk(worker_signature + generation_call));
     EXPECT_TRUE(worker_generates_chunk(worker_signature + "\r\n" + generation_call + "\r\n}\r\n"));
-    const std::size_t stale_check = source.find("const bool snapshot_stale");
-    const std::size_t owner_save = source.find("save_tile(result.tile");
+    const std::size_t stale_check = source.find("if (!build_result_current(result)");
+    const std::size_t owner_save = source.find("m_tile_saves.enqueue(result.save_dir");
     ASSERT_NE(stale_check, std::string::npos);
     ASSERT_NE(owner_save, std::string::npos);
     EXPECT_LT(stale_check, owner_save);
@@ -4544,8 +4544,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);",
          "entry.voxel_revision = chunk->voxel_revision();",
          "entry.authority_durable = !chunk->is_voxel_data_dirty();",
-         "entry.sdf_data = chunk->sdf_data;",
-         "entry.material_data = chunk->material_data;",
+         "entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);",
          "snapshot->entries.push_back(std::move(entry));"});
 
     const auto worker = section(
@@ -4663,32 +4662,42 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     EXPECT_FALSE(has_guarded_completion(""));
     EXPECT_FALSE(has_guarded_completion("LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>"));
 
+    const auto admission =
+        section(source, "bool FarLodSystem::build_result_current(", "void FarLodSystem::update(");
+    expect_ordered(
+        admission,
+        {"return m_world && result.epoch == m_epoch && result.sdf_snapshot &&",
+         "result.capture_epoch == result.sdf_snapshot->capture_epoch &&",
+         "result.params_hash == result.sdf_snapshot->params_hash &&",
+         "result.params_hash == m_params_hash &&",
+         "result.authority_revision == result.sdf_snapshot->authority_revision &&",
+         "result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&",
+         "m_world->far_lod_region_authority_revision(result.rx, result.rz) &&",
+         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);",
+         "if (!build_result_current(result) || result.authority_build_failed ||",
+         "result.mesh.vertices.empty() || result.mesh.indices.empty())",
+         "++m_stats.builds_failed_total;",
+         "continue;",
+         "if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed)",
+         "m_tile_saves.enqueue(result.save_dir, std::move(result.tile))",
+         "m_ready_builds.push_back(std::move(result));"});
     const auto integrate = section(
         source, "void FarLodSystem::integrate_completed_builds()", "void FarLodSystem::update(");
     expect_ordered(
         integrate,
-        {"const bool snapshot_stale =",
-         "!m_world || !result.sdf_snapshot ||",
-         "result.capture_epoch != result.sdf_snapshot->capture_epoch ||",
-         "result.params_hash != result.sdf_snapshot->params_hash ||",
-         "result.params_hash != m_params_hash ||",
-         "result.authority_revision != result.sdf_snapshot->authority_revision ||",
-         "result.region_authority_revision != result.sdf_snapshot->region_authority_revision ||",
-         "result.region_authority_revision !=",
-         "m_world->far_lod_region_authority_revision(result.rx, result.rz) ||",
-         "!m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);",
-         "result.epoch != m_epoch || snapshot_stale || result.mesh.vertices.empty() ||",
-         "result.mesh.indices.empty())",
+        {"queue_completed_saves();",
+         "const bool current = build_result_current(head);",
+         "!budget.admit(head.upload_bytes, m_frame - head.queued_frame, m_pending.size())",
+         "m_ready_builds.pop_front();",
+         "if (!current)",
          "++m_stats.builds_failed_total;",
          "continue;",
-         "if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed)",
-         "save_tile(result.tile, &errors)",
-         "++m_stats.builds_failed_total;",
-         "continue;",
-         "persistence_pending = true;",
+         "const bool persistence_pending =",
+         "result.tile_changed && !result.save_dir.empty() && !result.persistence_allowed;",
          "glGenVertexArrays(1, &region.vao);",
          "region.persistence_pending = persistence_pending;",
          "m_residents.emplace(key, region);"});
+    EXPECT_EQ(integrate.find("save_tile("), std::string_view::npos);
 
     const auto current = section(world_source,
                                  "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(",

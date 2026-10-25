@@ -3270,7 +3270,8 @@ int main(int argc, char* argv[]) {
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
-                // Synchronous main-thread save; shutdown cannot overlap this callback.
+                // Complete accepted cache writes before saving authoritative state.
+                prepare_world_entry();
                 if (!gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -3423,7 +3424,7 @@ int main(int argc, char* argv[]) {
                 worldAvailable().available && !scenario_config.active() && DeveloperUiAllowed(g_app)
                     ? gameSession->GetWorldSystem()
                     : nullptr;
-            worldGenViewer->DrawContents(liveWorld);
+            worldGenViewer->DrawContents(liveWorld, renderPipeline);
         }};
     widgetServices["client.settings"] = {playerAvailable,
                                          [&](Developer::DeveloperFrameAdapter&) {
@@ -3696,6 +3697,7 @@ int main(int argc, char* argv[]) {
                              wrote_metrics ? "written" : "failed",
                              runtime_boot_frames,
                              runtime_boot_output.string());
+        prepare_world_entry();
         if (auto* world_system = gameSession->GetWorldSystem()) {
             world_system->clear_world(nullptr);
         }
@@ -4434,6 +4436,7 @@ int main(int argc, char* argv[]) {
                     [&](bool main_menu) {
                         if (!session_persistence_allowed())
                             return Measurement::ActionResult{false, 0};
+                        prepare_world_entry();
                         const bool saved = gameSession->SaveWorld();
                         if (saved) {
                             benchmark_loaded_snapshot.reset();

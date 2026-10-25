@@ -1,5 +1,6 @@
 #include "SavedWorldCatalog.h"
 
+#include "RegionFileWriteGuard.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
@@ -102,18 +103,22 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         if (!fs::is_directory(save) || fs::is_symlink(save))
             return result;
         const auto metadata_path = save / "world_info.json";
-        if (!fs::is_regular_file(metadata_path))
-            return result;
-        // Bound metadata to 1 MiB before parsing.
-        constexpr std::uintmax_t kMaxMetadataBytes = 1'048'576;
-        if (fs::file_size(metadata_path) > kMaxMetadataBytes) {
-            result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
-            return result;
+        nlohmann::json json;
+        {
+            const detail::FilePublicationReadGuard read(metadata_path);
+            if (!fs::is_regular_file(metadata_path))
+                return result;
+            // Bound metadata to 1 MiB before parsing.
+            constexpr auto kMaxMetadataBytes = std::uintmax_t{1024} * 1024;
+            if (fs::file_size(metadata_path) > kMaxMetadataBytes) {
+                result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
+                return result;
+            }
+            std::ifstream input(metadata_path);
+            if (!input)
+                return result;
+            json = nlohmann::json::parse(input);
         }
-        std::ifstream input(metadata_path);
-        if (!input)
-            return result;
-        const auto json = nlohmann::json::parse(input);
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.

@@ -388,7 +388,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         start = service.index("if(snapshot.entities.empty()){")
         end = service.index("returnFlushRemovalDirectory(path,errors);", start)
         empty_roster = service[start:end]
-        self.assertIn("std::filesystem::remove(path,ec);if(ec){", empty_roster)
+        self.assertIn("std::filesystem::remove(path,ec);}if(ec){", empty_roster)
+        self.assertLess(empty_roster.index("LockPublication(path)"),
+                        empty_roster.index("std::filesystem::remove(path,ec)"))
+        self.assertIn("if(!AllowPublication(path,true,errors)){", empty_roster)
         self.assertIn("returnfalse;", empty_roster)
         self.assertIn("returnFlushRemovalDirectory(path,errors);", service[end:])
 

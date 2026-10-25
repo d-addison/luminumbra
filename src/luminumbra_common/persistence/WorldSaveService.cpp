@@ -1,5 +1,6 @@
 #include "WorldSaveService.h"
 #include "CreatedWorldArtifacts.h"
+#include "RegionFileWriteGuard.h"
 #include "core/Profiler.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
@@ -18,6 +19,7 @@
 #include <lz4.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <charconv>
@@ -36,6 +38,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <sstream>
 #include <stdexcept>
 #include <stop_token>
@@ -64,7 +67,145 @@
 #endif
 
 namespace Luminumbra::Persistence {
+namespace detail {
+
+struct RegionFileSync {
+    std::shared_mutex publication;
+    std::atomic<std::size_t> waiting_publishers{0};
+};
+
 namespace {
+RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
+    // Fixed storage bounds synchronization overhead regardless of world size.
+    // Hash the generated filename so relative/absolute world paths and Windows
+    // case differences select the same stripe. Collisions may delay publication;
+    // readers never acquire the writer mutex that covers compression or fsync.
+    static std::array<RegionFileSync, 256> stripes;
+    std::size_t hash = 0;
+    const auto filename = path.filename().native();
+    for (const auto character : filename) {
+        const auto folded =
+            character >= 'A' && character <= 'Z' ? character + ('a' - 'A') : character;
+        hash = hash * 31u + static_cast<std::size_t>(folded);
+    }
+    return stripes[hash % stripes.size()];
+}
+} // namespace
+
+FilePublicationReadGuard::FilePublicationReadGuard(const std::filesystem::path& path)
+    : m_sync(&RegionFileSyncFor(path)) {
+    m_sync->publication.lock_shared();
+}
+
+FilePublicationReadGuard::~FilePublicationReadGuard() {
+    m_sync->publication.unlock_shared();
+}
+
+RegionFileWriteGuard::RegionFileWriteGuard(const std::filesystem::path&) {}
+
+RegionFileWriteGuard::~RegionFileWriteGuard() = default;
+
+std::size_t RegionFileWriteGuard::waiting_writers() const {
+    return WorldSaveService::waiting_save_writers();
+}
+
+} // namespace detail
+
+// File-operation injection is defined here rather than in the production API.
+// Persistence regressions observe real open streams and emulate Windows sharing
+// violations on every platform. Hooks are installed before starting any workers.
+namespace detail {
+using ReadObserver = void (*)(const std::filesystem::path&, bool);
+using PublicationHook = bool (*)(const std::filesystem::path&, bool);
+namespace {
+std::atomic<ReadObserver>& ReadObserverForTesting() {
+    static std::atomic<ReadObserver> observer{nullptr};
+    return observer;
+}
+std::atomic<PublicationHook>& PublicationHookForTesting() {
+    static std::atomic<PublicationHook> hook{nullptr};
+    return hook;
+}
+} // namespace
+void set_file_read_observer_for_testing(ReadObserver observer) {
+    ReadObserverForTesting().store(observer, std::memory_order_release);
+}
+void set_file_publication_hook_for_testing(PublicationHook hook) {
+    PublicationHookForTesting().store(hook, std::memory_order_release);
+}
+std::size_t waiting_file_publishers_for_testing(const std::filesystem::path& path) {
+    return RegionFileSyncFor(path).waiting_publishers.load(std::memory_order_acquire);
+}
+} // namespace detail
+namespace {
+
+// The caller owns the shared publication lock before construction and until
+// after destruction. In particular, close the native stream before unlocking.
+class ObservedInput {
+public:
+    explicit ObservedInput(const std::filesystem::path& path)
+        : m_stream(path, std::ios::binary)
+        , m_path(path) {
+        if (m_stream.is_open()) {
+            if (const auto observer =
+                    detail::ReadObserverForTesting().load(std::memory_order_acquire))
+                observer(m_path, true);
+        }
+    }
+    ~ObservedInput() {
+        if (m_stream.is_open()) {
+            m_stream.close();
+            if (const auto observer =
+                    detail::ReadObserverForTesting().load(std::memory_order_acquire))
+                observer(m_path, false);
+        }
+    }
+    ObservedInput(const ObservedInput&) = delete;
+    ObservedInput& operator=(const ObservedInput&) = delete;
+
+    std::ifstream& stream() {
+        return m_stream;
+    }
+
+private:
+    std::ifstream m_stream;
+    const std::filesystem::path& m_path;
+};
+
+std::shared_mutex& ClockPairPublicationMutex() {
+    static std::shared_mutex mutex;
+    return mutex;
+}
+
+void AcquirePublicationLock(std::unique_lock<std::shared_mutex>& lock,
+                            detail::RegionFileSync& sync) {
+    if (!lock.try_lock()) {
+        // Count only confirmed contention, so diagnostics establish that an
+        // open reader really prevented publication, independent of scheduling.
+        sync.waiting_publishers.fetch_add(1, std::memory_order_release);
+        lock.lock();
+        sync.waiting_publishers.fetch_sub(1, std::memory_order_release);
+    }
+}
+
+struct PublicationLocks {
+    std::unique_lock<std::shared_mutex> clock_pair;
+    std::unique_lock<std::shared_mutex> file;
+};
+
+PublicationLocks LockPublication(const std::filesystem::path& path) {
+    auto& sync = detail::RegionFileSyncFor(path);
+    PublicationLocks locks{.clock_pair =
+                               std::unique_lock(ClockPairPublicationMutex(), std::defer_lock),
+                           .file = std::unique_lock(sync.publication, std::defer_lock)};
+    // Readers comparing ledger and clock need one consistent pair, including
+    // across a rewind. Writers keep the installed ledger tick <= clock tick.
+    // Only replacement holds this gate; staging and fsync never acquire it.
+    if (path.filename() == "world_info.json" || path.filename() == "active-regions.arl")
+        AcquirePublicationLock(locks.clock_pair, sync);
+    AcquirePublicationLock(locks.file, sync);
+    return locks;
+}
 
 constexpr const char* kChunksDirectoryName = "chunks";
 constexpr const char* kWorldStateFileName = "world-state.json";
@@ -289,6 +430,17 @@ void AddError(std::vector<std::string>* errors, std::string message) {
     }
 }
 
+bool AllowPublication(const std::filesystem::path& path,
+                      bool removing,
+                      std::vector<std::string>* errors) {
+    if (const auto hook = detail::PublicationHookForTesting().load(std::memory_order_acquire);
+        hook && !hook(path, removing)) {
+        AddError(errors, "file publication refused: " + Filesystem::GenericUtf8PathString(path));
+        return false;
+    }
+    return true;
+}
+
 bool ReadAmbientAnchor(const nlohmann::json& metadata,
                        std::optional<Vec3>& anchor,
                        std::string& error) {
@@ -477,6 +629,9 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
+    const auto publish = LockPublication(destination);
+    if (!AllowPublication(destination, false, errors))
+        return false;
     if (artifacts) {
         artifacts->publish_file(temp, destination);
         return true;
@@ -609,6 +764,9 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     return true;
 }
 
+bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
+                         std::vector<std::string>* errors);
+
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors,
@@ -616,18 +774,22 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
-    // POSIX rename replaces an existing same-filesystem destination atomically.
-    // World members stage in the save root outside the chunks scan; standalone
-    // containers stage beside the file. Cross-filesystem rename fails safely.
-    if (artifacts) {
-        artifacts->publish_file(temp, destination);
-    } else if (std::rename(temp.c_str(), destination.c_str()) != 0) {
-        const int error = errno;
-        AddError(errors,
-                 "failed to atomically replace region file: " +
-                     Filesystem::GenericUtf8PathString(destination) + ": " +
-                     PosixErrorMessage(error));
-        return false;
+    // Only publication excludes open readers, matching Windows semantics. Flush
+    // both directory entries after releasing that lock when staging is elsewhere.
+    {
+        const auto publish = LockPublication(destination);
+        if (!AllowPublication(destination, false, errors))
+            return false;
+        if (artifacts) {
+            artifacts->publish_file(temp, destination);
+        } else if (std::rename(temp.c_str(), destination.c_str()) != 0) {
+            const int error = errno;
+            AddError(errors,
+                     "failed to atomically replace region file: " +
+                         Filesystem::GenericUtf8PathString(destination) + ": " +
+                         PosixErrorMessage(error));
+            return false;
+        }
     }
 
     // Persist the directory entry update as well as the replacement bytes.
@@ -671,7 +833,9 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                      Filesystem::GenericUtf8PathString(parent) + ": " + PosixErrorMessage(error));
         return false;
     }
-    return true;
+    return temp.parent_path() == destination.parent_path() ||
+           FlushDirectoryEntry(
+               temp.has_parent_path() ? temp.parent_path() : std::filesystem::path("."), errors);
 }
 
 // Flushes the directory that holds a newly created entry so the entry survives
@@ -922,28 +1086,33 @@ bool ReadRegionFile(const std::filesystem::path& path,
     LUMIN_PROFILE_ZONE_N("File save read");
     out_records.clear();
 
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-        AddError(errors,
-                 "failed to open region file for reading: " +
-                     Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    std::ostringstream buffer;
-    char read_buffer[64 * 1024];
-    while (input) {
-        if (stop.stop_requested()) {
-            AddError(errors, "Saved-world validation cancelled.");
+    std::string bytes;
+    {
+        const std::shared_lock read(detail::RegionFileSyncFor(path).publication);
+        std::ifstream input(path, std::ios::binary);
+        if (!input.is_open()) {
+            AddError(errors,
+                     "failed to open region file for reading: " +
+                         Filesystem::GenericUtf8PathString(path));
             return false;
         }
-        input.read(read_buffer, sizeof(read_buffer));
-        buffer.write(read_buffer, input.gcount());
+        std::ostringstream buffer;
+        char read_buffer[64 * 1024];
+        while (input) {
+            if (stop.stop_requested()) {
+                AddError(errors, "Saved-world validation cancelled.");
+                return false;
+            }
+            input.read(read_buffer, sizeof(read_buffer));
+            buffer.write(read_buffer, input.gcount());
+        }
+        if (input.bad()) {
+            AddError(errors,
+                     "failed to read region file: " + Filesystem::GenericUtf8PathString(path));
+            return false;
+        }
+        bytes = buffer.str();
     }
-    if (input.bad()) {
-        AddError(errors, "failed to read region file: " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    const std::string bytes = buffer.str();
 
     if (bytes.size() < kRegionFileHeaderSize ||
         std::memcmp(bytes.data(), kRegionMagic, sizeof(kRegionMagic)) != 0) {
@@ -1036,11 +1205,18 @@ bool WriteRegionFile(const std::filesystem::path& path,
     });
 
     std::string bytes;
-    std::size_t payload_bytes = 0;
+    std::size_t total_bytes = kRegionFileHeaderSize + records.size() * kRecordHeaderSize;
     for (const RegionRecord& record : records) {
-        payload_bytes += record.compressed_payload.size();
+        if (record.compressed_payload.size() > std::numeric_limits<std::uint32_t>::max() ||
+            record.compressed_payload.size() > bytes.max_size() - total_bytes) {
+            AddError(errors,
+                     "region file exceeds the serializable size limit: " +
+                         Filesystem::GenericUtf8PathString(path));
+            return false;
+        }
+        total_bytes += record.compressed_payload.size();
     }
-    bytes.reserve(kRegionFileHeaderSize + records.size() * kRecordHeaderSize + payload_bytes);
+    bytes.reserve(total_bytes);
 
     bytes.append(kRegionMagic, sizeof(kRegionMagic));
     AppendU16(bytes, kRegionVersion);
@@ -1163,6 +1339,7 @@ bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
 
 bool WriteWorldManifest(const std::filesystem::path& manifest_path,
                         std::vector<std::string>* errors) {
+    const detail::RegionFileWriteGuard transaction(manifest_path);
     const nlohmann::json manifest = {{"schema", kWorldManifestSchema},
                                      {"container", "LMR1"},
                                      {"container_version", kRegionVersion}};
@@ -1332,10 +1509,11 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         // Root-level .tmp.* siblings are uncommitted staging, never authority.
         requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
         const auto path = save_dir / "world_info.json";
+        const std::shared_lock read(detail::RegionFileSyncFor(path).publication);
         if (!std::filesystem::exists(path))
             return true;
-        std::ifstream input(path, std::ios::binary);
-        const auto metadata = nlohmann::json::parse(input);
+        ObservedInput input(path);
+        const auto metadata = nlohmann::json::parse(input.stream());
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
@@ -1408,6 +1586,7 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
     if (!validate_save(save_dir, errors))
         return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
+    const detail::RegionFileWriteGuard transaction(path);
     // Like ledger staging, abandoned plant copies must live outside the strict
     // region scan. Reclaim them even when the new roster is empty.
     const auto staging = save_dir / path.filename();
@@ -1415,7 +1594,16 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
     std::error_code ec;
     if (snapshot.entities.empty()) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
-        std::filesystem::remove(path, ec);
+        {
+            const auto publish = LockPublication(path);
+            if (!AllowPublication(path, true, errors)) {
+                AddError(errors,
+                         "failed to remove plant entities file: " +
+                             Filesystem::GenericUtf8PathString(path));
+                return false;
+            }
+            std::filesystem::remove(path, ec);
+        }
         if (ec) {
             AddError(errors,
                      "failed to remove plant entities file: " +
@@ -1439,20 +1627,36 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     LUMIN_PROFILE_ZONE_N("File plant entities load");
     out = Luminumbra::Ecs::EntityRegistrySnapshot{};
     const std::filesystem::path path = plant_entities_path(save_dir);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
-        return true; // clean miss: a fresh / no-plant world
+    std::string bytes;
+    {
+        const std::shared_lock read(detail::RegionFileSyncFor(path).publication);
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(path, ec);
+        if (ec) {
+            AddError(errors, "failed to inspect plant entities file: " + ec.message());
+            return false;
+        }
+        if (!exists)
+            return true; // clean miss: a fresh / no-plant world
+        ObservedInput input(path);
+        if (!input.stream()) {
+            AddError(errors,
+                     "failed to open plant entities file: " +
+                         Filesystem::GenericUtf8PathString(path));
+            return false;
+        }
+        std::ostringstream buffer;
+        buffer << input.stream().rdbuf();
+        if (input.stream().bad() || buffer.bad()) {
+            AddError(errors,
+                     "failed to read plant entities file: " +
+                         Filesystem::GenericUtf8PathString(path));
+            return false;
+        }
+        bytes = buffer.str();
     }
-    const std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors,
-                 "failed to open plant entities file: " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    std::ostringstream ss;
-    ss << in.rdbuf();
     std::vector<std::string> load_errors;
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, out, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
         return false;
@@ -1471,6 +1675,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
     LUMIN_PROFILE_ZONE_N("File active regions load");
     try {
         const auto path = active_regions_path(save_dir);
+        const std::shared_lock read(detail::RegionFileSyncFor(path).publication);
         if (!std::filesystem::exists(path)) {
             ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
@@ -1480,11 +1685,11 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
             AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
             return false;
         }
-        std::ifstream input(path, std::ios::binary);
+        ObservedInput input(path);
         std::string bytes(static_cast<std::size_t>(length), '\0');
-        input.read(bytes.data(), static_cast<std::streamsize>(length));
+        input.stream().read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
-        if (!input || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+        if (!input.stream() || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
             return false;
         }
@@ -1782,13 +1987,15 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
             return false;
     }
     try {
+        const detail::RegionFileWriteGuard transaction(region_file);
         if (!parent.empty()) {
             std::filesystem::create_directories(parent);
         }
 
         std::vector<RegionRecord> raw_records;
-        std::error_code exists_error;
-        if (std::filesystem::exists(region_file, exists_error) && !exists_error) {
+        // Inspection failures must abort the merge, never masquerade as an
+        // absent container and discard records owned by another writer.
+        if (std::filesystem::exists(region_file)) {
             if (!ReadRegionFile(region_file, raw_records, errors)) {
                 return false;
             }
@@ -2071,6 +2278,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   std::vector<std::string>& errors,
                                   const std::stop_token& stop) const {
     LUMIN_PROFILE_ZONE_N("File world load");
+    // Staging lives outside the strict region inventory. Each published file
+    // is read independently; validation never holds a world-wide transaction.
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();
@@ -2082,34 +2291,37 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
         const auto metadata_path = save_dir / "world_info.json";
-        if (std::filesystem::exists(metadata_path)) {
-            std::ifstream input(metadata_path, std::ios::binary);
-            const auto metadata = nlohmann::json::parse(input);
-            if (!metadata.is_object())
-                return reject("corrupt world metadata: expected an object");
-            // Old worlds can contain only metadata: no chunk container exists yet
-            // to reveal their version. Refuse them before the clean-miss path.
-            if (!metadata.contains("container_version"))
-                return reject(kObsoleteWorldMessage);
-            const auto& version = metadata.at("container_version");
-            if (!version.is_number_integer())
-                return reject("corrupt world metadata container version");
-            if (version != kContainerVersion) {
-                if (version >= 0 && version < kContainerVersion)
+        {
+            const std::shared_lock read(detail::RegionFileSyncFor(metadata_path).publication);
+            if (std::filesystem::exists(metadata_path)) {
+                ObservedInput input(metadata_path);
+                const auto metadata = nlohmann::json::parse(input.stream());
+                if (!metadata.is_object())
+                    return reject("corrupt world metadata: expected an object");
+                // Old worlds can contain only metadata: no chunk container exists yet
+                // to reveal their version. Refuse them before the clean-miss path.
+                if (!metadata.contains("container_version"))
                     return reject(kObsoleteWorldMessage);
-                if (version > kContainerVersion)
-                    return reject("unsupported future world metadata container version " +
-                                  version.dump());
-                return reject("corrupt world metadata container version");
-            }
-            if (metadata.contains("simulationTick") || metadata.contains("calendar") ||
-                metadata.contains("renderCalendar")) {
-                world::WorldClock clock;
-                std::string error;
-                std::optional<Vec3> anchor;
-                if (!world::WorldClock::from_metadata(metadata, clock, error) ||
-                    !ReadAmbientAnchor(metadata, anchor, error))
-                    return reject(error);
+                const auto& version = metadata.at("container_version");
+                if (!version.is_number_integer())
+                    return reject("corrupt world metadata container version");
+                if (version != kContainerVersion) {
+                    if (version >= 0 && version < kContainerVersion)
+                        return reject(kObsoleteWorldMessage);
+                    if (version > kContainerVersion)
+                        return reject("unsupported future world metadata container version " +
+                                      version.dump());
+                    return reject("corrupt world metadata container version");
+                }
+                if (metadata.contains("simulationTick") || metadata.contains("calendar") ||
+                    metadata.contains("renderCalendar")) {
+                    world::WorldClock clock;
+                    std::string error;
+                    std::optional<Vec3> anchor;
+                    if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+                        !ReadAmbientAnchor(metadata, anchor, error))
+                        return reject(error);
+                }
             }
         }
         const auto chunks_dir = save_dir / kChunksDirectoryName;
@@ -2135,7 +2347,13 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
             int rx = 0, rz = 0;
-            if (!entry.is_regular_file())
+            const std::shared_lock read(detail::RegionFileSyncFor(entry.path()).publication);
+            // A plant file can be retired after iterator discovery. Inspect it
+            // under its publication lock and accept that clean disappearance.
+            const auto status = std::filesystem::status(entry.path());
+            if (!std::filesystem::exists(status) && entry.path() == plant_entities_path(save_dir))
+                continue;
+            if (!std::filesystem::is_regular_file(status))
                 return reject("corrupt world persistence artifact: " +
                               Filesystem::GenericUtf8PathString(entry.path()));
             if (entry.path() == world_manifest_path(save_dir) ||
@@ -2153,6 +2371,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (!present)
             return false;
         if (std::filesystem::exists(world_manifest_path(save_dir))) {
+            const std::shared_lock read(
+                detail::RegionFileSyncFor(world_manifest_path(save_dir)).publication);
             std::ifstream input(world_manifest_path(save_dir), std::ios::binary);
             const auto manifest = nlohmann::json::parse(input);
             if (manifest.is_object() && manifest.contains("schema") &&
@@ -2221,16 +2441,19 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 }
             }
         }
-        world::ActiveRegionLedger ledger;
-        if (!load_active_regions(ledger, save_dir, &errors))
-            return reject("");
-        if (std::filesystem::exists(active_regions_path(save_dir))) {
-            world::WorldClock clock;
-            bool required = false;
-            if (!read_clock_metadata(save_dir, clock, required, &errors))
+        {
+            const std::shared_lock pair(ClockPairPublicationMutex());
+            world::ActiveRegionLedger ledger;
+            if (!load_active_regions(ledger, save_dir, &errors))
                 return reject("");
-            if (ledger.header_tick() > clock.tick())
-                return reject(world::ActiveRegionLedger::kCorruptMessage);
+            if (std::filesystem::exists(active_regions_path(save_dir))) {
+                world::WorldClock clock;
+                bool required = false;
+                if (!read_clock_metadata(save_dir, clock, required, &errors))
+                    return reject("");
+                if (ledger.header_tick() > clock.tick())
+                    return reject(world::ActiveRegionLedger::kCorruptMessage);
+            }
         }
         Ecs::EntityRegistrySnapshot plants;
         if (stop.stop_requested())
@@ -2330,13 +2553,13 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
         for (auto& [region_coords, region_chunks] : regions) {
             const std::filesystem::path path =
                 region_file_path(save_dir, region_coords.first, region_coords.second);
+            const detail::RegionFileWriteGuard transaction(path);
 
             // Merge with existing on-disk records: chunks absent from memory
             // and far-LOD tile records (lod_level > 0) are preserved
             // verbatim; records for the chunks being written are replaced.
             std::vector<RegionRecord> records;
-            std::error_code exists_error;
-            if (std::filesystem::exists(path, exists_error) && !exists_error) {
+            if (std::filesystem::exists(path)) {
                 if (!ReadRegionFile(path, records, errors)) {
                     return false;
                 }

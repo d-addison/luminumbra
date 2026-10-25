@@ -115,6 +115,7 @@ bool ScenarioRunnerImpl::drivePersistenceRoundtrip() {
         if (scenario_config.persistence_phase == "load") {
             phase_result = RunPersistenceRoundtripLoadPhase(scenario_config, gameSession.get());
         } else {
+            renderPipeline.prepare_world_swap();
             phase_result = RunPersistenceRoundtripSavePhase(scenario_config, gameSession.get());
         }
         if (!phase_result.passed) {

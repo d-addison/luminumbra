@@ -2,6 +2,7 @@
 // SIMULATION requirements only (preset and worldgen dependencies); renderer/UI
 // asset requirements are caller-supplied by the client. Worldgen dependencies
 // are simulation assets and must be available even for a headless host.
+#include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
@@ -68,6 +69,7 @@
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -128,6 +130,44 @@ public:
 private:
     fs::path root_;
 };
+
+TEST(GameSessionHeadlessWorldTest, PlantDeletionFailureFailsLegacySaveWithoutDirtyChunks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateWorld("Plant deletion failure", "1337", "default"));
+        const auto save = session.GetWorldSaveDir();
+        const auto path = Luminumbra::Persistence::WorldSaveService::plant_entities_path(save);
+        Luminumbra::Ecs::EntityRegistrySnapshot plants;
+        plants.entities.push_back(Luminumbra::Ecs::EntitySnapshotRecord{
+            .entity_id = 1, .name = "stale plant", .components = {}});
+        ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_plant_entities(plants, save));
+        for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
+            ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(
+            [](const fs::path& destination, bool removing) {
+                return !(removing && destination.filename() == "plant-entities.json");
+            });
+        Luminumbra::world::WorldStateSaveReport report;
+        EXPECT_FALSE(session.SaveWorldStateTo(save, &report));
+        EXPECT_EQ(report.chunks_dirty, 0u);
+        EXPECT_FALSE(report.saved);
+        Luminumbra::Ecs::EntityRegistrySnapshot retained;
+        EXPECT_TRUE(Luminumbra::Persistence::WorldSaveService::load_plant_entities(retained, save));
+        EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(retained),
+                  Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(plants));
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+        EXPECT_TRUE(session.SaveWorldStateTo(save));
+        EXPECT_FALSE(fs::exists(path));
+    }
+    jobs.shutdown();
+}
 
 // Fault injection exercises scan errors on every platform and under elevated users.
 // No permission-dependent fixture or skipped assertion is needed.
