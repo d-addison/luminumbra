@@ -183,6 +183,54 @@ class ReplaySourceContract(unittest.TestCase):
                      "TransientSnapshotsRetainTheEffectivePresetAndRenderCalendar"):
             self.assertIn(f"TEST_F(EffectivePresetIdentity, {name})", native)
 
+    def test_voxel_edit_preparation_indexes_and_publishes_synchronous_generation(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        prepare = source.split("bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(", 1)[1].split(
+            "int SHIELD_WorldSystem::EditTerrainVoxel(", 1)[0]
+        insertion = prepare.split("if (iterator == m_streaming_state.chunks.end()) {", 1)[1].split(
+            "auto& chunk = iterator->second;", 1)[0]
+        self.assertIn("m_activation_index.insert(iterator->second);", insertion)
+        self.assertIn("++m_dirty_generation;", insertion)
+        generation = prepare.split("if (chunk->sdf_data.empty()) {", 1)[1].split(
+            "if (chunk->sdf_data.size() != kFullSdfLattice)", 1)[0]
+        self.assertRegex(generation, r'GenerateChunkData\(\*chunk, 1\);\s*'
+                         r'publish_generated_column_span\(\*chunk\);\s*'
+                         r'\+\+m_dirty_generation;')
+        self.assertLess(prepare.index("return false;"), prepare.index("wait_for_streaming_jobs();"))
+        native = read_source("test/common/ActivationResidencyIndex_test.cpp")
+        self.assertIn("VoxelEditPreparationMaintainsResidencyAndPublication", native)
+        for token in ("EXPECT_FALSE(world.PrepareTerrainVoxelEdit(anchor, 0.0f));",
+                      "EXPECT_FALSE(world.PrepareTerrainVoxelEdit(anchor, 17.0f));",
+                      "EXPECT_EQ(loaded->sdf_data, partial_sdf);",
+                      "EXPECT_EQ(prepared.index_updates, initial.index_updates + 2u);",
+                      "world.get_last_streaming_budget_stats().generation_candidates, 0u"):
+            self.assertIn(token, native)
+        self.assertIn("common/ActivationResidencyIndex_test.cpp", read_source("test/CMakeLists.txt"))
+        self.assertNotRegex(native, r'(?<![\w:])Test::SyntheticTerrainParams\(')
+
+    def test_surface_span_cache_preserves_revision_and_owner_publication(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        sampler = source.split("SHIELD_WorldSystem::compute_column_surface_span(", 1)[1].split(
+            "SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span_from_heights(", 1)[0]
+        self.assertRegex(sampler, r'ComputeShapedHeightsAtPositionsImpl<true>\('
+                         r'[^;]*m_params.surface_sampling_revision >=\s*kSurfaceSamplingRevision\);')
+        self.assertIn("return column_surface_span_from_heights(chunk_x, chunk_z, heights);", sampler)
+        publication = source.split("void SHIELD_WorldSystem::publish_generated_column_span(", 1)[1].split(
+            "SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span(", 1)[0]
+        self.assertRegex(publication, r'if \(m_params.surface_sampling_revision < kSurfaceSamplingRevision &&\s*'
+                         r'\(m_params.biome_relief_enabled \|\| m_params.cliffs_enabled \|\| m_params.lakes_enabled \|\|\s*'
+                         r'm_params.surface_breaks_enabled\)\)\s*return;')
+        adoption = source.split("bool SHIELD_WorldSystem::adopt_streamed_chunk(", 1)[1]
+        for token in ("chunk->stage_water_seed_inputs({});", "m_activation_index.insert(chunk);",
+                      "m_activation_index.content_changed(chunk->get_coords());"):
+            self.assertIn(token, adoption)
+        native = read_source("test/common/ActivationResidencyIndex_test.cpp")
+        for token in ("params.surface_sampling_revision < Systems::kSurfaceSamplingRevision",
+                      "legacy_params.cliffs_enabled = false;",
+                      "GeneratedCliffHeightmapsPreserveFullScanActivationPolicy",
+                      "CurrentRevisionPublishesCompleteGeneratedCliffSpans"):
+            self.assertIn(token, native)
+
     def test_surface_admission_precedes_boot_output_and_allocation(self):
         helper = read_source(MODES + "ModeHelpers.cpp").split("ReplayRunnerConfigFrom(", 1)[1]
         guard = "SurfaceRadiiSupported(header.surface_radius, header.collision_radius)"

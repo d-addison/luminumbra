@@ -2,6 +2,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
+#include "../world/ActivationResidencyIndex.h"
 #include "../world/BiomeTable.h"
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
@@ -803,6 +804,14 @@ public:
         m_streaming_radius_cap = cap_chunks;
     }
 
+    // Owner-thread cumulative diagnostics; derived indexes never enter world_hash.
+    const World::ActivationResidencyIndex::Counters& activation_index_counters() const {
+        return m_activation_index.counters();
+    }
+    // Owner-thread diagnostic in dispatch/publication order. Returns at most
+    // 1024 coordinates, including unpublished batches whose workers finished.
+    std::vector<IVec3> generation_queue_prefix(std::size_t max_count) const;
+
     //  ( T.1): the water epoch (terraform bed edits increment it) —
     // folded into the waterfall site-cache key for bounded re-surveys.
     std::uint64_t water_epoch() const;
@@ -1163,20 +1172,21 @@ private:
     // wall between columns of different surface height is always inside one
     // of the two spans. center_y preserves the old single-point sample for
     // ordering (drain center-out) and collision selection.
-    struct ColumnSurfaceSpan {
-        int min_y = 0;
-        int max_y = 0;
-        int center_y = 0;
-        // cached surface biome id for the column (u8, 255 = none).
-        // Filled from BiomeIdAt when biomes are enabled, kNoBiome otherwise.
-        u8 biome_id = 255u;
-    };
-    // Pure 5-point sampling (no cache) - usable from const initial-load paths.
+    using ColumnSurfaceSpan = World::ActivationResidencyIndex::SurfaceSpan;
+    // The policy span remains the procedural five-point span, even after edits;
+    // changing that policy would change residency and the simulation hash.
     ColumnSurfaceSpan compute_column_surface_span(int chunk_x, int chunk_z) const;
-    // Cached for the lifetime of the current seed/params (terrain height is
-    // deterministic).
+    ColumnSurfaceSpan column_surface_span_from_heights(int chunk_x,
+                                                       int chunk_z,
+                                                       const std::array<float, 5>& heights) const;
     ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
-    std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
+    void publish_generated_column_span(const ::Luminumbra::Chunk& chunk);
+    World::ActivationResidencyIndex m_activation_index;
+    bool m_activation_plan_valid = false;
+    int m_activation_plan_radius = -1;
+    std::vector<IVec3> m_activation_plan_camera_chunks;
+    std::size_t m_activation_plan_surface_columns = 0;
+    int m_last_eviction_radius = -1;
 
     // --- Helper Functions ---
     // Returns true if it actually ran the activation pass (false if it was elided because the
