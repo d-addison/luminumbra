@@ -1199,14 +1199,14 @@ void content_references() {
     // Exercise the public JSON dependency loader with the shared capture policy.
     std::string bytes;
     require(Luminumbra::World::ReadWorldgenFile(content.root() / "external.ltex", bytes));
-    Luminumbra::Filesystem::capture_content_paths.enable(content.root());
+    Luminumbra::Filesystem::capture_content_paths().enable(content.root());
     require(Luminumbra::World::ReadWorldgenFile(content.root() / "res/included.json", bytes));
     require(bytes == "{}");
     require(!Luminumbra::World::ReadWorldgenFile(content.root() / "external.ltex", bytes));
     require(bytes.empty());
     require(!Luminumbra::World::ReadWorldgenFile(content.root() / "data/../external.ltex", bytes));
     require(bytes.empty());
-    require(Luminumbra::Filesystem::capture_content_paths.refused());
+    require(Luminumbra::Filesystem::capture_content_paths().refused());
 
     species_capture_references(content);
 

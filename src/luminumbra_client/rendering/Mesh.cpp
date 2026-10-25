@@ -76,7 +76,7 @@ std::vector<std::filesystem::path> BuildMeshPathCandidates(const std::string& pa
 
 std::ifstream OpenMeshFile(const std::string& path, std::filesystem::path& resolvedPath) {
     // Capture resolution never falls back to a different build/source data tree.
-    if (Filesystem::capture_content_paths.active()) {
+    if (Filesystem::capture_content_paths().active()) {
         const std::filesystem::path requested(path);
         bool rooted_content = false;
         if (!requested.empty())
@@ -87,9 +87,9 @@ std::ifstream OpenMeshFile(const std::string& path, std::filesystem::path& resol
         resolvedPath =
             Filesystem::IsAbsolutePath(requested)
                 ? requested
-                : Filesystem::capture_content_paths.root() /
+                : Filesystem::capture_content_paths().root() /
                       (rooted_content ? requested : std::filesystem::path("data") / requested);
-        if (!Filesystem::capture_content_paths.allows(resolvedPath))
+        if (!Filesystem::capture_content_paths().allows(resolvedPath))
             return {};
         return std::ifstream(resolvedPath, std::ios::binary);
     }

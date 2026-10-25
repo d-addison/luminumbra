@@ -48,7 +48,10 @@ bool IsAbsolutePath(const std::filesystem::path& path) noexcept {
 namespace {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
-thread_local std::size_t long_name_expansion_count = 0;
+std::size_t& LongNameExpansionCountStorage() noexcept {
+    static thread_local std::size_t count = 0;
+    return count;
+}
 
 std::filesystem::path OrdinaryWindowsPath(std::wstring resolved) {
     if (resolved.starts_with(LR"(\\?\UNC\)"))
@@ -119,7 +122,7 @@ FinalWindowsPath(HANDLE handle, bool require_directory, std::error_code& error) 
 
 std::size_t LongNameExpansionCount() noexcept {
 #if defined(_WIN32) && !defined(__CYGWIN__)
-    return long_name_expansion_count;
+    return LongNameExpansionCountStorage();
 #else
     return 0;
 #endif
@@ -148,7 +151,7 @@ std::filesystem::path LongNamePath(const std::filesystem::path& path, std::error
     // removes one component; every intermediate spelling is bounded to 32767 characters.
     std::array<wchar_t, 32768> buffer{};
     while (!ancestor.empty()) {
-        ++long_name_expansion_count;
+        ++LongNameExpansionCountStorage();
         const DWORD length =
             GetLongPathNameW(ancestor.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
         if (length > 0 && length < buffer.size()) {
@@ -428,6 +431,9 @@ bool CaptureContentPaths::within(const std::filesystem::path& path,
     return component != path.end() || include_tree_root;
 }
 
-CaptureContentPaths capture_content_paths;
+CaptureContentPaths& capture_content_paths() {
+    static CaptureContentPaths paths;
+    return paths;
+}
 
 } // namespace Luminumbra::Filesystem

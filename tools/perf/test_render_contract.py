@@ -79,7 +79,7 @@ class RenderContractTests(unittest.TestCase):
         # Check the actual file-open boundary, including the closing brace of
         # its inactive-only block. A guard around parsing alone still reads
         # private metadata and is insufficient.
-        guard = 'if (!Filesystem::capture_content_paths.active()) {'
+        guard = 'if (!Filesystem::capture_content_paths().active()) {'
         self.assertIn(guard, gallery)
         tail = gallery.split(guard, 1)[1]
         depth = 1
@@ -95,7 +95,7 @@ class RenderContractTests(unittest.TestCase):
         self.assertIsNotNone(end)
         self.assertIn('std::ifstream sf(sidecar);', tail[:end])
         self.assertNotIn('allows(sidecar)', gallery)
-        self.assertIn('if (!Filesystem::capture_content_paths.allows(thumbs_dir))\n        return;', gallery)
+        self.assertIn('if (!Filesystem::capture_content_paths().allows(thumbs_dir))\n        return;', gallery)
         self.assertLess(gallery.index('allows(thumbs_dir)'), gallery.index('fs::directory_iterator'))
         self.assertIn('if (stars >= 4)', gallery)
 

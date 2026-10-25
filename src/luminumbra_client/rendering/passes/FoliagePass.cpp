@@ -518,9 +518,9 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     const Attribution::PhaseScope shader_phase(Attribution::Phase::ShaderLoad);
     // Load + compile the scatter compute shader. On any failure the pass keeps
     // m_gpu_scatter=false and the CPU rebuild loop is used (graceful fallback).
-    if (!Filesystem::capture_content_paths.allows(root_path / "res/shaders/grass_scatter.comp") ||
-        !Filesystem::capture_content_paths.allows(root_path /
-                                                  "res/shaders/grass_compact_prefix.comp"))
+    if (!Filesystem::capture_content_paths().allows(root_path / "res/shaders/grass_scatter.comp") ||
+        !Filesystem::capture_content_paths().allows(root_path /
+                                                    "res/shaders/grass_compact_prefix.comp"))
         return;
     std::ifstream in(root_path / "res/shaders/grass_scatter.comp");
     if (!in) {
@@ -665,7 +665,7 @@ void FoliagePass::destroy_compute() {
 }
 
 bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
-    if (!Filesystem::capture_content_paths.allows(json_path))
+    if (!Filesystem::capture_content_paths().allows(json_path))
         return false;
     std::ifstream in(json_path);
     if (!in) {

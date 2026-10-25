@@ -1177,7 +1177,7 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     const fs::path thumbs_dir = m_galleryCaptureDir.empty()
                                     ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
                                     : m_galleryCaptureDir;
-    if (!Filesystem::capture_content_paths.allows(thumbs_dir))
+    if (!Filesystem::capture_content_paths().allows(thumbs_dir))
         return;
     if (fs::exists(thumbs_dir, ec)) {
         for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
@@ -1209,7 +1209,7 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
         // Capture uses only the validated thumbnails, without consulting ratings
         // or marking their intentional omission as a content refusal.
         int stars = 0;
-        if (!Filesystem::capture_content_paths.active()) {
+        if (!Filesystem::capture_content_paths().active()) {
             const auto sidecar =
                 fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json");
             std::ifstream sf(sidecar);

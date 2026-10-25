@@ -530,6 +530,21 @@ class ContainmentLinkClosureTests(unittest.TestCase):
         cls.targets = repository_targets(ROOT)
         cls.graph = IncludeGraph(ROOT)
 
+    def test_process_policy_uses_out_of_line_local_static(self):
+        header = (ROOT / POLICY).read_text(encoding='utf-8')
+        source = (ROOT / OWNER).read_text(encoding='utf-8')
+        self.assertIn('CaptureContentPaths& capture_content_paths();', header)
+        self.assertNotIn('extern CaptureContentPaths capture_content_paths;', header)
+        self.assertRegex(source, r'CaptureContentPaths& capture_content_paths\(\)\s*\{\s*'
+                                r'static CaptureContentPaths paths;\s*return paths;\s*\}')
+
+    def test_windows_expansion_counter_uses_local_static(self):
+        source = (ROOT / OWNER).read_text(encoding='utf-8')
+        self.assertRegex(source, r'std::size_t& LongNameExpansionCountStorage\(\) noexcept\s*\{\s*'
+                                r'static thread_local std::size_t count = 0;\s*return count;\s*\}')
+        self.assertIn('return LongNameExpansionCountStorage();', source)
+        self.assertIn('++LongNameExpansionCountStorage();', source)
+
     def test_capture_identity_reads_verified_handles(self):
         source = (ROOT / 'src/luminumbra_client/app/RenderConfiguration.h').read_text(encoding='utf-8')
         policy = (ROOT / OWNER).read_text(encoding='utf-8')

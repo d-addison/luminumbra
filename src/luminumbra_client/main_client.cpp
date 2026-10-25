@@ -1430,7 +1430,7 @@ int main(int argc, char* argv[]) {
             if (HasCommandLineOption(argc, argv, "--scene-config"))
                 throw std::invalid_argument("schema v4 refuses --scene-config; the workload owns "
                                             "scene configuration");
-            Luminumbra::Filesystem::capture_content_paths.enable(root_dir);
+            Luminumbra::Filesystem::capture_content_paths().enable(root_dir);
         } catch (const std::exception& error) {
             LUMINUMBRA_CORE_ERROR("Render benchmark content refused: {}", error.what());
             return 2;
@@ -2438,7 +2438,7 @@ int main(int argc, char* argv[]) {
         }
         glfwDestroyWindow(window);
         glfwTerminate();
-        return Luminumbra::Filesystem::capture_content_paths.refused() ? 2 : -1;
+        return Luminumbra::Filesystem::capture_content_paths().refused() ? 2 : -1;
     }
     // Render-optimization (cloud-raymarch-optimization): apply the reduced-res
     // sky-dome quality once the GL targets exist. No-op at 0 (full).
@@ -2513,7 +2513,7 @@ int main(int argc, char* argv[]) {
             benchmark_v4,
             exit_code,
             scenario_failed,
-            Luminumbra::Filesystem::capture_content_paths.refused());
+            Luminumbra::Filesystem::capture_content_paths().refused());
     };
     std::string scenario_failure_reason;
     bool scenario_ready = false;
@@ -3832,7 +3832,7 @@ int main(int argc, char* argv[]) {
     }
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
-        if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths.refused()) {
+        if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused()) {
             LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
             exit_code = 2;
             break;
@@ -4799,7 +4799,7 @@ int main(int argc, char* argv[]) {
             Measurement::ReloadSettlingWatchdog watchdog;
             for (;;) {
                 if (glfwWindowShouldClose(window) ||
-                    Luminumbra::Filesystem::capture_content_paths.refused() ||
+                    Luminumbra::Filesystem::capture_content_paths().refused() ||
                     gameSession->GetRegionSchedulerFault() ||
                     reload_settling_passes == std::numeric_limits<std::uint64_t>::max())
                     return false;
@@ -6620,7 +6620,7 @@ int main(int argc, char* argv[]) {
                 if (benchmark_v4) {
                     j["schema"] = "luminumbra.render_benchmark.v4";
                     try {
-                        if (Luminumbra::Filesystem::capture_content_paths.refused())
+                        if (Luminumbra::Filesystem::capture_content_paths().refused())
                             throw std::runtime_error("content reference escapes inventoried trees");
                         if (capture_content() != benchmark_content)
                             throw std::runtime_error("workload content changed during capture");
@@ -6916,7 +6916,7 @@ int main(int argc, char* argv[]) {
     }
     glfwDestroyWindow(window);
     glfwTerminate();
-    if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths.refused())
+    if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused())
         exit_code = 2;
     return exit_code;
 }

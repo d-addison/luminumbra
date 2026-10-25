@@ -9,7 +9,7 @@
 class AssetManager {
 public:
     static GLuint LoadTexture(const char* path) {
-        if (!Luminumbra::Filesystem::capture_content_paths.allows(path))
+        if (!Luminumbra::Filesystem::capture_content_paths().allows(path))
             return 0;
         GLuint textureID = 0;
         glGenTextures(1, &textureID);

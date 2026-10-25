@@ -199,7 +199,7 @@ public:
             errors.push_back(message);
         };
         try {
-            if (!Luminumbra::Filesystem::capture_content_paths.allows(dir)) {
+            if (!Luminumbra::Filesystem::capture_content_paths().allows(dir)) {
                 report_io_failure("creature species directory escapes capture content trees");
                 return 0;
             }
@@ -238,7 +238,7 @@ public:
                         report_io_failure("creature species filename is not valid UTF-8");
                         return 0;
                     }
-                    if (!Luminumbra::Filesystem::capture_content_paths.allows(entry.path())) {
+                    if (!Luminumbra::Filesystem::capture_content_paths().allows(entry.path())) {
                         report_io_failure("creature species file escapes capture content trees");
                         return 0;
                     }

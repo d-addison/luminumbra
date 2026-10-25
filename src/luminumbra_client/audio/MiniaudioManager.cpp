@@ -285,7 +285,7 @@ void MiniaudioManager::Shutdown() {
 
 bool MiniaudioManager::LoadBank(const std::string& bankPath) {
     const std::string full_path = m_rootPath + bankPath;
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return false;
     std::ifstream f(full_path);
     if (!f.is_open()) {
@@ -307,7 +307,7 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
         AudioEventDefinition def;
         def.files = event_def_json["files"].get<std::vector<std::string>>();
         for (const auto& file : def.files)
-            if (!Filesystem::capture_content_paths.allows(m_rootPath + file))
+            if (!Filesystem::capture_content_paths().allows(m_rootPath + file))
                 return false;
         def.volume = event_def_json.value("volume", 1.0f);
         def.pitch_variation = event_def_json.value("pitch_variation", 0.0f);
@@ -358,7 +358,7 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel_path;
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return false;
 
     uint32_t flags = MA_SOUND_FLAG_DECODE;
@@ -431,7 +431,7 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel;
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return false;
 
     // routed as a MANAGED one-shot instead of the old
@@ -469,7 +469,7 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID,
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel_path;
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return false;
 
     auto sound = std::make_unique<ma_sound>();
@@ -527,7 +527,7 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
     }
 
     const std::string full_path = m_rootPath + def->files[0];
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return;
 
     uint32_t flags = MA_SOUND_FLAG_STREAM;
@@ -752,7 +752,7 @@ void MiniaudioManager::SetWindParameters(const glm::vec3& direction, float stren
     if (strength > 0.0f && !m_windSound && m_engine) {
         // You would need a wind sound file
         const std::string windPath = m_rootPath + "assets/audio/sfx/weather/wind_loop.ogg";
-        if (!Filesystem::capture_content_paths.allows(windPath))
+        if (!Filesystem::capture_content_paths().allows(windPath))
             return;
         m_windSound = std::make_unique<ma_sound>();
 
@@ -864,7 +864,7 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID,
 
     auto sound = std::make_unique<ma_sound>();
     const std::string full_path = m_rootPath + def->files[0];
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return;
 
     // Decode the (short) loop fully into memory instead of streaming: ogg streaming can fail

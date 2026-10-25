@@ -27,7 +27,7 @@ inline bool ReadWorldgenFileWithStatus(const std::filesystem::path& path,
                                        std::string& bytes,
                                        const WorldgenFileStatusReader& read_status) {
     bytes.clear();
-    if (!Filesystem::capture_content_paths.allows(path))
+    if (!Filesystem::capture_content_paths().allows(path))
         return false;
     std::error_code ec;
     if (!std::filesystem::is_regular_file(read_status(path, ec)) || ec)

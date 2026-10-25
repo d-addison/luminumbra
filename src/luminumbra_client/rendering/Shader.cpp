@@ -31,7 +31,7 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
         return false;
     }
 
-    if (!Filesystem::capture_content_paths.allows(normalized)) {
+    if (!Filesystem::capture_content_paths().allows(normalized)) {
         diagnostic = "capture content reference escapes inventoried trees";
         include_stack.erase(key);
         return false;

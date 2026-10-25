@@ -158,7 +158,7 @@ public:
             errors.push_back(message);
             m_species.resize(original_size);
         };
-        if (!Luminumbra::Filesystem::capture_content_paths.allows(dir)) {
+        if (!Luminumbra::Filesystem::capture_content_paths().allows(dir)) {
             fail("species directory escapes inventoried trees");
             return 0;
         }
@@ -212,7 +212,7 @@ public:
             });
             std::size_t loaded = 0;
             for (const auto& [filename, file] : files) {
-                if (!Luminumbra::Filesystem::capture_content_paths.allows(file)) {
+                if (!Luminumbra::Filesystem::capture_content_paths().allows(file)) {
                     fail("species file escapes inventoried trees");
                     return 0;
                 }

@@ -57,6 +57,7 @@ private:
     bool active_ = false;
 };
 
-extern CaptureContentPaths capture_content_paths;
+// Process-wide policy; configure on the host thread before starting workers.
+CaptureContentPaths& capture_content_paths();
 
 } // namespace Luminumbra::Filesystem

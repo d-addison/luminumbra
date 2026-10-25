@@ -5331,7 +5331,7 @@ void RenderPipeline::register_static_model_textures() {
     // albedo/normal.ltex + an alpha-test flag (leaves). Render-only; absent file
     // is a graceful no-op (parts keep the flat fallback / terrain look).
     const std::filesystem::path manifest = m_root_path / "data/models/trees/tree_textures.json";
-    if (!Filesystem::capture_content_paths.allows(manifest))
+    if (!Filesystem::capture_content_paths().allows(manifest))
         return;
     std::ifstream in(manifest);
     if (!in)
@@ -5376,7 +5376,7 @@ void RenderPipeline::load_material_texture_lut() {
     // material that omits the columns or for a missing file.
     m_material_texture_lut = MaterialTextureLut{};
     const std::filesystem::path path = m_root_path / "data/common/materials.json";
-    if (!Filesystem::capture_content_paths.allows(path))
+    if (!Filesystem::capture_content_paths().allows(path))
         return;
     std::ifstream in(path);
     if (!in) {
@@ -5622,7 +5622,7 @@ bool ReadPod(std::ifstream& in, T& value) {
 } // namespace
 
 bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) {
-    if (!Filesystem::capture_content_paths.allows(path))
+    if (!Filesystem::capture_content_paths().allows(path))
         return false;
     std::ifstream in(path, std::ios::binary);
     if (!in) {

@@ -82,7 +82,7 @@ std::filesystem::path CheckedPath(const std::filesystem::path& root, const std::
             throw std::runtime_error(
                 "Game asset path traverses a symbolic link or reparse point: " + result.string());
     }
-    if (!Luminumbra::Filesystem::capture_content_paths.allows(result))
+    if (!Luminumbra::Filesystem::capture_content_paths().allows(result))
         throw std::runtime_error("Capture asset reference escapes inventoried trees");
     return result;
 }

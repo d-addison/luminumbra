@@ -1772,7 +1772,7 @@ void CheckCaptureGalleryContentPolicy() {
     };
     // Positive control: ordinary play still reads the saved rating.
     inspect(6, 1);
-    auto& policy = Luminumbra::Filesystem::capture_content_paths;
+    auto& policy = Luminumbra::Filesystem::capture_content_paths();
     policy.enable(root.path());
     inspect(6, 0);
     EXPECT_FALSE(policy.refused());

@@ -46,7 +46,7 @@ RmlFileInterface::RmlFileInterface(const std::string& root_path)
 
 Rml::FileHandle RmlFileInterface::Open(const Rml::String& path) {
     std::string full_path = m_root + path;
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return 0;
     FILE* fp = fopen(full_path.c_str(), "rb");
     if (!fp) {
@@ -245,7 +245,7 @@ Rml::TextureHandle RmlRenderer::LoadTexture(Rml::Vector2i& texture_dimensions,
     // GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str, SOIL_LOAD_AUTO,
     // SOIL_CREATE_NEW_ID, SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
 
-    if (!Filesystem::capture_content_paths.allows(full_path))
+    if (!Filesystem::capture_content_paths().allows(full_path))
         return 0;
 
     // CORRECTED LINE:
