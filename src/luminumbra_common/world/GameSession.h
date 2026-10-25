@@ -118,6 +118,10 @@ public:
     // the current world and save eligibility. Snapshot reader refusals clear
     // resident chunks and disable saving without publishing staged members.
     bool LoadWorld(const std::string& worldId);
+    // Read a caller-owned immutable save snapshot. Keep it alive until the next successful
+    // canonical save or world replacement: region freezes also read its durable directory.
+    // Runtime content and subsequent persistence retain this session's configured roots.
+    bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
 
     // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
@@ -534,7 +538,7 @@ private:
     std::vector<RegionWork> m_regionWork;
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
-    void LatchRegionFault(std::uint64_t tick, std::string message);
+    void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.

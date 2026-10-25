@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -37,6 +38,7 @@
 
 #include "audio/NullAudioManager.h"
 #include "core/FilesystemPath.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
@@ -1691,6 +1693,111 @@ TEST(UiSmokeTest, GalleryBackNavigationAndContentArePresent) {
         << "gallery back arrow must navigate to main_menu.rml";
 
     ui.Shutdown();
+}
+
+namespace {
+
+void CheckCaptureGalleryContentPolicy() {
+    class GalleryRoot {
+    public:
+        GalleryRoot() {
+            // At most 32 exclusive attempts.
+            for (int attempt = 0; attempt < 32; ++attempt) {
+                const auto candidate =
+                    fs::temp_directory_path() /
+                    ("gallery-content-" +
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                     "-" + std::to_string(attempt));
+                if (fs::create_directory(candidate)) {
+                    m_path = candidate;
+                    break;
+                }
+            }
+        }
+        ~GalleryRoot() {
+            std::error_code error;
+            fs::remove_all(m_path, error);
+        }
+        const fs::path& path() const {
+            return m_path;
+        }
+
+    private:
+        fs::path m_path;
+    };
+    const GalleryRoot root;
+    // Six thumbnails and four bounded metadata payloads plus one
+    // unreadable directory exercise the optional rating inputs.
+    ASSERT_FALSE(root.path().empty());
+    for (const auto* tree : Luminumbra::Filesystem::kCaptureContentTrees)
+        fs::create_directories(root.path() / tree);
+    for (const auto* file : {"gallery.rml", "base.rcss", "game_theme.rcss", "pages.rcss"}) {
+        fs::create_directories(root.path() / "data/ui");
+        fs::copy_file(SourceRoot() / "data/ui" / file, root.path() / "data/ui" / file);
+    }
+    const auto thumbs = root.path() / "data/ui/captures";
+    fs::create_directories(thumbs);
+    fs::create_directories(root.path() / "photos");
+    int id = 0;
+    for (const auto* payload : {"{\"stars\":5}", "", "{\"stars\":", "{\"other\":1}"}) {
+        ++id;
+        std::ofstream output(root.path() / "photos" /
+                             ("photo-" + std::to_string(id) + ".photo.json"));
+        output << payload;
+        output.close();
+        ASSERT_TRUE(output);
+    }
+    fs::create_directory(root.path() / "photos/photo-5.photo.json");
+    for (int number = 1; number <= 6; ++number)
+        fs::copy_file(SourceRoot() / "data/ui/fixtures/captures/cap_1.tga",
+                      thumbs / ("cap_" + std::to_string(number) + ".tga"));
+
+    const HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::Client::Rml_UIManager ui(root.path().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    auto inspect = [&](std::size_t expected_cards, std::size_t expected_favorites) {
+        ui.RequestLoadDocument("gallery.rml");
+        ui.Update();
+        ui.ReloadActiveDocument();
+        auto* gallery = FindDocumentByElementId(ui.GetContext(), "gallery");
+        ASSERT_NE(gallery, nullptr);
+        Rml::ElementList cards;
+        gallery->GetElementsByClassName(cards, "photo-card");
+        EXPECT_EQ(cards.size(), expected_cards);
+        Rml::ElementList favorites;
+        gallery->GetElementsByClassName(favorites, "photo-fav");
+        EXPECT_EQ(favorites.size(), expected_favorites);
+    };
+    // Positive control: ordinary play still reads the saved rating.
+    inspect(6, 1);
+    auto& policy = Luminumbra::Filesystem::capture_content_paths();
+    policy.enable(root.path());
+    inspect(6, 0);
+    EXPECT_FALSE(policy.refused());
+    fs::remove_all(thumbs);
+    fs::create_directory(thumbs);
+    inspect(0, 0);
+    EXPECT_FALSE(policy.refused());
+    // The optional rating omission must never bypass content checks.
+    ui.SetGalleryCaptureSource(root.path() / "photos", "captures/");
+    inspect(8, 1); // Refusal preserves the authored fallback cards.
+    EXPECT_TRUE(policy.refused());
+    ui.Shutdown();
+}
+
+} // namespace
+
+// A subprocess owns the process-wide capture policy, so other UI cases retain
+// their normal interactive mode even when the entire test binary runs at once.
+TEST(UiSmokeDeathTest, CaptureGalleryOmitsPersonalRatingsAndRetainsContentRefusals) {
+    ASSERT_EXIT(([] {
+                    CheckCaptureGalleryContentPolicy();
+                    std::exit(::testing::Test::HasFailure() ? 1 : 0);
+                })(),
+                ::testing::ExitedWithCode(0),
+                "");
 }
 
 //  world-select load button must NOT fire the load callback with no selection, and the

@@ -1,6 +1,7 @@
 #include "ParticlePass.h"
 #include "../FarWorldReplay.h"
 #include "core/Profiler.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -199,7 +200,7 @@ uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path,
                              json_path.string());
         return kInvalidEmitter;
     }
-    std::ifstream in(json_path);
+    Filesystem::ContentInput in(json_path);
     if (!in) {
         LUMINUMBRA_CORE_WARN("ParticlePass: emitter file not found '{}'.", json_path.string());
         return kInvalidEmitter;
