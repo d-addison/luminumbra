@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../rendering/UploadBudget.h"
+#include "luminumbra_common/core/WaterAttribution.h"
 
 #include <array>
 #include <chrono>
@@ -82,6 +83,12 @@ struct FoliageRebuild {
     std::uint64_t copied_bytes = 0;
     std::uint64_t hashed_bytes = 0;
     std::uint64_t uploaded_bytes = 0;
+    std::uint64_t dirty_columns = 0;
+    std::uint64_t worker_dispatched = 0;
+    std::uint64_t worker_completed = 0;
+    std::uint64_t worker_stale_rejected = 0;
+    // Oldest outstanding or consumed job, in frames, including worker service.
+    std::uint64_t worker_queue_age_frames = 0;
     std::uint64_t uploads = 0;
     std::uint64_t stale_results = 0;
     // Storage allocated with null glBufferData, separate from transferred bytes.
@@ -277,7 +284,8 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t generated_count,
                    std::uint64_t count_generation,
                    const PhaseTotals& phases = {},
-                   const RenderUploads& uploads = {});
+                   const RenderUploads& uploads = {},
+                   const WaterAttribution::Frame& water = {});
 
 // Flush and close an open CSV file, preserving write, flush, and close failures.
 // Uses the default non-throwing stream exception mask, as do the CSV writers.
@@ -301,7 +309,8 @@ public:
                 std::uint64_t generated_count,
                 std::uint64_t count_generation,
                 const PhaseTotals& phases = {},
-                const RenderUploads& uploads = {});
+                const RenderUploads& uploads = {},
+                const WaterAttribution::Frame& water = {});
 
 private:
     // Fixed 64 KiB stream buffer; frames stream to disk without a retained history.

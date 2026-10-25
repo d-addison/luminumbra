@@ -34,6 +34,7 @@
 #include <stdexcept>
 #include <streambuf>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <vector>
@@ -61,15 +62,70 @@ TEST(RenderBenchmarkOverrides, WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOv
                                "--cam-yaw",
                                "--cam-pitch",
                                "--window-mode"}) {
-        for (const std::string value : {"4", "", "a=b"}) {
-            SCOPED_TRACE(std::string(option) + "=" + value);
-            std::vector<std::string> arguments{"client",
-                                               std::string(option) + "=" + value,
-                                               "successor",
-                                               "--render-scale=0.5",
-                                               "tail",
-                                               "--systems-config",
-                                               "systems.json"};
+        for (const bool assigned : {false, true}) {
+            for (const std::string value : {"4", "0", "", "a=b"}) {
+                SCOPED_TRACE(::testing::Message()
+                             << option << " value: " << value << " assigned: " << assigned);
+                std::vector<std::string> arguments{"client", option};
+                if (assigned)
+                    arguments.back() += "=" + value;
+                else
+                    arguments.push_back(value);
+                arguments.insert(arguments.end(),
+                                 {"successor",
+                                  "--render-scale=0.5",
+                                  "tail",
+                                  "--systems-config",
+                                  "systems.json"});
+                std::vector<char*> argv;
+                argv.reserve(arguments.size());
+                for (auto& argument : arguments)
+                    argv.push_back(argument.data());
+                const auto active = Luminumbra::Client::Measurement::render_overrides(
+                    static_cast<int>(argv.size()), argv.data());
+                nlohmann::json cli = nlohmann::json::object();
+                for (const auto& item : active.items())
+                    if (item.key().rfind("cli:", 0) == 0)
+                        cli[item.key()] = item.value();
+                const nlohmann::json expected{{"cli:successor", "true"},
+                                              {"cli:--render-scale", "0.5"},
+                                              {"cli:tail", "true"},
+                                              {"cli:--systems-config", "systems.json"}};
+                EXPECT_EQ(cli, expected);
+            }
+        }
+        // A missing workload value must leave the next option visible, and a
+        // terminal workload option must not read beyond argv.
+        for (const bool terminal : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << option << " terminal: " << terminal);
+            std::vector<std::string> arguments{"client", option};
+            if (!terminal)
+                arguments.push_back("--render-scale=0");
+            std::vector<char*> argv;
+            argv.reserve(arguments.size());
+            for (auto& argument : arguments)
+                argv.push_back(argument.data());
+            const auto active = Luminumbra::Client::Measurement::render_overrides(
+                static_cast<int>(argv.size()), argv.data());
+            EXPECT_FALSE(active.contains(std::string("cli:") + option));
+            if (!terminal)
+                EXPECT_EQ(active.at("cli:--render-scale"), "0");
+        }
+    }
+}
+
+TEST(RenderBenchmarkOverrides, OverrideSyntaxPreservesValuesAndSuccessors) {
+    for (const bool assigned : {false, true}) {
+        for (const std::string value : {"0.5", "0", "", "a=b"}) {
+            SCOPED_TRACE(::testing::Message() << "value: " << value << " assigned: " << assigned);
+            std::vector<std::string> arguments{"client", "--render-scale"};
+            if (assigned)
+                arguments.back() += "=" + value;
+            else
+                arguments.push_back(value);
+            arguments.insert(
+                arguments.end(),
+                {"tail", "--systems-config=systems.json", "--no-audio=false", "--terminal"});
             std::vector<char*> argv;
             argv.reserve(arguments.size());
             for (auto& argument : arguments)
@@ -80,10 +136,11 @@ TEST(RenderBenchmarkOverrides, WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOv
             for (const auto& item : active.items())
                 if (item.key().rfind("cli:", 0) == 0)
                     cli[item.key()] = item.value();
-            const nlohmann::json expected{{"cli:successor", "true"},
-                                          {"cli:--render-scale=0.5", "true"},
+            const nlohmann::json expected{{"cli:--render-scale", value},
                                           {"cli:tail", "true"},
-                                          {"cli:--systems-config", "systems.json"}};
+                                          {"cli:--systems-config", "systems.json"},
+                                          {"cli:--no-audio", "false"},
+                                          {"cli:--terminal", "true"}};
             EXPECT_EQ(cli, expected);
         }
     }
@@ -105,8 +162,9 @@ public:
 
 TEST(RenderBenchmarkOutput, BothSchemasRejectPartialWritesAndFlushFailures) {
     using Luminumbra::Client::Measurement::write_render_benchmark;
-    for (const char* schema :
-         {"luminumbra.render_benchmark.v2", "luminumbra.render_benchmark.v3"}) {
+    for (const char* schema : {"luminumbra.render_benchmark.v2",
+                               "luminumbra.render_benchmark.v3",
+                               "luminumbra.render_benchmark.v4"}) {
         const nlohmann::json report{{"schema", schema}, {"frames", 4}};
         std::ostringstream complete;
         EXPECT_TRUE(write_render_benchmark(complete, report));
@@ -122,11 +180,12 @@ TEST(RenderBenchmarkOutput, BothSchemasRejectPartialWritesAndFlushFailures) {
 TEST(RenderBenchmarkOutput, BothSchemasCheckFileOpenAndDirectoryCreation) {
     using Luminumbra::Client::Measurement::write_render_benchmark;
     const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("render-report-");
-    for (const bool binary : {false, true}) {
-        const nlohmann::json report{
-            {"schema",
-             binary ? "luminumbra.render_benchmark.v3" : "luminumbra.render_benchmark.v2"}};
-        const auto output = directory / (binary ? "v3" : "v2") / "report.json";
+    for (const char* schema : {"luminumbra.render_benchmark.v2",
+                               "luminumbra.render_benchmark.v3",
+                               "luminumbra.render_benchmark.v4"}) {
+        const bool binary = std::string_view(schema) != "luminumbra.render_benchmark.v2";
+        const nlohmann::json report{{"schema", schema}};
+        const auto output = directory / schema / "report.json";
         EXPECT_TRUE(write_render_benchmark(output, report, binary));
         {
             std::ifstream input(output, std::ios::binary);

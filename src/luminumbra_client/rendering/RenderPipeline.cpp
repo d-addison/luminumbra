@@ -21,8 +21,10 @@
 #include "UploadBudget.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/DeterministicMath.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
@@ -249,7 +251,9 @@ RenderPipeline::RenderPipeline()
     , m_glass_oit_pass(std::make_unique<GlassOitPass>())
     , m_froxel_pass(std::make_unique<FroxelPass>())
     , m_waterfall_pass(std::make_unique<WaterfallPass>())
-    , m_luminance_meter_pass(std::make_unique<LuminanceMeterPass>()) {}
+    , m_luminance_meter_pass(std::make_unique<LuminanceMeterPass>()) {
+    m_foliage_pass->begin_ground_frame();
+}
 
 // forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
@@ -1265,6 +1269,8 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
+    if (m_foliage_pass)
+        m_foliage_pass->attach_job_system(job_system);
     if (m_farlod) {
         m_farlod->attach_job_system(job_system);
     }
@@ -2492,7 +2498,10 @@ void RenderPipeline::render_frame(entt::registry& registry,
     //  TAAU: also remember this frame's wind wall-clock so next frame's instanced vertex shader
     // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts
     // tree-tops).
-    m_prev_time = static_cast<float>(glfwGetTime());
+    m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
+    // Scatter preparation happens before render_frame. Open admission for the
+    // next rendered frame here, so nested sweeps/previews need no outer loop.
+    m_foliage_pass->begin_ground_frame();
 }
 
 FarReplayCamera RenderPipeline::replay_camera(const Camera& camera) const {
@@ -2618,10 +2627,10 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_frame_stage_trace.clear();
     m_cpu_frame_t0 = std::chrono::steady_clock::now(); // CPU per-phase submit cost
 
-    //  (Group K): ONE wall-clock snapshot per frame, shared by every pass
+    // One presentation snapshot per frame, shared by every pass
     // via RenderContext.time_seconds so converted passes are deterministic w.r.t.
     // each other (no per-pass glfwGetTime drift). Render-only (u_time sway etc.).
-    m_wall_clock_time = static_cast<float>(glfwGetTime());
+    m_wall_clock_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
 
     update_time_of_day(deltaTime);
 
@@ -5322,7 +5331,7 @@ void RenderPipeline::register_static_model_textures() {
     // albedo/normal.ltex + an alpha-test flag (leaves). Render-only; absent file
     // is a graceful no-op (parts keep the flat fallback / terrain look).
     const std::filesystem::path manifest = m_root_path / "data/models/trees/tree_textures.json";
-    std::ifstream in(manifest);
+    Filesystem::ContentInput in(manifest);
     if (!in)
         return;
     try {
@@ -5365,7 +5374,7 @@ void RenderPipeline::load_material_texture_lut() {
     // material that omits the columns or for a missing file.
     m_material_texture_lut = MaterialTextureLut{};
     const std::filesystem::path path = m_root_path / "data/common/materials.json";
-    std::ifstream in(path);
+    Filesystem::ContentInput in(path);
     if (!in) {
         LUMINUMBRA_CORE_WARN(
             "Material texture LUT: materials.json not found at '{}', terrain stays untextured.",
@@ -5601,7 +5610,7 @@ constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
 
 template<typename T>
-bool ReadPod(std::ifstream& in, T& value) {
+bool ReadPod(std::istream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));
     return static_cast<bool>(in);
 }
@@ -5609,7 +5618,7 @@ bool ReadPod(std::ifstream& in, T& value) {
 } // namespace
 
 bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) {
-    std::ifstream in(path, std::ios::binary);
+    Filesystem::ContentInput in(path, std::ios::binary);
     if (!in) {
         LUMINUMBRA_CORE_ERROR("Texture residency: could not open.ltex '{}'", path.string());
         return false;
@@ -5657,7 +5666,9 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, Ltex
     }
 
     std::error_code size_error;
-    const auto file_bytes = std::filesystem::file_size(path, size_error);
+    const auto file_bytes = Filesystem::capture_content_paths().active()
+                                ? in.verified_size()
+                                : std::filesystem::file_size(path, size_error);
     constexpr size_t kHeaderBytes = 17;
     if (size_error || total_bytes > 256u * 1024u * 1024u ||
         file_bytes != kHeaderBytes + total_bytes) {
@@ -5687,8 +5698,16 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // never feed the tick (scenarios, tests, menus) keep the legacy wall-clock advance
     // at the shared day length.
     if (!m_timeOfDayHold && !m_todTickDriven) {
-        m_timeOfDay += deltaTime / m_dayDurationSeconds;
-        m_timeOfDay = fmod(m_timeOfDay, 1.0f);
+        const auto day_ticks =
+            m_dayLengthOverride ? m_dayLengthTicks : m_renderClock.calendar().dayLengthTicks;
+        m_dayDurationSeconds = static_cast<double>(day_ticks) /
+                               luminumbra::core::SimulationClock::kCanonicalTickRateHz;
+        if (const auto& seconds = Client::presentation_clock.capture_seconds())
+            m_elapsedDayPhase = std::fmod(*seconds / m_dayDurationSeconds, 1.0);
+        else
+            m_elapsedDayPhase =
+                std::fmod(m_elapsedDayPhase + deltaTime / m_dayDurationSeconds, 1.0);
+        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock);
     }
     m_todTickDriven = false;
 
@@ -5721,8 +5740,12 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         return -1.0f;
     }();
     const float moon_forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;
-    const Rendering::CelestialFrame celestial = Rendering::EvaluateCelestialBodies(
-        m_timeOfDay, m_seasonSunDeclination, m_seasonTick, moon_forced, kTicksPerLunarCycle);
+    const Rendering::CelestialFrame celestial =
+        Rendering::EvaluateCelestialBodies(m_timeOfDay,
+                                           m_seasonSunDeclination,
+                                           m_celestialTick,
+                                           moon_forced,
+                                           get_lunar_period_ticks());
     const Rendering::SunGeometry& sun_geo = celestial.sun_geometry;
     const float season_tilt_z = sun_geo.tiltZ;
     m_sun.direction = sun_geo.direction;
@@ -5890,6 +5913,7 @@ void RenderPipeline::set_season_tick(std::uint64_t tick) {
     // One-way : this never feeds back into the sim and never touches
     // world_hash.
     m_seasonTick = tick;
+    m_celestialTick = tick;
 }
 
 u32 RenderPipeline::water_caustics_texture() const {
@@ -5898,30 +5922,50 @@ u32 RenderPipeline::water_caustics_texture() const {
 
 void RenderPipeline::set_time_of_day(float normalized_time) {
     m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
+    m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderClock);
+}
+
+void RenderPipeline::set_render_calendar(world::WorldCalendar calendar) {
+    // Validate at this boundary too; rendering never silently repairs a calendar.
+    const world::WorldClock checked(0, calendar);
+    m_worldClock.reset();
+    if (m_renderClock.calendar() != checked.calendar()) {
+        m_renderClock = checked;
+        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderClock);
+    }
 }
 
 void RenderPipeline::set_world_clock(const world::WorldClock& clock) {
     m_worldClock = clock;
+    m_renderClock = clock;
     m_seasonTick = clock.tick();
+    m_celestialTick = clock.tick();
     if (!m_timeOfDayHold) {
         if (m_dayLengthOverride) {
-            const float shifted =
-                Rendering::TimeOfDayFromTick(clock.tick(), m_dayLengthTicks) + 0.5f;
-            m_timeOfDay = shifted >= 1.0f ? shifted - 1.0f : shifted;
+            const double phase = static_cast<double>(clock.tick() % m_dayLengthTicks) /
+                                 static_cast<double>(m_dayLengthTicks);
+            m_elapsedDayPhase = Rendering::WrapDayPhase(phase + 0.5);
+            m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock);
         } else {
+            m_elapsedDayPhase = Rendering::WrapDayPhase(clock.day_phase(clock.tick()) + 0.5);
             m_timeOfDay = Rendering::TimeOfDayFromWorldClock(clock);
         }
+    } else {
+        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderClock);
     }
     m_todTickDriven = true;
 }
 
 void RenderPipeline::set_time_of_day_tick(std::uint64_t sim_tick) {
-    // the photo-mode hold outranks the tick authority ( — the player
-    // is scrubbing time); scenario/scene pins outrank it by frame order (they call
-    // set_time_of_day after this). Marks the frame tick-driven either way so the
-    // wall-clock advance never fights the scrub.
+    m_worldClock.reset();
+    m_celestialTick = sim_tick;
+    // Photo hold wins; later direct scenario pins retain frame-order precedence.
     if (!m_timeOfDayHold) {
-        m_timeOfDay = Rendering::TimeOfDayFromTick(sim_tick, m_dayLengthTicks);
+        const auto day_ticks =
+            m_dayLengthOverride ? m_dayLengthTicks : m_renderClock.calendar().dayLengthTicks;
+        m_elapsedDayPhase =
+            static_cast<double>(sim_tick % day_ticks) / static_cast<double>(day_ticks);
+        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock);
     }
     m_todTickDriven = true;
 }
@@ -6000,7 +6044,10 @@ void RenderPipeline::advance_cloud_phase(float deltaTime) {
     if (!m_cloud_state.enabled) {
         return;
     }
-    m_cloud_phase += deltaTime;
+    if (const auto& seconds = Client::presentation_clock.capture_seconds())
+        m_cloud_phase = static_cast<float>(*seconds);
+    else
+        m_cloud_phase += deltaTime;
     // Wind comes from the replicated weather render state (one-way bridge). A
     // gentle base drift so clouds still move when no wind has been pushed yet.
     glm::vec2 wind_xz(m_weather_state.wind_direction.x, m_weather_state.wind_direction.z);

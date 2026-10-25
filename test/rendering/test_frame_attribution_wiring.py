@@ -184,6 +184,20 @@ class FrameAttributionWiring(unittest.TestCase):
         cls.header = read(CLIENT / "app/FrameAttribution.h")
         cls.collector = read(CLIENT / "app/FrameAttribution.cpp")
 
+    def test_preview_restore_precedes_reload_and_gameplay_foliage(self):
+        restore = self.main.index("if (worldgenPreview->active() &&")
+        reload = self.main.index("const auto settle_workload_reload =")
+        scatter = [match.start() for match in re.finditer(
+            re.escape("UpdateFoliageScatter(g_app,"), self.main)]
+        self.assertEqual(len(scatter), 2)
+        self.assertLess(restore, reload)
+        for position in scatter:
+            self.assertLess(restore, position)
+        self.assertLess(restore, self.main.index("RenderMenuScreens(g_app,"))
+        self.assertIn("UpdateFoliageScatter(g_app,", block(self.main,
+                      "const auto settle_workload_reload ="))
+        self.assertLess(reload, self.main.index("if (!settle_workload_reload())"))
+
     def test_render_bucket_receives_exclusive_time_and_feeds_outputs(self):
         main = compact(self.main)
         self.assertIn("rb_render_bucket_ms = Attribution::exclusive_parent_ms("
@@ -211,6 +225,9 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("foliage_frame.rebuild_ms, rb_menu_ms, rb_ui_ms,", slow)
         self.assertIn('"foliage={:.1f} menu={:.1f} ui={:.1f} | "', slow)
         self.assertIn("foliage-split:", slow)
+        self.assertIn('"scratch_bytes={} backlog={} path={} fallback={} dirty_columns={} "', slow)
+        self.assertIn("Attribution::fallback_name(foliage_attribution.fallback), "
+                      "foliage_attribution.dirty_columns,", slow)
 
     def test_collection_and_split_log_require_explicit_opt_in(self):
         main = compact(self.main)
@@ -225,6 +242,120 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertRegex(compact(self.foliage),
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
+
+    def test_reload_drains_all_gates_before_resuming_script(self):
+        load = block(self.main, 'const auto settle_workload_reload =')
+        for fragment in ('const Measurement::ReloadWaterPause water_pause(*world);',
+                         'Measurement::ReloadSettlingWatchdog watchdog;',
+                         'world->update(', 'UpdateFoliageScatter(',
+                         'renderPipeline.render_frame(', 'benchmark_queries->checkpoint_passes();',
+                         'glfwPollEvents();',
+                         'Measurement::reload_residency_observed(reload_settling_passes,',
+                         'budget.update_interval_frames)',
+                         'streaming.quiescent()', 'uploads.terrain_upload_candidates == 0',
+                         'uploads.water_upload_candidates == 0',
+                         '(!foliage || !foliage->build_pending())',
+                         'gameSession->GetRegionSchedulerFault()',
+                         'watchdog.waiting(', 'watchdog.failed()'):
+            self.assertIn(fragment, load)
+        self.assertIn('reload_settling_pending = reload && !scenario_failed;', self.main)
+        self.assertLess(self.main.index('switch (currentState)'),
+                        self.main.index('if (reload_settling_pending)'))
+        self.assertLess(self.main.index('if (reload_settling_pending)'),
+                        self.main.index('if (currentState != GameState::WORLD_LOADING)'))
+        self.assertNotIn('TickSimulation(', load)
+        self.assertNotIn('glfwSwapBuffers(', load)
+        self.assertNotIn('workload_frame_records.append', load)
+        writer = read(CLIENT / 'app/RenderBenchmarkReport.h')
+        self.assertIn('workload_observation_json', writer)
+        self.assertIn('{"settling_passes", reload_settling_passes}', self.main)
+
+    def test_all_foliage_update_callers_supply_photo_mode(self):
+        calls = re.findall(r"UpdateFoliageScatter\(g_app,(.*?)\);", self.main, re.S)
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual(compact(call),
+                             "root_dir, scenario_config, g_camera.get(), gameSession.get(), "
+                             "renderPipeline, g_playerController && "
+                             "g_playerController->photo_mode_active(), " +
+                             ("scatter_ms, foliage_ms" if "rb_scatter_ms" not in call
+                              else "rb_scatter_ms, rb_foliage_ms"))
+
+    def test_capture_simulation_decision_covers_ticks_physics_and_water(self):
+        main = compact(self.main)
+        self.assertIn('const bool simulate_frame = Measurement::frame_simulation_enabled('
+                      'benchmark_v4, traversal.has_value(), measuring_v3, '
+                      'g_app.hud.paused, g_app.capture.timeScale);', main)
+        self.assertIn('const bool advance_frame_simulation = !g_rb_active || simulate_frame;', main)
+        session = block(self.main, 'if (!scenario_config.networked_session_smoke())')
+        ticking = block(session, 'if (simulate_frame)')
+        self.assertEqual(session.count('gameSession->TickSimulation('),
+                         ticking.count('gameSession->TickSimulation('))
+        self.assertEqual(ticking.count('gameSession->TickSimulation('), 4)
+        physics = block(self.main, 'if (advance_frame_simulation)')
+        self.assertIn('physics->update(deltaTime * g_app.capture.timeScale);', physics)
+        self.assertIn('g_playerController && !benchmark_v4 && advance_frame_simulation)', main)
+        self.assertIn('g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera && '
+                      'advance_frame_simulation)', main)
+        anchors = block(session, 'if (advance_frame_simulation)')
+        self.assertEqual(anchors.count('SetLocalPlayerSimulationPosition('), 2)
+        # The streaming call stays outside the tick gate on held warmup/menu frames.
+        self.assertNotIn('GetWorldSystem()->update(', ticking)
+        self.assertIn('gameSession->GetWorldSystem()->update(gameSession->GetRegistry(), '
+                      'streaming_position, gameSession->GetPhysicsSystem(), '
+                      'advance_frame_simulation);', compact(session))
+        settling = compact(block(self.main, 'const auto settle_workload_reload ='))
+        self.assertIn('world->update(gameSession->GetRegistry(), g_camera->Position, '
+                      'gameSession->GetPhysicsSystem(), /*advance_simulation=*/false);', settling)
+        world = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.cpp')
+        single = block(world, 'void SHIELD_WorldSystem::update(entt::registry& registry,')
+        self.assertIn('update(registry, std::vector<Vec3>{camera_position}, physics_system, '
+                      'advance_simulation);', compact(single))
+        multi = block(world, 'const std::vector<Vec3>& anchor_positions,')
+        water = block(multi, 'if (advance_simulation && m_water_system)')
+        self.assertEqual(compact(water),
+                         'm_water_system->update(registry, m_streaming_state.chunks);')
+        self.assertEqual(multi.count('m_water_system->update('), water.count('m_water_system->update('))
+        for fragment in ('publish_completed_generation_jobs(', 'update_chunk_activation(',
+                         'dispatch_deferred_meshing(', 'replace_chunk_collision('):
+            self.assertIn(fragment, multi)
+            self.assertNotIn(fragment, water)
+        header = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.h')
+        self.assertEqual(header.count('bool advance_simulation = true'), 2)
+
+    def test_capture_simulation_policy_handles_held_and_live_frames(self):
+        source = compact(block(read(CLIENT / 'app/RenderWorkload.h'),
+                               'inline bool frame_simulation_enabled('))
+        rules = re.findall(r'(?:if \(([^()]*)\) )?return ([^;]+);', source)
+        self.assertEqual(len(rules), 3)
+        for workload, traversal in ((True, True), (False, True), (False, False)):
+            for measuring in (False, True):
+                for paused in (False, True):
+                    for scale in (-1.0, 0.0, 0.5, 1.0, 16.0, float('nan')):
+                        values = dict(workload_capture=workload, traversal_capture=traversal,
+                                      measuring=measuring, paused=paused, time_scale=scale)
+                        for condition, returned in rules:
+                            if not condition or cpp_expression(condition, **values):
+                                actual = cpp_expression(re.sub(r'(?<=\d)f\b', '', returned), **values)
+                                break
+                        expected = (measuring and not paused if workload else
+                                    measuring if traversal else scale > 0)
+                        with self.subTest(**values):
+                            self.assertEqual(actual, expected)
+
+    def test_const_scope_token_keeps_registered_observations_mutable(self):
+        scope = compact(block(self.header, "class FoliageFrameScope"))
+        self.assertIn("mutable FoliageFrame m_frame{};", scope)
+        self.assertIn("current_foliage_frame() = enabled ? &m_frame : nullptr;", self.collector)
+        self.assertIn("const Attribution::FoliageFrameScope foliage_scope", self.main)
+
+    def test_const_scope_observations_have_mutable_storage(self):
+        # Writes through the registered pointer must remain defined for const
+        # scope tokens; runtime assertions alone cannot reliably expose this UB.
+        scope = compact(block(self.header, "class FoliageFrameScope"))
+        self.assertRegex(scope, r"\bmutable FoliageFrame m_frame\s*\{\s*\}\s*;")
+        self.assertEqual(compact(block(scope, "const FoliageFrame& snapshot() const")),
+                         "return m_frame;")
 
     def test_benchmark_does_not_enable_foliage_input_hashing(self):
         update = compact(block(self.main, "static void UpdateFoliageScatter("))
@@ -256,12 +387,13 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("interactive = true;", block(menu, "if (previewState.dragging)"))
 
     def test_poll_attribution_keeps_ownership_refresh_and_registered_overlays(self):
-        poll = self.main[self.main.index("const auto _rb_poll_t0"):
-                         self.main.index("glfwPollEvents();")]
+        start = self.main.index("const auto _rb_poll_t0")
+        poll_end = self.main.index("glfwPollEvents();", start)
+        poll = self.main[start:poll_end]
         self.assertIn("poll_phases_before = Attribution::phase_total_ms();", poll)
         self.assertIn("poll_foliage_before = foliage_scope.snapshot().rebuild_ms;", poll)
         self.assertIn("RefreshInputOwnership(window);", poll)
-        after_poll = compact(self.main[self.main.index("glfwPollEvents();"):])
+        after_poll = compact(self.main[poll_end:])
         self.assertTrue(after_poll.startswith("glfwPollEvents(); RefreshInputOwnership(window);"))
         self.assertIn("developerConsole.Draw(developerFrame);", self.main)
         self.assertNotIn("DrawFrameStatusOverlays(", self.main)
@@ -271,6 +403,21 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"menuPreviewState.last_menu_frame = \{\}; "
                          r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
                          r"DrawCreatureNameplates\(")
+
+    def test_capture_day_phase_uses_calendar_without_frame_drift(self):
+        update = block(read(CLIENT / "rendering/RenderPipeline.cpp"),
+                       "void RenderPipeline::update_time_of_day(")
+        advance = compact(block(update, "if (!m_timeOfDayHold && !m_todTickDriven)"))
+        self.assertIn("m_dayLengthOverride ? m_dayLengthTicks : "
+                      "m_renderClock.calendar().dayLengthTicks", advance)
+        self.assertRegex(advance, r"if \(const auto& seconds = "
+                         r"Client::presentation_clock.capture_seconds\(\)\) "
+                         r"m_elapsedDayPhase = std::fmod\(\*seconds / m_dayDurationSeconds, 1.0\); "
+                         r"else m_elapsedDayPhase = std::fmod\(m_elapsedDayPhase \+ "
+                         r"deltaTime / m_dayDurationSeconds, 1.0\);")
+        self.assertIn("m_timeOfDay = Rendering::SolarTimeFromNoonElapsed("
+                      "m_elapsedDayPhase, m_renderClock);", advance)
+        self.assertIn("m_todTickDriven = false;", update)
 
     def test_disabled_timers_do_not_read_clocks(self):
         constructor = compact(block(self.header, "explicit StageTimer("))
@@ -289,6 +436,16 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertGreater(len(timers), 10)
         for arguments in timers:
             self.assertTrue(compact(arguments).endswith(", collect_attribution"))
+
+    def test_water_subzones_share_the_opt_in_frame_and_csv(self):
+        main = compact(self.main)
+        self.assertIn("WaterAttribution::FrameScope water_scope(frame_attribution_enabled);", main)
+        self.assertIn("foliage_frame.uploads, water_scope.snapshot())", main)
+        self.assertRegex(main, r'const auto& water = water_scope.snapshot\(\); '
+                              r'LUMINUMBRA_CORE_WARN\( " water-split:')
+        for column in ("water_seed_inputs_ms", "water_initialization_ms", "water_sim_ms",
+                       "water_seam_ms", "water_bookkeeping_ms", "water_fallback_columns"):
+            self.assertIn(column, self.collector)
 
     def test_const_frame_scopes_allow_callback_collection(self):
         scope = block(self.header, "class FoliageFrameScope")
@@ -387,7 +544,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
         self.assertIn("foliage_frame.capacity, foliage_frame.count_known, "
-                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot(), foliage_frame.uploads)", main)
+                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot(), foliage_frame.uploads, water_scope.snapshot())", main)
         scope = compact(block(self.foliage, "~RebuildAttributionScope()"))
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)
@@ -400,7 +557,7 @@ class FrameAttributionWiring(unittest.TestCase):
             self.assertIn(f"Attribution::phase_total_ms() - {parent}_phases_before", main)
         self.assertIn("buckets.other(_wallMs, phase_scope.snapshot())", main)
         self.assertIn("buckets.other(frame_ms, phases)", compact(self.collector))
-        self.assertIn("count_generation, phases, uploads)",
+        self.assertIn("count_generation, phases, uploads, water)",
                       compact(block(self.collector, "bool FrameRecorder::record(")))
         self.assertIn("Phase::WorldCreateCallback", block(self.main, "auto start_world_creation ="))
         self.assertIn("Phase::WorldLoadCallback", block(self.main, "auto start_world_load ="))
@@ -695,9 +852,13 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIsNotNone(bounded)
         numerator, denominator = map(float, bounded.groups())
         ceiling = numerator / denominator
-        shipping = re.search(r"deltaTime = std::min\(deltaTime, ([\d.]+)f / ([\d.]+)f\);", self.main)
+        shipping = re.search(
+            r"deltaTime = benchmark_v4 \? ([\d.]+)f / ([\d.]+)f : "
+            r"std::min\(deltaTime, ([\d.]+)f / ([\d.]+)f\);", self.main)
         self.assertIsNotNone(shipping)
-        self.assertEqual(ceiling, float(shipping[1]) / float(shipping[2]))
+        capture_delta = float(shipping[1]) / float(shipping[2])
+        self.assertEqual(capture_delta, 1.0 / 30.0)
+        self.assertEqual(ceiling, float(shipping[3]) / float(shipping[4]))
         self.assertEqual(ceiling, 0.05)
         # Evaluate the scalar operation extracted above, without native execution.
         for elapsed, expected in ((0, 0), (0.001, 0.001), (0.033, 0.033),
@@ -1119,6 +1280,259 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
 
+    def test_worker_counters_reach_frame_totals_csv_and_split_log(self):
+        for name in ("worker_dispatched", "worker_completed", "worker_stale_rejected",
+                     "worker_queue_age_frames"):
+            self.assertIn(f"std::uint64_t {name} = 0;", self.header)
+            self.assertIn(f"total.{name}", self.collector)
+            self.assertIn(f"foliage.{name}", self.collector)
+            self.assertIn(f"foliage_attribution.{name}", self.main)
+            self.assertIn(f"m_rebuild_attribution.{name}", self.foliage)
+        self.assertIn("std::max(total.worker_queue_age_frames, rebuild.worker_queue_age_frames)",
+                      compact(self.collector))
+
+    def test_worker_budget_follows_every_rendered_frame_including_nested_loops(self):
+        self.assertNotIn("foliage->begin_ground_frame();", self.main)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        constructor = block(pipeline, "RenderPipeline::RenderPipeline()")
+        self.assertIn("m_foliage_pass->begin_ground_frame();", constructor)
+        render = block(pipeline, "void RenderPipeline::render_frame(")
+        self.assertIn("m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));",
+                      render)
+        self.assertEqual(render.count("m_foliage_pass->begin_ground_frame();"), 1)
+        self.assertGreater(render.index("m_foliage_pass->begin_ground_frame();"),
+                           render.index("dispatch_stages(camera);"))
+        self.assertTrue(compact(render).endswith("m_foliage_pass->begin_ground_frame();"))
+        # Every nested loop uses this common boundary, including callers that do
+        # not rebuild foliage themselves (survey, boot metrics, menu screenshots).
+        for path in ("main_client.cpp", "world/WorldgenPreview.cpp",
+                     "rendering/SceneSurvey.cpp", "app/MenuScreens.cpp",
+                     "core/ScenarioRunnerCapture.cpp"):
+            self.assertIn("render_frame(", read(CLIENT / path))
+        self.assertEqual(self.foliage.count("prepare_ground_samples(chunk)"), 2)
+        self.assertIn("if (!m_ground_frame_driven) m_ground_queue.begin_frame(); "
+                      "else m_ground_queue.clear_stats();", compact(self.foliage))
+        queue = read(CLIENT / "rendering/FoliageGroundWork.h")
+        self.assertIn("kInFlight = 8;", queue)
+        self.assertIn("kPerFrame = 4;", queue)
+        self.assertNotIn("std::function", queue)
+        self.assertNotIn("glBind", queue)
+        self.assertNotIn("JobSystem::wait", self.foliage)
+        self.assertIn("m_ground_queue.invalidate(key);", self.foliage)
+        self.assertIn("m_ground_queue.invalidate();", self.foliage)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        self.assertIn("m_foliage_pass->attach_job_system(job_system);", pipeline)
+
+    def test_ground_query_publication_releases_resident_payloads_on_both_paths(self):
+        synchronous = compact(block(self.foliage, "if (!mesh.query)"))
+        self.assertIn("mesh.query = std::make_shared<const FoliageGroundMesh>(", synchronous)
+        self.assertIn("mesh.payload.reset();", synchronous)
+        self.assertLess(synchronous.index("mesh.payload->indices);"),
+                        synchronous.index("mesh.payload.reset();"))
+        self.assertLess(self.foliage.index("mesh.payload.reset();"),
+                        self.foliage.index("mesh.query->sample(x, z);"))
+        polling = block(self.foliage, "void FoliagePass::poll_ground_builds(")
+        publication = compact(block(polling, "if (resident != column->second.meshes.end())"))
+        self.assertEqual(publication, "resident->second.query = mesh.query; "
+                         "resident->second.payload.reset();")
+        # Only validated completions publish; stale or failed jobs are discarded.
+        worker = read(CLIENT / "rendering/FoliageGroundWork.h")
+        polling = compact(block(worker, "void poll(Validate validate, Consume consume)"))
+        self.assertIn("if (slot.invalidated || !validate(slot.build->input)) "
+                      "++m_stats.stale_rejected; else if (!slot.build->failed) "
+                      "consume(*slot.build); slot.build.reset();", polling)
+        self.assertIn("const FoliageGroundRequest input;", worker)
+        self.assertIn("queries.push_back({mesh.id, {}, std::move(query)});", worker)
+        self.assertNotIn("queries.push_back({mesh.id, mesh.payload,", worker)
+
+    def test_preview_rebuilds_current_support_even_with_cached_scatter_inputs(self):
+        preview = read(CLIENT / "world/WorldgenPreview.cpp")
+        rebuild = block(preview, "void WorldgenPreview::rebuild_foliage_if_needed(")
+        cached = block(rebuild, "if (m_last_foliage_generation != m_rebuild_generation)")
+        self.assertIn("m_foliage_scatter.clear();", cached)
+        self.assertNotIn("return;", cached.split("for (", 1)[0])
+        self.assertNotIn("rebuild_instances(", cached)
+        self.assertNotIn("m_last_foliage_generation == m_rebuild_generation", rebuild)
+        self.assertIn("Rendering::FoliagePass::Preparation::Complete", rebuild)
+        self.assertEqual(rebuild.count("rebuild_instances("), 1)
+        for entry in ("bool WorldgenPreview::render(", "bool WorldgenPreview::render_to_backbuffer("):
+            self.assertIn("rebuild_foliage_if_needed(pipeline);", block(preview, entry))
+
+    def test_sweep_qualification_and_capture_callers_require_complete_preparation(self):
+        sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
+        self.assertEqual(sweep.count("rebuild_instances("), 2)
+        self.assertEqual(sweep.count("FoliagePass::Preparation::Complete"), 2)
+        drive = block(read(CLIENT / "core/ScenarioRunnerDrive.cpp"),
+                      "bool ScenarioRunnerImpl::onPreRenderFoliage()")
+        self.assertIn("FoliagePass::Preparation::Complete", drive)
+        update = block(self.main, "static void UpdateFoliageScatter(")
+        preparation = block(self.main, "static bool CompleteFoliagePreparation(")
+        self.assertIn("CompleteFoliagePreparation(g_app, scenario_config, photo_mode_active)",
+                      compact(update))
+        for mode in ("scenario_config.active()", "capture.scene_active",
+                     "capture.render_benchmark_path.empty()", "capture.frame_scan_active",
+                     "capture.render_parity_active", "capture.timelapse_frames > 0",
+                     "capture.survey_active", "photo_mode_active"):
+            self.assertIn(mode, preparation)
+        self.assertIn("g_playerController->photo_mode_active()", self.main)
+        self.assertIn("FoliagePass::Preparation::Complete", update)
+        self.assertIn("FoliagePass::Preparation::Deferred", update)
+        rebuild = compact(block(self.foliage, "void FoliagePass::rebuild_instances("))
+        self.assertIn("if (preparation == Preparation::Complete) m_worker_ground_active = false;",
+                      rebuild)
+        self.assertIn("preparation == Preparation::Complete ? std::numeric_limits<int>::max() : 4;",
+                      rebuild)
+        gpu = compact(block(self.foliage, "bool FoliagePass::rebuild_instances_gpu("))
+        self.assertIn("m_readback_enabled || preparation == Preparation::Complete", gpu)
+
+    def test_worker_polling_preserves_generation_safe_gpu_readback(self):
+        rebuild = block(self.foliage, "void FoliagePass::rebuild_instances(")
+        signature = rebuild.index("std::uint64_t sig =")
+        self.assertLess(rebuild.index("poll_ground_builds(chunks, camera_pos);"), signature)
+        # Frozen and unchanged inputs may drain their matching snapshots. A
+        # changed input must advance its generation before consuming GPU output.
+        before_signature = rebuild[:signature]
+        frozen = block(before_signature, "if (m_qualification.frozen_inputs)")
+        self.assertEqual(before_signature.count("poll_foliage_readback();"),
+                         frozen.count("poll_foliage_readback();"))
+        changed = rebuild[rebuild.index("m_uploaded_input_hash.reset();", signature):]
+        self.assertLess(changed.index("++m_build_generation;"),
+                        changed.index("poll_foliage_readback();"))
+        self.assertLess(changed.index("m_gpu_generated_count.reset();"),
+                        changed.index("poll_foliage_readback();"))
+    def test_metadata_replacement_does_not_upload_a_redundant_command(self):
+        gpu = block(self.foliage, "bool FoliagePass::rebuild_instances_gpu(")
+        self.assertIn("const bool initialize_command = !m_metadata_valid;", gpu)
+        reset = compact(block(gpu, "if (initialize_command || !metadata_changed)"))
+        for operation in ("glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);",
+                          "glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);",
+                          "m_rebuild_attribution.uploaded_bytes += sizeof(draw_command);",
+                          "++m_rebuild_attribution.uploads;"):
+            self.assertIn(operation, reset)
+        self.assertEqual(gpu.count("sizeof(draw_command), draw_command)"), 1)
+        # Count never consumes the old command. Prefix writes every word, then
+        # the storage barrier makes those writes visible before emit/draw.
+        scatter = read(ROOT / "res/shaders/grass_scatter.comp")
+        for name in ("append_count", "draw_vertex_count", "draw_instance_count",
+                     "draw_first_vertex", "draw_base_instance"):
+            self.assertEqual(len(re.findall(r"\b" + name + r"\b", scatter)), 2 if name == "append_count" else 1)
+        prefix = compact(block(read(ROOT / "res/shaders/grass_compact_prefix.comp"), "void main()"))
+        for assignment in ("accepted_count = total;", "vertex_count = 12u;",
+                           "instance_count = min(total, u_max_instances);",
+                           "first_vertex = 0u;", "base_instance = 0u;"):
+            self.assertIn(assignment, prefix)
+        dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
+        self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1, 1, 1); "
+                      "glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
+                      "Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog); "
+                      "glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)
+
+    def test_csv_schema_preserves_existing_indices_and_appends_dirty_columns(self):
+        header = block(self.collector, "void write_csv_header(")
+        static_header, phase_header = header.split("    for (std::size_t index", 1)
+        encoded = "".join(json.loads(literal) for literal in re.findall(r'"(?:\\.|[^"\\])*"', static_header))
+        self.assertEqual(compact("for (std::size_t index" + phase_header),
+                         "for (std::size_t index = 0; index < kPhaseCount; ++index) "
+                         "out << ',' << phase_name(static_cast<Phase>(index)) << \"_ms\"; "
+                         'out << ",dirty_columns,water_selection_ms," '
+                         '"water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms," '
+                         '"water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns," '
+                         '"water_stale_columns,worker_dispatched,worker_completed,worker_stale_rejected," '
+                         '"worker_queue_age_frames\\n";')
+        self.assertEqual(encoded.rstrip("\n").split(","), [
+            "frame", "frame_ms", "sim_ms", "stream_ms", "render_ms", "present_ms",
+            "foliage_ms", "scatter_ms", "rebake_ms", "poll_ms", "menu_ms", "ui_ms", "other_ms",
+            "signature_ms", "sort_ms", "surface_ms", "repack_ms", "hash_ms", "upload_ms",
+            "palette_scratch_ms", "dispatch_ms", "cpu_fallback_ms", "rebuild_calls", "reason_mask",
+            "admitted_columns", "surface_misses", "deferred_columns", "copied_bytes", "hashed_bytes",
+            "uploaded_bytes", "scratch_bytes", "backlog", "path", "fallback", "instance_capacity",
+            "generated_count", "count_generation",
+            "terrain_work_ms", "terrain_overshoot_ms", "terrain_attempts", "terrain_adopted",
+            "terrain_work_bytes", "terrain_byte_overshoot", "terrain_pending", "water_work_ms",
+            "water_overshoot_ms", "water_attempts", "water_adopted", "water_work_bytes",
+            "water_byte_overshoot", "water_pending",
+        ])
+        phase_names = re.findall(r'"([a-z_]+)"', block(self.collector, "kPhaseNames"))
+        self.assertEqual(len(encoded.split(",")), 51)
+        self.assertEqual(phase_names, [
+            "ui_update", "ui_render", "ui_filters", "menu_scene", "preview_adoption",
+            "document_load", "texture_load", "shader_load", "shader_first_use",
+            "world_create_callback", "world_load_callback",
+        ])
+        water_columns = ["water_selection_ms", "water_seed_inputs_ms", "water_initialization_ms",
+                         "water_sim_ms", "water_seam_ms", "water_bookkeeping_ms",
+                         "water_precomputed_columns", "water_fallback_columns", "water_stale_columns"]
+        worker_columns = ["worker_dispatched", "worker_completed",
+                          "worker_stale_rejected", "worker_queue_age_frames"]
+        columns = encoded.split(",") + [name + "_ms" for name in phase_names] + ["dirty_columns"] + water_columns + worker_columns
+        self.assertEqual(len(columns), 76)
+        self.assertEqual(columns[62], "dirty_columns")
+        self.assertEqual(columns[63:72], water_columns)
+        self.assertEqual(columns[72:76], worker_columns)
+        documentation = read(ROOT / "docs/render-benchmark.md")
+        self.assertIn("The CSV has 76 fields.", documentation)
+        phase_table = documentation.split("| Column | Work measured |", 1)[1].split("\n\n", 1)[0]
+        phase_columns = re.findall(r"^\| `([a-z_]+)` \|", phase_table, re.M)
+        self.assertEqual(phase_columns, [name + "_ms" for name in phase_names])
+        documented = []
+        for first, last, names in re.findall(r"^\| (\d+)(?:–(\d+))? \| (.*?) \|$",
+                                              documentation, re.M):
+            self.assertEqual(int(first), len(documented))
+            if first == "51":
+                self.assertEqual(last, "61")
+                names = phase_columns
+            else:
+                names = re.findall(r"`([a-z_]+)`", names)
+            self.assertEqual(len(names), int(last or first) - int(first) + 1)
+            documented.extend(names)
+        self.assertIn("| 62 | `dirty_columns` |", documentation)
+        self.assertEqual(documented, columns)
+        row = compact(block(self.collector, "bool write_csv_row("))
+        self.assertIn("if (count_known) out << generated_count; out << ','; "
+                      "if (count_known) out << count_generation;", row)
+        self.assertTrue(row.endswith("for (const double value : phases.milliseconds()) "
+                                    "out << ',' << value; "
+                                    "out << ',' << foliage.dirty_columns; "
+                                    "out << ',' << water.selection_ms << ',' << water.seed_inputs_ms << ',' "
+                                    "<< water.initialization_ms << ',' << water.sim_ms << ',' << water.seam_ms << ',' "
+                                    "<< water.bookkeeping_ms << ',' << water.precomputed_columns << ',' << water.fallback_columns "
+                                    "<< ',' << water.stale_columns; "
+                                    "out << ',' << foliage.worker_dispatched << ',' << foliage.worker_completed << ',' "
+                                    "<< foliage.worker_stale_rejected << ',' << foliage.worker_queue_age_frames << '\\n'; "
+                                    "return out.good();"))
+        self.assertEqual(row.count("foliage.dirty_columns"), 1)
+
+    def test_camera_transition_fixture_starts_with_an_attributed_baseline(self):
+        native = read(ROOT / "test/rendering/foliage_rebuild_test.cpp")
+        transition = compact(block(native, "TEST_F(FoliageRebuildTest, "
+                                   "CameraReorderUploadsMetadataOnceAndPrefixReplacesEveryCommandWord)"))
+        baseline, movement = transition.split("for (const glm::vec3 camera :", 1)
+        self.assertIn("const auto initial = RebuildAttributed(reused.pass(), chunks, 1);", baseline)
+        self.assertIn("EXPECT_EQ(initial.reasons, Attribution::Initial);", baseline)
+        self.assertNotIn("Rebuild(reused.pass(), chunks, 1);", baseline)
+        self.assertIn("glm::vec3{kCamera.x + 32, kCamera.y, kCamera.z}, kCamera", movement)
+        self.assertIn("RebuildAttributed(reused.pass(), chunks, ++frame, camera)", movement)
+        self.assertIn("EXPECT_EQ(work.reasons, Attribution::CameraCell);", movement)
+        self.assertIn("for (const bool gpu : {false, true})", movement)
+        self.assertIn("Rebuild(fresh.pass(), chunks, frame, camera);", movement)
+
+    def test_legacy_hash_oracle_uses_the_callers_camera_and_preserves_the_default(self):
+        rebuild = read(ROOT / "test/rendering/foliage_rebuild_test.cpp")
+        self.assertIn('#include "foliage_rebuild_fixture.h"', rebuild)
+        native = read(ROOT / "test/rendering/foliage_rebuild_fixture.h")
+        for counter in ("uploaded_bytes", "uploads", "surface_upload_bytes", "surface_uploads"):
+            self.assertIn(f"mutable std::size_t {counter} = 0;", rebuild)
+        self.assertRegex(compact(native), r"LegacyUploadedHash\(const FoliagePass& pass, "
+                         r"std::size_t count, const glm::vec3& camera = kCamera\)")
+        oracle = compact(block(native, "static std::uint64_t LegacyUploadedHash("))
+        self.assertIn("{camera.x, camera.z, pass.density_scale(), pass.fade_end_m(), total_weight}",
+                      oracle)
+        self.assertNotIn("kCamera", oracle)
+        transition = compact(block(rebuild, "TEST_F(FoliageRebuildTest, "
+                                   "CameraReorderUploadsMetadataOnceAndPrefixReplacesEveryCommandWord)"))
+        self.assertIn("EXPECT_EQ(hash, LegacyUploadedHash(reused.pass(), chunks.size(), camera));",
+                      transition)
+
     def test_csv_nullable_counts_precede_both_complete_upload_lanes(self):
         writer = compact(block(self.collector, "bool write_csv_row("))
         self.assertIn("if (count_known) out << generated_count; out << ','; "
@@ -1127,7 +1541,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("append_uploads(uploads.terrain, uploads.terrain_pending); "
                       "append_uploads(uploads.water, uploads.water_pending); "
                       "for (const double value : phases.milliseconds()) out << ',' << value; "
-                      "out << '\\n';",
+                      "out << ',' << foliage.dirty_columns;",
                       writer)
         append = compact(block(writer, "const auto append_uploads ="))
         self.assertEqual(append, "out << ',' << work.elapsed_ms << ',' << work.overshoot_ms "
@@ -1139,6 +1553,8 @@ class FrameAttributionWiring(unittest.TestCase):
         for target, source in (
             ("common_tests", "common/DeterministicWorkBudget_test.cpp"),
             ("pass_context_test", "rendering/foliage_rebuild_test.cpp"),
+            ("pass_context_test", "rendering/foliage_invalidation_test.cpp"),
+            ("foliage_ground_work_test", "rendering/foliage_ground_work_test.cpp"),
         ):
             sources = re.search(r"add_executable\(" + target + r"\s+(.*?)^\)",
                                 cmake, re.S | re.M)
@@ -1182,6 +1598,222 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertLess(self.main.index("if (!frame_recorder.finish())"),
                         self.main.index('trace_shutdown("query_cleanup_started")'))
         self.assertIn("return exit_code;", self.main)
+
+
+    def test_boot_seed_preparation_is_bounded_owned_and_owner_published(self):
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        boot = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        self.assertIn("kBootSeedBatch = 64", boot)
+        self.assertIn("m_boot_settle_mode && m_job_system", boot)
+        self.assertIn("std::min(kBootSeedBatch, pending.size() - begin)", boot)
+        self.assertIn("pending.subspan(begin, count)", boot)
+        self.assertIn("prepare_high_water_seed_inputs(to_init, parallel_boot)", boot)
+        self.assertIn("[task = std::move(task)] { task->compute(); }", boot)
+        self.assertLess(boot.index("dispatch_batch(jobs)"), boot.index("wait(handle)"))
+        self.assertLess(boot.index("jobs.clear()"), boot.index("wait(handle)"))
+        self.assertLess(boot.index("fence->load(std::memory_order_acquire)"),
+                        boot.index("seed_chunk_water("))
+        self.assertLess(boot.index("inputs->ready_for(m_sim_resolution)"),
+                        boot.index("seed_chunk_water("))
+        task = compact(block(water, "struct BootWaterSeedTask"))
+        self.assertIn("std::shared_ptr<const SHIELD_WorldSystem> sampler", task)
+        self.assertNotRegex(task, r"Chunk\s*[*&]|WaterSystem\s*[*&]|\[this")
+        self.assertNotIn("seed_chunk_water", task)
+        release = compact(block(water, "~BootWaterSeedTask()"))
+        self.assertLess(release.index("inputs.reset()"), release.index("memory_order_release"))
+        self.assertLess(release.index("sampler.reset()"), release.index("memory_order_release"))
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        capture = compact(block(world, "SHIELD_WorldSystem::capture_water_seed_sampler() const"))
+        self.assertIn("acquire_worldgen_sample_scope()", capture)
+        self.assertIn("new SHIELD_WorldSystem(*this, WaterSeedSamplerTag{})", capture)
+        constructor = compact(block(world, "SHIELD_WorldSystem::SHIELD_WorldSystem("
+                                    "const SHIELD_WorldSystem& source"))
+        self.assertIn("hydro_lock(source.m_hydro_mutex)", constructor)
+        self.assertIn("m_hydro_cache = source.m_hydro_cache", constructor)
+        self.assertIn("m_job_system(nullptr)", world)
+        self.assertIn("m_params(source.m_params)", world)
+        self.assertIn("m_seed(source.m_seed)", world)
+        for node in ("terrain", "cave", "spaghetti", "worley", "island_mask",
+                     "continentalness", "erosion", "peaks", "warp", "temperature",
+                     "humidity", "river"):
+            self.assertIn(f"m_{node}_generator(source.m_{node}_generator)", world)
+
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        common = re.search(r"add_executable\(common_tests\s+(.*?)^\)", cmake, re.S | re.M)
+        self.assertIsNotNone(common)
+        self.assertIn("common/WaterSeedInputs_test.cpp", common.group(1))
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for name in ("BootMediumAndHighFallbackQueueBoundedInputsBeforeOwnerPublication",
+                     "BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory",
+                     "RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing",
+                     "DetachedSamplerSurvivesSourceResetPrefetchAndDestruction",
+                     "BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain",
+                     "RejectedResolutionBootAndLiveKeepConfiguredGridAndInlineHash",
+                     "UnpublishedPartialAndWrongResolutionInputsFallBackInBootAndLive",
+                     "LakeDisabledBootAndLiveRetireInputsAndKeepInlineHash",
+                     "InvalidSessionResolutionsLeaveTheConfiguredGridUnchanged",
+                     "SavedUltraChunkRestoresAndMigratesWithoutSelectingUltraSession",
+                     "BootSurfaceAndGenerationJobsRespectPresetAndResolutionEligibility",
+                     "ReadinessRequiresPublishedSupportedAndMatchingResolution"):
+            self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
+
+    def test_water_seed_inputs_require_supported_preset_and_matching_publication(self):
+        header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
+        self.assertIn("static constexpr bool supports_resolution(", header)
+        self.assertIn("bool ready_for(", header)
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", text).group(1))
+                     for name, text in (("kResolution", header), ("CHUNK_SIZE_X", types),
+                                        ("CHUNK_SIZE_Z", types))}
+        supported = compact(block(header, "static constexpr bool supports_resolution("))
+        supported = re.fullmatch(r"return (.*);", supported).group(1)
+        readiness = compact(block(header, "bool ready_for("))
+        readiness = re.fullmatch(r"return (.*);", readiness).group(1)
+        readiness = readiness.replace("supports_resolution(cells_per_side)", "supported")
+        readiness = readiness.replace("ready.load(std::memory_order_acquire)", "published")
+        for requested in (-1, 0, 1, 2, 3, 4, 8, 16, 17, 32, 2**31 - 1):
+            accepts = cpp_expression(supported, cells_per_side=requested, **constants)
+            self.assertEqual(accepts, requested in (2, 4, 8, 16))
+            for published in (False, True):
+                for resolution in (0, 2, 4, 8, 16, 32):
+                    self.assertEqual(
+                        cpp_expression(readiness, supported=accepts, published=published,
+                                       resolution=resolution, cells_per_side=requested,
+                                       true=True, false=False),
+                        accepts and published and resolution == requested,
+                    )
+        # The empty default span is outside the function body.
+        compute = compact(block(header.replace("std::span<const float> terrain = {}",
+                                               "std::span<const float> terrain"),
+                                "void ComputeWaterSeedInputs("))
+        self.assertIn("if (!HighWaterSeedInputs::supports_resolution(resolution)) return;", compute)
+        self.assertIn("if (!terrain.empty() && terrain.size() != cells) return;", compute)
+        self.assertLess(compute.index("inputs.resolution = resolution;"),
+                        compute.index("inputs.ready.store(true, std::memory_order_release);"))
+
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        boot = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        eligibility = re.search(r"const bool use_seed_inputs = (.*?);", boot).group(1)
+        eligibility = eligibility.replace(
+            "HighWaterSeedInputs::supports_resolution(m_sim_resolution)", "supported")
+        for accepts in (False, True):
+            for lakes in (False, True):
+                self.assertEqual(
+                    cpp_expression(eligibility, supported=accepts,
+                                   **{"m_shield_system->get_params().lakes_enabled": lakes}),
+                    accepts and lakes,
+                )
+        self.assertIn("const bool parallel_boot = use_seed_inputs && "
+                      "m_boot_settle_mode && m_job_system;", boot)
+        self.assertIn("auto high_seed_inputs = use_seed_inputs ? "
+                      "prepare_high_water_seed_inputs(to_init, parallel_boot) : "
+                      "std::vector<std::shared_ptr<HighWaterSeedInputs>>{};", boot)
+        parallel = compact(block(water, "if (parallel_boot)"))
+        self.assertIn("std::make_shared<HighWaterSeedInputs>()", parallel)
+        self.assertIn("ComputeWaterSeedInputs(*inputs,", parallel)
+        self.assertIn("if (!use_seed_inputs || m_sim_resolution != "
+                      "HighWaterSeedInputs::kResolution) "
+                      "to_init[i]->stage_water_seed_inputs({});", boot)
+        self.assertIn("seed_chunk_water(to_init[i], terrain_seed[i], "
+                      "inputs && inputs->ready_for(m_sim_resolution) ? inputs : nullptr);", boot)
+        live = compact(block(water, "WaterSystem::prepare_high_water_seed_inputs("))
+        self.assertIn("if (inputs && inputs->ready_for(m_sim_resolution))", live)
+        consumer = compact(block(water, "void WaterSystem::seed_chunk_water("))
+        guard = "if (inputs && !inputs->ready_for(initial_resolution)) inputs = nullptr;"
+        self.assertIn(guard, consumer)
+        self.assertLess(consumer.index(guard), consumer.index("inputs->rest[cell]"))
+        self.assertLess(consumer.index(guard), consumer.index("inputs->terrain[cell]"))
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        request = compact(block(world, "SHIELD_WorldSystem::request_water_seed_inputs("))
+        self.assertIn("!m_params.lakes_enabled", request)
+        self.assertIn("m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution", request)
+        self.assertLess(request.index("return {};"),
+                        request.index("std::make_shared<HighWaterSeedInputs>()"))
+
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        regression = compact(block(native, "TEST(WaterSeedInputs, "
+                                   "RejectedResolutionBootAndLiveKeepConfiguredGridAndInlineHash)"))
+        self.assertIn("for (const int resolution : {2, 4, 8, 16})", regression)
+        self.assertIn("for (const bool boot : {false, true})", regression)
+        self.assertIn("accelerated.water().SetBootSettleMode(boot);", regression)
+        self.assertIn("accelerated.water().SetSimResolution(32);", regression)
+        self.assertIn("inputs->resolution = 32;", regression)
+        for fixture in ("accelerated", "inline_path"):
+            self.assertIn(f"{fixture}.water().SetSimResolution(resolution);", regression)
+            self.assertIn(f"ASSERT_EQ({fixture}.water().sim_resolution(), resolution);", regression)
+            self.assertIn(f"ExpectInlineSeed({fixture}, resolution);", regression)
+        self.assertIn("ExpectSameWater(accelerated, inline_path);", regression)
+        oracle = compact(block(native, "void ExpectInlineSeed("))
+        self.assertIn("EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);", oracle)
+
+    def test_water_resolution_setter_retains_integral_cell_contract(self):
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        setter = block(water, "void WaterSystem::SetSimResolution(")
+        # Pin the complete mutation/refusal path, including short circuiting before
+        # modulo zero. This is the original contract for every possible int value.
+        self.assertEqual(compact(re.sub(r"//[^\n]*", "", setter)),
+                         "if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 || "
+                         "CHUNK_SIZE_Z % cells_per_side != 0) { return; } "
+                         "m_sim_resolution = cells_per_side;")
+        refusal = re.search(r"if \((.*?)\) \{", compact(setter)).group(1)
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", types).group(1))
+                     for name in ("CHUNK_SIZE_X", "CHUNK_SIZE_Z")}
+        for requested in (-(2**31), -1, *range(66), 2**31 - 1):
+            for configured in (2, 4, 8, 16):
+                rejected = cpp_expression(refusal, cells_per_side=requested, **constants)
+                actual = configured if rejected else requested
+                self.assertEqual(actual, requested if requested in (2, 4, 8, 16) else configured)
+
+    def test_water_seed_defensive_predicates_directly_refuse_unreachable_grids(self):
+        # Use the existing scalar production-expression seam: no setter bypass or
+        # runtime route to an unsupported session grid is needed. This evaluates
+        # the actual consumer guard, independently of upstream input filtering.
+        header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
+        types = read(ROOT / "include/luminumbra/core/Types.h")
+        constants = {name: int(re.search(r"\b" + name + r"\s*=\s*(\d+)", text).group(1))
+                     for name, text in (("kResolution", header), ("CHUNK_SIZE_X", types),
+                                        ("CHUNK_SIZE_Z", types))}
+        supported = re.fullmatch(r"return (.*);", compact(block(
+            header, "static constexpr bool supports_resolution("))).group(1)
+        readiness = re.fullmatch(r"return (.*);", compact(block(
+            header, "bool ready_for("))).group(1)
+        readiness = readiness.replace("supports_resolution(cells_per_side)", "supported")
+        readiness = readiness.replace("ready.load(std::memory_order_acquire)", "published")
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        initialize = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        eligibility = re.search(r"const bool use_seed_inputs = (.*?);", initialize).group(1)
+        eligibility = eligibility.replace(
+            "HighWaterSeedInputs::supports_resolution(m_sim_resolution)", "supported")
+        consumer = compact(block(water, "void WaterSystem::seed_chunk_water("))
+        guard_match = re.search(r"if \((.*?)\) inputs = nullptr;", consumer)
+        self.assertIsNotNone(guard_match, "consumer must independently reject invalid payloads")
+        guard = guard_match.group(1)
+        guard = guard.replace("inputs->ready_for(initial_resolution)", "ready_for")
+        # Both payload reads must remain behind the guard.
+        for field in ("rest", "terrain"):
+            self.assertLess(consumer.index("inputs = nullptr;"),
+                            consumer.index(f"inputs->{field}[cell]"))
+        for requested in (-(2**31), -1, 0, 1, 2, 3, 4, 8, 16, 17, 32, 2**31 - 1):
+            accepts = cpp_expression(supported, cells_per_side=requested, **constants)
+            for lakes in (False, True):
+                eligible = cpp_expression(
+                    eligibility, supported=accepts, true=True, false=False,
+                    **{"m_shield_system->get_params().lakes_enabled": lakes})
+                self.assertEqual(eligible, lakes and requested in (2, 4, 8, 16))
+            for present in (False, True):
+                for published in (False, True):
+                    # Zero metadata covers partial/uncomputed and unknown payloads;
+                    # the other values cover matching and mismatched publications.
+                    for resolution in (0, 2, 4, 8, 16, 32):
+                        ready = cpp_expression(
+                            readiness, supported=accepts, published=published,
+                            resolution=resolution, cells_per_side=requested, true=True, false=False)
+                        discarded = cpp_expression(guard, inputs=present, ready_for=ready,
+                                                   true=True, false=False)
+                        consumes = present and not discarded
+                        self.assertEqual(consumes, present and published and
+                                         requested in (2, 4, 8, 16) and resolution == requested)
 
 
 if __name__ == "__main__":

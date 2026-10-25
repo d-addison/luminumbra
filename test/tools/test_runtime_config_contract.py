@@ -226,7 +226,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         start = fixture.index("TEST(WorldSaveService,EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop)")
         cleanup = fixture[start:fixture.index("TEST(WorldSaveService,LoadFromEmpty", start)]
         self.assertIn("clock.write_metadata(metadata);", cleanup)
-        self.assertEqual(cleanup.count("ASSERT_TRUE(WorldSaveService::save_metadata(valid,save_dir.path()));"), 2)
+        first_save = "ASSERT_TRUE(WorldSaveService::save_metadata(metadata.dump(),save_dir.path()));"
+        baseline = 'constautovalid=ReadFileBytes(save_dir.path()/"world_info.json");'
+        self.assertLess(cleanup.index(first_save), cleanup.index(baseline))
+        self.assertIn("ASSERT_EQ(nlohmann::json::parse(valid),metadata);", cleanup)
+        self.assertLess(cleanup.index(baseline), cleanup.index("for(constauto*invalid:"))
+        self.assertEqual(cleanup.count("ASSERT_TRUE(WorldSaveService::save_metadata(valid,save_dir.path()));"), 1)
         self.assertNotIn('ASSERT_TRUE(WorldSaveService::save_metadata("{}",', cleanup)
         self.assertIn('EXPECT_FALSE(WorldSaveService::save_metadata("{}",save_dir.path()));', cleanup)
         self.assertIn('EXPECT_EQ(ReadFileBytes(metadata_staging),"partialmetadata");', cleanup)
@@ -307,10 +312,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for capture in ("quiesce_streaming_jobs_for_save();", "BuildPlantEntitySnapshot(m_registry)",
                         "state.dirty_chunk_ids()"):
             self.assertLess(sequence.index(capture), ownership)
-        for operation in ("ClockConfigurationCompatible(save_dir)", "validate_save(save_dir)",
+        for operation in ("ClockConfigurationCompatible(save_dir)",
+                          "validate_save(save_dir)",
                           "SavedPresetCompatible(save_dir)", "service.save_world(",
                           ".save_dirty_chunks(", "save_plant_entities(", "SaveEnergyFieldRecord(",
-                          "SaveWorldMetadataTo(", "m_activeRegionLedger.mark_saved(",
+                          "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
+                          "m_activeRegionLedger.mark_saved(",
                           "chunk->clear_voxel_data_dirty()"):
             self.assertLess(ownership, sequence.index(operation))
 

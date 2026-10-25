@@ -2,8 +2,10 @@
 
 #include "../AsyncReadbackRing.h"
 #include "../AttributedGl.h"
+#include "../FoliageCountObservation.h"
 #include "../FoliageEvidence.h"
-#include "../FoliageGroundMesh.h"
+#include "../FoliageGroundWork.h"
+#include "../FoliageSurfaceSlots.h"
 #include "../RenderContext.h"
 #include "app/FrameAttribution.h"
 
@@ -18,6 +20,10 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+
+namespace Luminumbra {
+class JobSystem;
+}
 
 namespace Luminumbra::Rendering {
 
@@ -105,6 +111,7 @@ public:
         8192; // grass overhaul: 2x denser per-chunk
               // carpet (paired with the tighter near
               // fade so the global cap still fits).
+    static_assert(kMaxCandidatesPerChunk == FoliageGroundBuild::kCandidates);
 
     // Packed 36-byte instance record (matches the GL vertex-attribute layout).
 #pragma pack(push, 1)
@@ -154,6 +161,20 @@ public:
                             const std::vector<u32>& indices);
     void remove_ground_mesh(ChunkID id);
     void clear_ground_meshes();
+    // Optional existing executor; nullptr retains synchronous preparation.
+    // The executor outlives submissions. Detaching never waits for worker work.
+    void attach_job_system(JobSystem* jobs) {
+        m_ground_jobs = jobs;
+        m_scatter_built = false;
+    }
+    // Pipeline construction opens the first admission interval; render_frame
+    // opens the next after drawing. All rebuilds before a draw share one budget,
+    // including nested capture loops. Standalone callers may drive this explicitly;
+    // otherwise each rebuild is treated as a frame.
+    void begin_ground_frame() {
+        m_ground_frame_driven = true;
+        m_ground_queue.begin_frame();
+    }
     void reset_shader();
 
     //  #4: GPU grass scatter (compute). Compiles res/shaders/grass_scatter.comp
@@ -212,6 +233,14 @@ public:
     // Last collected invocation; timings measure CPU submission, not GPU completion.
     const Client::Attribution::FoliageRebuild& rebuild_attribution() const {
         return m_rebuild_attribution;
+    }
+    using CountObservation = FoliageCountObservation;
+    // Window-boundary diagnostic only. Reads the actual indirect draw count,
+    // never the play-mode capacity marker. May wait for GPU completion; callers
+    // must keep this outside the measured frame intervals.
+    CountObservation observe_counts() const;
+    bool build_pending() const {
+        return m_foliage_build_backlog;
     }
 
     // Loads the scatter archetype set from data/common/foliage/scatter_set.json.
@@ -306,32 +335,26 @@ public:
     // One visible chunk's placement input. The caller (RenderPipeline) supplies
     // per-chunk biome id + density + surface samples; the pass scatters
     // instances deterministically inside the chunk footprint.
-    struct ChunkScatter {
-        glm::ivec2 chunk_xz{0, 0}; // chunk coords (X,Z) — placement hash input
-        glm::vec3 origin{0.0f};    // world origin of the chunk column footprint
-        float extent_m = 32.0f;    // chunk footprint side length (world units)
-        u8 biome_id = 255;         // placement hash input
-        float density = 0.0f;      // biome vegetation density [0,1]
-    };
+    using ChunkScatter = FoliageScatterInput;
 
     // Surface query callback: returns the terrain surface world Y + a slope
     // estimate [0,1] (0 flat.. 1 steep) + moisture [0,1] at a world (x,z).
     // Supplied by the caller so the pass never depends on the world system.
-    struct SurfaceSample {
-        float height = 0.0f;
-        float slope = 0.0f;    // [0,1]
-        float moisture = 0.0f; // [0,1]
-        bool valid = true;     // false skips the candidate (e.g. underwater)
-    };
+    using SurfaceSample = FoliageGroundSample;
     using SurfaceQuery = SurfaceSample (*)(void* ctx, float world_x, float world_z);
 
-    // Rebuilds the instance set for the supplied visible chunks. PURE function
-    // of the chunk inputs + the surface query (no RNG). Fills the persistent
-    // mapping for this frame..
+    enum class Preparation {
+        Deferred,
+        Complete
+    };
+    // Rebuilds the instance set deterministically from chunk inputs and ground.
+    // Complete prepares all contributing columns synchronously for one-shot
+    // preview/capture callers, without joining or dispatching worker jobs.
     void rebuild_instances(const std::vector<ChunkScatter>& chunks,
                            SurfaceQuery query,
                            void* query_ctx,
-                           const glm::vec3& camera_pos);
+                           const glm::vec3& camera_pos,
+                           Preparation preparation = Preparation::Deferred);
 
     // Draws the live foliage instances into the lit HDR target (ctx.lit_scene).
     // Reads scene depth for occlusion. No-op (returns 0) when no instances or
@@ -427,24 +450,41 @@ private:
     bool rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
                                SurfaceQuery query,
                                void* query_ctx,
-                               const glm::vec3& camera_pos);
+                               const glm::vec3& camera_pos,
+                               Preparation preparation);
     // drain the most-recent COMPLETED async blade readback
     // into m_instances (stale-safe). Called every frame from rebuild_instances so
     // the gate's instance_hash/coverage probes stay populated independent of the
     // scatter-cache elision..
     void poll_foliage_readback();
     void submit_foliage_readback();
-    SurfaceSample sample_ground(
-        const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx, float x, float z) const;
+    SurfaceSample
+    sample_ground(const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx, float x, float z);
+    void poll_ground_builds(const std::vector<ChunkScatter>& chunks, const glm::vec3& camera_pos);
+    const std::vector<glm::vec4>* prepare_ground_samples(const ChunkScatter& chunk);
+    FoliageGroundVersion ground_version(const ChunkScatter& chunk) const;
+    // Foliage never joins a shared executor with 64 or more queued jobs.
+    static constexpr std::size_t kGroundJobQueueLimit = 64;
+    JobSystem* m_ground_jobs = nullptr;
+    FoliageGroundQueue m_ground_queue;
+    bool m_worker_ground_active = false;
+    bool m_ground_queue_available = false;
+    bool m_ground_frame_driven = false;
     bool contributes_to_scatter(const ChunkScatter& chunk, const glm::vec3& camera_pos) const;
     bool m_use_rendered_ground = false;
     // Render-only revision allocator. Only a contributing column's stored token
     // enters the scatter signature; absent columns have revision zero. Storage
     // follows resident columns, with no history retained for unloaded terrain.
     std::uint64_t m_next_ground_revision = 0;
+    std::uint64_t m_ground_epoch = 0;
+    struct GroundMesh {
+        // Retained only until query publication; in-flight requests own snapshots.
+        std::shared_ptr<const FoliageMeshPayload> payload;
+        std::shared_ptr<const FoliageGroundMesh> query;
+    };
     struct GroundColumn {
         std::uint64_t revision = 0;
-        std::unordered_map<ChunkID, FoliageGroundMesh> meshes;
+        std::unordered_map<ChunkID, GroundMesh> meshes;
     };
     std::unordered_map<ChunkID, std::uint64_t> m_ground_columns;
     std::unordered_map<std::uint64_t, GroundColumn> m_ground_meshes;
@@ -509,7 +549,7 @@ private:
     u32 m_group_counts_ssbo = 0;
     u32 m_group_offsets_ssbo = 0;
     int m_uploaded_chunk_count = 0;
-    static constexpr std::size_t kMaxGpuChunks = 512;
+    static constexpr std::size_t kMaxGpuChunks = FoliageSurfaceSlots::kCapacity;
     // Rebuild scratch retains its high-water capacity. GPU input scratch is
     // bounded by 512 columns, each with 8192 vec4 samples (64 MiB total).
     struct GpuChunk {
@@ -520,11 +560,32 @@ private:
     std::vector<ChunkScatter> m_ordered_chunks;
     std::vector<const ChunkScatter*> m_admitted_chunks;
     std::vector<GpuChunk> m_chunk_params;
-    std::vector<glm::vec4> m_surface_scratch;
+    FoliageSurfaceSlots m_surface_slots;
+    std::size_t m_surface_storage_slots = 0;
+    std::array<std::uint64_t, kMaxGpuChunks> m_slot_revisions{};
+    std::vector<std::uint32_t> m_slot_order;
+    std::vector<FoliageSurfaceSlots::Key> m_surface_keys;
+    struct DirtySurface {
+        std::size_t slot;
+        const std::vector<glm::vec4>* samples;
+        std::uint64_t revision;
+    };
+    std::vector<DirtySurface> m_dirty_surfaces;
+    // One bounded 18 KiB transfer holds both metadata streams.
+    struct GpuMetadata {
+        std::array<GpuChunk, kMaxGpuChunks> params{};
+        std::array<std::uint32_t, kMaxGpuChunks> slots{};
+    };
+    GpuMetadata m_uploaded_metadata{};
+    // Only adjacent dirty runs are concatenated; at most 512 * 8192 vec4s.
+    std::vector<glm::vec4> m_dirty_surface_scratch;
+    std::size_t m_metadata_count = 0;
+    bool m_metadata_valid = false;
     // Palette storage is checked against element, GL byte, and uniform limits.
     std::vector<float> m_palette;
     float m_palette_total_weight = 1.0f;
     bool m_palette_dirty = true;
+    bool m_palette_uploaded = false;
     std::size_t m_group_storage_bytes = 0;
     u32 m_chunk_ssbo = 0;
     u32 m_surf_ssbo = 0;
@@ -564,6 +625,8 @@ private:
     std::size_t m_draw_instance_limit = 0;
     std::optional<std::size_t> m_gpu_generated_count;
     std::uint64_t m_gpu_count_generation = 0;
+    std::uint64_t m_candidate_slots = 0;
+    std::uint64_t m_candidate_count = 0;
 
     bool m_enabled = false;
     glm::vec2 m_wind_xz{0.0f, 0.0f};
@@ -599,14 +662,16 @@ private:
     };
     std::unordered_map<std::uint64_t, CachedChunkRecords> m_chunk_cache;
     std::uint64_t m_chunk_cache_gen = 1;
-    // Exact mesh hits at the GPU's deterministic candidate positions. Biome and
-    // footprint changes move those positions, so they must invalidate cached hits.
-    // Mesh replacement/removal invalidates the affected column separately.
+    // Exact mesh hits keyed by column and candidate footprint. Support revisions
+    // invalidate every footprint of an edited column without walking the cache.
     struct CachedSurfaceSamples {
-        std::uint64_t placement = 0;
+        std::uint64_t support_revision = 0;
+        std::uint64_t revision = 0;
         std::vector<glm::vec4> samples;
     };
-    std::unordered_map<std::uint64_t, CachedSurfaceSamples> m_surf_grid_cache;
+    std::unordered_map<FoliageSurfaceSlots::Key, CachedSurfaceSamples, FoliageSurfaceSlots::KeyHash>
+        m_surf_grid_cache;
+    std::uint64_t m_next_surface_revision = 0;
     //  implementation note: when MOVING fast, many chunks stream into the renderable set in one
     //  frame,
     // and building their (uncached) records all at once re-ran hundreds of SurfaceQuery calls -> a

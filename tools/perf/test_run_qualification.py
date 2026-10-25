@@ -220,6 +220,11 @@ def index_of(results, cell_id):
 
 class RunnerTestBase(unittest.TestCase):
     def setUp(self):
+        def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
+            return subprocess.run(command, **kwargs)
+        capture_patch = mock.patch.object(rq.runner.crash_capture, 'run', side_effect=ordinary_run)
+        capture_patch.start()
+        self.addCleanup(capture_patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         # Match the runner's canonical output paths when the temporary directory

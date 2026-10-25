@@ -33,6 +33,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -68,6 +69,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -1539,7 +1541,9 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsRefusedOnLoad) {
         session.SetJobSystem(&jobs);
         session.SetRootPath(root.root_string());
         ASSERT_TRUE(session.CreateWorld("QuarantineWorld", "12345", "default"));
+        session.GetWorldSystem()->SetWaterSimWindowCursor(19);
         EXPECT_FALSE(session.LoadWorldStateFrom(save_dir));
+        EXPECT_EQ(session.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
         EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
         EXPECT_FALSE(session.GetWorldOpenError().empty());
         EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
@@ -1563,6 +1567,14 @@ std::string ReadClockTestFile(const fs::path& path) {
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
+}
+
+std::map<fs::path, std::string> ReadClockTestDirectory(const fs::path& path) {
+    std::map<fs::path, std::string> bytes;
+    for (const auto& entry : fs::recursive_directory_iterator(path))
+        bytes.emplace(entry.path().lexically_relative(path),
+                      entry.is_regular_file() ? ReadClockTestFile(entry.path()) : "");
+    return bytes;
 }
 
 void WriteSavedPresetTestJson(const fs::path& path, const nlohmann::json& json) {
@@ -2070,6 +2082,7 @@ TEST_P(SavedWorldPresetTest, NormalCreationRefusalsRetainDirtySessionAndExitSave
             bool saved_reported = false;
             Luminumbra::Client::SaveSessionOnExit(
                 &session,
+                true,
                 [&] {
                     session.SetSpawnPoint(Luminumbra::Vec3(19, 23, -17));
                     spawn_updated = true;
@@ -2179,6 +2192,7 @@ TEST_P(SavedWorldPresetTest, FatalSnapshotAndFinalMetadataRefusalsCannotBeCleare
         unsigned spawn_updates = 0;
         Luminumbra::Client::SaveSessionOnExit(
             &session,
+            true,
             [&] { ++spawn_updates; },
             [] { FAIL() << "Fatal session reported save success"; });
         EXPECT_EQ(spawn_updates, 1u);
@@ -2257,7 +2271,183 @@ TEST_P(SavedWorldPresetTest, FreshAndTransientRefusalsAndExactCustomReplacement)
     EXPECT_FLOAT_EQ(reopened.GetWorldSystem()->get_params().height_offset, 123.0f);
 }
 
+TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMetadataToZero) {
+    GameSession source, reader;
+    Configure(source);
+    Configure(reader);
+    ASSERT_TRUE(source.CreateWorld("Water cursor source", "1337", "default"));
+    ASSERT_TRUE(reader.CreateTransientWorld("Water cursor reader", "1337", "default"));
+    // A value beyond the 64-chunk update cap must survive exactly; clamping it
+    // would choose a different next water window when more chunks are awake.
+    constexpr std::size_t saved_cursor = 65;
+    source.GetWorldSystem()->SetWaterSimWindowCursor(saved_cursor);
+    ASSERT_TRUE(source.SaveWorld());
+    const auto source_save = source.GetWorldSaveDir();
+    ASSERT_TRUE(source.LoadWorld(source.GetMetadata().worldId)) << source.GetWorldOpenError();
+    EXPECT_EQ(source.GetWorldSystem()->GetWaterSimWindowCursor(), saved_cursor);
+
+    const auto snapshot = Root().path() / "water-cursor-snapshot";
+    for (const bool with_chunks : {false, true}) {
+        SCOPED_TRACE(with_chunks);
+        fs::remove_all(snapshot);
+        ASSERT_TRUE(fs::create_directories(snapshot));
+        fs::copy_file(source_save / "world_info.json", snapshot / "world_info.json");
+        fs::copy_file(source_save / "preset.json", snapshot / "preset.json");
+        if (with_chunks) {
+            Luminumbra::WorldStreamingState state;
+            auto chunk = state.get_or_create_chunk(Luminumbra::IVec3(0, 0, 0));
+            chunk->set_state(Luminumbra::ChunkState::Idle);
+            ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
+        }
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        auto before = SavedPresetTestDiskBytes(snapshot);
+        ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), saved_cursor);
+        EXPECT_EQ(SavedPresetTestDiskBytes(snapshot), before);
+
+        auto metadata = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
+        ASSERT_EQ(metadata.erase("waterSimCursor"), 1u);
+        ASSERT_NO_FATAL_FAILURE(WriteSavedPresetTestJson(snapshot / "world_info.json", metadata));
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        before = SavedPresetTestDiskBytes(snapshot);
+        ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+        EXPECT_EQ(SavedPresetTestDiskBytes(snapshot), before);
+
+        ASSERT_TRUE(fs::remove(snapshot / "world_info.json"));
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+    }
+    reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+    ASSERT_TRUE(reader.LoadWorldStateFrom(Root().path() / "missing-water-snapshot"));
+    EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+}
+
+TEST_P(SavedWorldPresetTest, InvalidWaterCursorRefusesCatalogAndSnapshotWithoutChangingCursor) {
+    GameSession source;
+    Configure(source);
+    ASSERT_TRUE(source.CreateWorld("Invalid water cursor", "1337", "default"));
+    const auto save = source.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const std::array<nlohmann::json, 8> invalid{
+        nullptr, -1, 1.5, 1e38, true, "65", nlohmann::json::array(), nlohmann::json::object()};
+    for (const auto& value : invalid) {
+        SCOPED_TRACE(value.dump());
+        auto malformed = metadata;
+        malformed["waterSimCursor"] = value;
+        ASSERT_NO_FATAL_FAILURE(WriteSavedPresetTestJson(save / "world_info.json", malformed));
+        const auto before = SavedPresetTestDiskBytes(save);
+        GameSession reader;
+        Configure(reader);
+        ASSERT_TRUE(reader.CreateTransientWorld("Cursor refusal", "1337", "default"));
+        reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        EXPECT_FALSE(reader.LoadWorldStateFrom(save));
+        EXPECT_NE(reader.GetWorldOpenError().find("water simulation cursor"), std::string::npos);
+        EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
+        EXPECT_FALSE(
+            P::InspectSavedWorld(Root().path(), source.GetMetadata().worldId).error.empty());
+        EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+    }
+}
+
+TEST_P(SavedWorldPresetTest, UnmarkedInvalidDestinationRefusesBeforePresetOrPayloadWrites) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, false));
+    const PendingSnapshotState pending(session);
+    const auto save = session.GetWorldSaveDir();
+    const std::array<std::pair<fs::path, std::string>, 5> artifacts{{
+        {P::WorldSaveService::world_state_path(save), "obsolete snapshot"},
+        {P::WorldSaveService::region_file_path(save, 0, 0), std::string("LMR1\xff\xff\0\0", 8)},
+        {P::WorldSaveService::region_file_path(save, 0, 0), "LMR1"},
+        {P::WorldSaveService::world_manifest_path(save), "{"},
+        {P::WorldSaveService::region_directory(save) / "unknown.bin", "unknown artifact"},
+    }};
+    for (const auto& [path, bytes] : artifacts) {
+        SCOPED_TRACE(path.generic_string());
+        fs::remove_all(save);
+        fs::create_directories(path.parent_path());
+        {
+            std::ofstream output(path, std::ios::binary);
+            output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            output.close();
+            ASSERT_FALSE(output.fail());
+        }
+        ASSERT_FALSE(fs::exists(save / "preset.json"));
+        ASSERT_FALSE(fs::exists(save / "world_info.json"));
+        ASSERT_FALSE(P::WorldSaveService::validate_save(save));
+        const SnapshotDestinationBytes before(save);
+        EXPECT_FALSE(session.SaveWorld());
+        before.ExpectUnchanged();
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_FALSE(session.SaveWorldState());
+        before.ExpectUnchanged();
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_FALSE(session.SaveWorldStateTo(save));
+        before.ExpectUnchanged();
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_FALSE(fs::exists(save / "preset.json"));
+        EXPECT_FALSE(fs::exists(save / "world_info.json"));
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
+
+TEST(GameSessionHeadlessWorldTest,
+     TransientCalendarSnapshotsPreservePresetIdentityAndRefuseChanges) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    original.SetRootPath(root.root_string());
+    original.SetJobSystem(&jobs);
+    original.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(original.CreateWorld("Snapshot identity", "1337", "default"));
+    const auto original_metadata =
+        nlohmann::json::parse(ReadClockTestFile(original.GetWorldSaveDir() / "world_info.json"));
+
+    for (const bool dirty : {false, true}) {
+        SCOPED_TRACE(dirty);
+        GameSession preview;
+        preview.SetRootPath(root.root_string());
+        preview.SetJobSystem(&jobs);
+        preview.SetActiveRegionsEnabled(false);
+        const SnapshotDestinationBytes before_preview(root.path());
+        ASSERT_TRUE(preview.CreateTransientWorld("Calendar preview", "1337", "default"));
+        before_preview.ExpectUnchanged();
+        EXPECT_EQ(preview.PresetContentHash(), original.PresetContentHash());
+        const auto snapshot = root.path() / (dirty ? "dirty-preview" : "empty-preview");
+        ASSERT_TRUE(preview.SaveWorldStateTo(snapshot));
+        const auto metadata =
+            nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
+        EXPECT_EQ(metadata.at("renderCalendar"), original_metadata.at("renderCalendar"));
+        EXPECT_EQ(metadata.at("presetFormat"), original_metadata.at("presetFormat"));
+        EXPECT_EQ(metadata.at("presetIdentity"), original_metadata.at("presetIdentity"));
+        EXPECT_EQ(metadata.at("presetIdentity"),
+                  P::StableChecksum(
+                      nlohmann::json::parse(ReadClockTestFile(snapshot / "preset.json")).dump()));
+        const SnapshotPresetFiles preset_files(snapshot);
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        if (dirty) {
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(preview.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        }
+        for (const auto* changed : {"preset", "identity", "both"}) {
+            SCOPED_TRACE(changed);
+            ASSERT_NO_FATAL_FAILURE(preset_files.Rewrite(changed));
+            const SnapshotDestinationBytes before(root.path());
+            EXPECT_FALSE(preview.SaveWorldStateTo(snapshot));
+            before.ExpectUnchanged();
+            EXPECT_EQ(chunk->is_voxel_data_dirty(), dirty);
+            ASSERT_NO_FATAL_FAILURE(preset_files.Restore());
+        }
+        ASSERT_TRUE(preview.SaveWorldStateTo(snapshot));
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    }
+}
 
 // Normalize historical text-mode energy records and current durable binary
 // records for content assertions. Exact-byte assertions use ReadClockTestFile.
@@ -2275,7 +2465,9 @@ nlohmann::json SessionWorldSubHashes(GameSession& session) {
     const auto energy = session.ComputeAetherStateSubHash();
     if (!energy.empty())
         aether = P::StableChecksum(aether + "|state:" + energy);
-    return {{"chunk", P::ComputeWorldStreamingStateHash(state)},
+    return {{"chunk",
+             P::ComputeWorldStreamingStateHash(
+                 state, session.GetWorldSystem()->GetWaterSimWindowCursor())},
             {"wind", session.GetWindFieldSystem()->ComputeWindSubHash()},
             {"weather", session.GetWeatherSystem()->ComputeWeatherSubHash()},
             {"aether", aether},
@@ -2336,11 +2528,15 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     ASSERT_TRUE(control.CreateTransientWorld("Clock control", "1337", "default"));
     const auto save = original.GetWorldSaveDir();
     auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
-    const Luminumbra::world::WorldCalendar calendar{120, 4};
-    Luminumbra::world::WorldClock(0, calendar).write_metadata(metadata);
-    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    const Luminumbra::world::WorldCalendar calendar{120, 4, 1, 2, 8};
+    metadata["simulationTick"] = 0u;
+    metadata["calendar"] = {{"dayLengthTicks", calendar.dayLengthTicks},
+                            {"daysPerYear", calendar.daysPerYear}};
+    const auto imported_bytes = metadata.dump();
+    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << imported_bytes;
     ASSERT_TRUE(original.LoadWorldStateFrom(save));
     ASSERT_TRUE(control.LoadWorldStateFrom(save));
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), imported_bytes);
     for (auto* session : {&original, &control}) {
         ClockTestPlant(session->GetRegistry(), session->GetMetadata().spawnPoint);
         auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
@@ -3032,6 +3228,8 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledCallbacksKeepLegacySavesLoa
     session.SetFiniteHydrologyEnabled(false);
 
     ASSERT_TRUE(session.CreateWorld("Legacy callbacks", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "unmarked-snapshot"));
+    ASSERT_TRUE(session.SaveWorld());
     const auto save = session.GetWorldSaveDir();
     const auto before = ReadClockTestFile(save / "world_info.json");
     const double dt = session.GetSimulationClock().fixed_dt();
@@ -3119,7 +3317,6 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAnd
     }
     ASSERT_TRUE(session.CreateWorld("Legacy clock", "1337", "default"));
     const auto path = session.GetWorldSaveDir() / "world_info.json";
-    const auto before = ReadClockTestFile(path);
     const auto& m = session.GetMetadata();
     // Clock keys remain absent; the preset marker and identity apply to every new world.
     const nlohmann::json legacy = {
@@ -3135,7 +3332,10 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAnd
         {"creationTime", m.creationTime},
         {"spawnPoint", {{"x", m.spawnPoint.x}, {"y", m.spawnPoint.y}, {"z", m.spawnPoint.z}}},
         {"waterSimCursor", std::size_t{0}}};
-    EXPECT_EQ(before, legacy.dump(4) + "\n");
+    const auto before = legacy.dump(4) + "\n";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << before;
+    ASSERT_TRUE(session.LoadWorld(m.worldId));
+    EXPECT_EQ(session.GetRenderCalendar(), Luminumbra::world::WorldCalendar::Legacy());
     for (int i = 0; i < 10; ++i)
         session.TickSimulation(session.GetSimulationClock().fixed_dt());
     EXPECT_EQ(session.FoldClockIntoEcologyHash("legacy-ecology"), "legacy-ecology");
@@ -3145,6 +3345,399 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAnd
     ASSERT_TRUE(loaded.LoadWorld(m.worldId));
     EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
     EXPECT_EQ(ReadClockTestFile(path), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, RenderCalendarMarkerLifecycleAndSnapshotReplacement) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    for (auto* s : {&session, &loaded}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(false);
+    }
+    ASSERT_TRUE(session.CreateWorld("Presentation calendar", "1337", "default"));
+    const auto id = session.GetMetadata().worldId;
+    const auto save = session.GetWorldSaveDir();
+    const auto before = ReadClockTestFile(save / "world_info.json");
+    const auto metadata = nlohmann::json::parse(before);
+    EXPECT_FALSE(metadata.contains("simulationTick"));
+    EXPECT_FALSE(metadata.contains("calendar"));
+    ASSERT_TRUE(metadata.contains("renderCalendar"));
+    EXPECT_EQ(metadata.at("renderCalendar").at("version"), 2);
+    EXPECT_EQ(session.GetRenderCalendar(), Luminumbra::world::WorldCalendar{});
+    const auto inspected = P::InspectSavedWorld(root.path(), id);
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_FALSE(inspected.requires_active_regions);
+    ASSERT_TRUE(inspected.render_calendar.has_value());
+    EXPECT_EQ(inspected.render_calendar,
+              std::optional<Luminumbra::world::WorldCalendar>{Luminumbra::world::WorldCalendar{}});
+    ASSERT_TRUE(loaded.LoadWorld(id));
+    EXPECT_EQ(loaded.GetRenderCalendar(), session.GetRenderCalendar());
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before);
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(session.FoldClockIntoEcologyHash("ecology"), "ecology");
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before);
+    const auto snapshot = root.path() / "marked-snapshot";
+    ASSERT_TRUE(session.SaveWorldStateTo(snapshot));
+    EXPECT_EQ(
+        nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json")).at("renderCalendar"),
+        metadata.at("renderCalendar"));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot));
+    EXPECT_EQ(loaded.GetRenderCalendar(), Luminumbra::world::WorldCalendar{});
+    const Luminumbra::world::WorldCalendar custom{101, 3, 3, 5, 9};
+    auto custom_metadata = metadata;
+    custom_metadata["renderCalendar"] =
+        Luminumbra::world::WorldClock(0, custom).calendar_metadata();
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(custom_metadata.dump(), snapshot));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot));
+    EXPECT_EQ(loaded.GetRenderCalendar(), custom);
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_EQ(
+        nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")).at("renderCalendar"),
+        custom_metadata.at("renderCalendar"));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(root.path() / "absent-metadata"));
+    EXPECT_EQ(loaded.GetRenderCalendar(), Luminumbra::world::WorldCalendar::Legacy());
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_FALSE(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"))
+                     .contains("renderCalendar"));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot));
+    EXPECT_EQ(loaded.GetRenderCalendar(), custom);
+    ASSERT_TRUE(loaded.CreateWorld("Session reused", "1337", "default"));
+    EXPECT_EQ(loaded.GetRenderCalendar(), Luminumbra::world::WorldCalendar{});
+    // A transient presentation preview can also export an explicit snapshot.
+    ASSERT_TRUE(loaded.CreateTransientWorld("Preview", "1337", "default"));
+    ASSERT_TRUE(loaded.SaveWorldStateTo(root.path() / "preview-snapshot"));
+}
+
+TEST(GameSessionHeadlessWorldTest, UnmarkedSnapshotOverwriteRemovesRenderCalendarOnEverySavePath) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession marked;
+    marked.SetRootPath(root.root_string());
+    marked.SetJobSystem(&jobs);
+    marked.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(marked.CreateWorld("Marked calendar", "1337", "default"));
+
+    for (const bool transient : {false, true}) {
+        SCOPED_TRACE(transient);
+        GameSession legacy, loaded;
+        for (auto* session : {&legacy, &loaded}) {
+            session->SetRootPath(root.root_string());
+            session->SetJobSystem(&jobs);
+            session->SetActiveRegionsEnabled(false);
+        }
+        if (transient) {
+            ASSERT_TRUE(legacy.CreateTransientWorld("Legacy preview", "1337", "default"));
+        } else {
+            ASSERT_TRUE(legacy.CreateWorld("Legacy calendar", "1337", "default"));
+        }
+        ASSERT_TRUE(legacy.LoadWorldStateFrom(root.path() / "absent-calendar"));
+        ASSERT_EQ(legacy.GetRenderCalendar(), Luminumbra::world::WorldCalendar::Legacy());
+        ASSERT_TRUE(loaded.CreateTransientWorld("Calendar reader", "1337", "default"));
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+
+        for (int save_path = 0; save_path < 3; ++save_path) {
+            SCOPED_TRACE(save_path);
+            const auto snapshot = root.path() / "calendar-overwrite";
+            fs::remove_all(snapshot);
+            ASSERT_TRUE(marked.SaveWorldStateTo(snapshot));
+            ASSERT_TRUE(nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"))
+                            .contains("renderCalendar"));
+            if (save_path != 0) {
+                chunk->mark_voxel_data_dirty();
+                if (save_path == 1) {
+                    ASSERT_TRUE(legacy.GetWorldSystem()->adopt_streamed_chunk(chunk));
+                }
+                if (save_path == 2) {
+                    Luminumbra::WorldStreamingState state;
+                    state.insert_chunk(chunk);
+                    ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
+                }
+            }
+            EXPECT_EQ(P::WorldSaveService::has_world_save(snapshot), save_path == 2);
+            Luminumbra::world::WorldStateSaveReport report;
+            ASSERT_TRUE(legacy.SaveWorldStateTo(snapshot, &report));
+            EXPECT_EQ(report.chunks_dirty, save_path == 0 ? 0u : 1u);
+            EXPECT_FALSE(nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"))
+                             .contains("renderCalendar"));
+            ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot));
+            EXPECT_EQ(loaded.GetRenderCalendar(), Luminumbra::world::WorldCalendar::Legacy());
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EnergyWriteFailurePreservesCalendarMetadataOnEverySavePath) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool marked_source : {false, true}) {
+        SCOPED_TRACE(marked_source);
+        GameSession session;
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld(
+            marked_source ? "Marked energy failure" : "Legacy energy failure", "1337", "default"));
+        if (!marked_source) {
+            ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "absent-calendar"));
+        }
+        auto* energy = session.GetEnergyFieldState();
+        ASSERT_NE(energy, nullptr);
+        energy->SetAnchorCell(0, 0);
+        energy->QueueDeposit(1, 0, 0, 0, 60000);
+        energy->Tick(0);
+        ASSERT_GT(energy->page_count(), 0u);
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        for (int save_path = 0; save_path < 3; ++save_path) {
+            SCOPED_TRACE(save_path);
+            if (save_path == 1) {
+                ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+            }
+            for (const bool marked_destination : {false, true}) {
+                SCOPED_TRACE(marked_destination);
+                const auto snapshot = root.path() / "failed-energy-snapshot";
+                fs::remove_all(snapshot);
+                ASSERT_TRUE(fs::create_directories(snapshot));
+                auto metadata = nlohmann::json::parse(
+                    ReadClockTestFile(session.GetWorldSaveDir() / "world_info.json"));
+                metadata.erase("renderCalendar");
+                if (marked_destination) {
+                    metadata["renderCalendar"] =
+                        Luminumbra::world::WorldClock(0, {101, 3, 3, 5, 9}).calendar_metadata();
+                }
+                ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), snapshot));
+                if (save_path == 2) {
+                    Luminumbra::WorldStreamingState state;
+                    state.insert_chunk(chunk);
+                    ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
+                }
+                chunk->mark_voxel_data_dirty();
+                ASSERT_EQ(P::WorldSaveService::has_world_save(snapshot), save_path == 2);
+                ASSERT_TRUE(P::WorldSaveService::validate_save(snapshot));
+                const auto before = ReadClockTestFile(snapshot / "world_info.json");
+                // A directory at the record path denies opening a file on both platforms,
+                // independently of privileges, symlink support or permission bits.
+                ASSERT_TRUE(fs::create_directory(snapshot / "aether_state.efs"));
+                ASSERT_TRUE(P::WorldSaveService::validate_save(snapshot));
+                Luminumbra::world::WorldStateSaveReport report;
+                EXPECT_FALSE(session.SaveWorldStateTo(snapshot, &report));
+                EXPECT_FALSE(report.saved);
+                EXPECT_EQ(ReadClockTestFile(snapshot / "world_info.json"), before);
+                EXPECT_TRUE(fs::is_directory(snapshot / "aether_state.efs"));
+            }
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     CalendarIdentityRejectsDifferentResolvedCalendarsBeforeAdmission) {
+    using Luminumbra::world::WorldCalendar;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    original.SetRootPath(root.root_string());
+    original.SetJobSystem(&jobs);
+    original.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(original.CreateWorld("Calendar identity", "1337", "default"));
+    const auto snapshot = root.path() / "identity-calendar";
+    ASSERT_TRUE(original.SaveWorldStateTo(snapshot));
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        GameSession first, second;
+        for (auto* session : {&first, &second}) {
+            session->SetRootPath(root.root_string());
+            session->SetJobSystem(&jobs);
+            session->SetActiveRegionsEnabled(active_regions);
+            ASSERT_TRUE(session->CreateTransientWorld("Admission", "1337", "default"));
+        }
+        for (const auto calendar : {WorldCalendar{},
+                                    WorldCalendar{162001, 8, 2, 3, 8},
+                                    WorldCalendar{162000, 9, 2, 3, 8},
+                                    WorldCalendar{162000, 8, 1, 3, 8},
+                                    WorldCalendar{162000, 8, 2, 5, 8},
+                                    WorldCalendar{162000, 8, 2, 3, 9},
+                                    WorldCalendar::Legacy()}) {
+            SCOPED_TRACE(WorldClock(0, calendar).calendar_metadata().dump());
+            ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), snapshot));
+            ASSERT_TRUE(first.LoadWorldStateFrom(snapshot));
+            auto changed_metadata = metadata;
+            changed_metadata["renderCalendar"] = WorldClock(0, calendar).calendar_metadata();
+            ASSERT_TRUE(P::WorldSaveService::save_metadata(changed_metadata.dump(), snapshot));
+            ASSERT_TRUE(second.LoadWorldStateFrom(snapshot));
+            const bool equal = calendar == WorldCalendar{};
+            EXPECT_EQ(first.SystemConfigIdentity() == second.SystemConfigIdentity(), equal);
+            Luminumbra::Net::HelloMsg local;
+            local.seed = 1337;
+            local.preset = "default";
+            local.preset_content_hash = first.PresetContentHash();
+            local.system_config_identity = first.SystemConfigIdentity();
+            auto peer = local;
+            peer.system_config_identity = second.SystemConfigIdentity();
+            Luminumbra::Net::HelloMsg decoded;
+            ASSERT_TRUE(Luminumbra::Net::DecodeHello(Luminumbra::Net::EncodeHello(peer), decoded));
+            EXPECT_EQ(Luminumbra::Net::HelloMatches(local, decoded), equal);
+            ASSERT_EQ(first.TickSimulation(first.GetSimulationClock().fixed_dt()), 1u);
+            EXPECT_EQ(first.SystemConfigIdentity(), local.system_config_identity);
+        }
+        // The resolved legacy calendar is identical with or without a v2 marker.
+        const auto legacy_identity = second.SystemConfigIdentity();
+        auto unmarked_metadata = metadata;
+        unmarked_metadata.erase("renderCalendar");
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(unmarked_metadata.dump(), snapshot));
+        ASSERT_TRUE(second.LoadWorldStateFrom(snapshot));
+        EXPECT_EQ(second.GetRenderCalendar(), WorldCalendar::Legacy());
+        EXPECT_EQ(second.SystemConfigIdentity(), legacy_identity);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RenderCalendarActivatesOnNormalLoadAndNextSave) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded;
+    for (auto* session : {&original, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+    }
+    original.SetActiveRegionsEnabled(false);
+    loaded.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(original.CreateWorld("Calendar activation", "1337", "default"));
+    for (int i = 0; i < 3; ++i)
+        ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto save = original.GetWorldSaveDir();
+    const Luminumbra::world::WorldCalendar custom{101, 3, 3, 5, 9};
+    const auto recorded = Luminumbra::world::WorldClock(0, custom).calendar_metadata();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    ASSERT_FALSE(metadata.contains("simulationTick"));
+    ASSERT_FALSE(metadata.contains("calendar"));
+    metadata["renderCalendar"] = recorded;
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    const auto before = ReadClockTestDirectory(root.path());
+
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetWorldClock().calendar(), custom);
+    EXPECT_EQ(loaded.GetRenderCalendar(), custom);
+    EXPECT_EQ(loaded.GetWorldClock().tick(), 0u);
+    EXPECT_EQ(loaded.GetSimulationClock().tick_count(), 0u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().tick(), 0u);
+    EXPECT_EQ(ReadClockTestDirectory(root.path()), before);
+
+    ASSERT_TRUE(loaded.SaveWorldState());
+    const auto saved = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    EXPECT_EQ(saved.at("simulationTick"), 0u);
+    EXPECT_EQ(saved.at("calendar"), recorded);
+    EXPECT_FALSE(saved.contains("renderCalendar"));
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetWorldClock().calendar(), custom);
+    EXPECT_EQ(loaded.GetWorldClock().tick(), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, RenderCalendarActivatesOnExplicitSnapshotLoadAndNextSave) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded;
+    for (auto* session : {&original, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+    }
+    original.SetActiveRegionsEnabled(false);
+    loaded.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(original.CreateWorld("Presentation snapshot", "1337", "default"));
+    const auto snapshot = root.path() / "activation-snapshot";
+    ASSERT_TRUE(original.SaveWorldStateTo(snapshot));
+    const Luminumbra::world::WorldCalendar custom{101, 3, 3, 5, 9};
+    const auto recorded = Luminumbra::world::WorldClock(0, custom).calendar_metadata();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
+    ASSERT_FALSE(metadata.contains("simulationTick"));
+    ASSERT_FALSE(metadata.contains("calendar"));
+    metadata["renderCalendar"] = recorded;
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), snapshot));
+    ASSERT_TRUE(loaded.CreateWorld("Snapshot activation", "1337", "default"));
+    for (int i = 0; i < 3; ++i)
+        ASSERT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_NE(loaded.GetWorldClock().calendar(), custom);
+    ASSERT_EQ(loaded.GetWorldClock().tick(), 3u);
+    const auto before = ReadClockTestDirectory(root.path());
+
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetWorldClock().calendar(), custom);
+    EXPECT_EQ(loaded.GetRenderCalendar(), custom);
+    EXPECT_EQ(loaded.GetWorldClock().tick(), 0u);
+    EXPECT_EQ(loaded.GetSimulationClock().tick_count(), 0u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().tick(), 0u);
+    EXPECT_EQ(ReadClockTestDirectory(root.path()), before);
+
+    ASSERT_TRUE(loaded.SaveWorldStateTo(snapshot));
+    const auto saved = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
+    EXPECT_EQ(saved.at("simulationTick"), 0u);
+    EXPECT_EQ(saved.at("calendar"), recorded);
+    EXPECT_FALSE(saved.contains("renderCalendar"));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetWorldClock().calendar(), custom);
+    EXPECT_EQ(loaded.GetWorldClock().tick(), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, DefaultCalendarContinuesAcrossSaveAndExplicitSnapshot) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded;
+    for (auto* s : {&original, &loaded}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Default calendar", "1337", "default"));
+    ClockTestPlant(original.GetRegistry(), original.GetMetadata().spawnPoint);
+    const auto snapshot = root.path() / "default-calendar-snapshot";
+    for (int i = 0; i < 31; ++i)
+        ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(original.SaveWorldStateTo(snapshot));
+    ASSERT_TRUE(loaded.CreateTransientWorld("Continuation", "1337", "default"));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot));
+    EXPECT_EQ(loaded.GetWorldClock().calendar(), Luminumbra::world::WorldCalendar{});
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+    for (int i = 0; i < 31; ++i) {
+        ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
+    }
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+}
+
+TEST(GameSessionHeadlessWorldTest, EnabledLegacyClockPinsEmptyEcologyFold) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Legacy clock fold", "1337", "default"));
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    Luminumbra::world::WorldClock(12345, Luminumbra::world::WorldCalendar::Legacy())
+        .write_metadata(metadata);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save));
+    ASSERT_EQ(session.GetWorldClock().tick(), 12345u);
+    ASSERT_EQ(session.GetWorldClock().calendar(), Luminumbra::world::WorldCalendar::Legacy());
+    ASSERT_TRUE(session.GetActiveRegionLedger().records().empty());
+    ASSERT_TRUE(session.GetActiveRegionLedger().canonical_bytes().empty());
+    const auto ecology = luminumbra::ai::ComputeEcologySubHash(session.GetRegistry());
+    ASSERT_TRUE(ecology.empty());
+    EXPECT_EQ(session.FoldClockIntoEcologyHash(ecology), "9b7d0612513877a2");
 }
 
 TEST(GameSessionHeadlessWorldTest, EnabledClockOverflowRefusesWithoutAdvancingEitherClock) {
@@ -3187,15 +3780,25 @@ TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTick
     struct Pin {
         std::uint64_t tick;
         float day, year, daylight, warmth;
+        Luminumbra::world::WorldCalendar calendar{120, 4};
     };
-    for (const auto pin : {Pin{30, .25f, .0625f, .575f, .125f},
+    for (const auto pin : {Pin{20, .25f, 1.0f / 24.0f, .575f, 1.0f / 12.0f},
+                           Pin{30, .3203125f, .0625f, .69453125f, .125f},
                            Pin{60, .5f, .125f, 1.0f, .25f},
+                           Pin{90, .6796875f, .1875f, .69453125f, .375f},
+                           Pin{100, .75f, 5.0f / 24.0f, .575f, 5.0f / 12.0f},
                            Pin{120, 0.0f, .25f, .15f, .5f},
                            Pin{240, 0.0f, .5f, .15f, 1.0f},
                            Pin{360, 0.0f, .75f, .15f, .5f},
-                           Pin{480, 0.0f, 0.0f, .15f, 0.0f}}) {
+                           Pin{480, 0.0f, 0.0f, .15f, 0.0f},
+                           Pin{27000, .25f, 1.0f / 48.0f, .575f, 1.0f / 24.0f, {}},
+                           Pin{81000, .5f, .0625f, 1.0f, .125f, {}},
+                           Pin{135000, .75f, 5.0f / 48.0f, .575f, 5.0f / 24.0f, {}},
+                           Pin{162000, 0.0f, .125f, .15f, .25f, {}},
+                           Pin{648000, 0.0f, .5f, .15f, 1.0f, {}},
+                           Pin{1296000, 0.0f, 0.0f, .15f, 0.0f, {}}}) {
         SCOPED_TRACE(pin.tick);
-        Luminumbra::world::WorldClock(pin.tick - 1, {120, 4}).write_metadata(metadata);
+        Luminumbra::world::WorldClock(pin.tick - 1, pin.calendar).write_metadata(metadata);
         ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
         ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
         const auto position = session.GetMetadata().spawnPoint;
@@ -3203,7 +3806,11 @@ TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTick
         const auto creature = ClockTestCreature(session.GetRegistry());
         ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
         const auto& clock = session.GetWorldClock();
-        EXPECT_FLOAT_EQ(static_cast<float>(clock.day_phase(pin.tick)), pin.day);
+        EXPECT_FLOAT_EQ(static_cast<float>(clock.solar_phase(pin.tick)), pin.day);
+        EXPECT_FLOAT_EQ(
+            static_cast<float>(clock.day_phase(pin.tick)),
+            static_cast<float>(static_cast<double>(pin.tick % pin.calendar.dayLengthTicks) /
+                               pin.calendar.dayLengthTicks));
         EXPECT_FLOAT_EQ(static_cast<float>(clock.year_phase(pin.tick)), pin.year);
         EXPECT_FLOAT_EQ(session.GetRegistry().get<C::CircadianComponent>(creature).activity,
                         luminumbra::ai::CircadianActivity(pin.day, false));
@@ -3316,6 +3923,7 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
         s->SetFiniteHydrologyEnabled(false);
 
         ASSERT_TRUE(s->CreateWorld("Region golden", "1337", "default"));
+        ASSERT_TRUE(s->LoadWorldStateFrom(root.path() / "unmarked-snapshot"));
         s->GetWorldSystem()->SetWaterHydrology(false, 0, 0);
         ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(*s, 0));
     }
@@ -3386,6 +3994,7 @@ TEST(GameSessionHeadlessWorldTest,
         s->SetFiniteHydrologyEnabled(false);
 
         ASSERT_TRUE(s->CreateTransientWorld("Plant region golden", "1337", "default"));
+        ASSERT_TRUE(s->LoadWorldStateFrom(root.path() / "unmarked-snapshot"));
     }
     for (auto* s : {&expected_live, &expected_loaded}) {
         ClockTestPlant(s->GetRegistry(), Luminumbra::Vec3(8, 20, 8));
@@ -4392,7 +5001,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "60ab3c242d54ce89");
+    EXPECT_EQ(baseline, "49f694fd70645bcc");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
         EXPECT_NE(identity, baseline);

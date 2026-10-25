@@ -361,7 +361,11 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                 const bool looking_up = camera->Pitch > 5.0f;
                 const auto& scatter_for_cell = looking_up ? kEmptyScatter : chunk_scatter;
                 foliage->rebuild_instances(
-                    scatter_for_cell, &FoliageSurfaceQuery, &foliage_ctx, camera->Position);
+                    scatter_for_cell,
+                    &FoliageSurfaceQuery,
+                    &foliage_ctx,
+                    camera->Position,
+                    Luminumbra::Rendering::FoliagePass::Preparation::Complete);
             }
             ok = deps.render_and_read(pixels, fb_w, fb_h);
             if (!ok) {
@@ -381,8 +385,11 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     camera->updateCameraVectors();
     for (int i = 0; i < 28; ++i) {
         if (foliage != nullptr && foliage_ready && !chunk_scatter.empty()) {
-            foliage->rebuild_instances(
-                chunk_scatter, &FoliageSurfaceQuery, &foliage_ctx, camera->Position);
+            foliage->rebuild_instances(chunk_scatter,
+                                       &FoliageSurfaceQuery,
+                                       &foliage_ctx,
+                                       camera->Position,
+                                       Luminumbra::Rendering::FoliagePass::Preparation::Complete);
         }
         if (!deps.render_and_read(pixels, fb_w, fb_h)) {
             break;

@@ -80,65 +80,138 @@ No measured caps or distant system consumers are activated by this foundation.
 The regional plants/water continuation stack (issue #242) is planned for v0.3.1;
 performance/default enablement remains v0.4.0 (issue #320).
 
-### Simulation clock metadata
+### Simulation clock metadata {#simulation-clock-metadata}
 
-The hashed `sim.active_regions` key is enabled by default for v0.3.0. When enabled, every
-successful persistent `GameSession` save writes three additional keys in
-`world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
-temporary-file and atomic replacement path:
+The hashed `sim.active_regions` key is enabled by default for v0.3.0. When
+enabled, each successful persistent `GameSession` save writes the resolved clock
+in `world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
+temporary-file and atomic replacement path. The container remains version 2:
 
 ```json
 "simulationTick": 317,
-"calendar": { "dayLengthTicks": 216000, "daysPerYear": 8 },
+"calendar": {
+  "version": 2,
+  "dayLengthTicks": 162000,
+  "daysPerYear": 8,
+  "daylightNumerator": 2,
+  "daylightDenominator": 3,
+  "lunarCycleDays": 8
+},
 "ambientFieldAnchor": { "x": 8.0, "y": 100.0, "z": 8.0 }
 ```
 
-`simulationTick` is the absolute completed host tick; there is no wall-clock
-progression while a world is closed. Tick zero is midnight on day zero in
-midwinter. At 30 Hz the default day lasts two hours (about one hour of daylight) and
-the eight-day year lasts 16 hours. Plants and circadian activity use the midnight
-phase directly; migration, stimulus seasons and the sky's seasonal sine offset the year by three quarters
-to their spring-equinoctial origin. Sky geometry offsets the day by half a cycle
-because its existing zero is noon. An explicit render day-length override and
-photo/scenario time pins remain presentation controls.
+`simulationTick` is the absolute completed host tick, with no progression while
+closed. Tick zero is midnight on day zero in midwinter. New worlds have a
+162,000-tick day: 90 minutes at 30 Hz, with 108,000 ticks (60 minutes) of
+geometric daylight and 54,000 ticks (30 minutes) of night. Sunrise is tick
+27,000 (15 minutes), noon 81,000 (45 minutes), sunset 135,000 (75 minutes).
+Existing twilight blends extend beyond the geometric daylight interval. The
+eight-day year and independent eight-day lunar month each last 1,296,000 ticks
+(12 hours). Seasons change peak solar elevation, without moving the horizon
+crossings or varying daylight duration.
 
-| Metadata condition | Open / write behavior |
+| Saved calendar form | Resolved calendar |
 |---|---|
-| `simulationTick` absent | Tick zero |
-| `calendar` absent | Pinned defaults: 216,000 ticks/day, 8 days/year |
-| `simulationTick` present | JSON unsigned integer in `[0, 2^62)` |
-| `calendar` present | Object containing exactly `dayLengthTicks` and `daysPerYear` |
+| Absent in an existing save or explicit snapshot | Pinned 216,000 ticks/day, 8 days/year, daylight 1/2, lunar month 8 days |
+| Unversioned object with exactly `dayLengthTicks`, `daysPerYear` | Recorded day/year; daylight 1/2; lunar month 8 days |
+| Complete version 2 object | All five recorded values |
+| Newly created world | 162,000 / 8 / 2 / 3 / 8 |
+
+Loading and catalog inspection never rewrite metadata. A successful explicit
+save writes the original two-field calendar for daylight 1/2 with an eight-day
+lunar cycle; other calendars use version 2. Imported 36,000- and 216,000-tick
+calendars remain authoritative. There is no rescaling of ticks,
+indices, entities, ledger timestamps or weather history.
+
+| Field / condition | Validation |
+|---|---|
+| `simulationTick` | JSON unsigned integer in `[0, 2^62)`; absent means zero |
+| Version 2 calendar | Exactly `version`, `dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator`, `lunarCycleDays`; version is integer 2 |
 | `dayLengthTicks` | JSON integer in `[1, 2^31)` |
 | `daysPerYear` | JSON integer in `[1, 366]` |
-| `ambientFieldAnchor` present in a clock save | Object containing finite numeric `x`, `y`, `z` coordinates |
-| `ambientFieldAnchor` absent | Use the saved spawn point, or the initialized spawn if metadata has none |
-| Invalid clock type, null, negative/out-of-range clock number, fractional/exponent clock number, incomplete calendar, unknown calendar member or arithmetic overflow | Corrupt world metadata; refuse before generation or writing |
-| Either clock key present with `sim.active_regions` off | Incompatible configuration; refuse without modifying disk bytes |
+| Daylight fraction | Integer `0 < numerator < denominator <= 65535`, reduced by greatest common divisor |
+| `lunarCycleDays` | JSON integer in `[1, 366]`, independent of `daysPerYear` |
+| `ambientFieldAnchor` in a clock save | Exactly finite numeric `x`, `y`, `z`; absent uses saved or initialized spawn |
+| Missing/extra members, unknown versions, invalid bounds, redundant fractions, floats/exponents, bools, nulls, strings, huge integers | Corrupt metadata; refuse before generation or writing |
+| Clock metadata with `sim.active_regions` disabled | Incompatible configuration; refuse without changing disk bytes |
+| `renderCalendar` together with `calendar`, `simulationTick` or an active-region ledger | Competing authorities; refuse |
 
-Day × year and tick + the catch-up bound are checked before use. Validation
-also applies to initialized saves with no chunk directory, catalog inspection,
-explicit snapshot directories, and saves over existing metadata. The catalog
-reports valid clock metadata without selecting a runtime configuration; opening
-checks the feature requirement. Presence of either clock key marks the save as
-requiring `sim.active_regions`; metadata writes cannot remove both keys from an
-initialized clock save. Save calls inside a simulation catch-up batch are
-refused; successful snapshots observe a completed tick boundary.
-Enabled transient sessions can read explicit snapshots, but saving them is
-refused before creating a directory or writing any member, just as their
-canonical saves are refused.
+These checks apply to metadata-only initialized worlds, catalogs, normal and
+explicit snapshot loads, and every save writer. Products promote operands to
+`uint64_t` before multiplication. Solar branch comparisons and local offsets use
+integer `2 * denominator * remainder` against `day * (denominator ± numerator)`
+and `day * denominator`. These products are below 2^49 and convert exactly to
+double; only the local ratios and cubic evaluation use floating point, under the
+engine's pinned floating-point contract. The symmetric 1/2 path returns the
+original `day_phase()` calculation, preserving its arithmetic. No simulation
+timing uses a floating accumulator or library transcendental.
 
-Saves with an explicit calendar retain it, including older 36,000-tick days.
-Saves without the calendar key adopt the 216,000-tick default; no migration is
-needed to load them.
+`day_phase()`, day/year indices, annual temperature and season phases stay
+linear. `solar_phase()` is a midnight-origin, monotonic cubic Hermite mapping:
+midnight 0, sunrise 1/4, noon 1/2, sunset 3/4. For daylight fraction `f = n/d`,
+the elapsed-day knots are `0, (1-f)/2, 1/2, (1+f)/2, 1`. Each interval has solar
+span 1/4 and elapsed span `L` (either `(1-f)/2` or `f/2`). With local coordinate
+`t` in `[0,1]` and `a = 4L`, its solar offset is
+`[t + (a-1)t(1-t)(1-2t)]/4`. Afternoon quarters reflect the morning quarters.
+Its normalized derivative is `a + 6(1-a)t(1-t)`: for every valid fraction,
+`0 < a < 2`, so this derivative is positive (at least `a` for `a <= 1`, and
+`(3-a)/2` otherwise). The rate with respect to elapsed-day phase is exactly 1
+at both ends of every quarter. Thus angle and rate join continuously at dawn,
+noon, dusk and the midnight wrap, with no additional fraction bounds. Integer
+horizon ticks return exactly 1/4 and 3/4; nonintegral horizons lie between ticks.
 
-With the key off, saves omit all three keys and loads restart at zero; simulation
-consumers retain their legacy periods and hash bytes. The renderer uses the shared
-two-hour default day even on the legacy path. With it on, clock canonical bytes fold
-into the existing ecology hash slot without changing the top-level hash order.
-The canonical clock section is ASCII `world_clock:v1:` followed by little-endian
-`u64 simulationTick`, `u32 dayLengthTicks`, and `u32 daysPerYear` (16 payload
-bytes). It excludes frame accumulators and telemetry. Calendar and tick changes
-therefore affect the hash even when the entity roster is empty.
+Plant daily light, circadian activity, and stimulus time-of-day, daily temperature
+and fallback light consume this solar phase at enabled calendar call sites.
+Ambient-light and precipitation overrides keep precedence. Migration and
+stimulus/sky seasons retain the spring-equinoctial offset of 3/4 year. Weather,
+storms, wind and aether retain absolute tick periods.
+
+Clock-disabled **new** worlds instead write `renderCalendar`, containing the same
+complete version 2 calendar object, with no persisted tick and no enabled-clock
+hash contribution. It is presentation persistence bookkeeping. Unmarked existing
+disabled worlds keep the pinned 216,000-tick symmetric rendering calendar and
+continue omitting the marker on save. Markers survive normal saves and explicit
+snapshots, including metadata-only snapshots. Loading an explicit snapshot
+replaces the resolved rendering calendar even when it has no metadata. A
+transient disabled preview can export a marked explicit snapshot. Enabled
+transient sessions can read snapshots but cannot save them.
+
+The renderer keeps unwarped elapsed phase separate from solar angle. Wall-clock
+pacing derives from the selected calendar and canonical tick rate (5,400 seconds
+for new worlds). World-clock inputs have a midnight origin; the legacy tick API
+and clock-disabled rendering retain their noon-at-zero origin. Sky geometry
+receives `wrap(solar_phase + 0.5)`. Direct `set_time_of_day()` values remain solar
+pins; a fixed 56-step bisection of the same smooth curve initializes fallback
+elapsed time for a continuous resume. Photo hold wins over automatic advancement,
+and later scenario pins keep frame-order precedence. Both legacy clock setters clear world-clock authority.
+A day-length debug override changes only solar pacing: saved season and lunar
+periods retain their selected calendar. `[`, `]`, and `\` still adjust simulation
+speed, from pause through 16×, with the existing catch-up batching. At ideal 16×,
+a new day lasts 337.5 real seconds (225 daylight, 112.5 night).
+
+Lunar phase uses `tick % (uint64(dayLengthTicks) * lunarCycleDays)` divided by
+that independent month, without solar warping or resetting at year boundaries.
+Tick zero is full moon, default day four reaches the 0.08 new-moon floor, and
+day eight is full again. Imported 36,000- and 216,000-tick days yield months of
+288,000 and 1,728,000 ticks; imported moon brightness can therefore change.
+`LUMIN_MOON` precedes the explicit override, which precedes automatic phase,
+with clamping preserved. A wall-only preview can keep its static celestial tick.
+The moon remains opposite the sun; the visible disc does not depict phase.
+
+With the feature disabled, simulation daily/annual periods and hash bytes stay
+legacy, independently of the presentation marker. With it enabled, clock bytes
+fold into the ecology slot without changing top-level hash ordering. Canonical
+bytes preserve ASCII `world_clock:v1:` followed by LE `u64 simulationTick`,
+LE `u32 dayLengthTicks` and LE `u32 daysPerYear` (16 payload bytes) for daylight
+1/2 with an eight-day lunar cycle. Other calendars use `world_clock:v2:` and
+append three LE `u32` fields: `daylightNumerator`, `daylightDenominator`,
+`lunarCycleDays` (28 payload bytes). They encode resolved values independently
+of source JSON. Representable legacy calendars preserve their enabled-clock
+hash bytes. The calendar change leaves container v2, LMR1, ARL1 and entity/chunk
+formats unchanged. Lockstep and LREC1 use version 3 for configuration and preset
+identity binding; see the [identity contract](development/system-config-identity.md).
+Save calls inside a simulation catch-up batch remain refused; successful
+snapshots observe completed tick boundaries.
 
 C1 persists the ambient grid's anchor separately from the player respawn
 `spawnPoint`. It is initialized from the spawn when creating or importing a

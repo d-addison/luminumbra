@@ -200,7 +200,7 @@ jobs:
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset perf --no-tests=error \
-              -R '^(RenderTraversalIntegrated|RenderBenchmarkImplicitCreationFailure|RenderBenchmarkMeasuredFrameBounds|RenderBenchmarkIsolationSubmission|RenderBenchmarkOverrideCollection|RenderTraversalEmbeddedPresetRefusal)$' \
+              -R '^(RenderTraversalIntegrated|RenderWorkloadSaveLoadIntegrated|RenderWorkloadNoAudioIntegrated|RenderBenchmarkStreamRadiusRefusal|RenderEscapingAudioRefusal|RenderAbsoluteTextureRefusal|RenderParentRelativeTextureRefusal|RenderSceneConfigSeparateRefusal|RenderSceneConfigAssignmentRefusal|RenderExistingWorldOptionFormsRefusal|RenderTraversalDurationOptionFormsRefusal|RenderCaptureOptionMissingValuesRefusal|RenderTraversalOwnerOptionFormsRefusal|RenderBenchmarkImplicitCreationFailure|RenderBenchmarkMeasuredFrameBounds|RenderBenchmarkIsolationSubmission|RenderBenchmarkOverrideCollection|RenderTraversalEmbeddedPresetRefusal)$' \
               --output-on-failure
       - name: Measure preview frame
         run: |

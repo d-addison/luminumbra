@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json_fwd.hpp>
@@ -8,8 +9,14 @@
 namespace Luminumbra::world {
 
 struct WorldCalendar {
-    std::uint32_t dayLengthTicks = 216000; // 2 h/day at the canonical 30 Hz
+    std::uint32_t dayLengthTicks = 162000; // 90 min/day at the canonical 30 Hz
     std::uint32_t daysPerYear = 8;
+    std::uint32_t daylightNumerator = 2;
+    std::uint32_t daylightDenominator = 3;
+    std::uint32_t lunarCycleDays = 8;
+    static constexpr WorldCalendar Legacy() {
+        return {216000, 8, 1, 2, 8};
+    }
     bool operator==(const WorldCalendar&) const = default;
 };
 
@@ -28,6 +35,14 @@ public:
     }
     [[nodiscard]] std::uint64_t year_length_ticks() const;
     [[nodiscard]] double day_phase(std::uint64_t tick) const;
+    // Midnight-origin C1 solar angle; calendar indices remain linear.
+    [[nodiscard]] double solar_phase(std::uint64_t tick) const;
+    // Continuous presentation mapping and inverse, with inputs in [0, 1].
+    // Tick consumers use solar_phase() to retain integer boundary decisions.
+    [[nodiscard]] double solar_phase_from_day_phase(double phase) const;
+    [[nodiscard]] double day_phase_from_solar_phase(double phase) const;
+    [[nodiscard]] std::uint64_t lunar_period_ticks() const;
+    [[nodiscard]] double lunar_phase(std::uint64_t tick) const;
     [[nodiscard]] double year_phase(std::uint64_t tick) const;
     [[nodiscard]] std::uint64_t day_index(std::uint64_t tick) const;
     [[nodiscard]] std::uint64_t year_index(std::uint64_t tick) const;
@@ -36,10 +51,16 @@ public:
     void set_tick(std::uint64_t tick);
     [[nodiscard]] bool can_advance(std::uint64_t ticks) const;
 
-    // Tagged canonical bytes: ASCII world_clock:v1:, then LE u64 tick,
-    // LE u32 dayLengthTicks, LE u32 daysPerYear. No frame accumulator.
+    // Tagged canonical bytes: ASCII world_clock:v1: for daylight 1/2 and an
+    // eight-day lunar cycle, then LE u64 tick and LE u32 day/year (16 bytes).
+    // Otherwise v2 adds the three remaining LE u32 fields (28 payload bytes).
     [[nodiscard]] std::string canonical_bytes() const;
     void write_metadata(nlohmann::json& metadata) const;
+    // Complete v2 calendar for the presentation-only renderCalendar marker.
+    [[nodiscard]] nlohmann::json calendar_metadata() const;
+    static bool read_render_calendar(const nlohmann::json& metadata,
+                                     std::optional<WorldCalendar>& out,
+                                     std::string& error);
     // Absent top-level keys use pinned defaults; a present calendar is complete.
     // Failure leaves out unchanged and supplies a corrupt-metadata diagnostic.
     static bool from_metadata(const nlohmann::json& metadata, WorldClock& out, std::string& error);

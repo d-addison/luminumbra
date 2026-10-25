@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Device-free run_client controls with real and injected process timeouts."""
 import argparse
-import base64
 from contextlib import redirect_stderr
 import hashlib
 import importlib.util
@@ -9,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +17,8 @@ import time
 import types
 import unittest
 from unittest import mock
+
+import test_render_contract as contract_fixtures
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,7 +31,7 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 CHILD = r'''
-import base64, pathlib, sys, time
+import pathlib, sys, time
 artifact, payload, code, loaders, ready, startup_delay = sys.argv[1:]
 time.sleep(float(startup_delay))
 if loaders == '1':
@@ -37,7 +39,7 @@ if loaders == '1':
     for part in ('trunk', 'branches', 'leaves'):
         print(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", flush=True)
 if payload != '-':
-    pathlib.Path(artifact).write_bytes(base64.b64decode(payload))
+    pathlib.Path(artifact).write_bytes(pathlib.Path(payload).read_bytes())
 if ready != '-':
     print('A' * 20000, flush=True)
     print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
@@ -67,6 +69,118 @@ time.sleep(30)
 '''
 
 
+class RenderRunnerRefusalInputsTests(unittest.TestCase):
+    def check_texture_inputs(self, method):
+        # Validate the actual integration case's argv and script before substituting
+        # the native content loader's refusal. An option error must fail this check.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / 'data/models/trees/tree_textures.json'
+            manifest.parent.mkdir(parents=True)
+            texture = root / 'data/texture.ltex'
+            texture.write_bytes(b'texture bytes')
+            manifest.write_text(json.dumps({'models': [{'albedo': 'data/texture.ltex'}]}),
+                                encoding='utf-8')
+            case = runner.RenderRunnerTests(method)
+            case.root = root
+            def content_refusal(name, extra, *, expected_exit, schema):
+                self.assertEqual((name, expected_exit, schema), ('refused', 2, 'v4'))
+                self.assertEqual(extra[0], '--traversal')
+                self.assertEqual(len(extra), 2, 'content refusal must not have a duration override')
+                script = runner.contract.traversal_manifest(Path(extra[1]).read_text(encoding='utf-8'))
+                self.assertEqual(script['kind'], 'save_load')
+                self.assertEqual(script['expected_ticks'], 4)
+                self.assertEqual([action['tick'] for action in script['actions']], [1, 2])
+                document = json.loads(manifest.read_bytes())
+                reference = document['models'][0]['albedo']
+                self.assertEqual((root / reference).resolve(), (root / 'external.ltex').resolve())
+                self.assertEqual((root / 'external.ltex').read_bytes(), texture.read_bytes())
+                return 'Benchmark content reference escapes inventoried trees'
+            with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
+                    source=Path(__file__).resolve().parents[2]), create=True), \
+                    mock.patch.object(case, 'run_client', side_effect=content_refusal) as process:
+                getattr(case, method)()
+                process.assert_called_once()
+
+    def test_absolute_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_absolute_texture_refusal')
+
+    def test_parent_relative_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_parent_relative_texture_refusal')
+
+
+class RenderRunnerLogPathsTests(unittest.TestCase):
+    def check_case(self, method, data, script=None):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = Path(directory)
+            # Two instances of the same entry share an artifact directory.
+            # Each reader must use its own writer's runtime token.
+            for runtime_name in ('first-runtime', 'second-runtime'):
+                runtime = artifacts / runtime_name
+                runtime.mkdir()
+                case = runner.RenderRunnerTests(method)
+                case.root = runtime
+                case.environment = os.environ.copy()
+                case.script = script
+                calls = []
+                def process(command, *, log, artifact, expected_exit, **kwargs):
+                    name = artifact.stem
+                    calls.append(name)
+                    self.assertEqual(log, artifacts / f'{method}-{runtime_name}-{name}.log')
+                    if expected_exit:
+                        output = ('Traversal owns the measured duration; '
+                                  'omit --render-benchmark-frames')
+                    else:
+                        artifact.write_text(json.dumps(data), encoding='utf-8')
+                        output = ('Static-model textures registered (3 models).\n' +
+                                  '\n'.join(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)"
+                                            for part in ('trunk', 'branches', 'leaves')) +
+                                  '\nFar world: requested=ladder effective=legacy '
+                                  'refusal=ImmutableAuthorityUnavailable\n'
+                                  'suppressed=true submission_refusal=IsolationSuppressed')
+                    log.write_text(output, encoding='utf-8')
+                    return subprocess.CompletedProcess(command, expected_exit), []
+                with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
+                        client=Path(sys.executable), artifacts=artifacts), create=True), \
+                        mock.patch.object(runner, '_run_process', side_effect=process):
+                    getattr(case, method)()
+                self.assertEqual(calls, ['first', 'second', 'traversal-frames-separate',
+                                         'traversal-frames-assigned']
+                                 if script else ['isolated'])
+
+    def test_traversal_readers_use_unique_writer_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'short.traversal'
+            text = (contract_fixtures.FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8')
+            text = text.replace('duration_seconds 60', 'duration_seconds 0.13333333333333333')
+            text = text.replace('expected_ticks 1800', 'expected_ticks 4')
+            script.write_bytes(text.encode('utf-8'))
+            manifest = runner.contract.traversal_manifest(text)
+            data = contract_fixtures.artifact()
+            data['workload'].update({key: value for key, value in manifest.items() if key != 'path'})
+            data['workload'].update(kind='traversal', actual_ticks=4,
+                                    measured_duration_seconds=0.01, script=text,
+                                    script_path=str(script), camera_samples=[
+                                        runner.contract.camera_sample(manifest, tick)
+                                        for tick in (1, 2, 3, 4)])
+            data['world_content_identity'] = data['workload']['content_identity']
+            data['far_world'] = contract_fixtures.far_capture()['far_world']
+            for row in data['far_world']['frames']:
+                row.update(effective_mode='legacy', refusal='ImmutableAuthorityUnavailable')
+            contract_fixtures.update_far_summary(data)
+            self.check_case('test_traversal_twice', data, script)
+
+    def test_isolation_reader_uses_unique_writer_path(self):
+        data = contract_fixtures.artifact()
+        data['far_world'] = contract_fixtures.far_capture()['far_world']
+        override = {'cli:--isolation-layers': 'foliage'}
+        data['debug_overrides'] = {'active': override, 'declared': dict(override)}
+        for row in data['far_world']['frames']:
+            row.update(suppressed=True, submission_refusal='IsolationSuppressed')
+        contract_fixtures.update_far_summary(data)
+        self.check_case('test_isolation_submission_reporting', data)
+
+
 class RenderRunnerEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -93,6 +207,9 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.startup_delay = 0
         self.loaders = True
         self.process_exception = None
+        def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
+            return subprocess.run(command, **kwargs)
+        mock.patch.object(runner.crash_capture, 'run', side_effect=ordinary_run).start()
         self.original_run = subprocess.run
         self.calls = []
         mock.patch.object(runner.subprocess, 'run', side_effect=self.run_child).start()
@@ -102,7 +219,13 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(kwargs['timeout'], 180)
         self.assertFalse(kwargs['check'])
         artifact = command[command.index('--render-benchmark') + 1]
-        payload = '-' if self.payload is None else base64.b64encode(self.payload).decode('ascii')
+        payload = '-'
+        if self.payload is not None:
+            # Capture JSON can exceed both Windows' command-line limit and the
+            # POSIX per-argument bound. Close the fixture file before spawning.
+            fixture = self.root / 'child-payload.json'
+            fixture.write_bytes(self.payload)
+            payload = str(fixture)
         if self.wait and not self.real_timeout:
             if self.payload is not None:
                 Path(artifact).write_bytes(self.payload)
@@ -173,7 +296,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
                 process.wait()
 
     def paths(self, name='capture'):
-        stem = 'test_traversal_twice-' + name
+        stem = 'test_traversal_twice-' + self.case.root.name + '-' + name
         return self.artifacts / (stem + '.json'), self.artifacts / (stem + '.process.json')
 
     def receipt(self, name='capture'):
@@ -202,6 +325,161 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), b'current evidence')
         self.assertEqual(replace.call_count, 2)
         self.assertFalse(list(self.artifacts.glob('*.tmp')))
+
+    def test_successful_v4_workload_runs_through_report_validation(self):
+        source = Path(__file__).resolve().parents[2]
+        runner.OPTIONS.source = source
+        data = self.delayed_reload_capture()
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_save_load_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assertNotIn('--no-audio', command)
+        self.assert_bounded_save_load_command(command)
+        capture, _ = self.paths('save-load')
+        self.assertEqual(json.loads(capture.read_bytes()), data)
+        receipt = self.receipt('save-load')
+        self.assertEqual(receipt['outcome'], 'returned')
+        self.assertEqual(receipt['return_code'], 0)
+        self.assertEqual(receipt['capture_status'], 'retained')
+        self.assertEqual(receipt['capture_sha256'], hashlib.sha256(self.payload).hexdigest())
+
+    def test_successful_v4_without_audio_runs_through_report_validation(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        content = data['settings']['content_files']
+        for path in list(content):
+            if path.startswith('assets/audio/'):
+                del content[path]
+        content['assets/audio'] = None
+        data['render_identity'] = runner.contract.render_identity(data['settings'])
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_no_audio_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertIn('--no-audio', command)
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assert_bounded_save_load_command(command)
+        self.assertFalse((self.runtime / 'assets/audio').exists())
+        self.assertEqual(json.loads(self.paths('save-load')[0].read_bytes()), data)
+        self.assertEqual(self.receipt('save-load')['return_code'], 0)
+
+    def delayed_reload_capture(self):
+        script = self.case.save_load_script()
+        data = contract_fixtures.workload_artifact('save_load', script)
+        manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
+        reload = data['workload']['reload']
+        request = reload['request_frame']
+        settled = request + 3
+        for row in data['workload']['observations']:
+            if request <= row['frame'] < settled:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        reload['first_settled_frame'] = settled
+        samples = data['frame_samples']
+        warmup = data['warmup_frames']
+        reload['elapsed_ms'] = sum(row['frame_wall_ms'] for row in
+                                   samples[request - warmup:settled - warmup])
+        overrides = {'cli:--horizon-radius': '4', 'cli:--collision-radius': '4',
+                     'cli:--render-benchmark-stream-radius': '4'}
+        data['debug_overrides'] = {'active': overrides, 'declared': dict(overrides)}
+        data['settings']['render_overrides'] = dict(overrides)
+        data['render_identity'] = runner.contract.render_identity(data['settings'])
+        # No streaming churn from camera movement while the reload is settling.
+        poses = [runner.contract.camera_sample(manifest, tick)['position'] for tick in
+                 range(manifest['actions'][-1]['tick'], settled - warmup + 2)]
+        self.assertTrue(all(pose == poses[0] for pose in poses))
+        self.assertTrue(any(runner.contract.camera_sample(manifest, tick)['position'] != poses[0]
+                            for tick in range(settled - warmup + 2, manifest['expected_ticks'] + 1)))
+        return data
+
+    def assert_bounded_save_load_command(self, command):
+        overrides = {'cli:' + flag: '4' for flag in (
+            '--horizon-radius', '--collision-radius', '--render-benchmark-stream-radius')}
+        for key, value in overrides.items():
+            self.assertIn(key[4:], command)
+            self.assertEqual(command[command.index(key[4:]) + 1], value)
+        declaration = Path(command[command.index('--declare-render-overrides') + 1])
+        self.assertEqual(json.loads(declaration.read_text(encoding='utf-8')), overrides)
+        script = Path(command[command.index('--traversal') + 1])
+        manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
+        self.assertEqual((manifest['duration_seconds'], manifest['tick_rate'],
+                          manifest['expected_ticks']), (0.4, 30, 12))
+        self.assertEqual([(row['tick'], row['name']) for row in manifest['actions']],
+                         [(1, 'save'), (2, 'reload')])
+        self.assertNotIn('--render-benchmark-frames', command)
+
+    def test_small_capture_still_rejects_changed_identity_and_unresumed_camera(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        data['settings']['render_overrides']['cli:--render-benchmark-stream-radius'] = '2'
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaises(ValueError):
+            self.case.test_v4_save_load_success()
+        data = self.delayed_reload_capture()
+        # Even a quiescent reload at the last frame cannot claim resumed motion.
+        last = data['workload']['observations'][-1]['frame']
+        data['workload']['reload'].update(first_settled_frame=last)
+        for row in data['workload']['observations']:
+            if data['workload']['reload']['request_frame'] <= row['frame'] < last:
+                row.update(settled=False, stream_meshing_batches=1)
+        warmup = data['warmup_frames']
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload']['elapsed_ms'] = sum(
+            row['frame_wall_ms'] for row in data['frame_samples'][request - warmup:last - warmup])
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaisesRegex(ValueError, 'did not resume its camera path'):
+            self.case.test_v4_save_load_success()
+
+    def test_v4_success_case_rejects_reload_that_never_settles(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        for row in data['workload']['observations']:
+            if row['frame'] >= request:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaisesRegex(ValueError, 'did not settle after reload'):
+            self.case.test_v4_save_load_success()
+        self.assertEqual(self.receipt('save-load')['capture_status'], 'retained')
+
+    def test_unsettled_reload_reports_each_active_gate(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        rows = data['workload']['observations']
+        keys = ('stream_queue_depth', 'stream_generation_batches', 'stream_meshing_batches',
+                'stream_pending_lod_chunks', 'terrain_upload_candidates', 'water_upload_candidates',
+                'stream_promotion_pending', 'foliage_pending', 'region_scheduler_fault')
+        for row in rows:
+            if row['frame'] >= request:
+                row['settled'] = False
+                for key in keys:
+                    row[key] = True if type(row[key]) is bool else 1
+        self.payload = json.dumps(data).encode('utf-8')
+        count = sum(row['frame'] >= request for row in rows)
+        with self.assertRaises(ValueError) as caught:
+            self.case.test_v4_save_load_success()
+        for key in keys:
+            self.assertIn(f'{key}={count}', str(caught.exception))
+        self.assertIn('world_not_ready=0', str(caught.exception))
+        self.assertIn('outside_gameplay=0', str(caught.exception))
+
+    def test_unsettled_reload_reports_unready_world(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        rows = data['workload']['observations']
+        for row in rows:
+            if row['frame'] >= request:
+                row.update(settled=False, world_ready=False)
+        self.payload = json.dumps(data).encode('utf-8')
+        count = sum(row['frame'] >= request for row in rows)
+        with self.assertRaisesRegex(ValueError, f'world_not_ready={count}'):
+            self.case.test_v4_save_load_success()
 
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
         self.real_timeout = True
@@ -565,6 +843,54 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
 
 
+class RenderRunnerResidencyTests(unittest.TestCase):
+    def test_capture_cap_is_validated_early_and_applied_to_creation_and_reload(self):
+        root = Path(__file__).resolve().parents[2]
+        def cpp(path):
+            source = (root / path).read_text(encoding='utf-8')
+            tokens = r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/'
+            source = re.sub(tokens, lambda m: '' if m[0].startswith('/') else m[0],
+                            source, flags=re.DOTALL)
+            return ''.join(source.split())
+        parser_source = cpp('src/luminumbra_client/core/RuntimeScenarioConfig.cpp')
+        admission = parser_source[parser_source.index('voidParseSurfaceRadiusOptions('):
+                                  parser_source.index('RuntimePathOptionsParseRuntimePathOptions(')]
+        self.assertIn('std::string_view("--render-benchmark-stream-radius")', admission)
+        self.assertIn(':benchmark_stream_radius;', admission)
+        self.assertIn('if(!World::TryParseSurfaceRadius(value,radius))throw', admission)
+        self.assertIn('HasCommandLineOption(argc,argv,"--render-benchmark-stream-radius")&&'
+                      'GetCommandLineOption(argc,argv,"--render-benchmark-schema","v2")!="v4")'
+                      'throwstd::invalid_argument(', admission)
+        paths = parser_source[parser_source.index('RuntimePathOptionsParseRuntimePathOptions('):
+                              parser_source.index('ParseRuntimeScenarioConfig(')]
+        self.assertLess(paths.index('argc,argv,surface_radius,collision_radius,benchmark_stream_radius'),
+                        paths.index('std::filesystem::create_directories('))
+        self.assertIn('argc,argv,config.horizon_radius,config.collision_radius,'
+                      'config.benchmark_stream_radius', parser_source)
+        main = cpp('src/luminumbra_client/main_client.cpp')
+        entry = main[main.index('autofinish_world_entry='):main.index('autostart_world_creation=')]
+        cap = 'world_system->debug_set_streaming_radius_cap(scenario_config.benchmark_stream_radius);'
+        self.assertIn('if(benchmark_v4)' + cap, entry)
+        self.assertLess(entry.index(cap), entry.index('EnsureSurfaceReadyNear('))
+        creation = main[main.index('autostart_world_creation='):main.index('autostart_world_load=')]
+        load = main[main.index('autostart_world_load='):main.index('if(g_uiManager){', main.index('autostart_world_load='))]
+        for path in (creation, load):
+            self.assertIn('finish_world_entry();', path)
+        # The shared gate must still visit an activation interval and every
+        # pending queue/upload; it never advances a script tick while draining.
+        drain = main[main.index('constautosettle_workload_reload='):main.index('if(reload_settling_pending)')]
+        for gate in ('reload_residency_observed(', 'streaming.quiescent()',
+                     'uploads.terrain_upload_candidates==0', 'uploads.water_upload_candidates==0',
+                     '!foliage->build_pending()', 'benchmark_queries->checkpoint_passes()'):
+            self.assertIn(gate, drain)
+        self.assertNotIn('++traversal', drain)
+        self.assertNotIn('traversal_target_tick=', drain)
+        # Remain an observable declared override, bound by the existing identity
+        # serializer, rather than joining the workload-option exemption list.
+        report = cpp('src/luminumbra_client/app/RenderBenchmarkReport.h')
+        self.assertNotIn('"--render-benchmark-stream-radius"', report)
+
+
 class RenderRunnerRegistrationTests(unittest.TestCase):
     def test_real_client_registrations_share_native_graphics_admission(self):
         root = Path(__file__).resolve().parents[2]
@@ -588,6 +914,18 @@ class RenderRunnerRegistrationTests(unittest.TestCase):
         }
         cases = {
             'RenderTraversalIntegrated': 'test_traversal_twice',
+            'RenderWorkloadSaveLoadIntegrated': 'test_v4_save_load_success',
+            'RenderWorkloadNoAudioIntegrated': 'test_v4_no_audio_success',
+            'RenderBenchmarkStreamRadiusRefusal': 'test_stream_radius_refusal',
+            'RenderEscapingAudioRefusal': 'test_escaping_audio_refusal',
+            'RenderAbsoluteTextureRefusal': 'test_absolute_texture_refusal',
+            'RenderParentRelativeTextureRefusal': 'test_parent_relative_texture_refusal',
+            'RenderSceneConfigSeparateRefusal': 'test_scene_config_separate_refusal',
+            'RenderSceneConfigAssignmentRefusal': 'test_scene_config_assignment_refusal',
+            'RenderExistingWorldOptionFormsRefusal': 'test_existing_world_option_forms_refusal',
+            'RenderTraversalDurationOptionFormsRefusal': 'test_traversal_duration_option_forms_refusal',
+            'RenderCaptureOptionMissingValuesRefusal': 'test_capture_option_missing_values_refusal',
+            'RenderTraversalOwnerOptionFormsRefusal': 'test_traversal_owner_option_forms_refusal',
             'RenderBenchmarkImplicitCreationFailure': 'test_implicit_creation_failure',
             'RenderBenchmarkMeasuredFrameBounds': 'test_v2_measured_frame_bounds',
             'RenderBenchmarkIsolationSubmission': 'test_isolation_submission_reporting',

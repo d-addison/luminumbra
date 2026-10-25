@@ -1102,7 +1102,7 @@ TEST(TimeOfDayModel, MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors) {
         return c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f;
     };
     constexpr std::uint64_t kLunar =
-        54000ull; // == RenderPipeline::kTicksPerLunarCycle (30 min @ 30 Hz)
+        54000ull; // Arbitrary primitive-test period; runtime uses the saved lunar calendar
 
     // SEASON PALETTE tint: bit-exact vs the verbatim construction + manual luma normalize.
     for (float wave : {-1.0f, -0.5f, 0.0f, 0.3f, 1.0f}) {
@@ -1468,10 +1468,10 @@ TEST(SnowCoverModel, AccumulatesUnderSnowMeltsUnderSunAndClamps) {
 // TIME AUTHORITY — time-of-day is a pure function of the
 // sim tick. Same tick -> same TOD, bit-for-bit, no matter how many times or in
 // what order it is evaluated (there is no accumulator to drift with frame
-// pacing); the default day length matches the world calendar's 2 h day.
+// pacing); the default day length matches the world calendar's 90-minute day.
 TEST(TodTickPurity, SameTickSameTodIndependentOfFramePacing) {
     namespace R = Luminumbra::Rendering;
-    EXPECT_EQ(R::kDefaultDayLengthTicks, 216000u) << "2 h/day at 30 Hz";
+    EXPECT_EQ(R::kDefaultDayLengthTicks, 162000u) << "90 min/day at 30 Hz";
     EXPECT_EQ(R::kDefaultDayLengthTicks, Luminumbra::world::WorldCalendar{}.dayLengthTicks);
     constexpr auto day = R::kDefaultDayLengthTicks;
     // Anchors: tick 0 == noon (tod 0); half a day == midnight (tod 0.5); wraps.
@@ -1620,4 +1620,38 @@ TEST(RenderGraph, WriteAfterWriteAndReadAfterWriteOrderingHold) {
     EXPECT_EQ(s, expected);
     EXPECT_TRUE(g.validate().empty());
     EXPECT_EQ(g.latest_writer_of("T", "c"), "b");
+}
+
+TEST(TimeOfDayModel, ElapsedSolarInverseAndCalendarRelativeCelestialSeam) {
+    namespace R = Luminumbra::Rendering;
+    using Luminumbra::world::WorldCalendar;
+    using Luminumbra::world::WorldClock;
+    for (const auto calendar : {WorldCalendar{},
+                                WorldCalendar::Legacy(),
+                                WorldCalendar{36000, 3, 1, 2, 8},
+                                WorldCalendar{101, 7, 3, 5, 9}}) {
+        const WorldClock clock(0, calendar);
+        for (const auto phase : {0.0, .1, .25, .3, .5, .75, .9, .999}) {
+            const auto elapsed = R::NoonElapsedFromSolarTime(phase, calendar);
+            EXPECT_NEAR(R::SolarTimeFromNoonElapsed(elapsed, calendar), phase, 1e-7);
+        }
+        const auto period = clock.lunar_period_ticks();
+        for (const auto tick :
+             {std::uint64_t{0}, period / 2, period - 1, period, WorldClock::kTickLimit - 1}) {
+            const WorldClock at(tick, calendar);
+            const auto season = R::ComputeSeason(at);
+            const auto frame = R::EvaluateCelestialBodies(
+                R::TimeOfDayFromWorldClock(at), season.sunDeclination, tick, -1.0f, period);
+            EXPECT_FLOAT_EQ(frame.moon.illumination, R::LunarIllumination(tick, period));
+            EXPECT_EQ(frame.moon.travel_direction, -frame.sun.travel_direction);
+        }
+        EXPECT_FLOAT_EQ(R::LunarIllumination(0, period), 1.0f);
+        EXPECT_NEAR(R::LunarIllumination(period / 2, period), R::kNewMoonFloor, 1e-5f);
+        EXPECT_FLOAT_EQ(R::LunarIllumination(period, period), 1.0f);
+    }
+    const WorldClock different_year(0, {162000, 3, 2, 3, 8});
+    EXPECT_NE(R::LunarIllumination(different_year.year_length_ticks(),
+                                   different_year.lunar_period_ticks()),
+              1.0f);
+    EXPECT_EQ(WorldClock{}.lunar_period_ticks(), 1296000u);
 }

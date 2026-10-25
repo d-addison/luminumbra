@@ -1140,7 +1140,7 @@ class DeliveryRefusals(unittest.TestCase):
             with self.subTest(error=error.__name__, final_error=final_error):
                 observed = threading.Event()
                 calls = 0
-                def scan(source):
+                def scan(source, **kwargs):
                     nonlocal calls
                     calls += 1
                     if calls == 1:
@@ -1148,7 +1148,7 @@ class DeliveryRefusals(unittest.TestCase):
                         raise error("controlled administration entry")
                     if final_error:
                         raise FileNotFoundError("final scan remains strict")
-                    return real_inventory(source)
+                    return real_inventory(source, **kwargs)
                 class Output:
                     def __init__(self, stream):
                         self.stream = stream
@@ -1175,6 +1175,77 @@ class DeliveryRefusals(unittest.TestCase):
                         with self.assertRaises((M.Refusal, FileNotFoundError)):
                             M.git(self.w.root.parent, "--version")
                 self.assertFalse(self.w.root.exists())
+
+    def git_with_two_link_inventory(self, *, remove_after_live_scan):
+        root = self.w.root.parent
+        admin = root / ".git" / "objects"
+        admin.mkdir(parents=True)
+        final = admin / "object"
+        temporary = admin / "tmp_object"
+        final.write_bytes(b"controlled Git object")
+        os.link(final, temporary)
+        self.assertEqual(os.lstat(final).st_nlink, 2)
+        real_inventory = M.inventory
+        live_scans = final_scans = 0
+        def scan(source, **kwargs):
+            nonlocal live_scans, final_scans
+            if kwargs.get("live_git", False):
+                live_scans += 1
+            else:
+                final_scans += 1
+            result = real_inventory(source, **kwargs)
+            if kwargs.get("live_git", False) and temporary.exists() and remove_after_live_scan:
+                self.assertEqual(result[".git/objects/object"].st_nlink, 2)
+                temporary.unlink()
+            return result
+        with mock.patch.object(M, "inventory", side_effect=scan):
+            if remove_after_live_scan:
+                self.assertTrue(M.git(root, "--version").startswith(b"git version"))
+                self.assertEqual(os.lstat(final).st_nlink, 1)
+            else:
+                with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                    M.git(root, "--version")
+                self.assertEqual(os.lstat(final).st_nlink, 2)
+                self.assertEqual(final.read_bytes(), b"controlled Git object")
+                self.assertEqual(temporary.read_bytes(), final.read_bytes())
+                self.assertEqual(file_identity(final), file_identity(temporary))
+        self.assertGreaterEqual(live_scans, 1)
+        self.assertEqual(final_scans, 1)
+        self.assertFalse(self.w.root.exists())
+
+    def test_git_live_scan_accepts_transient_two_link_admin_file(self):
+        self.git_with_two_link_inventory(remove_after_live_scan=True)
+
+    def test_git_post_exit_inventory_refuses_two_link_admin_file(self):
+        self.git_with_two_link_inventory(remove_after_live_scan=False)
+
+    def test_live_git_inventory_refuses_source_links_and_unknown_link_counts(self):
+        cases = (("source", (1,)), ("nested/.git/object", (1,)),
+                 (".git-object", (1,)), (".git/object", (1, 2)))
+        for name, accepted in cases:
+            for links in (0, 1, 2):
+                with self.subTest(name=name, links=links), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"object")
+                    real_lstat = os.lstat
+                    def lstat(candidate):
+                        info = real_lstat(candidate)
+                        if Path(candidate) == path:
+                            fields = list(info)
+                            fields[3] = links
+                            return os.stat_result(fields)
+                        return info
+                    with mock.patch.object(M.os, "lstat", side_effect=lstat):
+                        if links in accepted:
+                            self.assertEqual(set(M.inventory(root, live_git=True)), {name})
+                        else:
+                            with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                                M.inventory(root, live_git=True)
+                        if links != 1:
+                            with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                                M.inventory(root)
 
     def test_population_is_empty_ordinary_and_never_evaluates_foreign_cmake(self):
         self.w.initialize()
@@ -2291,11 +2362,11 @@ class OwnedCommandLifetime(unittest.TestCase):
     def test_deadline_diagnostics_capture_the_actual_owned_parent_stack(self):
         entered, release = threading.Event(), threading.Event()
         real_inventory, real_join = M.inventory, threading.Thread.join
-        def held_inventory(source):
+        def held_inventory(source, **kwargs):
             entered.set()
             if not release.wait(3):
                 raise AssertionError("diagnostic barrier deadline exceeded")
-            return real_inventory(source)
+            return real_inventory(source, **kwargs)
         def join(thread, timeout=None):
             if timeout == 4:
                 self.assertTrue(entered.wait(3))
@@ -2740,7 +2811,7 @@ class WindowsContainmentRefusal(unittest.TestCase):
                         fcntl.fcntl(process.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
             process.stdout = Pipe(process.stdout, "output")
             return process
-        def scan(source):
+        def scan(source, **kwargs):
             self.wait_for("assigned" if phase == "spawn" else "before")
             if input_bytes is not None and not live_writer:
                 # The child consumed a real byte, then held the remaining input.
@@ -2761,7 +2832,7 @@ class WindowsContainmentRefusal(unittest.TestCase):
                 mock.patch.object(M.subprocess, "Popen", side_effect=launch), \
                 mock.patch.object(M.threading, "Thread", side_effect=writer), \
                 mock.patch.object(platform, "read", side_effect=read), \
-                mock.patch.object(M, "inventory", side_effect=scan if not nonzero else lambda source: {}):
+                mock.patch.object(M, "inventory", side_effect=scan if not nonzero else lambda source, **kwargs: {}):
             return M.run_command(self.root, [sys.executable, "-I", "-B", "-c", "pass"],
                                  dict(os.environ), input_bytes)
 

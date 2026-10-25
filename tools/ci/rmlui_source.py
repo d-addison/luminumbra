@@ -111,7 +111,12 @@ def check_windows_spelling(path: str, long_name: str) -> None:
             "workspace short-name alias or unreadable long path")
 
 
-def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str] | None = None) -> dict[str, os.stat_result]:
+def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str] | None = None,
+              *, live_git: bool = False) -> dict[str, os.stat_result]:
+    """Allow transient extra links only below .git during an owned command.
+
+    All admission, verification and post-exit inventories keep sole-link checks.
+    """
     result = {}
     pending = [root]
     entries = size = 0
@@ -132,7 +137,10 @@ def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str
                     require(allowed_directories is None or name in allowed_directories, "extra source directory")
                     pending.append(Path(entry.path))
                 else:
-                    require(ordinary(info) and info.st_nlink == 1, "nonordinary source entry")
+                    # Git publishes objects by linking a temporary file, then unlinking it.
+                    links_ok = (info.st_nlink == 1 or
+                                (live_git and name.startswith(".git/") and info.st_nlink > 1))
+                    require(ordinary(info) and links_ok, "nonordinary source entry")
                     size += info.st_size
                     require(size <= STORAGE_BYTES, "source storage bound exceeded")
                     result[name] = info
@@ -394,7 +402,7 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
         # Scan synchronously: no monitor can outlive this call or block a join.
         def scan() -> None:
             try:
-                inventory(source)
+                inventory(source, live_git=True)
             except FileNotFoundError:
                 # Git renames its own locks/packs. The final scan stays strict.
                 pass

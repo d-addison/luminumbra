@@ -2,6 +2,7 @@
 #include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
+#include "../core/WaterSeedInputs.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
@@ -523,6 +524,37 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
     , m_seed(seed)
     , m_water_system(water_system) {
     reinitialize_noise();
+}
+
+SHIELD_WorldSystem::SHIELD_WorldSystem(const SHIELD_WorldSystem& source, WaterSeedSamplerTag)
+    : m_job_system(nullptr)
+    , m_params(source.m_params)
+    , m_seed(source.m_seed)
+    , m_terrain_generator(source.m_terrain_generator)
+    , m_cave_generator(source.m_cave_generator)
+    , m_spaghetti_generator(source.m_spaghetti_generator)
+    , m_worley_generator(source.m_worley_generator)
+    , m_island_mask_generator(source.m_island_mask_generator)
+    , m_continentalness_generator(source.m_continentalness_generator)
+    , m_erosion_generator(source.m_erosion_generator)
+    , m_peaks_generator(source.m_peaks_generator)
+    , m_warp_generator(source.m_warp_generator)
+    , m_temperature_generator(source.m_temperature_generator)
+    , m_humidity_generator(source.m_humidity_generator)
+    , m_river_generator(source.m_river_generator)
+    , m_water_system(nullptr) {
+    // The epoch is held by capture. Nodes are configured before publication and
+    // replaced on reset, never mutated. Surface/rest sampling does not consult
+    // material or structure tables: no content reload or world-sized data copy.
+    // Copy at most the existing 2048 hydro handles; region bytes stay shared const.
+    const std::shared_lock<std::shared_mutex> hydro_lock(source.m_hydro_mutex);
+    m_hydro_cache = source.m_hydro_cache;
+}
+
+std::shared_ptr<const SHIELD_WorldSystem> SHIELD_WorldSystem::capture_water_seed_sampler() const {
+    const auto scope = acquire_worldgen_sample_scope();
+    return std::shared_ptr<const SHIELD_WorldSystem>(
+        new SHIELD_WorldSystem(*this, WaterSeedSamplerTag{}));
 }
 
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
@@ -1062,6 +1094,12 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
                        worldgen_epoch,
                        m_worldgen_epoch_mutex,
                        "Worldgen epoch lock wait");
+    // All seed payloads from the previous generator set become unusable. Never
+    // wrap the key: at saturation consumers conservatively use inline sampling.
+    const auto seed_generation = m_water_seed_terrain_generation.load(std::memory_order_relaxed);
+    if (seed_generation != std::numeric_limits<std::uint64_t>::max()) {
+        m_water_seed_terrain_generation.store(seed_generation + 1, std::memory_order_release);
+    }
     // Publish parameters and seed under the same epoch as their generators.
     // Preview readers must retain the previous complete world until they release it.
     if (params) {
@@ -3081,15 +3119,17 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const Vec3& camera_position,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
     // Single-anchor convenience overload — forwards to the multi-anchor path with one
     // anchor (byte-identical streaming/world_hash to the historical single-anchor code).
-    update(registry, std::vector<Vec3>{camera_position}, physics_system);
+    update(registry, std::vector<Vec3>{camera_position}, physics_system, advance_simulation);
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const std::vector<Vec3>& anchor_positions,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
     const MeshingSnapshotPass snapshot_pass(m_last_meshing_snapshot_bytes,
                                             m_meshing_snapshot_pass_active);
     // runtime telemetry ( implementation note): split the 300ms+ streaming spike by sub-phase.
@@ -3181,7 +3221,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
-    if (m_water_system) {
+    if (advance_simulation && m_water_system) {
         m_water_system->update(registry, m_streaming_state.chunks);
     }
     _dbg_split(m_dbg_stream.water); // runtime telemetry
@@ -3585,11 +3625,15 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
+    m_streaming_telemetry_stats.pending_lod_chunks = 0;
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         (void)id;
         if (!chunk_ptr) {
             continue;
         }
+
+        if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0)
+            ++m_streaming_telemetry_stats.pending_lod_chunks;
 
         const ChunkState state = chunk_ptr->get_state();
         if (state == ChunkState::Ready) {
@@ -3606,6 +3650,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
     }
 
+    m_streaming_telemetry_stats.generation_batches = m_streaming_state.generation_batches.size();
+    m_streaming_telemetry_stats.meshing_batches = m_streaming_state.meshing_batches.size();
+    m_streaming_telemetry_stats.promotion_pending = promotion_pipeline_pending();
     // Pending items leave the candidate set at dispatch, even when their
     // active mesh keeps them Ready. Count them through publication, plus
     // candidates not submitted this frame (including a backpressured lane).
@@ -4067,34 +4114,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         return false;
     }
 
-    // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
-    // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
-    // load. If one wedges (the intermittent freeze), the LAST line printed names the
-    // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
-    // runs at world-load/teleport, not per-frame.
-    const auto _esrn_t0 = std::chrono::steady_clock::now();
-    // ALL THREE unbounded waits in this function run under the
-    // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
-    // collision-build batch below was wrapped, so a generation/meshing wedge still
-    // hung silently). Observability only — hash-neutral, OFF in determinism gates.
-    const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...",
-                         world_pos.x,
-                         world_pos.z);
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/generation-drain",
-                                          [this]() { wait_for_generation_jobs(); });
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/meshing-drain",
-                                          [this]() { wait_for_meshing_jobs(); });
-    // settle the two-stage promotion pipeline too (publish staged
-    // sim truth, dispatch + drain the stage-B render meshes) so the surface
-    // band below observes fully settled chunks, exactly as before the split.
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/promotion-drain",
-                                          [this]() { wait_for_streaming_jobs(); });
-
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     // Preflight the exact vertical work before allocating or changing chunks.
     // At most 625 columns and 8192 chunks, including both vertical margins.
@@ -4135,6 +4154,35 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         return false;
     if (surface_capacity > chunks_to_consider_for_collision.max_size())
         return false;
+
+    // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
+    // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
+    // load. If one wedges (the intermittent freeze), the LAST line printed names the
+    // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
+    // runs at world-load/teleport, not per-frame.
+    const auto _esrn_t0 = std::chrono::steady_clock::now();
+    // ALL THREE unbounded waits in this function run under the
+    // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
+    // collision-build batch below was wrapped, so a generation/meshing wedge still
+    // hung silently). Observability only — hash-neutral, OFF in determinism gates.
+    const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...",
+                         world_pos.x,
+                         world_pos.z);
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/generation-drain",
+                                          [this]() { wait_for_generation_jobs(); });
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/meshing-drain",
+                                          [this]() { wait_for_meshing_jobs(); });
+    // settle the two-stage promotion pipeline too (publish staged
+    // sim truth, dispatch + drain the stage-B render meshes) so the surface
+    // band below observes fully settled chunks, exactly as before the split.
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/promotion-drain",
+                                          [this]() { wait_for_streaming_jobs(); });
+
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
@@ -4179,7 +4227,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     std::vector<Luminumbra::Job> build_jobs;
     build_jobs.reserve(chunks_to_build.size());
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
-        build_jobs.emplace_back([this, build_chunk]() {
+        const auto seed_inputs = request_water_seed_inputs(*build_chunk.chunk);
+        build_jobs.emplace_back([this, build_chunk, seed_inputs]() {
             const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
@@ -4223,6 +4272,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 // the heightfield mesher and seam fallback never
                 // read interior SDF.
                 GenerateChunkData(*chunk, build_chunk.step);
+            }
+            if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
+                ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
             }
             chunk->set_state(ChunkState::Meshing);
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(
@@ -4757,6 +4809,45 @@ std::size_t SHIELD_WorldSystem::GetWaterSimWindowCursor() const {
 void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
     if (m_water_system)
         m_water_system->SetSimWindowCursor(cursor);
+}
+
+bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m) {
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > 16.0f ||
+        !std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z) ||
+        std::abs(world_pos.x) > 32000.0f || std::abs(world_pos.y) > 32000.0f ||
+        std::abs(world_pos.z) > 32000.0f)
+        return false;
+
+    wait_for_streaming_jobs();
+    if (promotion_pipeline_pending())
+        return false;
+    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m));
+    const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m));
+    const auto worldgen_scope = acquire_worldgen_sample_scope();
+    // The validated bounds above cover at most 27 chunks of 17^3 samples.
+    // Generate synchronously before editing; never replace saved/edited SDFs.
+    for (int cz = lo.z; cz <= hi.z; ++cz)
+        for (int cy = lo.y; cy <= hi.y; ++cy)
+            for (int cx = lo.x; cx <= hi.x; ++cx) {
+                const IVec3 coords(cx, cy, cz);
+                const ChunkID id = Chunk::calculate_id(coords);
+                auto iterator = m_streaming_state.chunks.find(id);
+                if (iterator == m_streaming_state.chunks.end())
+                    iterator = m_streaming_state.chunks
+                                   .emplace(id, std::make_shared<Luminumbra::Chunk>(coords))
+                                   .first;
+                auto& chunk = iterator->second;
+                if (!chunk)
+                    return false;
+                if (chunk->sdf_data.empty()) {
+                    GenerateChunkData(*chunk, 1);
+                    chunk->current_lod.store(-1, std::memory_order_release);
+                    chunk->set_state(ChunkState::Idle);
+                }
+                if (chunk->sdf_data.size() != kFullSdfLattice)
+                    return false;
+            }
+    return true;
 }
 
 // PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
@@ -5423,6 +5514,19 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
     chunk.clear_voxel_data_dirty();
 }
 
+std::shared_ptr<HighWaterSeedInputs>
+SHIELD_WorldSystem::request_water_seed_inputs(Chunk& chunk) const {
+    if (!m_water_system || !m_params.lakes_enabled ||
+        m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution ||
+        chunk.has_water_sim.load(std::memory_order_acquire)) {
+        return {};
+    }
+    auto inputs = std::make_shared<HighWaterSeedInputs>();
+    inputs->generation = {water_seed_terrain_generation(), chunk.water_seed_edit_generation()};
+    chunk.stage_water_seed_inputs(inputs);
+    return inputs;
+}
+
 JobHandle
 SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
     // Coordinate-only callers (initial world load, regeneration, tests,
@@ -5465,9 +5569,13 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         const int target_step = request.target_step;
         chunk->pending_generation_ready.store(false, std::memory_order_release);
         batch.chunks.push_back(chunk);
-        jobs.emplace_back([this, chunk, target_step]() {
+        const auto seed_inputs = request_water_seed_inputs(*chunk);
+        jobs.emplace_back([this, chunk, target_step, seed_inputs]() {
             const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             GenerateChunkData(*chunk, target_step);
+            if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
+                ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
+            }
             // stage completion only — the MAIN thread flips
             // Loading→Idle in publish_completed_generation_jobs, so chunk
             // lifecycle is never a worker-timing side effect.
@@ -6163,6 +6271,11 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
+    if (adopted) {
+        // Derived payloads belong to the producing world, never to a saved or
+        // externally adopted chunk (world-local generation numbers can coincide).
+        chunk->stage_water_seed_inputs({});
+    }
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
         bump_far_lod_authority_revision(chunk->get_coords());
     }
