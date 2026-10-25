@@ -259,6 +259,20 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertLess(saving.index("renderPipeline.prepare_world_swap();"),
                         saving.index("RunPersistenceRoundtripSavePhase("))
 
+    def test_far_snapshot_checks_publication_before_reading_live_vectors(self):
+        source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(
+            encoding="utf-8")
+        capture = body(source, "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
+        self.assertRegex(capture, r"if \(!chunk \|\| chunk->get_state\(\) == ChunkState::Loading \|\|")
+        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
+                        capture.index("chunk->sdf_data.size()"))
+        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
+                        capture.index("chunk->material_data.size()"))
+        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
+                        capture.index("chunk->capture_far_lod_sdf("))
+        native = (ROOT / "test/rendering/far_lod_persistence_test.cpp").read_text(encoding="utf-8")
+        self.assertIn("CapturesWaitForGenerationPublication", native)
+
     def test_native_regressions_and_legacy_fault_discrimination_remain_registered(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")

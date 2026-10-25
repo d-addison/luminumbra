@@ -6267,7 +6267,10 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     // payload; overlapping regions and unchanged captures share those bytes.
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
-        if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize ||
+        // Generation writes live vectors while Loading. Only owner-thread
+        // publication makes those bytes eligible, even if a worker is finished.
+        if (!chunk || chunk->get_state() == ChunkState::Loading ||
+            chunk->sdf_data.size() != kFullSdfLatticeSize ||
             (!chunk->material_data.empty() && chunk->material_data.size() != kFullSdfLatticeSize)) {
             continue;
         }

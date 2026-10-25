@@ -613,6 +613,49 @@ TEST(FarLodIntegration, OversizedHeadWaitsForAgeOrBacklogAndConsumesOneFrameAlon
     EXPECT_FALSE(exact.admit(1, 0, 1));
 }
 
+TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    const auto empty = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(empty);
+    EXPECT_TRUE(empty->entries.empty());
+    EXPECT_EQ(empty->bytes_copied, 0u);
+
+    // Inline execution finishes the same jobs without publishing before their
+    // due tick. No scheduling delay or thread timing can satisfy this test.
+    world.begin_tick(0);
+    world.dispatch_generation_jobs(std::vector<Systems::SHIELD_WorldSystem::ChunkGenerationRequest>{
+        {IVec3(0, 0, 0), 1}, {IVec3(1, 0, 0), 2}});
+    const auto full = world.find_streamed_chunk(IVec3(0, 0, 0));
+    const auto coarse = world.find_streamed_chunk(IVec3(1, 0, 0));
+    ASSERT_TRUE(full);
+    ASSERT_TRUE(coarse);
+    ASSERT_EQ(full->get_state(), ChunkState::Loading);
+    ASSERT_FALSE(full->sdf_data.empty());
+    ASSERT_TRUE(coarse->sdf_data.empty());
+    const auto before = world.activation_index_counters();
+    world.activate_due(7);
+    const auto pending = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(pending);
+    EXPECT_TRUE(pending->entries.empty());
+    EXPECT_EQ(pending->bytes_copied, 0u);
+    EXPECT_EQ(world.activation_index_counters().index_updates, before.index_updates);
+
+    world.activate_due(8);
+    ASSERT_EQ(full->get_state(), ChunkState::Idle);
+    const auto published = world.activation_index_counters();
+    EXPECT_GT(published.index_updates, before.index_updates);
+    const auto ready = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(ready);
+    ASSERT_EQ(ready->entries.size(), 1u); // Coarse heightmaps are still excluded.
+    ASSERT_TRUE(ready->entries.front().payload);
+    EXPECT_EQ(ready->entries.front().coords, full->get_coords());
+    EXPECT_EQ(ready->entries.front().as_reduction_snapshot().sdf_data, full->sdf_data);
+    EXPECT_EQ(ready->bytes_copied,
+              full->sdf_data.size() * sizeof(f32) + full->material_data.size());
+    EXPECT_EQ(world.activation_index_counters().index_updates, published.index_updates);
+}
+
 TEST(FarLodPersistence, UnchangedAndOverlappingCapturesShareBytesAndEditsCopyOnce) {
     const auto params = Luminumbra::Test::SyntheticTerrainParams();
     Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
