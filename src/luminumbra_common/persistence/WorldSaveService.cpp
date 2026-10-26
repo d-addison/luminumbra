@@ -662,21 +662,36 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                      WindowsErrorMessage(attributes_error));
         return false;
     }
-    if (::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(temp);
-        if (retirement_error == ERROR_SUCCESS)
-            return true;
-        AddError(errors,
-                 "cannot confirm exclusive file installation: " +
-                     WindowsErrorMessage(retirement_error));
+    const auto file = ::CreateFileW(temp.c_str(),
+                                    GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_FLAG_OPEN_REPARSE_POINT,
+                                    nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        AddError(errors, "cannot bind file installation: " + WindowsErrorMessage(::GetLastError()));
         return false;
     }
-    const DWORD error = ::GetLastError();
-    AddError(errors,
-             "failed to atomically install region file: " +
-                 Filesystem::GenericUtf8PathString(destination) + ": " +
-                 WindowsErrorMessage(error));
-    return false;
+    try {
+        Detail::WindowsRenameWithoutReplacement(file, temp, destination);
+        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(temp);
+        if (retirement_error != ERROR_SUCCESS)
+            throw std::system_error(static_cast<int>(retirement_error),
+                                    std::system_category(),
+                                    "Cannot confirm exclusive file installation");
+        // Flush the renamed object's data and metadata through the same handle.
+        if (!::FlushFileBuffers(file))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Cannot flush installed file");
+    } catch (const std::exception& error) {
+        ::CloseHandle(file);
+        AddError(errors, "failed to atomically install region file: " + std::string(error.what()));
+        return false;
+    }
+    ::CloseHandle(file);
+    return true;
 }
 
 #else
@@ -982,27 +997,36 @@ public:
         // Keep identity through the move; rollback targets this handle, never a
         // replacement file found by looking up the destination a second time.
         m_handle = ::CreateFileW(m_temp.c_str(),
-                                 DELETE | FILE_READ_ATTRIBUTES,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                                  nullptr,
                                  OPEN_EXISTING,
-                                 FILE_ATTRIBUTE_NORMAL,
+                                 FILE_FLAG_OPEN_REPARSE_POINT,
                                  nullptr);
-        if (m_handle == INVALID_HANDLE_VALUE ||
-            !::MoveFileExW(m_temp.c_str(), m_destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        if (m_handle == INVALID_HANDLE_VALUE) {
             AddError(errors,
                      "cannot publish an unoccupied destination: " +
                          WindowsErrorMessage(::GetLastError()));
             return false;
         }
-        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(m_temp);
-        if (retirement_error != ERROR_SUCCESS) {
+        try {
+            Detail::WindowsRenameWithoutReplacement(m_handle, m_temp, m_destination);
+            const auto retirement_error = Detail::WindowsRenameSourceRetirementError(m_temp);
+            if (retirement_error != ERROR_SUCCESS)
+                throw std::system_error(static_cast<int>(retirement_error),
+                                        std::system_category(),
+                                        "Cannot confirm exclusive file publication");
+        } catch (const std::exception& error) {
             AddError(errors,
-                     "cannot confirm exclusive file publication: " +
-                         WindowsErrorMessage(retirement_error));
+                     "cannot publish an unoccupied destination: " + std::string(error.what()));
             return false;
         }
         m_published = true;
+        if (!::FlushFileBuffers(m_handle)) {
+            AddError(errors,
+                     "cannot flush published file: " + WindowsErrorMessage(::GetLastError()));
+            return false;
+        }
         return true;
 #else
         m_descriptor = ::open(m_temp.c_str(), O_RDONLY);

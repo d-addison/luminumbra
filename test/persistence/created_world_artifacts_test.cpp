@@ -28,6 +28,7 @@
 #endif
 #include <io.h>
 #include <windows.h>
+#include <winternl.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -56,6 +57,7 @@ HANDLE WINAPI RetainById(HANDLE hint,
                          DWORD flags);
 BOOL WINAPI InspectId(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes);
 DWORD WINAPI ResolveName(HANDLE file, LPWSTR name, DWORD size, DWORD flags);
+FARPROC WINAPI ResolveFunction(HMODULE library, LPCSTR name);
 BOOL WINAPI RetainDuplicate(HANDLE process,
                             HANDLE file,
                             HANDLE destination_process,
@@ -81,6 +83,7 @@ HANDLE WINAPI Open(LPCWSTR path,
 #define OpenFileById NativeRace::RetainById
 #define GetFileInformationByHandleEx NativeRace::InspectId
 #define GetFinalPathNameByHandleW NativeRace::ResolveName
+#define GetProcAddress NativeRace::ResolveFunction
 #define DuplicateHandle NativeRace::RetainDuplicate
 #define _open_osfhandle NativeRace::OpenDescriptor
 #define _fdopen NativeRace::OpenStream
@@ -120,6 +123,7 @@ int InterceptRename(int from, const char* source, int to, const char* destinatio
 #undef OpenFileById
 #undef GetFileInformationByHandleEx
 #undef GetFinalPathNameByHandleW
+#undef GetProcAddress
 #undef DuplicateHandle
 #undef _open_osfhandle
 #undef _fdopen
@@ -167,7 +171,27 @@ enum class Boundary : std::uint8_t {
     PublicationSourceParentReplaced,
     PublicationParentMissing,
     PublicationFinalNameMismatch,
-    PublicationSourceInspectionFailure
+    PublicationSourceInspectionFailure,
+    PublicationLateLinkedOccupant,
+    PublicationHiddenLinkedOccupant,
+    PublicationDestinationDenied,
+    PublicationDestinationParentMissing,
+    PublicationDestinationIdentityFailure,
+    PublicationDestinationIdentityMismatch,
+    PublicationDestinationIdentityUnknown,
+    PublicationDestinationReparsePoint,
+    PublicationLinkCountFailure,
+    PublicationLinkCountUnknown,
+    PublicationFinalLinkCountFailure,
+    PublicationFinalLinkCountUnknown,
+    PublicationRecoveryUnavailable,
+    PublicationRecoveryOccupied,
+    PublicationRecoveryExistingSource,
+    PublicationRecoveryInspectionDenied,
+    RetentionVolumeFailure,
+    RetentionVolumeUnknownName,
+    RetentionVolumeTooLong,
+    RetentionVolumeOpenDenied
 };
 struct Replacement {
     std::filesystem::path target;
@@ -180,6 +204,7 @@ struct Replacement {
     std::filesystem::path publication_source;
     bool restore_blocked = false;
     bool publication_completed = false;
+    bool vacancy_hidden = false;
 #if defined(_WIN32)
     BY_HANDLE_FILE_INFORMATION identity{};
     HANDLE pending_close = INVALID_HANDLE_VALUE;
@@ -290,11 +315,21 @@ bool BeforePublish(const std::filesystem::path& source, const std::filesystem::p
     }
     if (active->boundary == Boundary::BeforePublication)
         Replace(*active);
-    if (active->boundary == Boundary::PublicationLinkedOccupant) {
+    if (active->boundary == Boundary::PublicationLinkedOccupant ||
+        active->boundary == Boundary::PublicationHiddenLinkedOccupant) {
         active->fired = true;
         std::filesystem::create_hard_link(source, destination);
         EXPECT_TRUE(std::filesystem::equivalent(source, destination));
     }
+#if defined(_WIN32)
+    if (active->boundary == Boundary::PublicationLateLinkedOccupant) {
+        active->fired = true;
+        std::error_code error;
+        std::filesystem::create_hard_link(source, destination, error);
+        EXPECT_EQ(error.value(), ERROR_SHARING_VIOLATION);
+        EXPECT_FALSE(std::filesystem::exists(destination));
+    }
+#endif
     if (active->boundary == Boundary::PublicationSourceMissing) {
         active->fired = true;
         std::filesystem::rename(source, active->moved);
@@ -351,6 +386,22 @@ HANDLE WINAPI RetainById(HANDLE hint,
 }
 
 BOOL WINAPI InspectId(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes) {
+    auto* active = Active();
+    if (kind == FileStandardInfo && active && !active->fired) {
+        const bool final = active->publication_completed;
+        if ((!final && Fail(Boundary::PublicationLinkCountFailure)) ||
+            (final && (Fail(Boundary::PublicationFinalLinkCountFailure) ||
+                       Fail(Boundary::PublicationRecoveryUnavailable) ||
+                       Fail(Boundary::PublicationRecoveryOccupied) ||
+                       Fail(Boundary::PublicationRecoveryExistingSource) ||
+                       Fail(Boundary::PublicationRecoveryInspectionDenied)))) {
+            if (active->boundary == Boundary::PublicationRecoveryExistingSource)
+                std::ofstream(active->publication_source, std::ios::binary)
+                    << "protected source bytes\n";
+            ::SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+    }
     if (kind == FileIdInfo && Fail(Boundary::RetentionIdFailure)) {
         ::SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
@@ -358,14 +409,30 @@ BOOL WINAPI InspectId(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, 
     const auto result = ::GetFileInformationByHandleEx(file, kind, info, bytes);
     if (result && kind == FileIdInfo && Fail(Boundary::RetentionUnknownId))
         static_cast<FILE_ID_INFO*>(info)->FileId = {};
+    if (result && kind == FileStandardInfo && active &&
+        ((!active->publication_completed && Fail(Boundary::PublicationLinkCountUnknown)) ||
+         (active->publication_completed && Fail(Boundary::PublicationFinalLinkCountUnknown))))
+        static_cast<FILE_STANDARD_INFO*>(info)->NumberOfLinks = 0;
     return result;
 }
 
 DWORD WINAPI ResolveName(HANDLE file, LPWSTR name, DWORD size, DWORD flags) {
     auto* active = Active();
-    if (active && active->boundary == Boundary::PublicationFinalNameFailure &&
-        ++active->inspections == 3) {
-        active->fired = true;
+    if ((flags & VOLUME_NAME_GUID) != 0) {
+        if (Fail(Boundary::RetentionVolumeFailure)) {
+            ::SetLastError(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+        if (Fail(Boundary::RetentionVolumeTooLong))
+            return size;
+        if (Fail(Boundary::RetentionVolumeUnknownName)) {
+            constexpr wchar_t invalid[] = L"invalid";
+            std::copy(std::begin(invalid), std::end(invalid), name);
+            return 7;
+        }
+        return ::GetFinalPathNameByHandleW(file, name, size, flags);
+    }
+    if (active && active->publication_completed && Fail(Boundary::PublicationFinalNameFailure)) {
         ::SetLastError(ERROR_ACCESS_DENIED);
         return 0;
     }
@@ -376,12 +443,23 @@ DWORD WINAPI ResolveName(HANDLE file, LPWSTR name, DWORD size, DWORD flags) {
     if (Fail(Boundary::PublicationNameTooLong))
         return size;
     const auto length = ::GetFinalPathNameByHandleW(file, name, size, flags);
-    if (active && !active->fired && active->boundary == Boundary::PublicationFinalNameMismatch &&
-        ++active->inspections == 3 && length > 0 && length < size) {
-        active->fired = true;
+    if (active && active->publication_completed && length > 0 && length < size &&
+        Fail(Boundary::PublicationFinalNameMismatch)) {
         name[length - 1] = L'!';
     }
     return length;
+}
+
+FARPROC WINAPI ResolveFunction(HMODULE library, LPCSTR name) {
+    auto* active = Active();
+    if (active && active->publication_completed && std::string(name) == "NtSetInformationFile") {
+        if (active->boundary == Boundary::PublicationRecoveryUnavailable)
+            return nullptr;
+        if (active->boundary == Boundary::PublicationRecoveryOccupied)
+            std::ofstream(active->publication_source, std::ios::binary)
+                << "protected source bytes\n";
+    }
+    return ::GetProcAddress(library, name);
 }
 
 HANDLE WINAPI Retain(HANDLE file, DWORD access, DWORD share, DWORD flags) {
@@ -483,6 +561,17 @@ BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info) {
         return FALSE;
     }
     const auto result = ::GetFileInformationByHandle(file, info);
+    if (result && active && active->publication_completed &&
+        Fail(Boundary::PublicationDestinationIdentityMismatch))
+        info->nFileIndexLow ^= 1;
+    if (result && active && active->publication_completed &&
+        Fail(Boundary::PublicationDestinationIdentityUnknown)) {
+        info->nFileIndexHigh = 0;
+        info->nFileIndexLow = 0;
+    }
+    if (result && active && active->publication_completed &&
+        Fail(Boundary::PublicationDestinationReparsePoint))
+        info->dwFileAttributes |= FILE_ATTRIBUTE_REPARSE_POINT;
     if (result && target && active->boundary == Boundary::AfterCreation) {
         active->fired = true;
         std::filesystem::rename(active->target, active->moved);
@@ -506,8 +595,48 @@ HANDLE WINAPI Open(LPCWSTR path,
                    DWORD flags,
                    HANDLE template_file) {
     auto* active = Active();
+    if (access == 0 && flags == 0 && Fail(Boundary::RetentionVolumeOpenDenied)) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    const std::filesystem::path opened(path);
+    std::error_code parent_error;
+    const bool destination = active && active->target.filename() == opened.filename() &&
+                             std::filesystem::equivalent(active->target.parent_path(),
+                                                         opened.parent_path(),
+                                                         parent_error) &&
+                             !parent_error;
+    if (destination && access == FILE_READ_ATTRIBUTES &&
+        flags == (FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)) {
+        if (Fail(Boundary::PublicationDestinationDenied)) {
+            ::SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
+        }
+        if (Fail(Boundary::PublicationDestinationParentMissing)) {
+            ::SetLastError(ERROR_PATH_NOT_FOUND);
+            return INVALID_HANDLE_VALUE;
+        }
+        if (active->boundary == Boundary::PublicationHiddenLinkedOccupant &&
+            !active->vacancy_hidden) {
+            active->vacancy_hidden = true;
+            ::SetLastError(ERROR_FILE_NOT_FOUND);
+            return INVALID_HANDLE_VALUE;
+        }
+    }
+    if (!destination && active && active->publication_completed &&
+        active->boundary == Boundary::PublicationRecoveryInspectionDenied &&
+        flags == (FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) &&
+        ++active->inspections == 1) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (destination && active->publication_completed &&
+        Fail(Boundary::PublicationDestinationIdentityFailure)) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
     if (active && active->publication_completed && access == FILE_READ_ATTRIBUTES &&
-        flags == FILE_FLAG_OPEN_REPARSE_POINT &&
+        flags == FILE_FLAG_OPEN_REPARSE_POINT && !destination &&
         Fail(Boundary::PublicationSourceInspectionFailure)) {
         ::SetLastError(ERROR_ACCESS_DENIED);
         return INVALID_HANDLE_VALUE;
@@ -523,7 +652,8 @@ HANDLE WINAPI Open(LPCWSTR path,
         // rename callback would test that sharing conflict instead of an alias.
         if (active->boundary == Boundary::PublicationSourceMissing ||
             active->boundary == Boundary::PublicationSourceReplaced ||
-            active->boundary == Boundary::PublicationLinkedOccupant)
+            active->boundary == Boundary::PublicationLinkedOccupant ||
+            active->boundary == Boundary::PublicationHiddenLinkedOccupant)
             BeforePublish(path, active->target);
         if (Fail(Boundary::PublicationBindingDenied)) {
             ::SetLastError(ERROR_ACCESS_DENIED);
@@ -1152,8 +1282,12 @@ TEST_F(CreatedWorldCleanup, PublicationRestoreCollisionPreservesBothOwnersForRec
 
 #if defined(_WIN32)
 TEST_F(CreatedWorldCleanup, IdRetentionFailureNeverAdoptsOrDeletesAnUncertainFile) {
-    for (const auto boundary :
-         {NativeRace::Boundary::RetentionIdFailure, NativeRace::Boundary::RetentionUnknownId}) {
+    for (const auto boundary : {NativeRace::Boundary::RetentionIdFailure,
+                                NativeRace::Boundary::RetentionUnknownId,
+                                NativeRace::Boundary::RetentionVolumeFailure,
+                                NativeRace::Boundary::RetentionVolumeUnknownName,
+                                NativeRace::Boundary::RetentionVolumeTooLong,
+                                NativeRace::Boundary::RetentionVolumeOpenDenied}) {
         SCOPED_TRACE(static_cast<unsigned>(boundary));
         const NativeRace::HandleCapture handles;
         CreatedWorldArtifacts artifacts;
@@ -1178,7 +1312,11 @@ TEST_F(CreatedWorldCleanup, IdRetentionFailureNeverAdoptsOrDeletesAnUncertainFil
 TEST_F(CreatedWorldCleanup, PublicationNameAndDirectoryFailuresPreserveBothReservationsForRetry) {
     for (const auto boundary : {NativeRace::Boundary::PublicationParentDenied,
                                 NativeRace::Boundary::PublicationNameFailure,
-                                NativeRace::Boundary::PublicationNameTooLong}) {
+                                NativeRace::Boundary::PublicationNameTooLong,
+                                NativeRace::Boundary::PublicationDestinationDenied,
+                                NativeRace::Boundary::PublicationDestinationParentMissing,
+                                NativeRace::Boundary::PublicationLinkCountFailure,
+                                NativeRace::Boundary::PublicationLinkCountUnknown}) {
         SCOPED_TRACE(static_cast<unsigned>(boundary));
         CreatedWorldArtifacts artifacts;
         const auto save = Root() / "created-world";
@@ -1197,6 +1335,127 @@ TEST_F(CreatedWorldCleanup, PublicationNameAndDirectoryFailuresPreserveBothReser
         EXPECT_EQ(Read(destination), "owned bytes\n");
         EXPECT_TRUE(artifacts.rollback().empty());
         EXPECT_FALSE(std::filesystem::exists(save));
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
+
+TEST_F(CreatedWorldCleanup, LinkCreationAfterTheVacancyCheckIsExcludedByTheBoundHandle) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.create_root(save);
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    Arm(destination, NativeRace::Boundary::PublicationLateLinkedOccupant);
+    artifacts.publish_file(temp, destination);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_EQ(Read(destination), "owned bytes\n");
+    EXPECT_FALSE(std::filesystem::exists(temp));
+    EXPECT_TRUE(artifacts.rollback().empty());
+}
+
+TEST_F(CreatedWorldCleanup, ConsumedSameFileAliasRestoresTheSourceWithoutDeletingTheOtherLink) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.create_root(save);
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    // Hide one real, pre-existing alias from the vacancy probe to exercise
+    // NTFS's successful same-file rename and the independent post-rename guard.
+    Arm(destination, NativeRace::Boundary::PublicationHiddenLinkedOccupant);
+    EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+    ASSERT_TRUE(Race().fired);
+    ASSERT_TRUE(Race().vacancy_hidden);
+    ASSERT_TRUE(Race().publication_completed);
+    ASSERT_TRUE(std::filesystem::equivalent(temp, destination));
+    EXPECT_EQ(Read(temp), "owned bytes\n");
+    EXPECT_EQ(Read(destination), "owned bytes\n");
+    EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+    ASSERT_TRUE(std::filesystem::remove(destination));
+    EXPECT_TRUE(artifacts.rollback().empty());
+}
+
+TEST_F(CreatedWorldCleanup, UncertainLinkCountsRestoreTheSourceAndNeverConveyOwnership) {
+    for (const auto boundary : {NativeRace::Boundary::PublicationFinalLinkCountFailure,
+                                NativeRace::Boundary::PublicationFinalLinkCountUnknown}) {
+        SCOPED_TRACE(static_cast<unsigned>(boundary));
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / std::to_string(static_cast<unsigned>(boundary));
+        const auto temp = save / "preset.tmp";
+        const auto destination = save / "preset.json";
+        artifacts.create_root(save);
+        artifacts.write_file(temp, "owned bytes\n");
+        artifacts.reserve_file(destination);
+        Arm(destination, boundary);
+        EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+        ASSERT_TRUE(Race().fired);
+        ASSERT_TRUE(std::filesystem::equivalent(temp, destination));
+        EXPECT_EQ(Read(temp), "owned bytes\n");
+        EXPECT_EQ(Read(destination), "owned bytes\n");
+        EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+        ASSERT_TRUE(std::filesystem::remove(destination));
+        EXPECT_TRUE(artifacts.rollback().empty());
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
+
+TEST_F(CreatedWorldCleanup, RecoveryFailurePreservesTheDestinationAndAnyNewSourceOccupant) {
+    for (const auto boundary : {NativeRace::Boundary::PublicationRecoveryUnavailable,
+                                NativeRace::Boundary::PublicationRecoveryOccupied,
+                                NativeRace::Boundary::PublicationRecoveryExistingSource,
+                                NativeRace::Boundary::PublicationRecoveryInspectionDenied}) {
+        SCOPED_TRACE(static_cast<unsigned>(boundary));
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / std::to_string(static_cast<unsigned>(boundary));
+        const auto temp = save / "preset.tmp";
+        const auto destination = save / "preset.json";
+        artifacts.create_root(save);
+        artifacts.write_file(temp, "owned bytes\n");
+        artifacts.reserve_file(destination);
+        Arm(destination, boundary);
+        Race().publication_source = temp;
+        EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+        ASSERT_TRUE(Race().fired);
+        EXPECT_EQ(Read(destination), "owned bytes\n");
+        if (boundary == NativeRace::Boundary::PublicationRecoveryOccupied ||
+            boundary == NativeRace::Boundary::PublicationRecoveryExistingSource)
+            EXPECT_EQ(Read(temp), "protected source bytes\n");
+        else
+            EXPECT_FALSE(std::filesystem::exists(temp));
+        EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+        artifacts.release();
+        EXPECT_EQ(Read(destination), "owned bytes\n");
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
+
+TEST_F(CreatedWorldCleanup, UncertainDestinationIdentityNeverConveysOwnership) {
+    for (const auto boundary : {NativeRace::Boundary::PublicationDestinationIdentityFailure,
+                                NativeRace::Boundary::PublicationDestinationIdentityMismatch,
+                                NativeRace::Boundary::PublicationDestinationIdentityUnknown,
+                                NativeRace::Boundary::PublicationDestinationReparsePoint}) {
+        SCOPED_TRACE(static_cast<unsigned>(boundary));
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / std::to_string(static_cast<unsigned>(boundary));
+        const auto temp = save / "preset.tmp";
+        const auto destination = save / "preset.json";
+        artifacts.create_root(save);
+        artifacts.write_file(temp, "owned bytes\n");
+        artifacts.reserve_file(destination);
+        Arm(destination, boundary);
+        EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+        ASSERT_TRUE(Race().fired);
+        EXPECT_EQ(Read(destination), "owned bytes\n");
+        EXPECT_FALSE(std::filesystem::exists(temp));
+        EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+        artifacts.release();
+        EXPECT_EQ(Read(destination), "owned bytes\n");
         NativeRace::Active() = nullptr;
         Race() = {};
     }

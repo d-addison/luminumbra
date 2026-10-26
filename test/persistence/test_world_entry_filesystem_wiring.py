@@ -27,10 +27,17 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
     def setUp(self):
         self.journal = (PERSISTENCE / "CreatedWorldArtifacts.h").read_text(encoding="utf-8")
 
-    def test_retention_opens_by_id_and_directories_release_the_named_creation_handle(self):
+    def test_retention_uses_an_explicit_volume_and_releases_the_named_creation_handle(self):
         retention = body(self.journal, "static ScopedFile duplicate_file(")
-        self.assertIn("::OpenFileById(", retention)
-        self.assertNotRegex(retention, r"::(?:CreateFileW|ReOpenFile|DuplicateHandle)\(")
+        self.assertIn("::OpenFileById(volume.get(),", retention)
+        self.assertNotRegex(retention, r"::(?:ReOpenFile|DuplicateHandle)\(")
+        self.assertIn("VOLUME_NAME_GUID | FILE_NAME_NORMALIZED", retention)
+        self.assertRegex(retention, r"const ScopedFile volume\(\s*::CreateFileW\(volume_path.c_str\(\),")
+        self.assertIn("volume_path.resize(separator)", retention)
+        self.assertIn("volume.get() == INVALID_HANDLE_VALUE", retention)
+        self.assertIn("length == 0 || length >= volume_name.size()", retention)
+        self.assertIn("separator == std::wstring::npos", retention)
+        self.assertIn("Unknown world artifact retention identity.", retention)
         self.assertIn("ExtendedFileIdType", retention)
         creation = body(self.journal, "void create_owned_directory(")
         windows = creation.split("#else", 1)[0]
@@ -39,7 +46,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
     def test_publication_binds_identity_and_detects_same_link_noop_before_claiming_target(self):
         publication = body(self.journal, "void publish_windows(")
         binding = publication.index("const ScopedFile bound(")
-        rename = publication.index("::SetFileInformationByHandle(")
+        rename = publication.index("Detail::WindowsRenameWithoutReplacement(")
         identity = publication.index("identity_from(bound.get())")
         self.assertLess(binding, identity)
         self.assertLess(identity, rename)
@@ -52,7 +59,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
 
     def test_publication_checks_source_retirement_even_if_the_handle_name_changes(self):
         publication = body(self.journal, "void publish_windows(")
-        rename = publication.index("::SetFileInformationByHandle(")
+        rename = publication.index("Detail::WindowsRenameWithoutReplacement(")
         inspect = publication.index("Detail::WindowsRenameSourceRetirementError(source.path)")
         self.assertLess(rename, inspect)
         self.assertLess(inspect, publication.index("published_name != destination"))
@@ -68,6 +75,46 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
             encoding="utf-8")
         self.assertIn("UnreadablePublicationSourceNeverClaimsTheDestination", native)
         self.assertIn("RefusedPublicationNeverClaimsARacingHardLinkToTheSource", native)
+
+    def test_every_windows_exclusive_publication_checks_vacancy_and_link_counts(self):
+        rename = body(self.journal, "inline void WindowsRenameWithoutReplacement(")
+        before = rename.index("const auto links_before = WindowsPublicationLinkCount(file)")
+        vacant = rename.index("WindowsVacantPublicationNameError(bound_destination)")
+        move = rename.index("::SetFileInformationByHandle(")
+        after = rename.index("WindowsPublicationLinkCount(file) != links_before")
+        self.assertLess(before, vacant)
+        self.assertLess(vacant, move)
+        self.assertIn("vacancy != ERROR_SUCCESS", rename[vacant:move])
+        self.assertLess(move, after)
+        self.assertIn("ERROR_ALREADY_EXISTS", rename[after:])
+        self.assertIn("WindowsRestorePublicationSource(file, original_name)", rename[after:])
+        self.assertLess(rename.index("const auto original_name = WindowsPublicationPath(file)"), move)
+        self.assertIn("retained_info.nFileIndexLow != published_info.nFileIndexLow", rename)
+        check = body(self.journal, "inline DWORD WindowsVacantPublicationNameError(")
+        for token in ("::CreateFileW(destination.c_str()", "FILE_READ_ATTRIBUTES",
+                      "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE",
+                      "FILE_FLAG_OPEN_REPARSE_POINT", "occupant != INVALID_HANDLE_VALUE",
+                      "return ERROR_ALREADY_EXISTS", "error == ERROR_FILE_NOT_FOUND"):
+            self.assertIn(token, check)
+        count = body(self.journal, "inline DWORD WindowsPublicationLinkCount(")
+        self.assertIn("FileStandardInfo", count)
+        self.assertIn("info.NumberOfLinks == 0", count)
+        recovery = body(self.journal, "inline void WindowsRestorePublicationSource(")
+        self.assertIn("link->ReplaceIfExists = FALSE", recovery)
+        self.assertIn('"NtSetInformationFile"', recovery)
+        self.assertNotRegex(recovery, r"::(?:DeleteFileW|MoveFileExW)\(")
+        writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
+        self.assertIn("Detail::WindowsRenameWithoutReplacement(file, temp, destination)", writer)
+        self.assertIn("Detail::WindowsRenameWithoutReplacement(m_handle, m_temp, m_destination)",
+                      writer)
+        self.assertNotIn("::MoveFileExW(", writer)
+        for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):
+            publishing = body(writer, marker).split("#else", 1)[0]
+            move = publishing.index("Detail::WindowsRenameWithoutReplacement(")
+            flush = publishing.index("::FlushFileBuffers(", move)
+            self.assertLess(move, flush)
+            binding = publishing.index("::CreateFileW(")
+            self.assertNotIn("FILE_SHARE_DELETE", publishing[binding:move])
 
     def test_windows_link_collision_is_created_before_delete_sharing_is_denied(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
@@ -90,9 +137,10 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         publication = body(self.journal, "void publish_windows(")
         self.assertIn("handle_path(parent.get()) / target.path.filename()", publication)
         self.assertLess(publication.index("destination.make_preferred()"),
-                        publication.index("destination.native()"))
-        self.assertLess(publication.index("name.size() > 32767"),
-                        publication.index("std::vector<std::byte> storage"))
+                        publication.index("Detail::WindowsRenameWithoutReplacement("))
+        rename = body(self.journal, "inline void WindowsRenameWithoutReplacement(")
+        self.assertLess(rename.index("name.size() > 32767"),
+                        rename.index("std::vector<std::byte> storage"))
         parent = body(self.journal, "ScopedFile bind_publication_parent(")
         self.assertIn("identity_from(parent.get()) != find_artifact(path).identity", parent)
         self.assertNotIn("FILE_SHARE_DELETE", parent)
@@ -100,7 +148,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
             self.assertIn(f"bind_publication_parent({artifact}.path.parent_path())", publication)
 
     def test_native_rename_record_includes_an_explicit_uncounted_terminator(self):
-        publication = body(self.journal, "void publish_windows(")
+        publication = body(self.journal, "inline void WindowsRenameWithoutReplacement(")
         compact = re.sub(r"\s+", " ", publication)
         self.assertIn("offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t)", compact)
         self.assertIn("rename_info->FileNameLength = static_cast<DWORD>(name_bytes);", compact)
@@ -111,7 +159,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
 
     def test_publication_requires_the_exact_destination_before_claiming_ownership(self):
         publication = body(self.journal, "void publish_windows(")
-        rename = publication.index("::SetFileInformationByHandle(")
+        rename = publication.index("Detail::WindowsRenameWithoutReplacement(")
         self.assertIn("published_name != destination", publication[rename:])
         self.assertIn("ERROR_INVALID_DATA", publication[rename:])
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(

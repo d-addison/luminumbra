@@ -46,6 +46,222 @@ namespace Luminumbra::Persistence {
 
 #if defined(_WIN32)
 namespace Detail {
+class WindowsPublicationHandle {
+public:
+    explicit WindowsPublicationHandle(HANDLE file)
+        : m_file(file) {}
+    ~WindowsPublicationHandle() {
+        if (m_file != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_file);
+    }
+    WindowsPublicationHandle(const WindowsPublicationHandle&) = delete;
+    WindowsPublicationHandle& operator=(const WindowsPublicationHandle&) = delete;
+    HANDLE get() const {
+        return m_file;
+    }
+
+private:
+    HANDLE m_file;
+};
+
+inline std::filesystem::path WindowsPublicationPath(HANDLE file) {
+    // The Win32 extended path limit includes the terminating UTF-16 null.
+    std::array<wchar_t, 32768> name{};
+    const auto length = ::GetFinalPathNameByHandleW(
+        file, name.data(), static_cast<DWORD>(name.size()), FILE_NAME_NORMALIZED);
+    if (length == 0 || length >= name.size())
+        throw std::system_error(
+            static_cast<int>(length == 0 ? ::GetLastError() : ERROR_FILENAME_EXCED_RANGE),
+            std::system_category(),
+            "Could not resolve bound world artifact name");
+    return std::filesystem::path(std::wstring(name.data(), length));
+}
+
+inline DWORD WindowsVacantPublicationNameError(const std::filesystem::path& destination) {
+    const auto occupant = ::CreateFileW(destination.c_str(),
+                                        FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                        nullptr);
+    if (occupant != INVALID_HANDLE_VALUE) {
+        ::CloseHandle(occupant);
+        return ERROR_ALREADY_EXISTS;
+    }
+    const auto error = ::GetLastError();
+    return error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : error;
+}
+
+inline DWORD WindowsPublicationLinkCount(HANDLE file) {
+    FILE_STANDARD_INFO info{};
+    if (!::GetFileInformationByHandleEx(file, FileStandardInfo, &info, sizeof(info)))
+        throw std::system_error(static_cast<int>(::GetLastError()),
+                                std::system_category(),
+                                "Could not inspect publication link count");
+    if (info.NumberOfLinks == 0)
+        throw std::system_error(
+            ERROR_INVALID_DATA, std::system_category(), "Unknown publication link count");
+    return info.NumberOfLinks;
+}
+
+// Recovery adds the retired source link through the bound object. Renaming back
+// would consume the other owner's destination link. FileLinkInformation requires
+// DELETE access, already held by the publication handle; ReplaceIfExists is false.
+inline void WindowsRestorePublicationSource(HANDLE file, const std::filesystem::path& source) {
+    const auto vacancy = WindowsVacantPublicationNameError(source);
+    if (vacancy == ERROR_ALREADY_EXISTS)
+        return; // Never overwrite even an unrelated racing source occupant.
+    if (vacancy != ERROR_SUCCESS)
+        throw std::system_error(static_cast<int>(vacancy),
+                                std::system_category(),
+                                "Could not inspect publication recovery name");
+    struct LinkInformation {
+        BOOLEAN ReplaceIfExists;
+        HANDLE RootDirectory;
+        ULONG FileNameLength;
+        WCHAR FileName[1];
+    };
+    const auto& win32_name = source.native();
+    // Recovery receives the source handle's normalized extended name. Check
+    // before copying; replacing the four-unit prefix does not grow the string.
+    if (win32_name.size() > 32767 || !win32_name.starts_with(L"\\\\?\\"))
+        throw std::system_error(
+            ERROR_INVALID_NAME, std::system_category(), "Invalid bound publication recovery name");
+    auto name = win32_name;
+    // NtSetInformationFile consumes an NT object-manager path, rather than
+    // the Win32 spelling accepted by SetFileInformationByHandle.
+    name.replace(0, 4, L"\\??\\");
+    const auto name_bytes = name.size() * sizeof(wchar_t);
+    const auto record_bytes =
+        (std::max)(sizeof(LinkInformation), offsetof(LinkInformation, FileName) + name_bytes);
+    std::vector<std::byte> storage(record_bytes);
+    auto* link = reinterpret_cast<LinkInformation*>(storage.data());
+    link->ReplaceIfExists = FALSE;
+    link->RootDirectory = nullptr;
+    link->FileNameLength = static_cast<ULONG>(name_bytes);
+    std::memcpy(link->FileName, name.data(), name_bytes);
+    using LinkFunction =
+        NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+    const auto library = ::GetModuleHandleW(L"ntdll.dll");
+    const FARPROC entry = library ? ::GetProcAddress(library, "NtSetInformationFile") : nullptr;
+    const auto set_information = std::bit_cast<LinkFunction>(entry);
+    if (!set_information)
+        throw std::system_error(ERROR_NOT_SUPPORTED,
+                                std::system_category(),
+                                "Publication source recovery is unavailable");
+    IO_STATUS_BLOCK status{};
+    // Native FILE_INFORMATION_CLASS FileLinkInformation (11).
+    if (set_information(file,
+                        &status,
+                        link,
+                        static_cast<ULONG>(record_bytes),
+                        static_cast<FILE_INFORMATION_CLASS>(11)) < 0)
+        throw std::system_error(ERROR_CANNOT_MAKE,
+                                std::system_category(),
+                                "Could not restore publication source link; destination retained");
+}
+
+// The caller holds DELETE access without FILE_SHARE_DELETE. We fix both
+// parents. This excludes another DELETE handle, including FileLinkInformation
+// callers, while the destination is checked and renamed. A different-file racer
+// is refused atomically by ReplaceIfExists = FALSE. NTFS exceptionally accepts a
+// same-file destination and retires one link; the link-count check detects that
+// outcome too, without ever adopting or deleting the pre-existing link.
+inline void WindowsRenameWithoutReplacement(HANDLE file,
+                                            const std::filesystem::path& source,
+                                            const std::filesystem::path& destination) {
+    const WindowsPublicationHandle parent(
+        ::CreateFileW(destination.parent_path().empty() ? L"." : destination.parent_path().c_str(),
+                      FILE_READ_ATTRIBUTES,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      nullptr,
+                      OPEN_EXISTING,
+                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                      nullptr));
+    if (parent.get() == INVALID_HANDLE_VALUE)
+        throw std::system_error(static_cast<int>(::GetLastError()),
+                                std::system_category(),
+                                "Could not bind publication destination parent");
+    const WindowsPublicationHandle source_parent(
+        ::CreateFileW(source.parent_path().empty() ? L"." : source.parent_path().c_str(),
+                      FILE_READ_ATTRIBUTES,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      nullptr,
+                      OPEN_EXISTING,
+                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                      nullptr));
+    if (source_parent.get() == INVALID_HANDLE_VALUE)
+        throw std::system_error(static_cast<int>(::GetLastError()),
+                                std::system_category(),
+                                "Could not bind publication parents");
+    auto bound_destination = WindowsPublicationPath(parent.get()) / destination.filename();
+    bound_destination.make_preferred();
+    const auto original_name = WindowsPublicationPath(file);
+    const auto& name = bound_destination.native();
+    // At most 32767 UTF-16 code units: the rename record is less than 65 KiB.
+    if (name.size() > 32767)
+        throw std::runtime_error("World artifact destination is too long.");
+    const auto name_bytes = name.size() * sizeof(wchar_t);
+    // Win32 also consumes a terminator, excluded from FileNameLength.
+    const auto record_bytes =
+        (std::max)(sizeof(FILE_RENAME_INFO),
+                   offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t));
+    std::vector<std::byte> storage(record_bytes);
+    auto* rename_info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    rename_info->ReplaceIfExists = FALSE;
+    rename_info->RootDirectory = nullptr;
+    rename_info->FileNameLength = static_cast<DWORD>(name_bytes);
+    std::memcpy(rename_info->FileName, name.data(), name_bytes);
+    rename_info->FileName[name.size()] = L'\0';
+    const auto links_before = WindowsPublicationLinkCount(file);
+    const auto vacancy = WindowsVacantPublicationNameError(bound_destination);
+    if (vacancy != ERROR_SUCCESS)
+        throw std::system_error(static_cast<int>(vacancy),
+                                std::system_category(),
+                                "Refusing an occupied or unreadable publication name");
+    if (!::SetFileInformationByHandle(
+            file, FileRenameInfo, rename_info, static_cast<DWORD>(record_bytes)))
+        throw std::system_error(static_cast<int>(::GetLastError()),
+                                std::system_category(),
+                                "Could not exclusively publish world artifact");
+    try {
+        if (WindowsPublicationLinkCount(file) != links_before)
+            throw std::system_error(ERROR_ALREADY_EXISTS,
+                                    std::system_category(),
+                                    "Refusing an existing world artifact alias");
+    } catch (...) {
+        // Even an unreadable/unknown post-rename count cannot convey ownership.
+        WindowsRestorePublicationSource(file, original_name);
+        throw;
+    }
+    const WindowsPublicationHandle published(
+        ::CreateFileW(bound_destination.c_str(),
+                      FILE_READ_ATTRIBUTES,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr,
+                      OPEN_EXISTING,
+                      FILE_FLAG_OPEN_REPARSE_POINT,
+                      nullptr));
+    BY_HANDLE_FILE_INFORMATION retained_info{};
+    BY_HANDLE_FILE_INFORMATION published_info{};
+    if (published.get() == INVALID_HANDLE_VALUE ||
+        !::GetFileInformationByHandle(file, &retained_info) ||
+        !::GetFileInformationByHandle(published.get(), &published_info))
+        throw std::system_error(static_cast<int>(::GetLastError()),
+                                std::system_category(),
+                                "Could not inspect published world artifact identity");
+    if ((retained_info.nFileIndexHigh == 0 && retained_info.nFileIndexLow == 0) ||
+        ((retained_info.dwFileAttributes | published_info.dwFileAttributes) &
+         FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        retained_info.dwVolumeSerialNumber != published_info.dwVolumeSerialNumber ||
+        retained_info.nFileIndexHigh != published_info.nFileIndexHigh ||
+        retained_info.nFileIndexLow != published_info.nFileIndexLow)
+        throw std::system_error(ERROR_INVALID_DATA,
+                                std::system_category(),
+                                "Published world artifact changed identity");
+}
+
 // A successful same-file rename can update the handle name without retiring
 // the original link. Refuse ownership unless that source name is absent; any
 // inspection failure also refuses.
@@ -374,11 +590,42 @@ private:
                         std::end(identity.FileId.Identifier),
                         [](BYTE value) { return value == 0; }))
             throw std::runtime_error("Unknown world artifact retention identity.");
+        // GetFinalPathNameByHandle with VOLUME_NAME_GUID supplies the volume
+        // device name, independent of drive letters, mount points and 8.3 names.
+        // Open that device explicitly: OpenFileById receives a volume handle.
+        // The fixed buffer includes the Win32 path limit's terminating null.
+        std::array<wchar_t, 32768> volume_name{};
+        const auto length = ::GetFinalPathNameByHandleW(file,
+                                                        volume_name.data(),
+                                                        static_cast<DWORD>(volume_name.size()),
+                                                        VOLUME_NAME_GUID | FILE_NAME_NORMALIZED);
+        if (length == 0 || length >= volume_name.size())
+            throw std::system_error(
+                static_cast<int>(length == 0 ? ::GetLastError() : ERROR_FILENAME_EXCED_RANGE),
+                std::system_category(),
+                "Could not resolve world artifact volume");
+        std::wstring volume_path(volume_name.data(), length);
+        const auto separator = volume_path.find(L'\\', 4);
+        if (!volume_path.starts_with(L"\\\\?\\Volume{") || separator == std::wstring::npos)
+            throw std::runtime_error("Unknown world artifact volume name.");
+        volume_path.resize(separator); // CreateFile opens a volume without a trailing slash.
+        const ScopedFile volume(
+            ::CreateFileW(volume_path.c_str(),
+                          0,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          0,
+                          nullptr));
+        if (volume.get() == INVALID_HANDLE_VALUE)
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not open world artifact volume");
         FILE_ID_DESCRIPTOR descriptor{};
         descriptor.dwSize = sizeof(descriptor);
         descriptor.Type = ExtendedFileIdType;
         descriptor.ExtendedFileId = identity.FileId;
-        const auto retained = ::OpenFileById(file,
+        const auto retained = ::OpenFileById(volume.get(),
                                              &descriptor,
                                              FILE_READ_ATTRIBUTES,
                                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -399,16 +646,7 @@ private:
 
 #if defined(_WIN32)
     static std::filesystem::path handle_path(NativeFile file) {
-        // The Win32 extended path limit includes the terminating UTF-16 null.
-        std::array<wchar_t, 32768> name{};
-        const auto length = ::GetFinalPathNameByHandleW(
-            file, name.data(), static_cast<DWORD>(name.size()), FILE_NAME_NORMALIZED);
-        if (length == 0 || length >= name.size())
-            throw std::system_error(
-                static_cast<int>(length == 0 ? ::GetLastError() : ERROR_FILENAME_EXCED_RANGE),
-                std::system_category(),
-                "Could not resolve bound world artifact name");
-        return std::filesystem::path(std::wstring(name.data(), length));
+        return Detail::WindowsPublicationPath(file);
     }
 
     ScopedFile bind_publication_parent(const std::filesystem::path& path) {
@@ -438,24 +676,6 @@ private:
         // record spelling. Preserve UTF-16 throughout.
         auto destination = handle_path(parent.get()) / target.path.filename();
         destination.make_preferred();
-        const auto& name = destination.native();
-        // Windows paths contain at most 32767 UTF-16 code units. Check before
-        // allocating the variable-length native rename record (less than 65 KiB).
-        if (name.size() > 32767)
-            throw std::runtime_error("World artifact destination is too long.");
-        const auto name_bytes = name.size() * sizeof(wchar_t);
-        // FileName is also a null-terminated Win32 string. FileNameLength
-        // excludes that terminator, but the supplied storage must include it.
-        const auto record_bytes =
-            (std::max)(sizeof(FILE_RENAME_INFO),
-                       offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t));
-        std::vector<std::byte> storage(record_bytes);
-        auto* rename_info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
-        rename_info->ReplaceIfExists = FALSE;
-        rename_info->RootDirectory = nullptr;
-        rename_info->FileNameLength = static_cast<DWORD>(name_bytes);
-        std::memcpy(rename_info->FileName, name.data(), name_bytes);
-        rename_info->FileName[name.size()] = L'\0';
         const ScopedFile bound(::CreateFileW(source.path.c_str(),
                                              FILE_READ_ATTRIBUTES | DELETE,
                                              FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -475,11 +695,7 @@ private:
         // runs, binding its opened link through both rename and name inspection.
         // Windows rename can return success for an existing hard-link alias
         // without moving anything. Such a no-op never conveys ownership.
-        if (!::SetFileInformationByHandle(
-                bound.get(), FileRenameInfo, rename_info, static_cast<DWORD>(record_bytes)))
-            throw std::system_error(static_cast<int>(::GetLastError()),
-                                    std::system_category(),
-                                    "Could not exclusively publish world artifact");
+        Detail::WindowsRenameWithoutReplacement(bound.get(), original_name, destination);
         const auto published_name = handle_path(bound.get());
         if (published_name == original_name)
             throw std::system_error(ERROR_ALREADY_EXISTS,
