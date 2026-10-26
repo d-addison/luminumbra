@@ -1567,6 +1567,7 @@ class FrameAttributionWiring(unittest.TestCase):
         native = read(ROOT / "test/common/DeterministicWorkBudget_test.cpp")
         for name in ("EveryPinnedLimitRejectsAnInjectedExcess",
                      "IdleRejectsOneUploadByteAndOneHashByteIndependently",
+                     "TerrainAndWaterUploadWorkAndProgressStayPinned",
                      "LiveSubsystemMovementEditAndDrainStayBounded"):
             self.assertIn("TEST(DeterministicWorkBudget, " + name + ")", native)
         for name in ("DeterministicWorkBudgetMovementEditDrainAndIdle",
@@ -1577,7 +1578,8 @@ class FrameAttributionWiring(unittest.TestCase):
     def test_reviewed_work_budget_data_has_integer_units_and_exact_idle_zero(self):
         data = json.loads(read(ROOT / "test/fixtures/deterministic-work-budgets.json"))
         self.assertEqual(data["schema"], "luminumbra.deterministic_work_budgets.v1")
-        self.assertEqual(set(data["limits"]), {"idle", "foliage", "simulation"})
+        self.assertEqual(set(data["limits"]),
+                         {"idle", "foliage", "simulation", "terrain_upload", "water_upload"})
         for limits in data["limits"].values():
             self.assertTrue(limits)
             for name, limit in limits.items():

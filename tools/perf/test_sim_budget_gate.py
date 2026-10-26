@@ -9,12 +9,16 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
+import sys
 import tempfile
 from typing import Any
 import unittest
 from unittest import mock
 
+# The registered contract also runs with Python isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_sim_budget as capture
 import check_sim_budgets
 import propose_sim_budgets
@@ -100,6 +104,106 @@ def read_budgets(path: Path) -> dict[str, Any]:
 
 
 class SimBudgetGateTests(unittest.TestCase):
+    def test_work_item_extension_is_validated_by_every_capture_consumer(self):
+        reference = self.capture_dir("work-reference")
+        budgets = self.root / "work-budgets.json"
+        emit_budgets(reference, budgets)
+        valid = {"schema": "luminumbra.sim_work.v1", "counters": [
+            {"name": name, "work_trace": [{"tick": tick, "work": tick}
+                                         for tick in range(1, 5)]}
+            for name in capture.WORK_ITEMS]}
+        invalid = [None, {}, {"schema": "luminumbra.sim_work.v2", "counters": []}]
+        for counters in (None, [], valid["counters"][:-1], valid["counters"][::-1],
+                         valid["counters"] + valid["counters"][:1],
+                         [None] + valid["counters"][1:]):
+            invalid.append(dict(valid, counters=counters))
+        for name in capture.WORK_ITEMS:
+            index = capture.WORK_ITEMS.index(name)
+            for trace in (None, [], [{"tick": 1, "work": 1}], [None] * 4,
+                          [{}] * 4):
+                changed = copy.deepcopy(valid)
+                changed["counters"][index]["work_trace"] = trace
+                invalid.append(changed)
+            changed = copy.deepcopy(valid)
+            changed["counters"][index]["name"] = "unknown"
+            invalid.append(changed)
+            for key, values in (("tick", (0, 2, True, "1", None, -1, 2**64)),
+                                ("work", (True, "1", None, -1, 1.5, 2**64))):
+                for value in values:
+                    changed = copy.deepcopy(valid)
+                    changed["counters"][index]["work_trace"][0][key] = value
+                    invalid.append(changed)
+        for index, extension in enumerate([valid] + invalid):
+            with self.subTest(case=index):
+                directory = self.capture_dir(f"work-extension-{index}")
+                path = directory / "default.json"
+                data = sim_budget_io.read_json(path)
+                data["sim_budget"]["work_items"] = extension
+                path.write_text(json.dumps(data), encoding="utf-8")
+                self.assert_workload_acceptance(directory, reference, budgets,
+                                                "work_items", index == 0)
+        # Older v2 evidence remains readable; valid uint64 boundaries and extra
+        # object metadata remain permitted by the additive artifact contract.
+        self.assert_workload_acceptance(reference, reference, budgets, "", True)
+        for work in (0, 2**64 - 1):
+            valid["counters"][0]["work_trace"][0]["work"] = work
+            valid["metadata"] = "diagnostic"
+            capture.validate_work_items(valid, 4)
+
+    def test_work_counter_names_match_all_native_producers(self):
+        root = Path(__file__).resolve().parents[2]
+        header = (root / "src/luminumbra_common/simulation/SimWorkCounters.h").read_text(encoding="utf-8")
+        names = re.search(r'kSimWorkNames\{(.*?)\};', header, re.S).group(1)
+        self.assertEqual(tuple(re.findall(r'"([a-z_]+)"', names)), capture.WORK_ITEMS)
+        server = (root / "src/luminumbra_server/ServerStreamingBudget.h").read_text(encoding="utf-8")
+        session = (root / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
+        declared = re.search(r'enum class SimWork[^\{]*\{(.*?)Count', header, re.S).group(1)
+        counters = re.findall(r'\b([A-Z][A-Za-z]+)\s*,', declared)
+        self.assertEqual(len(counters), len(capture.WORK_ITEMS))
+        for counter in counters:
+            self.assertEqual((server + session).count(f"RecordWork(SimWork::{counter},"), 1)
+
+    def test_deterministic_work_fixtures_and_existing_registration_stay_pinned(self):
+        root = Path(__file__).resolve().parents[2]
+        fixture = read_budgets(root / "test/fixtures/deterministic-work-budgets.json")
+        self.assertEqual(fixture["schema"], "luminumbra.deterministic_work_budgets.v1")
+        self.assertEqual(fixture["limits"], {
+            "idle": dict(uploaded_bytes=0, hashed_bytes=0, uploads=0, surface_misses=0,
+                         surface_samples=0, deferred_columns=0),
+            "foliage": dict(surface_misses=4, surface_samples=32768, uploaded_bytes=2700000,
+                            uploads=4, copied_bytes=5400000, hashed_bytes=0, deferred_columns=5,
+                            backlog_growth=5, drain_steps=3),
+            "simulation": dict(water_cells=64, streaming_generation=64, streaming_meshing=64,
+                               physics_bodies=1, physics_characters=2, active_region_records=18,
+                               active_region_due=18, snapshot_copies=128, activation_queries=5,
+                               backlog=128, backlog_growth=64, drain_steps=64),
+            "terrain_upload": dict(uploaded_bytes=4194304, uploads=8, backlog=17,
+                                   backlog_growth=17, drain_steps=3),
+            "water_upload": dict(uploaded_bytes=1048576, uploads=4, backlog=17,
+                                 backlog_growth=17, drain_steps=5),
+        })
+        registration = (root / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = re.sub(r"#[^\n]*", "", registration)
+        common = cmake.split("add_executable(common_tests", 1)[1].split(")", 1)[0]
+        self.assertIn("common/DeterministicWorkBudget_test.cpp", common)
+        native = (root / "test/common/DeterministicWorkBudget_test.cpp").read_text(encoding="utf-8")
+        for name in ("EveryPinnedLimitRejectsAnInjectedExcess",
+                     "IdleRejectsOneUploadByteAndOneHashByteIndependently",
+                     "TerrainAndWaterUploadWorkAndProgressStayPinned",
+                     "LiveSubsystemMovementEditAndDrainStayBounded"):
+            self.assertIn(f"TEST(DeterministicWorkBudget, {name})", native)
+        self.assertIn('COMMAND "${Python3_EXECUTABLE}" -I -B '
+                      '"${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py"', registration)
+        ci_paths = (root / "tools/ci/ci_paths.py").read_text(encoding="utf-8")
+        tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
+        self.assertIn('"tools/perf/test_sim_budget_gate.py"', tests)
+        foliage = (root / "test/rendering/foliage_rebuild_test.cpp").read_text(encoding="utf-8")
+        for name in ("DeterministicWorkBudgetMovementEditDrainAndIdle",
+                     "OutdatedRevisionReadbackIsDiscardedBeforeAdoption"):
+            self.assertIn(f"TEST_F(FoliageRebuildTest, {name})", foliage)
+        passes = cmake.split("add_executable(pass_context_test", 1)[1].split(")", 1)[0]
+        self.assertIn("rendering/foliage_rebuild_test.cpp", passes)
+
     def test_preset_identity_is_preserved_and_enforced(self):
         before = self.capture_dir("preset-before", overrides={"preset_hash": FIXTURE_HASH})
         after = self.capture_dir("preset-after", overrides={"preset_hash": ZERO_HASH})

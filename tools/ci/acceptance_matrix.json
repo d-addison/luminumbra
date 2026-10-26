@@ -3,6 +3,40 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "ci.deterministic-work-budgets",
+      "source": "docs/deterministic-work-budgets.md",
+      "statement": "Issue #396 uses pinned integer work ceilings in the existing native suites for foliage idle, dirty sampling, copies, transfers, simulation counters, activation, backlog growth and eventual drain. Terrain and water upload policy fixtures attain their pinned byte/count/backlog/drain ceilings without graphics calls or clock reads and require current queued revisions. SimBudgetGateContract pins fixture values, counter producers and registration; all capture consumers refuse malformed work-item extensions while accepting older artifacts that omit them. Native execution remains pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetGateContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DeterministicWorkBudget.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.DeterministicWorkBudgetMovementEditDrainAndIdle"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.OutdatedRevisionReadbackIsDiscardedBeforeAdoption"
+        },
+        {
+          "kind": "script",
+          "ref": "test/fixtures/deterministic-work-budgets.json"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/deterministic-work-budgets.md",
+          "planned": "Run the registered native work-budget and foliage fixtures on standard CI; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "profiler.build-contract",
       "source": "issue #433",
       "statement": "Static source contracts require the existing Linux/GCC GNS compile job to configure the profile preset and build the common library, server, shipping client, QA client and both macro fixtures against pinned Tracy. The bootstrap installs NumPy and Pillow before enabling tests. Disposable TCP accept attempts retain job and future-wait zones without process-lifetime thread-name registration; persistent workers remain named. The licence disclosure links to the repository-hosted notice from generated documentation. Enabled native compile/link qualification is pending a successful CI run; no local profile configure or application build is claimed. Windows and macOS enabled builds, profiler captures and GPU execution remain outside this check. Release/perf lanes retain Tracy disabled.",
