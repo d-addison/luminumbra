@@ -40,7 +40,7 @@
 #include <cstdint>
 #include <vector>
 
-#include <entt/entt.hpp>
+#include <entt/entity/registry.hpp>
 
 #include "../components/CoreComponents.h"     // TransformComponent
 #include "../components/CreatureComponents.h" // CreatureComponent

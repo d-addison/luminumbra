@@ -13,6 +13,8 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/ci/test_rmlui_source.py",
+    "tools/ci/test_local_rmlui_recipe.py",
     "tools/gates/test_station_discovery.py",
     "tools/gates/test_common_library_isa.py",
     "test/tools/test_runtime_config_contract.py",
@@ -75,6 +77,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
     "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
     "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
@@ -202,10 +205,20 @@ def needs_cpp(path: str) -> bool:
     return True
 
 
+RMLUI_CALLER_INPUTS = frozenset({
+    "CMakePresets.json", "tools/gates/run-coverage.ps1", "tools/gates/validate-engine-frontier.ps1",
+    "README.md", "CONTRIBUTING.md", "docs/development.md", "docs/static-morph-assets.md",
+    "docs/performance.md", "docs/index.md", "docs/known-limitations.md", "docs/static-preview.md",
+    "docs/dependency-source.md", "docs/ci/local-checks.md", "tools/prefab_runtime/README.md",
+})
+
+
 def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
-    return path.endswith(".py") or path.startswith(CI_PREFIXES)
+    return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
+            or path == "vendor/rmlui/rmlui-6.1-source.json"
+            or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 
 
 def changed_paths(root: Path, base: str, head: str) -> list[str]:

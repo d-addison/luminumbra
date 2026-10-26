@@ -23,6 +23,10 @@ docs/evidence/blender-presentation-20260913/*.json -text
 docs/visual-catalog*.json text eol=lf
 docs/assets/visual-baselines/20260908/*.json text eol=lf
 
+# Reviewed dependency inputs and delivery code have byte-bound identities.
+cmake/patches/rmlui-* text eol=lf
+vendor/rmlui/rmlui-6.1-source.json text eol=lf
+tools/ci/rmlui_source.py text eol=lf
 # Jolt overlay identities hash materialized bytes on every checkout.
 cmake/patches/jolt-startup.json text eol=lf
 cmake/patches/jolt-startup.patch text eol=lf
