@@ -919,8 +919,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
             "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
-            # Require all three offline-dependency partitions in local-check evidence.
-            "linux": "449d5b0b5082349470a9e065221f45694d7bfdc473cd476e0ff07bb13ef8e170",
+            # Require all three offline-dependency partitions in local-check evidence
+            # and stage the delivered RmlUi revision as the fixtures' offline input.
+            "linux": "71ba46c1d8b07b4dd2778f5d1b9b8a30f55f11f6a6486ef678a7b2087b86ba0f",
             "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin the selected Python, partitioned local checks, render failure symbols and shard-1-only Python contracts.

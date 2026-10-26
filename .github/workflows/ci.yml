@@ -245,6 +245,24 @@ jobs:
         with:
           path: ~/.cache/ccache
           key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+      - name: Stage the pristine RmlUi fixture input
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        run: |
+          # Lend the RmlUi test fixtures the revision this build already delivered
+          # instead of letting each suite fetch it again over the network. The
+          # pristine tree is the committed HEAD of the delivered source, extracted
+          # through a private index so the delivery itself is never touched.
+          python3 -I -B tools/ci/rmlui_source.py verify --root build/release
+          source_dir="$(find build/release/_deps -mindepth 1 -maxdepth 1 -type d -name 'rmlui-*-src')"
+          test "$(printf '%s\n' "$source_dir" | wc -l)" = 1
+          root="$RUNNER_TEMP/rmlui-fixture"
+          rm -rf "$root"
+          mkdir -p "$root/pristine"
+          GIT_INDEX_FILE="$root/index" git -C "$source_dir" read-tree HEAD
+          GIT_INDEX_FILE="$root/index" git -C "$source_dir" checkout-index -a --prefix="$root/pristine/"
+          rm -f "$root/index"
+          # The fixtures require the input directly under the private TMPDIR.
+          { echo "TMPDIR=$root"; echo "LUMINUMBRA_RMLUI_TEST_SOURCE=$root/pristine"; } >> "$GITHUB_ENV"
       - name: Test
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: tests
