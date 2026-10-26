@@ -293,6 +293,7 @@ bool BeforePublish(const std::filesystem::path& source, const std::filesystem::p
     if (active->boundary == Boundary::PublicationLinkedOccupant) {
         active->fired = true;
         std::filesystem::create_hard_link(source, destination);
+        EXPECT_TRUE(std::filesystem::equivalent(source, destination));
     }
     if (active->boundary == Boundary::PublicationSourceMissing) {
         active->fired = true;
@@ -517,10 +518,12 @@ HANDLE WINAPI Open(LPCWSTR path,
         return INVALID_HANDLE_VALUE;
     }
     if (active && !active->fired && (access & DELETE) != 0 && active->target != path) {
-        // Source disappearance/replacement occurs before binding for rename.
-        // Destination collisions below occur at the rename syscall itself.
+        // Create the alias before the DELETE handle denies delete sharing.
+        // Hard-link creation opens the source too; injecting it inside the
+        // rename callback would test that sharing conflict instead of an alias.
         if (active->boundary == Boundary::PublicationSourceMissing ||
-            active->boundary == Boundary::PublicationSourceReplaced)
+            active->boundary == Boundary::PublicationSourceReplaced ||
+            active->boundary == Boundary::PublicationLinkedOccupant)
             BeforePublish(path, active->target);
         if (Fail(Boundary::PublicationBindingDenied)) {
             ::SetLastError(ERROR_ACCESS_DENIED);
@@ -1006,6 +1009,9 @@ TEST_F(CreatedWorldCleanup, RefusedPublicationNeverClaimsARacingHardLinkToTheSou
     Arm(destination, NativeRace::Boundary::PublicationLinkedOccupant);
     EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
     ASSERT_TRUE(Race().fired);
+    ASSERT_TRUE(std::filesystem::exists(temp));
+    ASSERT_TRUE(std::filesystem::exists(destination));
+    ASSERT_TRUE(std::filesystem::equivalent(temp, destination));
     EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
     EXPECT_EQ(Read(temp), "owned bytes\n");
     EXPECT_EQ(Read(destination), "owned bytes\n");

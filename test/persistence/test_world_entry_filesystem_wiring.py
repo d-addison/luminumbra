@@ -69,6 +69,23 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertIn("UnreadablePublicationSourceNeverClaimsTheDestination", native)
         self.assertIn("RefusedPublicationNeverClaimsARacingHardLinkToTheSource", native)
 
+    def test_windows_link_collision_is_created_before_delete_sharing_is_denied(self):
+        native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
+            encoding="utf-8")
+        opening = body(native[native.rindex("HANDLE WINAPI Open("):], "HANDLE WINAPI Open(")
+        binding = opening.index("(access & DELETE) != 0")
+        collision = opening.index("active->boundary == Boundary::PublicationLinkedOccupant",
+                                  binding)
+        self.assertLess(collision, opening.index("BeforePublish(path, active->target)", binding))
+        self.assertLess(collision, opening.index("return ::CreateFileW("))
+        hook = body(native, "bool BeforePublish(")
+        self.assertIn("std::filesystem::create_hard_link(source, destination)", hook)
+        self.assertIn("EXPECT_TRUE(std::filesystem::equivalent(source, destination))", hook)
+        regression = body(native, "TEST_F(CreatedWorldCleanup, "
+                          "RefusedPublicationNeverClaimsARacingHardLinkToTheSource)")
+        self.assertLess(regression.index("std::filesystem::equivalent(temp, destination)"),
+                        regression.index("artifacts.rollback()"))
+
     def test_native_rename_name_comes_from_bound_parent_and_has_checked_storage(self):
         publication = body(self.journal, "void publish_windows(")
         self.assertIn("handle_path(parent.get()) / target.path.filename()", publication)
