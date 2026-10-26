@@ -166,7 +166,8 @@ enum class Boundary : std::uint8_t {
     PublicationParentReplaced,
     PublicationSourceParentReplaced,
     PublicationParentMissing,
-    PublicationFinalNameMismatch
+    PublicationFinalNameMismatch,
+    PublicationSourceInspectionFailure
 };
 struct Replacement {
     std::filesystem::path target;
@@ -178,6 +179,7 @@ struct Replacement {
     std::filesystem::path restore_occupant;
     std::filesystem::path publication_source;
     bool restore_blocked = false;
+    bool publication_completed = false;
 #if defined(_WIN32)
     BY_HANDLE_FILE_INFORMATION identity{};
     HANDLE pending_close = INVALID_HANDLE_VALUE;
@@ -503,6 +505,12 @@ HANDLE WINAPI Open(LPCWSTR path,
                    DWORD flags,
                    HANDLE template_file) {
     auto* active = Active();
+    if (active && active->publication_completed && access == FILE_READ_ATTRIBUTES &&
+        flags == FILE_FLAG_OPEN_REPARSE_POINT &&
+        Fail(Boundary::PublicationSourceInspectionFailure)) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
     if (active && active->target.parent_path() == path && (share & FILE_SHARE_DELETE) == 0 &&
         Fail(Boundary::PublicationParentDenied)) {
         ::SetLastError(ERROR_ACCESS_DENIED);
@@ -578,7 +586,10 @@ BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DW
             throw std::runtime_error("Could not inspect bound publication source.");
         if (!BeforePublish(std::filesystem::path(std::wstring(source.data(), length)), destination))
             return FALSE;
-        return ::SetFileInformationByHandle(file, kind, info, bytes);
+        const auto result = ::SetFileInformationByHandle(file, kind, info, bytes);
+        if (active && result)
+            active->publication_completed = true;
+        return result;
     }
     BY_HANDLE_FILE_INFORMATION identity{};
     if (::GetFileInformationByHandle(file, &identity) &&
@@ -1200,6 +1211,24 @@ TEST_F(CreatedWorldCleanup, UncertainPublicationNameNeverDeletesThePublishedByte
     EXPECT_EQ(Read(destination), "owned bytes\n");
     EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
     EXPECT_EQ(Read(destination), "owned bytes\n");
+    artifacts.release();
+    EXPECT_EQ(Read(destination), "owned bytes\n");
+}
+
+TEST_F(CreatedWorldCleanup, UnreadablePublicationSourceNeverClaimsTheDestination) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.create_root(save);
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    Arm(destination, NativeRace::Boundary::PublicationSourceInspectionFailure);
+    EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_FALSE(std::filesystem::exists(temp));
+    EXPECT_EQ(Read(destination), "owned bytes\n");
+    EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
     artifacts.release();
     EXPECT_EQ(Read(destination), "owned bytes\n");
 }

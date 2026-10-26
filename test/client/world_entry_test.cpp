@@ -972,7 +972,8 @@ TEST(WorldEntryWiring, CreateAndLoadCallbacksOnlyRecordRequests) {
             EXPECT_EQ(callback.find(heavy), std::string::npos) << heavy;
     }
     const auto loading = source.find("case GameState::WORLD_LOADING:");
-    const auto present = source.find("glfwSwapBuffers(window);", loading);
+    const auto present = source.find(
+        "LUMIN_PROFILE_WAIT(\"Client present wait\", glfwSwapBuffers(window));", loading);
     const auto painted = source.find("world_entry.loading_painted();");
     ASSERT_NE(present, std::string::npos);
     ASSERT_NE(painted, std::string::npos);

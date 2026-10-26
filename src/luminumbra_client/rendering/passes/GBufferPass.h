@@ -6,9 +6,9 @@
 #include "../RenderContext.h" // per-frame pass contract (RenderContext)
 #include "../RenderInputs.h"  // GBufferPassInput / GBufferDrawStats
 
-#include <entt/entt.hpp> // entt::registry& execute param (un-fwd-declarable typedef)
-#include <glad/glad.h>   // GLuint for the owned VBO/VAO/SSBO members
-#include <glm/glm.hpp>   // glm::vec3/vec4/mat4 in the cached-prop structs
+#include <entt/entity/registry.hpp> // entt::registry& execute param
+#include <glad/glad.h>              // GLuint for the owned VBO/VAO/SSBO members
+#include <glm/glm.hpp>              // glm::vec3/vec4/mat4 in the cached-prop structs
 
 #include <cstddef>
 #include <cstdint>
@@ -40,7 +40,7 @@ class RenderResourceRegistry;
 // live-terrain submit callback, far-LOD system, root path, static-model UV
 // texture lane and tree-impostor bundle arrive via GBufferPassInput. No
 // RenderPipeline& and no `friend` reach. entt::registry& is a separate param
-// (its type is an un-fwd-declarable typedef).
+// (the official entity/fwd.hpp header declares the registry alias).
 class GBufferPass {
 public:
     GBufferPass();

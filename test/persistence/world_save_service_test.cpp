@@ -2,6 +2,7 @@
 #include "gtest/gtest.h"
 
 #include "../support/CalendarMetadataCases.h"
+#include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
 
 #include "core/FilesystemPath.h"
@@ -328,6 +329,79 @@ TEST(WorldSaveService, FirstSnapshotRefusesUnflushedAncestorAndRepeatsOnRetry) {
     std::vector<std::string> errors;
     ASSERT_TRUE(service.load_world(loaded, save_dir.path(), errors));
     EXPECT_EQ(service.world_hash(state), service.world_hash(loaded));
+}
+
+class RacingStagingAlias {
+public:
+    explicit RacingStagingAlias(const std::filesystem::path& destination) {
+        Target() = destination;
+        Injected() = false;
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(&Publish);
+    }
+    ~RacingStagingAlias() {
+        Reset();
+    }
+    static void Reset() {
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+    }
+    static bool& Injected() {
+        static bool injected = false;
+        return injected;
+    }
+
+private:
+    static std::filesystem::path& Target() {
+        static std::filesystem::path target;
+        return target;
+    }
+    static bool Publish(const std::filesystem::path& destination, bool removing) {
+        if (removing || destination != Target())
+            return true;
+        std::filesystem::path staged;
+        std::size_t inspected = 0;
+        // Private fixture: source, staging file and at most one publication.
+        for (const auto& entry : std::filesystem::directory_iterator(destination.parent_path())) {
+            if (++inspected > 3) {
+                ADD_FAILURE() << "Unexpected publication fixture entry";
+                return false;
+            }
+            const auto prefix =
+                destination.filename().native() + std::filesystem::path(".tmp.").native();
+            if (entry.path().filename().native().starts_with(prefix)) {
+                EXPECT_TRUE(staged.empty());
+                staged = entry.path();
+            }
+        }
+        EXPECT_FALSE(staged.empty());
+        if (staged.empty())
+            return false;
+        std::filesystem::create_hard_link(staged, destination);
+        Injected() = true;
+        return true;
+    }
+};
+
+TEST(WorldSaveService, RacingStagingAliasNeverTransfersPublicationOwnership) {
+    for (const bool rename_source : {false, true}) {
+        SCOPED_TRACE(rename_source);
+        const TempSaveDir save_dir("racing_staging_alias");
+        const auto source = save_dir.path() / "source";
+        const auto destination = save_dir.path() / "destination";
+        ASSERT_TRUE(WorldSaveService::create_file_durably(source, "original bytes"));
+        const RacingStagingAlias race(destination);
+        if (rename_source)
+            EXPECT_FALSE(WorldSaveService::rename_file_durably(
+                source, destination, "original bytes", "racing bytes"));
+        else
+            EXPECT_FALSE(WorldSaveService::create_file_durably(destination, "racing bytes"));
+        RacingStagingAlias::Reset();
+        ASSERT_TRUE(RacingStagingAlias::Injected());
+        EXPECT_EQ(ReadFileBytes(source), "original bytes");
+        EXPECT_EQ(ReadFileBytes(destination), "racing bytes");
+        ASSERT_TRUE(std::filesystem::remove(destination));
+        ASSERT_TRUE(WorldSaveService::create_file_durably(destination, "retry bytes"));
+        EXPECT_EQ(ReadFileBytes(destination), "retry bytes");
+    }
 }
 
 TEST(WorldSaveService, NewPublicationFlushFailureRollsBackAndCanRetry) {

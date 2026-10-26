@@ -44,6 +44,29 @@
 
 namespace Luminumbra::Persistence {
 
+#if defined(_WIN32)
+namespace Detail {
+// A successful same-file rename can update the handle name without retiring
+// the original link. Refuse ownership unless that source name is absent; any
+// inspection failure also refuses.
+inline DWORD WindowsRenameSourceRetirementError(const std::filesystem::path& source) {
+    const auto remaining = ::CreateFileW(source.c_str(),
+                                         FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                         nullptr,
+                                         OPEN_EXISTING,
+                                         FILE_FLAG_OPEN_REPARSE_POINT,
+                                         nullptr);
+    if (remaining != INVALID_HANDLE_VALUE) {
+        ::CloseHandle(remaining);
+        return ERROR_ALREADY_EXISTS;
+    }
+    const auto error = ::GetLastError();
+    return error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : error;
+}
+} // namespace Detail
+#endif
+
 // A journal for one exclusively created save. Writers reserve vacant names
 // before publishing, including temporary files; absent names need no cleanup.
 // Loading never populates this journal. Call rollback only after draining all
@@ -462,6 +485,13 @@ private:
             throw std::system_error(ERROR_ALREADY_EXISTS,
                                     std::system_category(),
                                     "Refusing an existing world artifact alias");
+        // The bound source denies delete sharing and both parents stay fixed
+        // through rename and the original-link inspection.
+        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(source.path);
+        if (retirement_error != ERROR_SUCCESS)
+            throw std::system_error(static_cast<int>(retirement_error),
+                                    std::system_category(),
+                                    "Could not confirm world artifact source retirement");
         // A move to any other name does not publish the reserved destination.
         // Leave its identity unclaimed and preserve the bytes for recovery.
         if (published_name != destination)
