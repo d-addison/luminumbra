@@ -4,6 +4,7 @@
 #include "app/WindowModeControls.h"
 
 #include "core/Log.h"
+#include "rendering/PixelIo.h"
 
 #include <algorithm>
 #include <fstream>
@@ -127,51 +128,12 @@ void ToggleFullscreen(GLFWwindow* window, WindowState& state) {
     ApplyWindowMode(window, state, next);
 }
 
-// Write a downscaled 24-bit uncompressed TGA thumbnail of a captured frame. `rgb` is the
-// glReadPixels buffer (bottom-up, RGB); TGA with descriptor=0 is bottom-up origin too, so the
-// rows map directly. RmlUi's GL3 backend only decodes TGA, so the gallery thumbs are TGA. The
-// downscale is nearest-neighbour (thumbnails don't need filtering) and keeps a small on-disk size.
 bool WriteCaptureThumbnailTga(const std::filesystem::path& path,
                               int srcW,
                               int srcH,
                               const std::vector<unsigned char>& rgb,
                               int maxDim) {
-    if (srcW <= 0 || srcH <= 0 || rgb.size() < static_cast<std::size_t>(srcW) * srcH * 3u)
-        return false;
-    const float scale =
-        std::min(1.0f, static_cast<float>(maxDim) / static_cast<float>(std::max(srcW, srcH)));
-    const int dstW = std::max(1, static_cast<int>(static_cast<float>(srcW) * scale));
-    const int dstH = std::max(1, static_cast<int>(static_cast<float>(srcH) * scale));
-    std::vector<unsigned char> bgr(static_cast<std::size_t>(dstW) * dstH * 3u);
-    for (int y = 0; y < dstH; ++y) {
-        const int sy =
-            std::min(srcH - 1, static_cast<int>((static_cast<float>(y) + 0.5f) / dstH * srcH));
-        for (int x = 0; x < dstW; ++x) {
-            const int sx =
-                std::min(srcW - 1, static_cast<int>((static_cast<float>(x) + 0.5f) / dstW * srcW));
-            const unsigned char* s = &rgb[(static_cast<std::size_t>(sy) * srcW + sx) * 3u];
-            unsigned char* d = &bgr[(static_cast<std::size_t>(y) * dstW + x) * 3u];
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0]; // RGB -> BGR
-        }
-    }
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream out(path, std::ios::binary);
-    if (!out)
-        return false;
-    unsigned char hdr[18] = {0};
-    hdr[2] = 2; // uncompressed true-color
-    hdr[12] = static_cast<unsigned char>(dstW & 0xFF);
-    hdr[13] = static_cast<unsigned char>((dstW >> 8) & 0xFF);
-    hdr[14] = static_cast<unsigned char>(dstH & 0xFF);
-    hdr[15] = static_cast<unsigned char>((dstH >> 8) & 0xFF);
-    hdr[16] = 24; // bits per pixel
-    hdr[17] = 0;  // descriptor: bottom-up origin (matches the GL buffer)
-    out.write(reinterpret_cast<const char*>(hdr), 18);
-    out.write(reinterpret_cast<const char*>(bgr.data()), static_cast<std::streamsize>(bgr.size()));
-    return static_cast<bool>(out);
+    return Luminumbra::Rendering::WritePixelBufferThumbnailTga(path, srcW, srcH, rgb, maxDim);
 }
 
 } // namespace Luminumbra::Client::App

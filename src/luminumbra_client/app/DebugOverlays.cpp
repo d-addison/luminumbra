@@ -40,7 +40,6 @@
 namespace Luminumbra::Client::App {
 
 using namespace Luminumbra::Client::ScenarioHarness;
-using Luminumbra::Rendering::WritePixelBufferPpm;
 
 namespace {
 
@@ -549,45 +548,45 @@ void UpdatePhotoCapture(ClientAppContext& app,
             if (is_discovery && audioManager)
                 audioManager->PlayOneShot2D("discovery", Luminumbra::Client::BusId::Events);
 
-            // Persist the framebuffer (PPM) + a verdict sidecar.
-            std::error_code _photo_ec;
-            const std::filesystem::path photo_dir = std::filesystem::path(root_path_str) / "photos";
-            std::filesystem::create_directories(photo_dir, _photo_ec);
-            const std::string stamp = "photo-" + std::to_string(app.hud.photoMode.captures);
-            if (cap_w > 0 && cap_h > 0) {
-                std::vector<unsigned char> px(static_cast<std::size_t>(cap_w) *
-                                              static_cast<std::size_t>(cap_h) * 3u);
+            // Score and discovery are independent of whether persistence succeeds.
+            std::size_t photo_bytes = 0;
+            std::vector<unsigned char> px;
+            bool readback_ok = false;
+            if (Luminumbra::Rendering::CapturePixelBytes(cap_w, cap_h, 3, photo_bytes)) {
+                px.resize(photo_bytes);
                 glReadBuffer(GL_BACK);
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                 glReadPixels(0, 0, cap_w, cap_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                WritePixelBufferPpm(photo_dir / (stamp + ".ppm"), cap_w, cap_h, px);
-                // Also drop a small TGA thumbnail where the gallery can load it
-                // (RmlUi decodes TGA only). The gallery enumerates these on
-                // open.
-                WriteCaptureThumbnailTga(
-                    std::filesystem::path(root_path_str) / "data" / "ui" / "captures" /
-                        ("cap_" + std::to_string(app.hud.photoMode.captures) + ".tga"),
-                    cap_w,
-                    cap_h,
-                    px,
-                    512);
+                readback_ok = glGetError() == GL_NO_ERROR;
             }
             luminumbra::game::PhotoSidecar side;
-            side.stamp = stamp;
             side.verdict = verdict;
             side.species_id = shot.main_species_id;
             side.lens = app.hud.photoMode.lens;
             side.observation = shot.observation; // behaviour/time/light context
-            std::ofstream sidecar(photo_dir / (stamp + ".photo.json"),
-                                  std::ios::binary | std::ios::trunc);
-            if (sidecar) {
-                const std::string json = luminumbra::game::SerializePhotoSidecar(side);
-                sidecar.write(json.data(), static_cast<std::streamsize>(json.size()));
+            const int saved_id =
+                readback_ok ? Luminumbra::Rendering::PersistPhotoCapture(
+                                  root_path_str, app.hud.photoMode.captures, cap_w, cap_h, px, side)
+                            : 0;
+            if (saved_id > 0) {
+                LUMINUMBRA_CORE_INFO("Photo captured: {} stars (total {}), saved photo-{}",
+                                     verdict.stars,
+                                     verdict.total,
+                                     saved_id);
+            } else {
+                LUMINUMBRA_CORE_ERROR("Photo capture could not be saved");
             }
-            LUMINUMBRA_CORE_INFO("Photo captured: {} stars (total {}), saved {}",
-                                 verdict.stars,
-                                 verdict.total,
-                                 stamp);
+            if (uiManager && uiManager->GetContext()) {
+                if (auto* doc = uiManager->GetContext()->GetDocument("photo_mode")) {
+                    if (auto* note = doc->GetElementById("verdict_note")) {
+                        if (saved_id <= 0) {
+                            note->SetInnerRML(
+                                "Photo could not be saved. Check the output directory.");
+                            note->SetClass("verdict-discovery", false);
+                        }
+                    }
+                }
+            }
         }
     }
 }

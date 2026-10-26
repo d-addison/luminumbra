@@ -1,4 +1,6 @@
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_client/rendering/PixelIo.h"
+#include "luminumbra_common/game/PhotoMode.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -1752,6 +1754,8 @@ void CheckCaptureGalleryContentPolicy() {
         fs::copy_file(SourceRoot() / "data/ui/fixtures/captures/cap_1.tga",
                       thumbs / ("cap_" + std::to_string(number) + ".tga"));
 
+    for (const auto* name : {"cap_0.tga", "cap_01.tga", "cap_3junk.tga", "cap_2147483648.tga"})
+        fs::copy_file(SourceRoot() / "data/ui/fixtures/captures/cap_1.tga", thumbs / name);
     const HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
     Luminumbra::Client::Rml_UIManager ui(root.path().string() + "/");
@@ -1770,8 +1774,16 @@ void CheckCaptureGalleryContentPolicy() {
         gallery->GetElementsByClassName(favorites, "photo-fav");
         EXPECT_EQ(favorites.size(), expected_favorites);
     };
-    // Positive control: ordinary play still reads the saved rating.
-    inspect(6, 1);
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-1.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-1.photo.json",
+                                                        "{\"stamp\":\"photo-1\",\"stars\":5}"));
+    // Admit complete historical photos as well as published captures; partial
+    // legacy artifacts stay hidden.
+    luminumbra::game::PhotoSidecar side;
+    side.verdict.stars = 5;
+    ASSERT_EQ(Luminumbra::Rendering::PersistPhotoCapture(root.path(), 7, 1, 1, {1, 2, 3}, side), 7);
+    inspect(2, 2);
     auto& policy = Luminumbra::Filesystem::capture_content_paths();
     policy.enable(root.path());
     inspect(6, 0);

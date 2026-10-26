@@ -17,6 +17,10 @@
 #include <string_view>
 #include <vector>
 
+namespace luminumbra::game {
+struct PhotoSidecar;
+}
+
 namespace Luminumbra::Rendering {
 
 // All capture buffers are bounded by 64M pixels. Check before allocation or
@@ -41,7 +45,9 @@ inline bool FlushCaptureStream(std::ostream& output) {
     output.flush();
     return static_cast<bool>(output);
 }
-inline bool CloseCaptureFile(std::ofstream& output) {
+// Also accepts other owning output streams with flush(), close() and stream state.
+template<typename OutputFile>
+inline bool CloseCaptureFile(OutputFile& output) {
     const bool flushed = FlushCaptureStream(output);
     output.close();
     return flushed && static_cast<bool>(output);
@@ -64,5 +70,59 @@ bool WritePixelBufferPpm(const std::filesystem::path& path,
                          int width,
                          int height,
                          const std::vector<unsigned char>& pixels);
+
+// Stream serializers share the same validation and write checks as file output.
+bool WritePixelBufferPpmStream(std::ostream& output,
+                               int width,
+                               int height,
+                               const std::vector<unsigned char>& pixels);
+bool WritePixelBufferThumbnailTgaStream(std::ostream& output,
+                                        int width,
+                                        int height,
+                                        const std::vector<unsigned char>& pixels,
+                                        int max_dimension);
+
+// Complete a group of owning streams, checking every open, write, flush and
+// close. Close every opened output even when an earlier operation failed, then
+// invoke the publisher only when all outputs completed.
+template<typename OutputFile, typename Publish>
+bool WritePhotoCaptureFiles(OutputFile& image,
+                            OutputFile& thumbnail,
+                            OutputFile& sidecar,
+                            int width,
+                            int height,
+                            const std::vector<unsigned char>& pixels,
+                            std::string_view metadata,
+                            const Publish& publish) {
+    const bool opened = image && thumbnail && sidecar;
+    const bool written =
+        opened && WritePixelBufferPpmStream(image, width, height, pixels) &&
+        WritePixelBufferThumbnailTgaStream(thumbnail, width, height, pixels, 512) &&
+        WriteCaptureStream(sidecar, metadata);
+    const bool image_closed = CloseCaptureFile(image);
+    const bool thumbnail_closed = CloseCaptureFile(thumbnail);
+    const bool sidecar_closed = CloseCaptureFile(sidecar);
+    return written && image_closed && thumbnail_closed && sidecar_closed && publish();
+}
+
+// Required photo artifacts use exclusively reserved directories. A successful
+// capture publishes its completion directory only after every output has closed.
+// Returns the reserved positive id, or zero on refusal. Never removes old files.
+int PersistPhotoCapture(const std::filesystem::path& root,
+                        int first_id,
+                        int width,
+                        int height,
+                        const std::vector<unsigned char>& pixels,
+                        const luminumbra::game::PhotoSidecar& side);
+// Legacy flat files are admitted only when every required artifact is complete.
+bool ReadCompletedPhotoCapture(const std::filesystem::path& root,
+                               int id,
+                               int& stars,
+                               bool legacy = false);
+bool WritePixelBufferThumbnailTga(const std::filesystem::path& path,
+                                  int width,
+                                  int height,
+                                  const std::vector<unsigned char>& pixels,
+                                  int max_dimension);
 
 } // namespace Luminumbra::Rendering

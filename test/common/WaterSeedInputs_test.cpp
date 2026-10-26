@@ -492,7 +492,175 @@ TEST(WaterSeedInputs, SavedUltraChunkRestoresAndMigratesWithoutSelectingUltraSes
         const auto cells =
             static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
         EXPECT_EQ(loaded.water_depth_mm, (std::vector<std::int32_t>(cells, 1000)));
+        EXPECT_EQ(loaded.water_bed_mm, (std::vector<std::int32_t>(cells, 1000)));
         EXPECT_EQ(world.MigrateWaterSimResolution(), 0u);
+    }
+}
+
+// An independent Q8 coordinate oracle: round the whole coordinate first, then
+// form its four weights. Signed rounding is expressed through quotient/remainder.
+std::vector<std::int32_t>
+MigratedWaterOracle(const std::vector<std::int32_t>& source, int old_res, int new_res) {
+    std::vector<std::int32_t> result(static_cast<std::size_t>(new_res * new_res));
+    for (int z = 0; z < new_res; ++z) {
+        for (int x = 0; x < new_res; ++x) {
+            const auto coordinate = [=](int value) {
+                return (2 * value * (old_res - 1) * 256 + new_res - 1) / (2 * (new_res - 1));
+            };
+            const int qx = coordinate(x);
+            const int qz = coordinate(z);
+            std::int64_t sum = 0;
+            for (int dz = 0; dz != 2; ++dz) {
+                for (int dx = 0; dx != 2; ++dx) {
+                    const int sx = std::min(old_res - 1, qx / 256 + dx);
+                    const int sz = std::min(old_res - 1, qz / 256 + dz);
+                    const int wx = dx ? qx % 256 : 256 - qx % 256;
+                    const int wz = dz ? qz % 256 : 256 - qz % 256;
+                    sum += static_cast<std::int64_t>(
+                               source[static_cast<std::size_t>(sz * old_res + sx)]) *
+                           wx * wz;
+                }
+            }
+            result[static_cast<std::size_t>(z * new_res + x)] =
+                static_cast<std::int32_t>(sum / 65536 + (sum % 65536 >= 32768   ? 1
+                                                         : sum % 65536 < -32768 ? -1
+                                                                                : 0));
+        }
+    }
+    return result;
+}
+
+TEST(WaterSeedInputs, EditedChannelAndDamSurviveMigrationAndSavedContinuation) {
+    // Every supported session resolution, both directions and identity controls.
+    for (const int old_res : {2, 4, 8, 16}) {
+        for (const int new_res : {2, 4, 8, 16}) {
+            SCOPED_TRACE(::testing::Message() << old_res << " -> " << new_res);
+            SeedFixture fixture;
+            fixture.water().SetSimResolution(old_res);
+            fixture.tick(); // also binds EditTerrainBed's active resident set
+            auto& chunk = *fixture.chunks().begin()->second;
+            const auto coords = chunk.get_coords();
+            const float origin_x = static_cast<float>(coords.x * CHUNK_SIZE_X);
+            const float origin_z = static_cast<float>(coords.z * CHUNK_SIZE_Z);
+            const auto terrain = chunk.water_sim_terrain_height;
+            const auto initial_beds = chunk.water_bed_mm;
+            ASSERT_EQ(initial_beds.size(), static_cast<std::size_t>(old_res * old_res));
+            ASSERT_GT(fixture.water().EditTerrainBed({origin_x, 0, origin_z + 8}, -4000, 8), 0);
+            ASSERT_GT(fixture.water().EditTerrainBed({origin_x + 16, 0, origin_z + 8}, 4000, 8), 0);
+            EXPECT_EQ(chunk.water_sim_terrain_height, terrain); // edits do not alter terrain
+            const auto beds = chunk.water_bed_mm;
+            const auto depths = chunk.water_depth_mm;
+            const auto flux = chunk.water_edge_flux;
+            ASSERT_LT(beds.front(), initial_beds.front());
+            ASSERT_GT(beds.back(), initial_beds.back());
+            // Persist the edited old grid, then migrate on load and compare
+            // four real solver steps with the uninterrupted migrated control.
+            WorldStreamingState saved;
+            const auto saved_chunk = saved.get_or_create_chunk(coords);
+            saved_chunk->has_water_sim.store(true);
+            saved_chunk->current_water_resolution.store(old_res);
+            saved_chunk->water_bed_mm = chunk.water_bed_mm;
+            saved_chunk->water_depth_mm = chunk.water_depth_mm;
+            saved_chunk->water_level_data = chunk.water_level_data;
+            saved_chunk->water_flow_data = chunk.water_flow_data;
+            saved_chunk->water_sim_terrain_height = chunk.water_sim_terrain_height;
+            saved_chunk->water_edge_flux = chunk.water_edge_flux;
+            saved_chunk->is_water_sleeping.store(chunk.is_water_sleeping.load());
+            saved_chunk->max_water_delta_last_tick = chunk.max_water_delta_last_tick;
+            saved_chunk->ticks_below_threshold = chunk.ticks_below_threshold;
+            saved_chunk->water_mesh_dirty_ticks = chunk.water_mesh_dirty_ticks;
+            fixture.water().SetSimResolution(new_res);
+            EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()),
+                      old_res == new_res ? 0u : 1u);
+            EXPECT_EQ(chunk.water_bed_mm, MigratedWaterOracle(beds, old_res, new_res));
+            EXPECT_EQ(chunk.water_depth_mm, MigratedWaterOracle(depths, old_res, new_res));
+            if (old_res == new_res) {
+                EXPECT_EQ(chunk.water_edge_flux, flux);
+            } else {
+                for (std::size_t index = 0; index < chunk.water_bed_mm.size(); ++index) {
+                    EXPECT_FLOAT_EQ(
+                        chunk.water_level_data[index],
+                        static_cast<float>(static_cast<std::int64_t>(chunk.water_bed_mm[index]) +
+                                           chunk.water_depth_mm[index]) /
+                            1000.0f);
+                }
+            }
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+                Persistence::SerializeWorldStreamingStateSnapshotJson(saved), restored, errors));
+            ASSERT_TRUE(errors.empty());
+            const auto loaded = restored.snapshot_chunks();
+            ASSERT_EQ(loaded.size(), 1u);
+            ASSERT_TRUE(loaded.front());
+            EXPECT_EQ(loaded.front()->water_bed_mm, beds);
+            EXPECT_EQ(loaded.front()->water_depth_mm, depths);
+            SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
+            WaterSystem water(nullptr, &world);
+            water.SetSimResolution(new_res);
+            world.SetWaterSystem(&water);
+            ASSERT_TRUE(world.adopt_streamed_chunk(loaded.front()));
+            const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks{
+                {loaded.front()->get_id(), loaded.front()}};
+            EXPECT_EQ(water.MigrateChunksToSimResolution(chunks), old_res == new_res ? 0u : 1u);
+            EXPECT_EQ(loaded.front()->water_bed_mm, chunk.water_bed_mm);
+            EXPECT_EQ(loaded.front()->water_depth_mm, chunk.water_depth_mm);
+            entt::basic_registry<> registry;
+            for (int step = 0; step < 4; ++step) {
+                water.update(registry, chunks);
+                fixture.tick();
+                EXPECT_EQ(loaded.front()->water_bed_mm, chunk.water_bed_mm);
+                EXPECT_EQ(loaded.front()->water_depth_mm, chunk.water_depth_mm);
+                EXPECT_EQ(loaded.front()->water_edge_flux, chunk.water_edge_flux);
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs,
+     IntegerMigrationDoesNotRequireRenderMirrorsAndRefusesInvalidSourceResolution) {
+    SeedFixture fixture;
+    fixture.water().SetSimResolution(8);
+    fixture.tick();
+    auto& chunk = *fixture.chunks().begin()->second;
+    for (std::size_t index = 0; index < chunk.water_bed_mm.size(); ++index) {
+        chunk.water_bed_mm[index] = index % 2 == 0 ? std::numeric_limits<std::int32_t>::min()
+                                                   : std::numeric_limits<std::int32_t>::max();
+        chunk.water_depth_mm[index] = std::numeric_limits<std::int32_t>::max();
+    }
+    const auto beds = chunk.water_bed_mm;
+    const auto depths = chunk.water_depth_mm;
+    const int old_res = chunk.current_water_resolution.load();
+    chunk.water_level_data.clear();
+    chunk.water_flow_data.clear();
+    fixture.water().SetSimResolution(16);
+    EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+    EXPECT_EQ(chunk.water_bed_mm, MigratedWaterOracle(beds, old_res, 16));
+    EXPECT_EQ(chunk.water_depth_mm, MigratedWaterOracle(depths, old_res, 16));
+    const auto complete_beds = chunk.water_bed_mm;
+    const auto complete_depths = chunk.water_depth_mm;
+    fixture.water().SetSimResolution(8);
+    for (const bool partial_bed : {false, true}) {
+        if (partial_bed)
+            chunk.water_bed_mm.pop_back();
+        else
+            chunk.water_depth_mm.pop_back();
+        const auto partial_beds = chunk.water_bed_mm;
+        const auto partial_depths = chunk.water_depth_mm;
+        EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 0u);
+        EXPECT_EQ(chunk.water_bed_mm, partial_beds);
+        EXPECT_EQ(chunk.water_depth_mm, partial_depths);
+        chunk.water_bed_mm = complete_beds;
+        chunk.water_depth_mm = complete_depths;
+    }
+    for (const int invalid : {-1, 0, 1, 3, 33, std::numeric_limits<int>::max()}) {
+        chunk.current_water_resolution.store(invalid);
+        const auto before_beds = chunk.water_bed_mm;
+        const auto before_depths = chunk.water_depth_mm;
+        EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 0u);
+        EXPECT_EQ(chunk.current_water_resolution.load(), invalid);
+        EXPECT_EQ(chunk.water_bed_mm, before_beds);
+        EXPECT_EQ(chunk.water_depth_mm, before_depths);
     }
 }
 

@@ -8,6 +8,7 @@
 #include "luminumbra_client/rendering/UploadBudget.h"
 #include "luminumbra_client/rendering/passes/ChunkGeometryPool.h"
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
+#include "luminumbra_common/game/PhotoMode.h"
 
 #include "../support/UniqueTempPath.h"
 
@@ -25,6 +26,8 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <iterator>
 #include <limits>
+#include <sstream>
+#include <streambuf>
 #include <thread>
 #include <vector>
 
@@ -1950,6 +1953,238 @@ TEST_F(FarWorldWaterGl, RetainedTerrainDrawSuppressesOverlappingFarPixelsDuringD
     driver.ReleaseLiveOwnership();
     glBindVertexArray(0);
     pool.destroy();
+}
+
+// The existing streambuf injection style, scoped to each owning output. No
+// process-wide hook: each step independently refuses open/write/flush/close.
+class PhotoFailureBuffer final : public std::streambuf {
+public:
+    std::size_t accepted = 0;
+    bool fail_write = false;
+    bool fail_flush = false;
+
+protected:
+    std::streamsize xsputn(const char*, std::streamsize count) override {
+        const auto size = static_cast<std::size_t>(count);
+        // A failing sink accepts at most 16 bytes before reporting a short write.
+        const auto taken =
+            fail_write ? std::min(size, 16u - std::min(accepted, std::size_t{16})) : size;
+        accepted += taken;
+        return static_cast<std::streamsize>(taken);
+    }
+    int_type overflow(int_type value) override {
+        if (traits_type::eq_int_type(value, traits_type::eof()))
+            return traits_type::not_eof(value);
+        if (fail_write && accepted >= 16)
+            return traits_type::eof();
+        ++accepted;
+        return value;
+    }
+    int sync() override {
+        return fail_flush ? -1 : 0;
+    }
+};
+
+class PhotoFailureFile final : public std::ostream {
+public:
+    PhotoFailureFile()
+        : std::ostream(nullptr) {
+        rdbuf(&buffer);
+    }
+    void close() {
+        closed = true;
+        if (fail_close)
+            setstate(std::ios::failbit);
+    }
+    PhotoFailureBuffer buffer;
+    bool fail_close = false;
+    bool closed = false;
+};
+
+TEST(CaptureArtifacts, EveryPhotoArtifactOpenWriteFlushAndCloseFailureRefusesPublication) {
+    const std::vector<unsigned char> pixels(8u * 8u * 3u, 42);
+    const std::string metadata = "{\"stamp\":\"photo-1\",\"stars\":5}";
+    for (int artifact = 0; artifact < 3; ++artifact) {
+        for (int failure = 0; failure < 4; ++failure) {
+            SCOPED_TRACE(::testing::Message() << artifact << ":" << failure);
+            PhotoFailureFile image;
+            PhotoFailureFile thumbnail;
+            PhotoFailureFile sidecar;
+            const std::array files{&image, &thumbnail, &sidecar};
+            auto& output = *files[static_cast<std::size_t>(artifact)];
+            if (failure == 0)
+                output.setstate(std::ios::failbit);
+            output.buffer.fail_write = failure == 1;
+            output.buffer.fail_flush = failure == 2;
+            output.fail_close = failure == 3;
+            bool published = false;
+            const auto publish = [&] {
+                published = true;
+                return true;
+            };
+            EXPECT_FALSE(
+                WritePhotoCaptureFiles(image, thumbnail, sidecar, 8, 8, pixels, metadata, publish));
+            EXPECT_FALSE(published);
+            EXPECT_TRUE(image.closed);
+            EXPECT_TRUE(thumbnail.closed);
+            EXPECT_TRUE(sidecar.closed);
+        }
+    }
+    PhotoFailureFile image;
+    PhotoFailureFile thumbnail;
+    PhotoFailureFile sidecar;
+    bool published = false;
+    const auto publish = [&] {
+        published = true;
+        return true;
+    };
+    EXPECT_TRUE(WritePhotoCaptureFiles(image, thumbnail, sidecar, 8, 8, pixels, metadata, publish));
+    EXPECT_TRUE(published);
+    EXPECT_EQ(image.buffer.accepted, 11u + pixels.size());
+    EXPECT_EQ(thumbnail.buffer.accepted, 18u + pixels.size());
+    EXPECT_EQ(sidecar.buffer.accepted, metadata.size());
+    PhotoFailureFile refused_image;
+    PhotoFailureFile refused_thumbnail;
+    PhotoFailureFile refused_sidecar;
+    const auto refuse_publication = [] {
+        return false;
+    };
+    EXPECT_FALSE(WritePhotoCaptureFiles(refused_image,
+                                        refused_thumbnail,
+                                        refused_sidecar,
+                                        8,
+                                        8,
+                                        pixels,
+                                        metadata,
+                                        refuse_publication));
+    EXPECT_TRUE(refused_image.closed);
+    EXPECT_TRUE(refused_thumbnail.closed);
+    EXPECT_TRUE(refused_sidecar.closed);
+}
+
+TEST(CaptureArtifacts, PhotoStreamPixelsKeepImageOrientationAndThumbnailChannels) {
+    const std::vector<unsigned char> pixels{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    std::ostringstream image;
+    ASSERT_TRUE(WritePixelBufferPpmStream(image, 2, 2, pixels));
+    std::string expected_image = "P6\n2 2\n255\n";
+    for (const int value : {7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6})
+        expected_image.push_back(static_cast<char>(value));
+    EXPECT_EQ(image.str(), expected_image);
+    std::ostringstream thumbnail;
+    ASSERT_TRUE(WritePixelBufferThumbnailTgaStream(thumbnail, 2, 2, pixels, 512));
+    std::string expected_pixels;
+    for (const int value : {3, 2, 1, 6, 5, 4, 9, 8, 7, 12, 11, 10})
+        expected_pixels.push_back(static_cast<char>(value));
+    ASSERT_EQ(thumbnail.str().size(), 18u + expected_pixels.size());
+    EXPECT_EQ(thumbnail.str().substr(18), expected_pixels);
+    std::ostringstream downscaled;
+    ASSERT_TRUE(WritePixelBufferThumbnailTgaStream(downscaled, 2, 2, pixels, 1));
+    EXPECT_EQ(downscaled.str().size(), 21u);
+    EXPECT_EQ(downscaled.str().substr(18), expected_pixels.substr(9));
+}
+
+TEST(CaptureArtifacts, PhotoDirectoriesCompletionAndUnrelatedFilesArePreserved) {
+    const Luminumbra::TestSupport::ScopedTempFile scratch("photos-", ".json");
+    const auto root = scratch.Path().parent_path();
+    luminumbra::game::PhotoSidecar side;
+    side.verdict.stars = 4;
+    int stars = 17;
+    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 1, stars));
+    EXPECT_EQ(stars, 17);
+    // A regular file blocks each required parent on both Windows and POSIX.
+    ASSERT_TRUE(WriteCaptureText(root / "photos", "unrelated"));
+    EXPECT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 0);
+    EXPECT_TRUE(std::filesystem::remove(root / "photos"));
+    ASSERT_TRUE(WriteCaptureText(root / "data", "unrelated"));
+    EXPECT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 0);
+    EXPECT_TRUE(std::filesystem::remove(root / "data"));
+    EXPECT_EQ(PersistPhotoCapture(root, 0, 1, 1, {1, 2, 3}, side), 0);
+    EXPECT_EQ(PersistPhotoCapture(root, 1, 0, 1, {}, side), 0);
+    EXPECT_EQ(PersistPhotoCapture(root, 1, 2, 2, {1, 2, 3}, side), 0);
+    // Occupied reservations survive, including a conflicting thumbnail directory.
+    std::filesystem::create_directories(root / "photos/photo-1");
+    ASSERT_TRUE(WriteCaptureText(root / "photos/photo-1/keep", "unrelated"));
+    std::filesystem::create_directories(root / "data/ui/captures/cap_2");
+    EXPECT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 0);
+    EXPECT_TRUE(std::filesystem::exists(root / "photos/photo-1/keep"));
+    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 2, stars));
+    EXPECT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 3);
+    EXPECT_TRUE(ReadCompletedPhotoCapture(root, 3, stars));
+    EXPECT_EQ(stars, 4);
+    // Removing the publication marker hides complete-looking payloads.
+    ASSERT_TRUE(std::filesystem::remove(root / "data/ui/captures/cap_3/complete"));
+    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 3, stars));
+    std::filesystem::create_directory(root / "data/ui/captures/cap_3/complete");
+    const auto sidecar = root / "photos/photo-3/verdict.photo.json";
+    std::ifstream input(sidecar, std::ios::binary);
+    const std::string valid_metadata{std::istreambuf_iterator<char>(input), {}};
+    input.close();
+    for (const auto* invalid : {"", "{", "{}", "{\"stars\":99}", "{\"stars\":1e38}"}) {
+        ASSERT_TRUE(WriteCaptureText(sidecar, invalid));
+        EXPECT_FALSE(ReadCompletedPhotoCapture(root, 3, stars));
+    }
+    for (const auto* invalid :
+         {"{\"stamp\":\"wrong\",\"stars\":4}",
+          "{\"stamp\":\"photo-3\",\"stars\":\"4\"}",
+          "{\"stamp\":\"photo-3\",\"stars\":-1}",
+          "{\"stamp\":\"photo-3\",\"stars\":18446744073709551615}",
+          "{\"stamp\":\"photo-3\",\"stars\":4}",
+          "{\"stamp\":\"photo-3\",\"stars\":4,\"capture_width\":1e38,\"capture_height\":1}",
+          "{\"stamp\":\"photo-3\",\"stars\":4,\"capture_width\":2,\"capture_height\":1}"}) {
+        ASSERT_TRUE(WriteCaptureText(sidecar, invalid));
+        EXPECT_FALSE(ReadCompletedPhotoCapture(root, 3, stars));
+    }
+    ASSERT_TRUE(WriteCaptureText(sidecar, std::string(65537, ' ')));
+    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 3, stars));
+    ASSERT_TRUE(WriteCaptureText(sidecar, valid_metadata));
+    ASSERT_TRUE(WriteCaptureText(root / "photos/photo-3/image.ppm", "partial"));
+    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 3, stars));
+    EXPECT_TRUE(WritePixelBufferPpm(root / "photos/photo-3/image.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(WriteCaptureText(root / "data/ui/captures/cap_3/thumbnail.tga", "partial"));
+    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 3, stars));
+    const auto thumbnail_path = root / "data/ui/captures/cap_3/thumbnail.tga";
+    ASSERT_TRUE(WritePixelBufferThumbnailTga(thumbnail_path, 1, 1, {1, 2, 3}, 512));
+    std::ifstream thumb_input(thumbnail_path, std::ios::binary);
+    const std::string valid_thumbnail{std::istreambuf_iterator<char>(thumb_input), {}};
+    thumb_input.close();
+    ASSERT_EQ(valid_thumbnail.size(), 21u);
+    for (const std::size_t byte : {0u, 1u, 2u, 12u, 13u, 14u, 15u, 16u, 17u}) {
+        auto invalid_thumbnail = valid_thumbnail;
+        invalid_thumbnail[byte] =
+            (byte == 13 || byte == 15) ? 3 : (invalid_thumbnail[byte] == 0 ? 1 : 0);
+        ASSERT_TRUE(WriteCaptureText(thumbnail_path, invalid_thumbnail));
+        EXPECT_FALSE(ReadCompletedPhotoCapture(root, 3, stars));
+    }
+    ASSERT_TRUE(WritePixelBufferPpm(root / "photos/photo-5.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(
+        WritePixelBufferThumbnailTga(root / "data/ui/captures/cap_5.tga", 1, 1, {1, 2, 3}, 512));
+    ASSERT_TRUE(WriteCaptureText(root / "photos/photo-5.photo.json",
+                                 "{\"stamp\":\"photo-5\",\"stars\":4}"));
+    EXPECT_TRUE(ReadCompletedPhotoCapture(root, 5, stars, true));
+    EXPECT_EQ(stars, 4);
+    const auto legacy_image = root / "photos/photo-5.ppm";
+    for (const auto* malformed : {"",
+                                  "P6\n",
+                                  "P6\n0",
+                                  "P6\n2147483648 1\n255\n",
+                                  "P6\n1 0\n255\n",
+                                  "P6\n1 1",
+                                  "P6\n1 1\n254\nabc",
+                                  "P6\n01 1\n255\nabc",
+                                  "P6\n1 1\n255\na"}) {
+        ASSERT_TRUE(WriteCaptureText(legacy_image, malformed));
+        EXPECT_FALSE(ReadCompletedPhotoCapture(root, 5, stars, true));
+    }
+    // The final signed id is safe; an occupied last id exhausts the search
+    // without integer wrap or reuse of its complete capture.
+    EXPECT_EQ(PersistPhotoCapture(root, std::numeric_limits<int>::max(), 1, 1, {1, 2, 3}, side),
+              std::numeric_limits<int>::max());
+    EXPECT_EQ(PersistPhotoCapture(root, std::numeric_limits<int>::max(), 1, 1, {1, 2, 3}, side), 0);
+    // Bounds are checked before creating a file, even for pathological inputs.
+    EXPECT_FALSE(WritePixelBufferThumbnailTga(root / "bad.tga", 1, 1, {1, 2, 3}, 0));
+    EXPECT_FALSE(WritePixelBufferThumbnailTga(root / "bad.tga", 1, 1, {1, 2, 3}, 65536));
+    EXPECT_FALSE(WritePixelBufferThumbnailTga(root / "bad.tga", 1, 1, {1, 2}, 512));
+    EXPECT_FALSE(std::filesystem::exists(root / "bad.tga"));
 }
 
 TEST(CaptureArtifacts, UnwritableReportImageInvalidScanAndCompleteOutput) {

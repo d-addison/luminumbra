@@ -684,7 +684,9 @@ class UploadBudgetWiring(unittest.TestCase):
         helpers = read(RENDERING / "PixelIo.h")
         image = compact(body(pixels, "bool WritePixelBufferPpm("))
         self.assertIn("!CapturePixelBytes(width, height, 3, bytes) || pixels.size() != bytes", image)
-        self.assertIn("if (!CloseCaptureFile(output))", image)
+        self.assertIn("const bool written = WritePixelBufferPpmStream(output, width, height, pixels);", image)
+        self.assertIn("const bool closed = CloseCaptureFile(output);", image)
+        self.assertIn("if (!written || !closed)", image)
         flush = compact(body(helpers, "bool FlushCaptureStream("))
         self.assertEqual(flush, "output.flush(); return static_cast<bool>(output);")
         close = compact(body(helpers, "bool CloseCaptureFile("))
@@ -710,6 +712,83 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("TruncatedIndexFlushFailureAndCompleteStreamAreDistinct", native)
         gl_native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
         self.assertIn("UnwritableReportImageInvalidScanAndCompleteOutput", gl_native)
+
+    def test_interactive_photos_publish_only_after_every_output_completed(self):
+        pixels = read(RENDERING / "PixelIo.cpp")
+        helpers = read(RENDERING / "PixelIo.h")
+        capture = compact(body(pixels, "int PersistPhotoCapture("))
+        files = compact(body(helpers, "bool WritePhotoCaptureFiles("))
+        self.assertIn("const bool opened = image && thumbnail && sidecar;", files)
+        for artifact in ("image", "thumbnail", "sidecar"):
+            self.assertIn(f"const bool {artifact}_closed = CloseCaptureFile({artifact});", files)
+        self.assertIn("return written && image_closed && thumbnail_closed && sidecar_closed && publish();", files)
+        for writer in ("WritePixelBufferPpmStream(image", "WritePixelBufferThumbnailTgaStream(thumbnail",
+                       "WriteCaptureStream(sidecar, metadata)"):
+            self.assertIn(writer, files)
+        self.assertIn('return std::filesystem::create_directory(thumbnail_dir / "complete", error);', capture)
+        self.assertIn("pixels, json, publish)) return 0;", capture)
+        self.assertIn("EXPECT_FALSE(published)", read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp"))
+        self.assertIn('if (!std::filesystem::create_directory(thumbnail_dir, error)) return 0;', capture)
+        self.assertEqual(capture.count("if (error) return 0;"), 3)
+        self.assertIn("attempt < 1024", capture)
+        self.assertNotIn("remove", capture.replace("No rollback deletes by pathname.", ""))
+        for platform_flag in ("_O_EXCL", "O_EXCL", "O_NOFOLLOW"):
+            self.assertIn(platform_flag, pixels)
+        self.assertIn("std::fclose(file) == 0", pixels)
+        self.assertIn("std::fflush(m_file)", pixels)
+        reader = compact(body(pixels, "bool ReadCompletedPhotoCapture("))
+        self.assertIn('thumbnail_dir / "complete"', reader)
+        for artifact in ('photo_dir / "image.ppm"', 'thumbnail_dir / "thumbnail.tga"',
+                         'photo_dir / "verdict.photo.json"'):
+            self.assertIn(artifact, reader)
+        self.assertIn("sidecar.size() > buffer.size()", reader)
+        self.assertIn("count != sidecar.size()", reader)
+        self.assertIn("image.size() != expected_header.size() + bytes", reader)
+        self.assertIn("thumbnail.size() != 18 + thumb_bytes", reader)
+        overlay = compact(body(read(ROOT / "src/luminumbra_client/app/DebugOverlays.cpp"),
+                               "void UpdatePhotoCapture("))
+        self.assertIn("CapturePixelBytes(cap_w, cap_h, 3, photo_bytes)", overlay)
+        self.assertIn("readback_ok = glGetError() == GL_NO_ERROR;", overlay)
+        self.assertIn("if (saved_id > 0)", overlay)
+        self.assertIn("Photo could not be saved.", overlay)
+        gallery = compact(body(read(ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp"),
+                               "void Rml_UIManager::PopulateGallery("))
+        self.assertIn("!Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, stars, legacy)", gallery)
+        self.assertIn('legacy ? ".tga" : "/thumbnail.tga"', gallery)
+        self.assertIn("parsed.ptr != digits.data() + digits.size()", gallery)
+        self.assertIn("if (ids.size() > 12) ids.pop_back();", gallery)
+        wrapper = compact(body(read(ROOT / "src/luminumbra_client/app/WindowModeControls.cpp"),
+                               "bool WriteCaptureThumbnailTga("))
+        self.assertIn("return Luminumbra::Rendering::WritePixelBufferThumbnailTga(", wrapper)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for name in ("EveryPhotoArtifactOpenWriteFlushAndCloseFailureRefusesPublication",
+                     "PhotoDirectoriesCompletionAndUnrelatedFilesArePreserved"):
+            self.assertIn("TEST(CaptureArtifacts, " + name + ")", native)
+        self.assertIn("artifact < 3", native)
+        self.assertIn("failure < 4", native)
+
+    def test_water_migration_preserves_both_integer_grids_without_float_feedback(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        resize = compact(body(source, "void WaterSystem::ResizeSimulationGrid("))
+        self.assertIn("old_bed_mm = std::move(chunk.water_bed_mm)", resize)
+        self.assertIn("sample_mm(old_bed_mm, x, z)", resize)
+        self.assertIn("sample_mm(old_depth_mm, x, z)", resize)
+        sampler = re.sub(r"//[^\n]*", "", body(body(source, "void WaterSystem::ResizeSimulationGrid("), "const auto sample_mm ="))
+        for forbidden in ("float", "floor", "lround"):
+            self.assertNotIn(forbidden, sampler)
+        self.assertIn("sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536)", sampler)
+        self.assertIn("new_resolution == current_resolution", resize)
+        self.assertIn("current_resolution > 32", resize)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        self.assertIn("EditedChannelAndDamSurviveMigrationAndSavedContinuation", native)
+        self.assertIn("IntegerMigrationDoesNotRequireRenderMirrorsAndRefusesInvalidSourceResolution", native)
+        self.assertIn("MigratedWaterOracle(beds, old_res, new_res)", native)
+        self.assertIn("-4000, 8", native)
+        self.assertIn("4000, 8", native)
+        self.assertIn("step < 4", native)
+        registration = read(ROOT / "test/CMakeLists.txt")
+        self.assertIn("common/WaterSeedInputs_test.cpp", registration)
+        self.assertIn("rendering/FarWorldWaterGl_test.cpp", registration)
 
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))
