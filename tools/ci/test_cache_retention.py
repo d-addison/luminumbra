@@ -401,8 +401,8 @@ class CacheRetentionTests(unittest.TestCase):
             ("ci", "linux", "400M"),
             ("asan", "asan-shard", "600M"),
             ("ci", "diligent-rhi", "250M"),
-            ("ci", "windows-msvc", "500M"),
-            ("ci", "windows-ucrt64", "500M"),
+            ("ci", "windows-msvc", "1000M"),
+            ("ci", "windows-ucrt64", "1000M"),
         ):
             with self.subTest(workflow=workflow, job=job):
                 workflow = (ROOT / f".github/workflows/{workflow}.yml").read_text(encoding="utf-8")
@@ -410,21 +410,29 @@ class CacheRetentionTests(unittest.TestCase):
                 self.assertEqual(body.split("CCACHE_MAXSIZE: ", 1)[1].splitlines()[0], cap)
 
     def test_two_branches_at_compiler_caps_fit_budget_and_retire_old_ucrt_generations(self):
-        sizes = {
+        # The Windows lanes write their generation on devel only; main holds the
+        # Linux lanes. One generation per branch and lane must fit the budget.
+        shared = {
             "linux-x64-gcc-ccache-": 400_000_000,
             "linux-x64-gcc-asan-ccache-": 600_000_000,
             "diligent-rhi-linux-x64-gcc-ccache-": 250_000_000,
-            "windows-x64-msvc-ccache-": 500_000_000,
-            "windows-x64-ucrt64-gcc-ccache-": 500_000_000,
             "perf-linux-x64-gcc-ccache-": 250_000_000,
             "perf-paired-linux-x64-gcc-": 250_000_000,
         }
+        windows = {
+            "windows-x64-msvc-ccache-": 1_000_000_000,
+            "windows-x64-ucrt64-gcc-ccache-": 1_000_000_000,
+        }
+        sizes = {"refs/heads/main": shared, "refs/heads/devel": {**shared, **windows}}
         self.assertEqual(self.budget, 6_000_000_000)
-        self.assertEqual(2 * sum(sizes.values()), 5_500_000_000)
+        self.assertEqual(sum(sum(lanes.values()) for lanes in sizes.values()), 5_500_000_000)
+        # A devel push saves a second generation before cleanup runs; the transient
+        # total must stay below GitHub's 10 GB cap without relying on eviction.
+        self.assertLess(sum(sizes["refs/heads/devel"].values()) + 5_500_000_000, 10_000_000_000)
         caches = []
         old_ids = []
-        for ref in ("refs/heads/main", "refs/heads/devel"):
-            for prefix, size in sizes.items():
+        for ref, lanes in sizes.items():
+            for prefix, size in lanes.items():
                 identity = len(caches) + 1
                 old_ids.append(identity)
                 caches.extend([self.cache(identity, prefix + "old", ref, size),
