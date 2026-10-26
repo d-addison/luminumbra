@@ -882,35 +882,38 @@ class UploadBudgetWiring(unittest.TestCase):
                           'bool SHIELD_WorldSystem::debug_water_grid_at('):
             self.assertIn('IsBoundedWaterResolution(res)', body(world, signature))
 
-    def test_capture_error_scopes_drain_stale_errors_before_capture_calls(self):
-        scopes = [
-            (ROOT / 'src/luminumbra_client/app/DebugOverlays.cpp',
-             'void UpdatePhotoCapture(', 'glReadBuffer(GL_BACK)', 1),
-            (ROOT / 'src/luminumbra_client/main_client.cpp',
-             None, 'glReadBuffer(GL_BACK)', 4),
-            (RENDERING / 'static_preview/StaticRenderer.cpp',
-             'StaticFrame StaticRenderer::Render(', 'impl.Resize(', 1),
-        ]
-        for path, signature, first_call, expected in scopes:
-            with self.subTest(path=path.name, signature=signature):
-                source = read(path)
-                scope = body(source, signature) if signature else source
-                drains = list(re.finditer(
-                    r'for \(unsigned capture_error = 0; capture_error < 8;\s*'
-                    r'\+\+capture_error\) \{\s*if \(glGetError\(\) == GL_NO_ERROR\)'
-                    r'\s*break;\s*\}', scope))
-                self.assertEqual(len(drains), expected)
-                boundaries = ([match.start() for match in re.finditer(
-                    re.escape(first_call), scope)] if first_call else
-                    [re.search(r'\bgl(?!GetError\b)[A-Z]\w*\(', scope).start()])
-                self.assertEqual(len(boundaries), expected)
-                previous = 0
-                for drain, boundary in zip(drains, boundaries):
-                    self.assertGreaterEqual(drain.start(), previous)
-                    self.assertLess(drain.end(), boundary)
-                    previous = boundary
-                self.assertRegex(scope[drains[-1].end():],
-                                 r'glGetError\(\)\s*(?:==|!=)\s*GL_NO_ERROR')
+    def test_gl_error_drains_exist_only_at_allowlisted_pre_work_sites(self):
+        drain = re.compile(
+            r'while\s*\(\s*glGetError\(\)'
+            r'|for\s*\([^;]*;[^;]*glGetError\(\)'
+            r'|glGetError\(\)\s*==\s*GL_NO_ERROR\)\s*\{?\s*break;')
+        allowed = {
+            'src/luminumbra_client/core/HardwareInfo.cpp': 1,
+            'src/luminumbra_client/rendering/RenderPipeline.cpp': 1,
+            'src/luminumbra_client/rendering/RenderResourceRegistry.cpp': 2,
+            'src/luminumbra_client/rendering/passes/ChunkGeometryPool.cpp': 2,
+            'src/luminumbra_client/rendering/static_preview/StaticRenderer.cpp': 1,
+        }
+        found = {}
+        for path in sorted((ROOT / 'src').rglob('*')):
+            if path.suffix not in ('.cpp', '.cc', '.h', '.hpp', '.inl', '.mm'):
+                continue
+            count = len(drain.findall(read(path)))
+            if count:
+                found[path.relative_to(ROOT).as_posix()] = count
+        # A drain between rendering and a capture consumer would discard the
+        # frame's own errors; new drains must be added here deliberately.
+        self.assertEqual(found, allowed)
+        for path in (ROOT / 'src/luminumbra_client/main_client.cpp',
+                     ROOT / 'src/luminumbra_client/app/DebugOverlays.cpp'):
+            with self.subTest(path=path.name):
+                self.assertNotIn('capture_error', read(path))
+        static_render = body(read(RENDERING / 'static_preview/StaticRenderer.cpp'),
+                             'StaticFrame StaticRenderer::Render(')
+        self.assertLess(static_render.index('capture_error'), static_render.index('impl.Resize('))
+        overlay = body(read(ROOT / 'src/luminumbra_client/app/DebugOverlays.cpp'),
+                       'void UpdatePhotoCapture(')
+        self.assertIn('readback_ok = glGetError() == GL_NO_ERROR;', overlay)
         native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
         self.assertIn('CaptureIgnoresPriorErrorsAndRefusesReadbackErrors', native)
 
