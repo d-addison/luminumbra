@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <iterator>
 #include <limits>
 
 namespace {
@@ -27,7 +29,7 @@ GraphicsEdit Override(std::string key, GraphicsOverrideValue value) {
 TEST(GraphicsSettingsState, CustomRetainsBaseAndResetRestoresIt) {
     GraphicsSettings settings;
     ASSERT_TRUE(SelectGraphicsPreset(settings, GraphicsPreset::High));
-    settings.overrides["grass_density"] = 1.2;
+    settings.overrides["grass_density"] = 1.6;
     EXPECT_EQ(BuildGraphicsSettingsDisplay(settings, {}, "").preset_label, "High");
     settings.overrides["grass_density"] = 0.6;
     GraphicsSettingsState state(settings, {});
@@ -43,7 +45,7 @@ TEST(GraphicsSettingsState, CustomRetainsBaseAndResetRestoresIt) {
     state.Applied(true, 0.0);
     EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
     EXPECT_EQ(state.Display().preset_label, "High");
-    EXPECT_DOUBLE_EQ(state.Display().effective.values.grass_density, 1.2);
+    EXPECT_DOUBLE_EQ(state.Display().effective.values.grass_density, 1.6);
 }
 
 TEST(GraphicsSettingsState, SelectingEachPresetClearsEveryOverride) {
@@ -60,23 +62,54 @@ TEST(GraphicsSettingsState, SelectingEachPresetClearsEveryOverride) {
         EXPECT_EQ(state.Settings().base_preset, preset);
         EXPECT_TRUE(state.Settings().overrides.empty());
         EXPECT_FALSE(state.Display().effective.custom);
+        EXPECT_EQ(state.Settings().preset_revision, kGraphicsPresetRevision);
+        EXPECT_EQ(state.Display().effective.values, GraphicsValues{});
+    }
+}
+
+TEST(GraphicsSettingsState, DetectionIsRepeatableAndPreservesConservativeVisualsForEveryCpuTier) {
+    GraphicsHardwareInputs inputs;
+    inputs.vendor = "NVIDIA";
+    inputs.renderer = "NVIDIA GeForce RTX 5070 Ti";
+    inputs.version = "4.6";
+    inputs.dedicatedVideoMemoryBytes = 8ULL * 1024 * 1024 * 1024;
+    GraphicsEdit detect;
+    detect.kind = GraphicsEditKind::DetectApply;
+    constexpr unsigned int counts[]{4, 7, 15, 16};
+    constexpr GraphicsPreset presets[]{
+        GraphicsPreset::Low, GraphicsPreset::Medium, GraphicsPreset::High, GraphicsPreset::Ultra};
+    for (std::size_t index = 0; index < std::size(counts); ++index) {
+        inputs.logicalProcessorCount = counts[index];
+        const auto recommendation = ClassifyGraphicsPreset(inputs);
+        EXPECT_EQ(recommendation, ClassifyGraphicsPreset(inputs));
+        EXPECT_EQ(recommendation.preset, presets[index]);
+        GraphicsSettingsState state({}, {});
+        ASSERT_TRUE(state.Stage(detect, inputs));
+        EXPECT_FALSE(state.SavePending());
+        state.Applied(true, 1.0);
+        EXPECT_EQ(state.Settings().base_preset, presets[index]);
+        EXPECT_EQ(state.Settings().preset_revision, kGraphicsPresetRevision);
+        EXPECT_EQ(state.Display().effective.values, GraphicsValues{});
+        EXPECT_TRUE(state.SaveDue(1.5));
+        EXPECT_FALSE(state.Display().hardware.empty());
     }
 }
 
 TEST(GraphicsSettingsState, InvalidRequestsDoNotReplaceAnAlreadyQueuedTransaction) {
     GraphicsSettingsState state({}, {});
     ASSERT_TRUE(state.Stage(Preset(GraphicsPreset::Low)));
-    for (const auto& edit : {Override("render_scale", 1.01),
-                             Override("grass_density", 0.0),
-                             Override("grass_fade_start_m", 48.0), // Low ends at 48.
-                             Override("grass_fade_end_m", 24.0),
-                             Override("far_terrain_radius_m", 767.0),
-                             Override("shadow_resolution", 512.0),
-                             Override("volumetric_quality", 2.0),
-                             Override("ui_blur", std::string("invalid")),
-                             Override("render_scale", std::numeric_limits<double>::quiet_NaN()),
-                             Override("water_resolution", 8.0),
-                             Preset(static_cast<GraphicsPreset>(255))}) {
+    for (const auto& edit :
+         {Override("render_scale", 1.01),
+          Override("grass_density", 0.0),
+          Override("grass_fade_start_m", 92.0), // Conservative presets end at 92.
+          Override("grass_fade_end_m", 48.0),
+          Override("far_terrain_radius_m", 767.0),
+          Override("shadow_resolution", 512.0),
+          Override("volumetric_quality", 2.0),
+          Override("ui_blur", std::string("invalid")),
+          Override("render_scale", std::numeric_limits<double>::quiet_NaN()),
+          Override("water_resolution", 8.0),
+          Preset(static_cast<GraphicsPreset>(255))}) {
         EXPECT_FALSE(state.Stage(edit));
         const auto& pending = state.Pending();
         if (!pending.has_value()) {

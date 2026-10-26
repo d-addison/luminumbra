@@ -1,5 +1,7 @@
 #include "core/GraphicsPresets.h"
 
+#include "core/FramePacing.h"
+
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -51,7 +53,8 @@ constexpr GraphicsValues kUltraRevision1{
     .live_menu_preview = true,
 };
 
-// Ultra preserves packaged gameplay; High changes only grass.
+// Retained for existing saved selections. These lower-tier visual reductions
+// are pending owner approval and are not used by new selections.
 constexpr auto kRevision1 = [] {
     std::array values{kUltraRevision1, kUltraRevision1, kUltraRevision1, kUltraRevision1};
     values[0].render_scale = 0.67;
@@ -77,6 +80,10 @@ constexpr auto kRevision1 = [] {
     values[2].grass_fade_end_m = 80.0;
     return values;
 }();
+
+// Revision 2 is conservative until the owner approves lower-tier visual changes.
+// Every newly selected tier preserves Ultra's complete shipping presentation.
+constexpr std::array kRevision2{kUltraRevision1, kUltraRevision1, kUltraRevision1, kUltraRevision1};
 
 // Compare every resolved field without serialization or allocation.
 auto GraphicsValueMembers(const GraphicsValues& values) {
@@ -234,14 +241,21 @@ void ResetGraphicsOverrides(GraphicsSettings& settings) {
 bool ResolveGraphics(const GraphicsSettings& settings,
                      const GraphicsOverrides& session_overrides,
                      ResolvedGraphics& result,
-                     std::string& error) {
-    if (settings.preset_revision != kGraphicsPresetRevision ||
+                     std::string& error,
+                     FramePacing frame_pacing) {
+    if ((settings.preset_revision != 1 && settings.preset_revision != kGraphicsPresetRevision) ||
         GraphicsPresetName(settings.base_preset).empty()) {
         error = "unsupported graphics preset or revision";
         return false;
     }
-    const auto& base = kRevision1[static_cast<std::size_t>(settings.base_preset)];
+    if (!IsValidFrameCap(frame_pacing.frame_cap)) {
+        error = "unsupported graphics frame cap";
+        return false;
+    }
+    const auto index = static_cast<std::size_t>(settings.base_preset);
+    const auto& base = settings.preset_revision == 1 ? kRevision1[index] : kRevision2[index];
     ResolvedGraphics resolved{.values = base,
+                              .frame_pacing = frame_pacing,
                               .base_preset = settings.base_preset,
                               .preset_revision = settings.preset_revision,
                               .custom = false,

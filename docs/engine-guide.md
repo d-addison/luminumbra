@@ -877,6 +877,33 @@ a first launch automatically selects and saves a recommendation. Existing and
 migrated selections remain intact across GPU/driver changes. Recovery continues
 to protect malformed or unsupported overlays from writes, including explicit saves.
 
+New graphics selections use revision 2. Pending owner approval of lower-tier
+visual reductions, Low, Medium and High resolve to the same presentation as Ultra.
+Ultra retains the current grass density, High water and all existing rendering
+features; presets leave active regions and the configured GNS transport unchanged.
+Vsync and frame cap remain independent `user.video` choices, included in resolved
+graphics and preserved by selection, reset and detection. Measurement runs retain
+their temporary uncapped, vsync-off policy.
+
+Existing saved revision-1 selections keep their immutable values until the player
+selects a preset again. The following revision-1 differences from Ultra are all
+**pending owner approval** for future lower-tier selections; revision 2 applies
+none of these reductions:
+
+| Setting | Ultra / all revision-2 tiers | Revision-1 Low | Revision-1 Medium | Revision-1 High | Visual impact of reduction |
+| --- | --- | --- | --- | --- | --- |
+| Render scale | 1.0 | 0.67 | 0.80 | 1.0 | Softer scene at lower internal resolution |
+| Grass density | 1.6 | 0.4 | 0.8 | 1.2 | Sparser grass |
+| Grass fade start / end (m) | 48 / 92 | 24 / 48 | 32 / 64 | 40 / 80 | Grass fades closer to the camera |
+| Far terrain wanted / outer clip (m) | 3000 / 3050 | 1500 / 1550 | 2250 / 2300 | 3000 / 3050 | Shorter distant terrain horizon |
+| Shadow atlas resolution | 2048 | 1024 | 1536 | 2048 | Less detailed shadows |
+| Volumetric quality | 1 | 0 | 0 | 1 | Froxel volumetrics disabled; analytic aerial remains |
+| UI backdrop blur | Full | Off | Half | Full | Sharper backdrop behind menus |
+
+All other preset values remain equal to Ultra. Native persistence, renderer and
+settings UI regressions are registered; execution and visual qualification remain
+pending.
+
 Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
 chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.
 Locomotion defaults use separation radius 2 m/strength 0.6, flock radius 12 m,

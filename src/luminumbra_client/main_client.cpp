@@ -2351,7 +2351,11 @@ int main(int argc, char* argv[]) {
     luminumbra::core::ResolvedGraphics resolved_graphics;
     std::string graphics_error;
     bool graphics_ready = luminumbra::core::ResolveGraphics(
-        graphics_state.Settings(), graphics_session_overrides, resolved_graphics, graphics_error);
+        graphics_state.Settings(),
+        graphics_session_overrides,
+        resolved_graphics,
+        graphics_error,
+        {.vsync = g_systemConfig.user().vsync, .frame_cap = g_systemConfig.user().frame_cap});
     if (graphics_ready) {
         graphics_ready = renderPipeline.apply_graphics(resolved_graphics);
         g_app.overlay.volumetric_quality = resolved_graphics.values.volumetric_quality;
@@ -2360,7 +2364,7 @@ int main(int argc, char* argv[]) {
     } else {
         LUMINUMBRA_CORE_ERROR("Invalid graphics configuration: {}", graphics_error);
     }
-    if (graphics_first_launch || graphics_detect_requested)
+    if (graphics_ready && (graphics_first_launch || graphics_detect_requested))
         graphics_state.ScheduleSave(glfwGetTime());
     const auto save_graphics = [&] {
         const bool saved = g_systemConfig.SaveUserOverlay(
@@ -2380,8 +2384,12 @@ int main(int argc, char* argv[]) {
             return true;
         luminumbra::core::ResolvedGraphics candidate;
         const bool applied =
-            luminumbra::core::ResolveGraphics(
-                *graphics_state.Pending(), graphics_session_overrides, candidate, graphics_error) &&
+            luminumbra::core::ResolveGraphics(*graphics_state.Pending(),
+                                              graphics_session_overrides,
+                                              candidate,
+                                              graphics_error,
+                                              {.vsync = g_systemConfig.user().vsync,
+                                               .frame_cap = g_systemConfig.user().frame_cap}) &&
             renderPipeline.apply_graphics(candidate);
         graphics_state.Applied(applied, glfwGetTime());
         if (applied) {
@@ -3111,6 +3119,8 @@ int main(int argc, char* argv[]) {
         Luminumbra::Client::SettingsBridge sb;
         sb.GetGraphics = [&] {
             auto display = graphics_state.Display();
+            display.effective.frame_pacing = {.vsync = g_systemConfig.user().vsync,
+                                              .frame_cap = g_systemConfig.user().frame_cap};
             const auto& recovery = g_systemConfig.settings_load_report().recovery_reason;
             if (!recovery.empty())
                 display.status += " | Settings recovery: " + recovery + "; original file preserved";

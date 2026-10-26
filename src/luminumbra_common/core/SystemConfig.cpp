@@ -429,11 +429,13 @@ bool ParseGraphicsSection(const nlohmann::json& data,
             !ParseGraphicsPreset(graphics["base_preset"].get<std::string>(), parsed.base_preset) ||
             !graphics.contains("preset_revision") ||
             !graphics["preset_revision"].is_number_integer() ||
-            graphics["preset_revision"] != kGraphicsPresetRevision ||
+            (graphics["preset_revision"] != 1 &&
+             graphics["preset_revision"] != kGraphicsPresetRevision) ||
             !graphics.contains("overrides") || !graphics["overrides"].is_object()) {
             error = "invalid graphics preset, revision or overrides";
             return false;
         }
+        parsed.preset_revision = graphics["preset_revision"].get<std::uint32_t>();
         for (const auto& [key, value] : graphics["overrides"].items()) {
             if (value.is_boolean())
                 parsed.overrides[key] = value.get<bool>();
@@ -481,7 +483,8 @@ bool ParseGraphicsSection(const nlohmann::json& data,
         user.graphics = std::move(parsed);
     }
     ResolvedGraphics resolved;
-    if (!ResolveGraphics(user.graphics, {}, resolved, error))
+    if (!ResolveGraphics(
+            user.graphics, {}, resolved, error, {.vsync = user.vsync, .frame_cap = user.frame_cap}))
         return false;
     user.render_scale = static_cast<float>(resolved.values.render_scale);
     return true;
@@ -853,7 +856,12 @@ bool SystemConfig::SaveUserOverlay(const std::filesystem::path& path) const {
         return false;
     ResolvedGraphics resolved;
     std::string error;
-    if (!ResolveGraphics(m_user.graphics, {}, resolved, error) ||
+    if (!ResolveGraphics(m_user.graphics,
+                         {},
+                         resolved,
+                         error,
+                         {.vsync = m_user.vsync,
+                          .frame_cap = IsValidFrameCap(m_user.frame_cap) ? m_user.frame_cap : 0}) ||
         GraphicsPresetName(m_user.graphics.detection.recommended_preset).empty() ||
         m_user.graphics.detection.observed_hardware.size() > 4096)
         return false;
@@ -862,8 +870,8 @@ bool SystemConfig::SaveUserOverlay(const std::filesystem::path& path) const {
     user["video"] = {
         {"resolution", m_user.resolution},
         {"window_mode", m_user.window_mode},
-        {"vsync", m_user.vsync},
-        {"frame_cap", IsValidFrameCap(m_user.frame_cap) ? m_user.frame_cap : 0},
+        {"vsync", resolved.frame_pacing.vsync},
+        {"frame_cap", resolved.frame_pacing.frame_cap},
         {"fov", m_user.fov},
         {"ui_scale", m_user.ui_scale},
         {"mouse_sensitivity", m_user.mouse_sensitivity},

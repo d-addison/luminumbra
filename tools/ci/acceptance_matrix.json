@@ -7460,6 +7460,44 @@
           "ref": "docs/v0.3-acceptance.md"
         }
       ]
+    },
+    {
+      "id": "iss.393",
+      "source": "issue #393",
+      "statement": "Graphics presets persist named selections and their revision. First-launch detection is a pure GPU/CPU description classifier. New revision-2 selections preserve Ultra visuals for every tier pending owner approval; saved revision-1 values remain readable. Independent vsync and frame-cap choices remain in user.video and are included in resolved graphics. Settings UI and persistence regressions are registered; native execution and visual qualification remain pending.",
+      "status": "needs-native-run",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsPresets.NewSelectionsPreserveUltraAndIndependentFramePacingPendingApproval"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsPresets.SavedRevisionOneRetainsItsVisualsUntilExplicitReselection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsSettingsState.DetectionIsRepeatableAndPreservesConservativeVisualsForEveryCpuTier"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntime.NewSelectionsRetainUltraPassValuesPendingVisualApproval"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsUiSourceContract"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/ci/check_acceptance_matrix.py",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json> --preparation-receipt-file <caller-metadata.json>",
+          "receipt_schema": "luminumbra.acceptance_execution.v1"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        }
+      ]
     }
   ]
 }

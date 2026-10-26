@@ -16,6 +16,8 @@ PYTHON_TESTS = (
     "tools/gates/test_station_discovery.py",
     "tools/gates/test_common_library_isa.py",
     "test/tools/test_runtime_config_contract.py",
+    "test/tools/test_graphics_ui_contract.py",
+    "test/tools/test_frame_pacing_contract.py",
     "test/tools/check_audio_shutdown_contract.py",
     "tools/ci/test_audio_propagation_metrics.py",
     "test/tools/check_profiler_contract.py",
