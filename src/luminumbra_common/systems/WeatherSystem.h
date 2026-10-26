@@ -32,8 +32,13 @@
 // material response READ the replicated state via the public query API below and
 // write NOTHING back into the sim or world_hash.
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "FastNoise/FastNoise.h"
@@ -128,6 +133,27 @@ public:
     // registry, the deterministic runtime contract  -- appended FIRST, append only, never
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
+    void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
+                             std::function<std::string()> hash) {
+        m_regional_sample = std::move(sample);
+        m_regional_hash = std::move(hash);
+    }
+    // Pure query projections adopted from FPG authority; this does not advance evolution.
+    void AdoptRegionalWeather(std::uint64_t tick,
+                              const Vec3& anchor,
+                              std::vector<StormCell> storms,
+                              std::vector<StrikeEvent> strikes) {
+        auto storm_index = BuildRegionalStormIndex(storms);
+        m_last_tick = tick;
+        if (m_regional_sample) {
+            const auto sample = m_regional_sample(anchor);
+            m_anchor_category = sample.category;
+            m_anchor_wind = sample.wind;
+        }
+        m_storm_cells = std::move(storms);
+        m_strikes = std::move(strikes);
+        m_regionalStormIndex.swap(storm_index);
+    }
 
     // Advance weather to `tick` anchored on the streamed region around
     // `region_anchor` (world-space; the spawn/stream anchor). Pure function of
@@ -168,6 +194,8 @@ public:
     [[nodiscard]] int active_storm_count() const noexcept {
         return static_cast<int>(m_storm_cells.size());
     }
+    // Const work diagnostic: storms examined by each precipitation/intensity query.
+    [[nodiscard]] std::size_t storm_candidates_at(const Vec3& world_pos) const;
 
     // The live lightning STRIKE schedule. Canonical order: strike_tick
     // ascending, then storm_salt, then x, then z (deterministic, stable). Folded
@@ -216,6 +244,8 @@ public:
     }
 
 private:
+    std::function<WeatherSample(const Vec3&)> m_regional_sample;
+    std::function<std::string()> m_regional_hash;
     // Map a world position to a local cell (clamped result reported via in_region).
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;
     // Classify a (pressure, temperature, humidity) triple into a category.
@@ -233,6 +263,16 @@ private:
     [[nodiscard]] float StormPrecipAt(const Vec3& world_pos) const;
     // Nearest-storm intensity at a world position [0, 1] (for the render sample).
     [[nodiscard]] float StormIntensityAt(const Vec3& world_pos) const;
+    [[nodiscard]] std::span<const std::size_t> RegionalStormIndices(const Vec3& world_pos) const;
+    using StormBin = std::array<double, 2>;
+    struct StormBinHash {
+        std::size_t operator()(const StormBin& bin) const noexcept;
+    };
+    using StormIndex = std::unordered_map<StormBin, std::vector<std::size_t>, StormBinHash>;
+    [[nodiscard]] static StormIndex BuildRegionalStormIndex(std::span<const StormCell> storms);
+    // Each admitted FPG storm (<= 65,536) intersects at most four 512 m bins.
+    // Vectors preserve projection order; hash-table iteration never affects samples.
+    StormIndex m_regionalStormIndex;
 
     int m_weather_seed = 0;   // world seed + 12 (weather noise/storm schedule)
     int m_lightning_seed = 0; // world seed + 13 (lightning strike schedule)

@@ -622,11 +622,14 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         failure.index("AdoptWorldStateFrom(save_dir, state);"))
         self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 1)
         reader = self.function(source, "ReadWorldStateFrom")
-        self.assertEqual(reader.count("return false;"), 5)
-        self.assertEqual(reader.count("m_worldOpenError ="), 5)
+        self.assertEqual(reader.count("return false;"), 10)
+        self.assertEqual(reader.count("m_worldOpenError ="), 10)
         for validation in ("service.load_world(", "WorldSaveService::read_clock_metadata(",
                            "WorldSaveService::load_active_regions(", "m_regionSchedulerOverride",
-                           "chunk->sdf_data.size() != kFullSdfLattice"):
+                           "chunk->sdf_data.size() != kFullSdfLattice",
+                           "recover_pending_journal(", "WorldSaveService::load_ground_objects(",
+                           "WorldSaveService::load_field_pages(", "state.energy.emplace(2)",
+                           "DeserializeRegionalRecord(", "ValidateRegionalOwners("):
             self.assertIn(validation, reader)
         self.assertNotIn("m_worldUsable", reader)
         self.assertNotIn("m_worldSystem->", reader)
@@ -638,6 +641,23 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             "ServerWorldRunner::StreamedChunkCount()", 1)[0]
         self.assertNotIn("GetWorldOpenError()", full_snapshot)
         self.assertIn("m_session->SaveWorldStateTo(", full_snapshot)
+
+    def test_regional_and_legacy_authority_share_the_cursor_encoding(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        authority = self.function(source, "ComputeChunkStateHash")
+        self.assertRegex(authority, r"ComputeWorldStreamingStateHash\(\s*state,\s*"
+                         r"m_worldSystem->GetWaterSimWindowCursor\(\)\)")
+        self.assertRegex(authority, r"HashSimulationProjection\(\s*projection,\s*"
+                         r"m_worldSystem->GetWaterSimWindowCursor\(\)\)")
+        roundtrip = read_source(
+            "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
+        binding = roundtrip.split("std::string HashSimulationProjection(", 1)[1].split(
+            "std::string ComputeWorldStreamingStateHash(", 1)[0]
+        self.assertIn("Checksum(canonical_bytes, WaterCursorHashInput(water_sim_cursor))", binding)
+        legacy = roundtrip.split("std::string ComputeWorldStreamingStateHash(", 1)[1].split(
+            "std::string ComputeRegionContentHash(", 1)[0]
+        self.assertRegex(legacy, r"HashSimulationProjection\(\s*"
+                         r"SerializeWorldStreamingStateSimTruthForHash\(state\),\s*water_sim_cursor\)")
 
     def test_normal_custom_validation_precedes_directory_and_uses_prepared_identity(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")

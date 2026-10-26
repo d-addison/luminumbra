@@ -263,6 +263,7 @@ add_executable(common_tests
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
+    common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
@@ -277,6 +278,8 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    common/GroundObjectStore_test.cpp
+    common/FieldPageState_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
@@ -359,6 +362,15 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
     luminumbra_save_fixture_support
 )
+
+# These large test translation units need room for their COFF sections on MSVC.
+# Keep the option source-local, as for the client entry translation unit.
+if(MSVC)
+    set_source_files_properties(
+        common/GameSessionHeadlessWorld_test.cpp
+        rendering/render_smoke_test.cpp
+        PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()
 
 # Frozen-water rendering exercises the client bridge and mesh implementation.
 add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
@@ -1521,6 +1533,7 @@ add_executable(frontier_gates_test
     ai/instinct_locomotion_test.cpp
     ai/astar_grid_test.cpp
     ai/scent_field_test.cpp
+    ai/scent_field_gates_test.cpp
     ai/deterministic_rng_test.cpp
     ai/perception_test.cpp
     ai/evolution_test.cpp
@@ -1555,6 +1568,7 @@ add_executable(frontier_gates_test
     persistence/persistence_hardening_test.cpp
     persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
+    persistence/SaveTransaction_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE
@@ -2164,6 +2178,10 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     endif()
 endforeach()
 
+# Apply child-only labels after discovery has registered the tests. This CTest
+# include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake")
 # GoogleTest's discovery includes must run before case labeling and COST hints.
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")

@@ -11,9 +11,19 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <string>
+#include <vector>
 
+#include "luminumbra/core/Types.h"
+#include "luminumbra_common/core/DeterministicMath.h"
+#include "luminumbra_common/fields/FieldPageState.h"
 #include "luminumbra_common/systems/AmbientNoiseDispatch.h"
 
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -89,6 +99,125 @@ TEST(WeatherSystem, GeometryMatchesPinnedShape) {
     EXPECT_EQ(kMaxStormCells, 16);
 }
 
+TEST(WeatherSystem, RegionalStormQueriesBoundWorkAndPreserveCanonicalAccumulation) {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    namespace Math = Luminumbra::DeterministicMath;
+    WeatherSystem weather(kSeed);
+    weather.BindRegionalBackend(
+        [](const Vec3&) {
+            return Luminumbra::Systems::WeatherSample{.category = WeatherCategory::Rain,
+                                                      .precip_intensity = 0.2f,
+                                                      .storm_intensity = 0.0f,
+                                                      .wind = Vec2(0.0f)};
+        },
+        [] { return std::string("regional hash"); });
+    std::vector<StormCell> storms;
+    storms.reserve(Luminumbra::world::FieldPageState::kMaxStorms);
+    // 4,096 owners, each at the admitted 16-storm cap, including distant retained storms.
+    for (int z = -32; z < 32; ++z) {
+        for (int x = -32; x < 32; ++x) {
+            for (std::uint32_t salt = 0; salt < 16; ++salt) {
+                const bool order_witness = x == 0 && z == 0;
+                const auto offset = order_witness ? 0.0f : static_cast<float>(salt) * 16.0f;
+                storms.push_back({.center_world = Vec2(static_cast<float>(x) * 512.0f + offset,
+                                                       static_cast<float>(z) * 512.0f + offset),
+                                  .velocity = Vec2(0.0f),
+                                  .intensity = order_witness ? (salt == 0 ? 0.25f : 1.0e-8f)
+                                                             : (salt % 2 == 0 ? 0.01f : 1.0e-8f),
+                                  .spawn_tick = salt,
+                                  .lifetime_ticks = 240,
+                                  .seed_salt = salt});
+            }
+        }
+    }
+    ASSERT_EQ(storms.size(), Luminumbra::world::FieldPageState::kMaxStorms);
+    weather.AdoptRegionalWeather(1, kAnchor, storms, {});
+    std::size_t candidates = 0;
+    // Match the water-cell tick budget; distant owners must not multiply query work.
+    for (int cell = 0; cell < 4096; ++cell) {
+        const int column = cell % 64;
+        const int row = cell / 64;
+        const Vec3 position(static_cast<float>(column) * 8.0f - 256.0f,
+                            0.0f,
+                            static_cast<float>(row) * 8.0f - 256.0f);
+        candidates += weather.storm_candidates_at(position);
+    }
+    // A 512 m bin expanded by the 220 m radius intersects at most 9 owners of 16 storms.
+    EXPECT_LE(candidates, 4096u * 9u * 16u);
+    EXPECT_GT(candidates, 0u);
+    constexpr std::array coordinates{
+        -512.0f, -220.0f, -0.001f, 0.0f, 219.999f, 220.0f, 511.999f, 512.0f, 732.0f};
+    for (const float z : coordinates) {
+        for (const float x : coordinates) {
+            const Vec3 position(x, 0.0f, z);
+            float precip = 0.0f, intensity = 0.0f;
+            // Independent reference: the original full scan, in projection order.
+            for (const auto& storm : storms) {
+                const float dx = x - storm.center_world.x;
+                const float dz = z - storm.center_world.y;
+                const float distance = Math::Sqrt(dx * dx + dz * dz);
+                if (distance >= 220.0f)
+                    continue;
+                const float t = 1.0f - distance / 220.0f;
+                const float falloff = t * t;
+                precip += storm.intensity * falloff;
+                intensity = std::max(intensity, storm.intensity * t);
+            }
+            const auto sample = weather.SampleAt(position);
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(sample.precip_intensity),
+                      std::bit_cast<std::uint32_t>(std::min(1.0f, 0.2f + std::min(1.0f, precip))))
+                << x << "," << z;
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(sample.storm_intensity),
+                      std::bit_cast<std::uint32_t>(intensity));
+            EXPECT_LE(weather.storm_candidates_at(position), 9u * 16u);
+        }
+    }
+    // The centre sample is deliberately sensitive to reversing the canonical sum.
+    float reversed = 0.0f;
+    for (int salt = 15; salt >= 0; --salt)
+        reversed += salt == 0 ? 0.25f : 1.0e-8f;
+    EXPECT_NE(std::bit_cast<std::uint32_t>(weather.PrecipitationAt(Vec3(0.0f))),
+              std::bit_cast<std::uint32_t>(0.2f + reversed));
+    // Replacement and empty projections must discard all old spatial references.
+    weather.AdoptRegionalWeather(2, kAnchor, {storms.front()}, {});
+    EXPECT_EQ(weather.storm_candidates_at(kAnchor), 0u);
+    EXPECT_EQ(weather.PrecipitationAt(kAnchor), 0.2f);
+    weather.AdoptRegionalWeather(3, kAnchor, {}, {});
+    EXPECT_EQ(weather.storm_candidates_at(Vec3(-16384.0f, 0.0f, -16384.0f)), 0u);
+    EXPECT_EQ(weather.ComputeWeatherSubHash(), "regional hash");
+}
+
+TEST(WeatherSystem, RegionalStormIndexHandlesExtremeAndNonfiniteCoordinates) {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    WeatherSystem weather(kSeed);
+    weather.BindRegionalBackend([](const Vec3&) { return Luminumbra::Systems::WeatherSample{}; },
+                                [] { return std::string{}; });
+    const auto extreme = std::numeric_limits<float>::max();
+    const auto invalid = std::numeric_limits<float>::quiet_NaN();
+    const StormCell distant{.center_world = Vec2(extreme),
+                            .velocity = Vec2(0.0f),
+                            .intensity = 0.5f,
+                            .spawn_tick = 1,
+                            .lifetime_ticks = 240,
+                            .seed_salt = 1};
+    auto malformed = distant;
+    malformed.center_world.x = invalid;
+    auto malformed_z = distant;
+    malformed_z.center_world.y = invalid;
+    weather.AdoptRegionalWeather(1, kAnchor, {distant, malformed, malformed_z}, {});
+    EXPECT_EQ(weather.storm_candidates_at(Vec3(extreme, 0.0f, extreme)), 1u);
+    EXPECT_EQ(weather.PrecipitationAt(Vec3(extreme, 0.0f, extreme)), 0.5f);
+    for (const auto coordinate : {invalid, std::numeric_limits<float>::infinity(), -extreme}) {
+        const auto sample = weather.SampleAt(Vec3(coordinate, 0.0f, coordinate));
+        EXPECT_EQ(weather.storm_candidates_at(Vec3(coordinate, 0.0f, coordinate)), 0u);
+        EXPECT_EQ(sample.precip_intensity, 0.0f);
+        EXPECT_EQ(sample.storm_intensity, 0.0f);
+    }
+    EXPECT_EQ(weather.storm_candidates_at(Vec3(0.0f, 0.0f, invalid)), 0u);
+}
+
 TEST(WeatherSystem, SubHashIsDeterministicAcrossRuns) {
     // The load-bearing property: two fresh instances, same inputs, equal hash.
     // This is the same-tick determinism the world_hash `weather` slot, the
@@ -145,8 +274,9 @@ TEST(WeatherSystem, OutOfRegionCategoryClampsToClear) {
     weather.Update(kTicks, kAnchor, &wind);
     // Far outside the centred 64-cell (1536 m) extent the category clamps to the
     // control-phase default (clear) and base precip is 0 (no storm reaches there).
-    const float far = 1.0e6f;
-    EXPECT_EQ(weather.CategoryAt(Vec3(far, 5.0f, far)), WeatherCategory::Clear);
+    const float distant_coordinate = 1.0e6f;
+    EXPECT_EQ(weather.CategoryAt(Vec3(distant_coordinate, 5.0f, distant_coordinate)),
+              WeatherCategory::Clear);
 }
 
 TEST(WeatherSystem, AdvectionIsDeterministicAndStormsMove) {

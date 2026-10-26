@@ -167,6 +167,32 @@ void ExpectInlineSeed(SeedFixture& fixture, int resolution) {
     EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);
 }
 
+TEST(WaterSeedInputs, InitializationMarksOnlyAuthoritativeWaterDirty) {
+    for (const int resolution : {8, 16}) {
+        for (const bool boot : {false, true}) {
+            for (const bool staged : {false, true}) {
+                for (const bool authoritative : {false, true}) {
+                    SeedFixture fixture;
+                    fixture.water().SetSimResolution(resolution);
+                    fixture.water().SetBootSettleMode(boot);
+                    auto& chunk = *fixture.chunks().begin()->second;
+                    if (authoritative) {
+                        chunk.mark_sdf_loaded_or_edited();
+                    }
+                    if (staged) {
+                        fixture.prepare(chunk);
+                    }
+                    chunk.is_water_sleeping.store(true);
+                    fixture.tick();
+                    EXPECT_TRUE(chunk.has_water_sim.load());
+                    EXPECT_EQ(chunk.is_water_state_dirty(), authoritative);
+                    EXPECT_EQ(chunk.water_revision(), authoritative ? 1u : 0u);
+                }
+            }
+        }
+    }
+}
+
 TEST(WaterSeedInputs, HighCellsMatchOriginalInlineBitsIncludingEditedTerrain) {
     SeedFixture fixture;
     auto& chunk = *fixture.chunks().begin()->second;

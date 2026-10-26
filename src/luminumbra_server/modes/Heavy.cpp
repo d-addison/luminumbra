@@ -4,8 +4,11 @@
 #include "luminumbra_common/HashCheckpoint.h"
 
 using Luminumbra::Server::AuthoritativeStateEqual;
+using Luminumbra::Server::CaptureGroundObjects;
+using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::MeshEqual;
+using Luminumbra::Server::ScentDifference;
 
 namespace fs = std::filesystem;
 
@@ -27,6 +30,9 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
         h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
         h.ledger_bytes = runner.Session()->GetActiveRegionLedger().canonical_bytes();
     }
+    if (runner.Session()) {
+        h.ground_objects = CaptureGroundObjects(runner.Session()->GetGroundObjects());
+    }
     runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub);
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     return h;
@@ -37,8 +43,22 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
 // luminumbra_server/HeavyComparison.h.
 
 nlohmann::json HeavyHashJson(const HeavyHashes& h) {
+    auto ground_objects = nlohmann::json::array();
+    for (const auto& object : h.ground_objects) {
+        ground_objects.push_back({{"id", object.id},
+                                  {"type", object.type},
+                                  {"x_mm", object.x_mm},
+                                  {"y_mm", object.y_mm},
+                                  {"z_mm", object.z_mm},
+                                  {"spawn_tick", object.spawn_tick},
+                                  {"active_age", object.active_age},
+                                  {"despawn_after", object.despawn_after},
+                                  {"payload", object.payload},
+                                  {"flags", object.flags}});
+    }
     return nlohmann::json{
         {"world_hash", h.world_hash},
+        {"ground_objects", std::move(ground_objects)},
         {"sub_hashes",
          {
              {"terrain", h.sub.terrain},
@@ -111,10 +131,19 @@ int RunHeavy(const ServerCliOptions& options) {
         loaded.Session()->GetWorldSystem()->GetWaterSimWindowCursor();
 
     // The loaded session, immediately after load, must match the original at
-    // save on AUTHORITATIVE sim state (terrain/water/entities). Mesh is tracked
+    // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
     // informationally (see AuthoritativeStateEqual rationale).
     const bool roundtrip_ok = AuthoritativeStateEqual(orig_at_save, loaded_at_load);
     const bool roundtrip_mesh_match = MeshEqual(orig_at_save, loaded_at_load);
+    const std::string roundtrip_ground_difference =
+        GroundObjectDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_ground_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
+    }
+    const std::string roundtrip_scent_difference = ScentDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_scent_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_scent_difference);
+    }
 
     // --- : resimulate M further ticks on BOTH sessions. ---
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
@@ -124,6 +153,14 @@ int RunHeavy(const ServerCliOptions& options) {
 
     const bool resim_ok = AuthoritativeStateEqual(orig_final, loaded_final);
     const bool resim_mesh_match = MeshEqual(orig_final, loaded_final);
+    const std::string resim_ground_difference = GroundObjectDifference(orig_final, loaded_final);
+    if (!resim_ground_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: resim differs in {}", resim_ground_difference);
+    }
+    const std::string resim_scent_difference = ScentDifference(orig_final, loaded_final);
+    if (!resim_scent_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: resim differs in {}", resim_scent_difference);
+    }
 
     //  diagnostic: on a water resim mismatch, localize it — which chunks,
     // which fields. Field-by-field compare over both sessions' chunk snapshots.
@@ -230,6 +267,8 @@ int RunHeavy(const ServerCliOptions& options) {
         {"original_at_save", HeavyHashJson(orig_at_save)},
         {"loaded_at_load", HeavyHashJson(loaded_at_load)},
         {"roundtrip_match", roundtrip_ok},
+        {"roundtrip_ground_difference", roundtrip_ground_difference},
+        {"roundtrip_scent_difference", roundtrip_scent_difference},
         {"roundtrip_mesh_match", roundtrip_mesh_match},
         {"roundtrip_water_difference",
          orig_at_save.sub.water == loaded_at_load.sub.water
@@ -239,6 +278,8 @@ int RunHeavy(const ServerCliOptions& options) {
         {"original_final", HeavyHashJson(orig_final)},
         {"loaded_final", HeavyHashJson(loaded_final)},
         {"resim_match", resim_ok},
+        {"resim_ground_difference", resim_ground_difference},
+        {"resim_scent_difference", resim_scent_difference},
         {"resim_mesh_match", resim_mesh_match},
         {"resim_water_difference",
          orig_final.sub.water == loaded_final.sub.water
@@ -250,11 +291,13 @@ int RunHeavy(const ServerCliOptions& options) {
         {"settle_contract_ok", settle_ok},
         {"water_sim_cursor_at_save", cursor_at_save},
         {"water_sim_cursor_at_load", cursor_at_load},
-        {"authoritative_sections", nlohmann::json::array({"terrain", "water", "entities"})},
+        {"authoritative_sections",
+         nlohmann::json::array({"terrain", "water", "entities", "ground_objects"})},
         {"mesh_excluded_reason",
          "surface mesh is a deterministically-regenerated derived render artifact; async "
          "re-meshing across a save/load boundary reaches identical geometry via a different "
-         "in-memory pending-mesh snapshot. Authoritative sim state (terrain/water/entities) "
+         "in-memory pending-mesh snapshot. Authoritative sim state "
+         "(terrain/water/entities/ground objects) "
          "round-trips exactly."},
         {"passed", passed},
     };

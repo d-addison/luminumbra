@@ -1,0 +1,1416 @@
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/fields/EnergyFieldState.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
+namespace fs = std::filesystem;
+
+namespace Luminumbra::Persistence {
+
+TEST(SaveTransaction, IndexedEnergyValidationRejectsCanonicalFingerprintOfMalformedContents) {
+    const auto remaining = std::to_string(luminumbra::fields::kEnergyCadenceTicks);
+    const std::string header = "EFS1 1 " + remaining + "\n";
+    std::vector<std::string> invalid{
+        "not an EFS record",
+        "EFS1 2147483647 " + remaining + "\n",
+        header + "P 0 0 0:1 0:2\n",
+        header + "P 0 0 0:1\nP 0 0 0:2\n",
+        header + "P 0 0 256:1\n",
+        header + "P 0 0 0:1junk\n",
+    };
+    std::string oversized = "EFS1 64 " + remaining + "\n";
+    for (int page = 0; page <= 2048; ++page)
+        oversized += "P " + std::to_string(page) + " 0\n";
+    invalid.push_back(std::move(oversized));
+    for (const auto& bytes : invalid) {
+        SCOPED_TRACE(bytes.substr(0, 128));
+        const auto dir =
+            fs::temp_directory_path() /
+            ("lum_bad_energy_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(dir);
+        {
+            // Seal using raw fingerprints to model a correctly fingerprinted malformed
+            // external member. The reader must validate structure as well as its hash.
+            SaveTransaction transaction(
+                dir,
+                1,
+                {},
+                +[](const fs::path& root,
+                    std::string_view relative,
+                    MemberDigest& out,
+                    std::string& error) {
+                    bool exists = false;
+                    std::vector<std::string> diagnostics;
+                    if (!hash_file(root / std::string(relative),
+                                   out.bytes,
+                                   out.fnv64,
+                                   exists,
+                                   &diagnostics)) {
+                        error = diagnostics.empty() ? "read failed" : diagnostics.front();
+                        return false;
+                    }
+                    out.present = exists;
+                    return true;
+                });
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(WorldSaveService::write_member_bytes(dir, "aether_state.efs", bytes));
+            ASSERT_TRUE(transaction.commit(nullptr));
+        }
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::validate_save(dir, &errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("energy field"), std::string::npos);
+        std::error_code remove_error;
+        fs::remove_all(dir, remove_error);
+    }
+}
+
+namespace {
+
+using TreeMap = std::map<std::string, std::string>;
+
+class TempSave {
+public:
+    TempSave() {
+        static std::atomic<std::uint64_t> counter{0};
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        std::string name = "lum_snaptxn_";
+#ifndef _WIN32
+        name += std::to_string(static_cast<long long>(::getpid())) + "_";
+#endif
+        name += std::to_string(counter.fetch_add(1)) + "_" + std::to_string(stamp);
+        m_path = fs::temp_directory_path() / name;
+        std::error_code ec;
+        fs::create_directories(m_path / "chunks" / "region", ec);
+    }
+    ~TempSave() {
+        std::error_code ec;
+        fs::remove_all(m_path, ec);
+    }
+    TempSave(const TempSave&) = delete;
+    TempSave& operator=(const TempSave&) = delete;
+
+    [[nodiscard]] const fs::path& path() const {
+        return m_path;
+    }
+
+private:
+    fs::path m_path;
+};
+
+void Put(const fs::path& file, const std::string& bytes) {
+    std::error_code ec;
+    fs::create_directories(file.parent_path(), ec);
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(out.good()) << file.string();
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+std::string Get(const fs::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+TreeMap Tree(const fs::path& root) {
+    TreeMap out;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(root, ec);
+    if (ec) {
+        return out;
+    }
+    for (const fs::recursive_directory_iterator end; it != end; it.increment(ec)) {
+        if (ec) {
+            break;
+        }
+        std::error_code status_ec;
+        if (!it->is_regular_file(status_ec) || status_ec) {
+            continue;
+        }
+        const std::string rel = fs::relative(it->path(), root, status_ec).generic_string();
+        out[rel] = Get(it->path());
+    }
+    return out;
+}
+
+auto TreeFingerprints(const fs::path& root) {
+    std::map<std::string, std::tuple<fs::file_type, std::uint64_t, std::uint64_t>> fingerprints;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        const auto status = entry.symlink_status();
+        const auto relative =
+            Filesystem::GenericUtf8PathString(entry.path().lexically_relative(root));
+        if (fs::is_symlink(status)) {
+            // Snapshot hashing refuses links. Fingerprint the link itself without opening
+            // its target; regular targets inside the tree are checked independently.
+            const auto target = Filesystem::GenericUtf8PathString(fs::read_symlink(entry.path()));
+            fingerprints.emplace(relative,
+                                 std::tuple{status.type(),
+                                            static_cast<std::uint64_t>(target.size()),
+                                            fnv1a64_bytes(target.data(), target.size())});
+            continue;
+        }
+        if (!fs::is_regular_file(status))
+            continue;
+        std::uint64_t bytes = 0, digest = 0;
+        bool exists = false;
+        EXPECT_TRUE(hash_file(entry.path(), bytes, digest, exists, nullptr));
+        EXPECT_TRUE(exists);
+        fingerprints.emplace(relative, std::tuple{status.type(), bytes, digest});
+    }
+    return fingerprints;
+}
+
+const std::string kJournalPrefix =
+    "{\"schema\":\"luminumbra.journal.v1\",\"txn_id\":1,\"base_generation\":0,"
+    "\"new_generation\":1,\"entries\":[";
+
+void ExpectJournalRefusalWithoutWrites(const fs::path& root, std::string_view diagnostic) {
+    const auto before = TreeFingerprints(root);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::vector<std::string> errors;
+        EXPECT_EQ(recover_pending_journal(root, &errors), RecoveryOutcome::Failed);
+        EXPECT_TRUE(std::any_of(errors.begin(), errors.end(), [&](const auto& message) {
+            return message.find(diagnostic) != std::string::npos;
+        }));
+        EXPECT_EQ(TreeFingerprints(root), before);
+    }
+    SaveTransaction transaction(root, 2, {}, &WorldSaveService::member_digest);
+    EXPECT_FALSE(transaction.begin(nullptr));
+    EXPECT_EQ(TreeFingerprints(root), before);
+}
+
+void CopyTree(const fs::path& from, const fs::path& to) {
+    std::error_code ec;
+    fs::remove_all(to, ec);
+    fs::create_directories(to.parent_path(), ec);
+    fs::copy(from, to, fs::copy_options::recursive, ec);
+    ASSERT_FALSE(ec) << from.string() << " -> " << to.string() << ": " << ec.message();
+}
+
+bool RawDigest(const fs::path& save_dir,
+               std::string_view relative_path,
+               MemberDigest& out,
+               std::string& error) {
+    bool exists = false;
+    if (!hash_file(save_dir / std::string(relative_path), out.bytes, out.fnv64, exists, nullptr)) {
+        error = "cannot hash " + std::string(relative_path);
+        return false;
+    }
+    out.present = exists;
+    return true;
+}
+
+std::map<std::string, std::size_t>& DigestCalls() {
+    static std::map<std::string, std::size_t> calls;
+    return calls;
+}
+
+bool CountingDigest(const fs::path& save_dir,
+                    std::string_view relative_path,
+                    MemberDigest& out,
+                    std::string& error) {
+    ++DigestCalls()[std::string(relative_path)];
+    return RawDigest(save_dir, relative_path, out, error);
+}
+
+bool RejectingDigest(const fs::path& save_dir,
+                     std::string_view relative_path,
+                     MemberDigest& out,
+                     std::string& error) {
+    if (relative_path == "aether_state.efs") {
+        error = "boom";
+        return false;
+    }
+    return RawDigest(save_dir, relative_path, out, error);
+}
+
+bool CommitOnce(const fs::path& dir,
+                std::uint64_t tick,
+                const std::map<std::string, std::string>& writes) {
+    SaveTransaction txn(dir, tick, {}, &RawDigest);
+    std::vector<std::string> errors;
+    std::vector<std::string> keys;
+    for (const auto& entry : writes) {
+        keys.push_back(entry.first);
+    }
+    if (!txn.begin(&errors) || !txn.protect(keys, &errors)) {
+        return false;
+    }
+    for (const auto& entry : writes) {
+        if (!WorldSaveService::write_member_bytes(dir, entry.first, entry.second, &errors)) {
+            return false;
+        }
+    }
+    return txn.commit(&errors);
+}
+
+SnapshotMember MakeMember(const std::string& path,
+                          MemberClass cls,
+                          bool present,
+                          std::uint64_t bytes,
+                          std::uint64_t fnv64,
+                          std::uint64_t generation) {
+    SnapshotMember member;
+    member.path = path;
+    member.cls = cls;
+    member.present = present;
+    member.bytes = bytes;
+    member.fnv64 = fnv64;
+    member.generation = generation;
+    return member;
+}
+
+SnapshotIndex MakeIndex() {
+    SnapshotIndex index;
+    index.generation = 3;
+    index.tick = 9;
+    index.txn_id = 4;
+    index.anchors.push_back({1.0f, 2.0f, 3.0f});
+    index.members.push_back(
+        MakeMember("aether_state.efs", MemberClass::Authoritative, true, 10, 0x1234abcdULL, 3));
+    index.members.push_back(MakeMember(
+        "chunks/region/plant-entities.json", MemberClass::Authoritative, false, 0, 0, 3));
+    index.members.push_back(
+        MakeMember("world_info.json", MemberClass::Derived, true, 20, 0xfeedULL, 2));
+    return index;
+}
+
+const SnapshotMember* FindMember(const SnapshotIndex& index, const std::string& path) {
+    for (const SnapshotMember& member : index.members) {
+        if (member.path == path) {
+            return &member;
+        }
+    }
+    return nullptr;
+}
+
+std::string ReplaceFirst(std::string text, const std::string& from, const std::string& to) {
+    const std::size_t pos = text.find(from);
+    if (pos != std::string::npos) {
+        text.replace(pos, from.size(), to);
+    }
+    return text;
+}
+
+// Installs a hook for the lifetime of the guard and clears it on exit.
+class HookGuard {
+public:
+    explicit HookGuard(SnapshotStepHook hook) {
+        set_snapshot_step_hook_for_testing(hook);
+    }
+    ~HookGuard() {
+        set_snapshot_step_hook_for_testing(nullptr);
+    }
+    HookGuard(const HookGuard&) = delete;
+    HookGuard& operator=(const HookGuard&) = delete;
+};
+
+struct JournalCaptureState {
+    fs::path source;
+    fs::path target;
+};
+
+JournalCaptureState& JournalCapture() {
+    static JournalCaptureState state;
+    return state;
+}
+
+void CaptureJournalHook(const char* step, const fs::path& /*path*/) {
+    if (std::string_view(step) == "commit-point" && fs::exists(JournalCapture().source)) {
+        CopyTree(JournalCapture().source, JournalCapture().target);
+    }
+}
+
+#if !defined(_WIN32)
+// Death-test state. Death tests run in forked children (gtest "fast" style), so the parent-side
+// paths are inherited unchanged by the child.
+struct DeathTestState {
+    int kill_at = 0;
+    int calls = 0;
+    int published_at = 0;
+    int last_exit_code = -1;
+};
+
+DeathTestState& DeathState() {
+    static DeathTestState state;
+    return state;
+}
+
+void KillHook(const char* /*step*/, const fs::path& /*path*/) {
+    if (++DeathState().calls == DeathState().kill_at) {
+        std::_Exit(7);
+    }
+}
+
+void RecordHook(const char* step, const fs::path& /*path*/) {
+    ++DeathState().calls;
+    if (DeathState().published_at == 0 && std::string_view(step) == "journal-published") {
+        DeathState().published_at = DeathState().calls;
+    }
+}
+
+// Runs in the parent after waitpid. Records the child's exit code for the caller.
+bool KilledOrFinished(int status) {
+    if (!WIFEXITED(status)) {
+        return false;
+    }
+    DeathState().last_exit_code = WEXITSTATUS(status);
+    return DeathState().last_exit_code == 7 || DeathState().last_exit_code == 0;
+}
+
+bool RunScenario(const fs::path& dir) {
+    return CommitOnce(dir,
+                      5,
+                      {{"world_info.json", "w1"},
+                       {"aether_state.efs", "e1"},
+                       {"chunks/region/plant-entities.json", "p1"}});
+}
+
+void ChildKillScenario(const fs::path& dir, int kill_at) {
+    DeathState().calls = 0;
+    DeathState().kill_at = kill_at;
+    set_snapshot_step_hook_for_testing(&KillHook);
+    const bool ok = RunScenario(dir);
+    std::_Exit(ok ? 0 : 9);
+}
+
+void ChildKilledRecovery(const fs::path& dir, int kill_at) {
+    DeathState().calls = 0;
+    DeathState().kill_at = kill_at;
+    set_snapshot_step_hook_for_testing(&KillHook);
+    (void)recover_pending_journal(dir, nullptr);
+    std::_Exit(0);
+}
+
+// Computes the expected post-commit tree by running the scenario in-process on a copy.
+void ComputeFinalTree(const fs::path& baseline_dir, TreeMap& out) {
+    TempSave scratch;
+    CopyTree(baseline_dir, scratch.path());
+    ASSERT_TRUE(RunScenario(scratch.path()));
+    SnapshotIndex index;
+    ASSERT_TRUE(read_snapshot_index(scratch.path(), index, nullptr));
+    ASSERT_EQ(index.generation, 2u);
+    out = Tree(scratch.path());
+}
+#endif
+
+} // namespace
+
+TEST(SaveTransaction, MemberPathAllowListAcceptsOnlyKnownShapes) {
+    const std::vector<std::string> accepted = {
+        "world_info.json",
+        "aether_state.efs",
+        "chunks/region/world-manifest.json",
+        "chunks/region/plant-entities.json",
+        "chunks/region/ground-objects.json",
+        "chunks/region/field-pages.fpg",
+        "chunks/region/active-regions.arl",
+        "chunks/region/r.0.0.lmr",
+        "chunks/region/r.-3.12.lmr",
+    };
+    for (const std::string& path : accepted) {
+        EXPECT_TRUE(member_path_allowed(path)) << "path=" << path;
+    }
+    const std::vector<std::string> rejected = {
+        "",
+        "/world_info.json",
+        "../world_info.json",
+        "chunks/region/../world_info.json",
+        "chunks\\region\\r.0.0.lmr",
+        "C:/x/world_info.json",
+        "chunks/region/snapshot.json",
+        "chunks/region/r.a.b.lmr",
+        "other.txt",
+        "chunks/region/r.0.0.lmr.tmp.1.2",
+    };
+    for (const std::string& path : rejected) {
+        EXPECT_FALSE(member_path_allowed(path)) << "path=" << path;
+    }
+}
+
+TEST(SaveTransaction, HashesMissingEmptyAndBlockBoundaryRegularFiles) {
+    const TempSave save;
+    const auto member = save.path() / "aether_state.efs";
+    std::uint64_t bytes = 91, digest = 92;
+    bool exists = true;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(exists);
+    EXPECT_EQ(bytes, 0u);
+    EXPECT_EQ(digest, 0u);
+    for (const std::size_t size : {std::size_t{0},
+                                   std::size_t{1},
+                                   std::size_t{1048575},
+                                   std::size_t{1048576},
+                                   std::size_t{1048577}}) {
+        SCOPED_TRACE(size);
+        std::string payload(size, 'x');
+        if (!payload.empty())
+            payload.back() = '\0';
+        Put(member, payload);
+        ASSERT_TRUE(hash_file(member, bytes, digest, exists, &errors));
+        EXPECT_TRUE(exists);
+        EXPECT_EQ(bytes, payload.size());
+        EXPECT_EQ(digest, fnv1a64_bytes(payload.data(), payload.size()));
+    }
+    EXPECT_TRUE(errors.empty());
+    ASSERT_TRUE(fs::remove(member));
+    ASSERT_TRUE(fs::create_directory(member));
+    EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(errors.empty());
+}
+
+#ifndef _WIN32
+TEST(SaveTransaction, IndexedEnergyFifoIsRefusedWithoutWaitingForAWriter) {
+    const TempSave save;
+    const auto energy =
+        "EFS1 1 " + std::to_string(luminumbra::fields::kEnergyCadenceTicks) + "\nP 0 0 0:1\n";
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"aether_state.efs", energy}}));
+    ASSERT_TRUE(WorldSaveService::validate_save(save.path(), nullptr));
+    const auto member = save.path() / "aether_state.efs";
+    ASSERT_TRUE(fs::remove(member));
+    ASSERT_EQ(::mkfifo(member.c_str(), 0600), 0);
+    const auto before = Tree(save.path());
+    ASSERT_EXIT(
+        {
+            // A broken blocking open must fail this child promptly instead of hanging CTest.
+            ::alarm(2);
+            std::uint64_t bytes = 0;
+            std::uint64_t digest = 0;
+            bool exists = false;
+            std::vector<std::string> errors;
+            const bool hashed = hash_file(member, bytes, digest, exists, &errors);
+            const bool validated = WorldSaveService::validate_save(save.path(), &errors);
+            std::_Exit(!hashed && !validated && !errors.empty() ? 0 : 1);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_EQ(fs::symlink_status(member).type(), fs::file_type::fifo);
+}
+
+TEST(SaveTransaction, HashingRefusesSymlinksWithoutReadingTheirTargets) {
+    const TempSave save;
+    const auto target = save.path() / "target";
+    Put(target, "payload");
+    const auto member = save.path() / "aether_state.efs";
+    fs::create_symlink(target, member);
+    std::uint64_t bytes = 0, digest = 0;
+    bool exists = false;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(Get(target), "payload");
+    EXPECT_TRUE(fs::is_symlink(member));
+    ASSERT_TRUE(fs::remove(target));
+    errors.clear();
+    EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_TRUE(fs::is_symlink(member));
+}
+#else
+TEST(SaveTransaction, HashingRefusesUnreadableAndLockedFiles) {
+    const TempSave save;
+    const auto member = save.path() / "aether_state.efs";
+    Put(member, "payload");
+    for (const bool exclusive_open : {true, false}) {
+        const HANDLE handle = ::CreateFileW(member.c_str(),
+                                            GENERIC_READ | GENERIC_WRITE,
+                                            exclusive_open ? 0 : FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                            nullptr,
+                                            OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL,
+                                            nullptr);
+        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+        OVERLAPPED overlap{};
+        if (!exclusive_open)
+            ASSERT_NE(::LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlap), 0);
+        std::uint64_t bytes = 0, digest = 0;
+        bool exists = false;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(hash_file(member, bytes, digest, exists, &errors));
+        EXPECT_FALSE(errors.empty());
+        if (!exclusive_open)
+            EXPECT_NE(::UnlockFileEx(handle, 0, 1, 0, &overlap), 0);
+        EXPECT_NE(::CloseHandle(handle), 0);
+    }
+    EXPECT_EQ(Get(member), "payload");
+}
+#endif
+
+TEST(SaveTransaction, IndexCodecRoundTripIsDeterministic) {
+    const SnapshotIndex original = MakeIndex();
+    const std::string encoded = encode_snapshot_index(original);
+
+    SnapshotIndex decoded;
+    std::string error;
+    ASSERT_TRUE(decode_snapshot_index(encoded, decoded, error)) << error;
+    EXPECT_EQ(decoded.generation, 3u);
+    EXPECT_EQ(decoded.tick, 9u);
+    EXPECT_EQ(decoded.txn_id, 4u);
+    ASSERT_EQ(decoded.anchors.size(), 1u);
+    EXPECT_EQ(decoded.anchors[0][0], 1.0f);
+    EXPECT_EQ(decoded.anchors[0][1], 2.0f);
+    EXPECT_EQ(decoded.anchors[0][2], 3.0f);
+    ASSERT_EQ(decoded.members.size(), 3u);
+    for (std::size_t i = 0; i < original.members.size(); ++i) {
+        const SnapshotMember& want = original.members[i];
+        const SnapshotMember& got = decoded.members[i];
+        EXPECT_EQ(got.path, want.path) << "i=" << i;
+        EXPECT_EQ(got.cls, want.cls) << "i=" << i;
+        EXPECT_EQ(got.present, want.present) << "i=" << i;
+        EXPECT_EQ(got.bytes, want.bytes) << "i=" << i;
+        EXPECT_EQ(got.fnv64, want.fnv64) << "i=" << i;
+        EXPECT_EQ(got.generation, want.generation) << "i=" << i;
+    }
+    EXPECT_EQ(encode_snapshot_index(decoded), encoded);
+}
+
+TEST(SaveTransaction, IndexDecodeRejectsMalformedInput) {
+    const std::string good = encode_snapshot_index(MakeIndex());
+
+    SnapshotIndex unsorted = MakeIndex();
+    std::swap(unsorted.members.front(), unsorted.members.back());
+
+    SnapshotIndex duplicated = MakeIndex();
+    duplicated.members[1].path = duplicated.members[0].path;
+
+    SnapshotIndex traversal = MakeIndex();
+    traversal.members = {MakeMember("../x", MemberClass::Authoritative, true, 1, 1, 3)};
+
+    SnapshotIndex not_allowed = MakeIndex();
+    not_allowed.members = {MakeMember("other.txt", MemberClass::Authoritative, true, 1, 1, 3)};
+
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"empty", ""},
+        {"not json", "not json"},
+        {"wrong schema", ReplaceFirst(good, kSnapshotIndexSchema, "luminumbra.snapshot.v9")},
+        {"unsorted members", encode_snapshot_index(unsorted)},
+        {"duplicate member", encode_snapshot_index(duplicated)},
+        {"traversal member", encode_snapshot_index(traversal)},
+        {"not allow-listed member", encode_snapshot_index(not_allowed)},
+    };
+    for (const auto& [name, bytes] : cases) {
+        SnapshotIndex out;
+        std::string error;
+        EXPECT_FALSE(decode_snapshot_index(bytes, out, error)) << "case=" << name;
+        EXPECT_FALSE(error.empty()) << "case=" << name;
+    }
+}
+
+TEST(SaveTransaction, ReadSnapshotIndexAbsentIsCleanMiss) {
+    TempSave save;
+    SnapshotIndex index;
+    index.generation = 99;
+    ASSERT_TRUE(read_snapshot_index(save.path(), index, nullptr));
+    EXPECT_EQ(index.generation, 0u);
+    EXPECT_FALSE(snapshot_index_exists(save.path()));
+}
+
+TEST(SaveTransaction, CommitPublishesIndexAndDeletesJournal) {
+    TempSave save;
+    Put(save.path() / "world_info.json", "v1");
+
+    ASSERT_TRUE(
+        CommitOnce(save.path(), 7, {{"world_info.json", "v2"}, {"aether_state.efs", "e1"}}));
+
+    SnapshotIndex index;
+    ASSERT_TRUE(read_snapshot_index(save.path(), index, nullptr));
+    EXPECT_EQ(index.generation, 1u);
+    EXPECT_EQ(index.tick, 7u);
+    EXPECT_FALSE(journal_pending(save.path()));
+    EXPECT_FALSE(fs::exists(journal_directory(save.path())));
+
+    const std::map<std::string, std::string> expected = {{"world_info.json", "v2"},
+                                                         {"aether_state.efs", "e1"}};
+    for (const auto& [path, bytes] : expected) {
+        const SnapshotMember* member = FindMember(index, path);
+        ASSERT_NE(member, nullptr) << "path=" << path;
+        EXPECT_TRUE(member->present) << "path=" << path;
+        EXPECT_EQ(member->bytes, bytes.size()) << "path=" << path;
+        EXPECT_EQ(member->fnv64, fnv1a64_bytes(bytes.data(), bytes.size())) << "path=" << path;
+        EXPECT_EQ(Get(save.path() / path), bytes) << "path=" << path;
+    }
+
+    const SnapshotMember* world_before = FindMember(index, "world_info.json");
+    ASSERT_NE(world_before, nullptr);
+    const SnapshotMember world_copy = *world_before;
+
+    ASSERT_TRUE(CommitOnce(save.path(), 8, {{"aether_state.efs", "e2"}}));
+    SnapshotIndex second;
+    ASSERT_TRUE(read_snapshot_index(save.path(), second, nullptr));
+    EXPECT_EQ(second.generation, 2u);
+    const SnapshotMember* world_after = FindMember(second, "world_info.json");
+    ASSERT_NE(world_after, nullptr);
+    EXPECT_EQ(world_after->bytes, world_copy.bytes);
+    EXPECT_EQ(world_after->fnv64, world_copy.fnv64);
+    EXPECT_EQ(world_after->generation, world_copy.generation);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, AbortRestoresPreviousBytesAndRemovesCreatedMembers) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
+    const TreeMap before = Tree(save.path());
+
+    {
+        SaveTransaction txn(save.path(), 2, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(txn.begin(&errors));
+        ASSERT_TRUE(txn.protect({"world_info.json", "chunks/region/plant-entities.json"}, &errors));
+        ASSERT_TRUE(
+            WorldSaveService::write_member_bytes(save.path(), "world_info.json", "b", &errors));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(
+            save.path(), "chunks/region/plant-entities.json", "p", &errors));
+        txn.abort(&errors);
+        EXPECT_FALSE(txn.committed());
+    }
+
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "a");
+    EXPECT_FALSE(fs::exists(save.path() / "chunks/region/plant-entities.json"));
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, FirstIndexDigestsProtectedAndUntouchedMembersOnce) {
+    const TempSave save;
+    Put(save.path() / "world_info.json", "metadata");
+    Put(save.path() / "chunks/region/r.0.0.lmr", "before");
+    Put(save.path() / "chunks/region/r.1.0.lmr", "untouched");
+    DigestCalls().clear();
+    SaveTransaction txn(save.path(), 1, {}, &CountingDigest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(txn.begin(&errors));
+    ASSERT_TRUE(
+        txn.protect({"world_info.json", "chunks/region/r.0.0.lmr", "aether_state.efs"}, &errors));
+    ASSERT_TRUE(WorldSaveService::durable_write_file(
+        save.path() / "chunks/region/r.0.0.lmr", "after", &errors));
+    ASSERT_TRUE(txn.commit(&errors));
+    for (const auto& [path, count] : DigestCalls())
+        EXPECT_EQ(count, 1u) << path;
+    for (const char* path : {"world_info.json",
+                             "chunks/region/r.0.0.lmr",
+                             "chunks/region/r.1.0.lmr",
+                             "aether_state.efs"})
+        EXPECT_EQ(DigestCalls().at(path), 1u) << path;
+    SnapshotIndex index;
+    ASSERT_TRUE(read_snapshot_index(save.path(), index, &errors));
+    EXPECT_EQ(index.members.size(), 3u); // The never-created energy member remains absent.
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(SaveTransaction, UndoCopiesAndRestoresEmptyAndBlockBoundaryPayloads) {
+    for (const std::size_t size : {std::size_t{0},
+                                   std::size_t{1},
+                                   std::size_t{65535},
+                                   std::size_t{65536},
+                                   std::size_t{65537}}) {
+        SCOPED_TRACE(size);
+        const TempSave save;
+        std::string previous(size, 'x');
+        if (!previous.empty())
+            previous.front() = '\0';
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        Put(member, previous);
+        SaveTransaction txn(save.path(), 1, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(txn.begin(&errors));
+        ASSERT_TRUE(txn.protect({"world_info.json", "world_info.json"}, &errors));
+        EXPECT_EQ(Get(undo), previous);
+        EXPECT_FALSE(fs::exists(journal_directory(save.path()) / "undo/1"));
+        EXPECT_EQ(WorldSaveService::region_staging_path(undo),
+                  journal_directory(save.path()) / "0");
+        ASSERT_TRUE(WorldSaveService::durable_write_file(member, "changed", &errors));
+        txn.abort(&errors);
+        EXPECT_EQ(Get(member), previous);
+        EXPECT_FALSE(journal_pending(save.path()));
+        EXPECT_TRUE(errors.empty());
+    }
+}
+
+TEST(SaveTransaction, MissingPartialCorruptAndNonregularUndoCannotBeRestored) {
+    for (const int damage : {0, 1, 2, 3}) {
+        SCOPED_TRACE(damage);
+        const TempSave save;
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        const std::string previous(65537, 'x');
+        Put(member, previous);
+        SaveTransaction txn(save.path(), 1, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(txn.begin(&errors));
+        ASSERT_TRUE(txn.protect({"world_info.json"}, &errors));
+        ASSERT_TRUE(WorldSaveService::durable_write_file(member, "changed", &errors));
+        if (damage == 0 || damage == 3) {
+            ASSERT_TRUE(fs::remove(undo));
+            if (damage == 3) {
+                ASSERT_TRUE(fs::create_directory(undo));
+            }
+        } else if (damage == 1) {
+            Put(undo, previous.substr(0, 65536));
+        } else {
+            auto corrupted = previous;
+            corrupted.back() = 'y';
+            Put(undo, corrupted);
+        }
+        txn.abort(&errors);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Get(member), "changed");
+        EXPECT_TRUE(journal_pending(save.path()));
+        const auto damaged = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), damaged);
+    }
+}
+
+TEST(SaveTransaction, CheckedPayloadReadsBoundAllocationAndSeparateMissingFromInvalid) {
+    const TempSave save;
+    const auto path = save.path() / "payload";
+    std::string bytes;
+    bool present = true;
+    ASSERT_TRUE(read_snapshot_bytes(path, 0, bytes, present, nullptr));
+    EXPECT_FALSE(present);
+    Put(path, "");
+    ASSERT_TRUE(read_snapshot_bytes(path, 0, bytes, present, nullptr));
+    EXPECT_TRUE(present);
+    EXPECT_TRUE(bytes.empty());
+    Put(path, "abc");
+    EXPECT_FALSE(read_snapshot_bytes(path, 2, bytes, present, nullptr));
+    EXPECT_TRUE(present);
+    EXPECT_TRUE(bytes.empty());
+    ASSERT_TRUE(read_snapshot_bytes(path, 3, bytes, present, nullptr));
+    EXPECT_EQ(bytes, "abc");
+    fs::resize_file(path, kMaxSnapshotPayloadBytes + 1);
+    EXPECT_FALSE(read_snapshot_bytes(path, kMaxSnapshotPayloadBytes + 1, bytes, present, nullptr));
+    EXPECT_TRUE(bytes.empty());
+    fs::remove(path);
+    fs::create_directory(path);
+    EXPECT_FALSE(read_snapshot_bytes(path, kMaxSnapshotPayloadBytes, bytes, present, nullptr));
+    EXPECT_TRUE(present);
+}
+
+TEST(SaveTransaction, RecoveryChecksUndoDeclaredAndActualSizesBeforeReading) {
+    for (const auto declared : {std::uint64_t{0}, std::uint64_t{2}, kMaxSnapshotPayloadBytes + 1}) {
+        const TempSave save;
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        const auto journal = journal_directory(save.path()) / "txn.json";
+        Put(member, "changed");
+        Put(undo, "x");
+        const auto document =
+            kJournalPrefix +
+            "{\"path\":\"world_info.json\",\"action\":\"replace\",\"prev_bytes\":" +
+            std::to_string(declared) +
+            ",\"prev_fnv64\":\"0000000000000000\",\"undo\":\"undo/0\"}]}";
+        Put(journal, document);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            EXPECT_EQ(Get(member), "changed");
+            EXPECT_EQ(Get(journal), document);
+            EXPECT_EQ(Get(undo), "x");
+        }
+    }
+}
+
+#ifndef _WIN32
+TEST(SaveTransaction, UndoFifosAndInfiniteOrHugeSymlinksRefuseWithoutReadingOrWriting) {
+    for (const int damage : {0, 1, 2, 3}) {
+        const TempSave save;
+        const TempSave outside;
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        Put(member, "changed");
+        fs::create_directories(undo.parent_path());
+        if (damage == 0) {
+            ASSERT_EQ(::mkfifo(undo.c_str(), 0600), 0);
+        } else if (damage == 1) {
+            fs::create_symlink("/dev/zero", undo);
+        } else {
+            const auto huge = outside.path() / "huge";
+            Put(huge, "x");
+            fs::resize_file(huge, kMaxSnapshotPayloadBytes + 1);
+            if (damage == 2)
+                fs::create_symlink(huge, undo);
+            else
+                fs::rename(huge, undo);
+        }
+        const auto journal = journal_directory(save.path()) / "txn.json";
+        const auto document =
+            kJournalPrefix +
+            "{\"path\":\"world_info.json\",\"action\":\"replace\",\"prev_bytes\":1,"
+            "\"prev_fnv64\":\"0000000000000000\",\"undo\":\"undo/0\"}]}";
+        Put(journal, document);
+        const auto type = fs::symlink_status(undo).type();
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            EXPECT_EXIT(
+                {
+                    ::alarm(2);
+                    const bool refused =
+                        recover_pending_journal(save.path(), nullptr) == RecoveryOutcome::Failed;
+                    std::_Exit(refused ? 0 : 1);
+                },
+                ::testing::ExitedWithCode(0),
+                "");
+            EXPECT_EQ(Get(member), "changed");
+            EXPECT_EQ(Get(journal), document);
+            EXPECT_EQ(fs::symlink_status(undo).type(), type);
+        }
+    }
+}
+#else
+TEST(SaveTransaction, LockedUndoRefusesWithoutChangingInstalledMembers) {
+    const TempSave save;
+    const auto undo = journal_directory(save.path()) / "undo/0";
+    const auto member = save.path() / "world_info.json";
+    Put(member, "changed");
+    Put(undo, "x");
+    const auto document = kJournalPrefix +
+                          "{\"path\":\"world_info.json\",\"action\":\"replace\",\"prev_bytes\":1,"
+                          "\"prev_fnv64\":\"0000000000000000\",\"undo\":\"undo/0\"}]}";
+    Put(journal_directory(save.path()) / "txn.json", document);
+    const HANDLE handle = ::CreateFileW(undo.c_str(),
+                                        GENERIC_READ,
+                                        FILE_SHARE_READ,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+    OVERLAPPED range{};
+    const bool locked =
+        ::LockFileEx(
+            handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &range) != 0;
+    if (locked)
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    EXPECT_NE(::CloseHandle(handle), 0);
+    ASSERT_TRUE(locked);
+    EXPECT_EQ(Get(member), "changed");
+    EXPECT_EQ(Get(journal_directory(save.path()) / "txn.json"), document);
+}
+#endif
+
+TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
+    const TreeMap before = Tree(save.path());
+
+    {
+        SaveTransaction txn(save.path(), 2, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(txn.begin(&errors));
+        ASSERT_TRUE(txn.protect({"world_info.json", "chunks/region/plant-entities.json"}, &errors));
+        ASSERT_TRUE(
+            WorldSaveService::write_member_bytes(save.path(), "world_info.json", "b", &errors));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(
+            save.path(), "chunks/region/plant-entities.json", "p", &errors));
+    }
+
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, FailedCommitValidationRollsBack) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
+    const TreeMap before = Tree(save.path());
+
+    SaveTransaction txn(save.path(), 2, {}, &RejectingDigest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(txn.begin(&errors));
+    ASSERT_TRUE(txn.protect({"world_info.json", "aether_state.efs"}, &errors));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "b", &errors));
+    ASSERT_TRUE(
+        WorldSaveService::write_member_bytes(save.path(), "aether_state.efs", "e", &errors));
+
+    EXPECT_FALSE(txn.commit(&errors));
+    EXPECT_FALSE(txn.committed());
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, RecoveryDiscardsStaleJournalWhenIndexAlreadyCommitted) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "v0"}}));
+
+    TempSave side;
+    JournalCapture().source = journal_directory(save.path());
+    JournalCapture().target = side.path() / "stale_journal";
+    fs::remove_all(JournalCapture().target);
+    {
+        HookGuard guard(&CaptureJournalHook);
+        ASSERT_TRUE(CommitOnce(save.path(), 2, {{"world_info.json", "v1"}}));
+    }
+    ASSERT_TRUE(fs::exists(JournalCapture().target / "txn.json"))
+        << "stale journal was not captured";
+    ASSERT_FALSE(journal_pending(save.path()));
+    const TreeMap post_commit = Tree(save.path());
+
+    CopyTree(JournalCapture().target, journal_directory(save.path()));
+    ASSERT_TRUE(journal_pending(save.path()));
+
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::DiscardedStale);
+    EXPECT_EQ(Tree(save.path()), post_commit);
+    EXPECT_FALSE(journal_pending(save.path()));
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::NothingToDo);
+}
+
+TEST(SaveTransaction, RecoveryOnCleanDirectoryIsNothingToDo) {
+    TempSave save;
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::NothingToDo);
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
+    TempSave save;
+    Put(journal_directory(save.path()) / "txn.json", "garbage");
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+    EXPECT_FALSE(errors.empty());
+}
+
+TEST(SaveTransaction, RecoveryRejectsOversizedJournalWithoutWrites) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "baseline"}}));
+    Put(save.path() / "world_info.json.tmp.1.2", "staging must survive refusal");
+    Put(journal_directory(save.path()) / "undo/0", "undo must survive refusal");
+    auto journal = kJournalPrefix + "]}";
+    journal.resize(kMaxJournalBytes + 1, ' ');
+    Put(journal_directory(save.path()) / "txn.json", journal);
+    ExpectJournalRefusalWithoutWrites(save.path(), "byte limit");
+}
+
+TEST(SaveTransaction, RecoveryRejectsTooManyJournalEntriesBeforeEntryDecoding) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "baseline"}}));
+    Put(save.path() / "world_info.json.tmp.1.2", "staging must survive refusal");
+    // The count guard must run before constructing/validating any recovery entry. Null entries
+    // keep this over-count input below the byte budget and distinguish the two refusals.
+    std::string journal = kJournalPrefix;
+    for (std::size_t i = 0; i <= kMaxJournalEntries; ++i)
+        journal += i == 0 ? "null" : ",null";
+    journal += "]}";
+    ASSERT_LT(journal.size(), kMaxJournalBytes);
+    Put(journal_directory(save.path()) / "txn.json", journal);
+    ExpectJournalRefusalWithoutWrites(save.path(), "entry count exceeds limit");
+}
+
+TEST(SaveTransaction, RecoveryAcceptsJournalAtByteLimit) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "baseline"}}));
+    const auto baseline = Tree(save.path());
+    auto journal = kJournalPrefix + "]}";
+    journal.resize(kMaxJournalBytes, ' ');
+    Put(journal_directory(save.path()) / "txn.json", journal);
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::DiscardedStale);
+    EXPECT_EQ(Tree(save.path()), baseline);
+}
+
+TEST(SaveTransaction, RecoveryRefusesEmptyTruncatedAndNonregularJournalsWithoutWrites) {
+    for (const auto& journal : {std::string{}, kJournalPrefix, kJournalPrefix + "{}"}) {
+        TempSave save;
+        Put(save.path() / "world_info.json", "baseline");
+        Put(save.path() / "world_info.json.tmp.1.2", "staging");
+        Put(journal_directory(save.path()) / "txn.json", journal);
+        ExpectJournalRefusalWithoutWrites(save.path(), "malformed journal JSON");
+    }
+    TempSave save;
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    fs::create_directories(txn);
+    Put(txn / "sentinel", "directory is not a journal");
+    ExpectJournalRefusalWithoutWrites(save.path(), "cannot open bounded snapshot input");
+    EXPECT_TRUE(fs::is_directory(txn));
+}
+
+#ifndef _WIN32
+TEST(SaveTransaction, RecoveryRefusesFifoJournalWithoutWaitingForAWriter) {
+    TempSave save;
+    fs::create_directories(journal_directory(save.path()));
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    ASSERT_EQ(::mkfifo(txn.c_str(), 0600), 0);
+    ExpectJournalRefusalWithoutWrites(save.path(), "cannot open bounded snapshot input");
+    EXPECT_EQ(fs::symlink_status(txn).type(), fs::file_type::fifo);
+}
+
+TEST(SaveTransaction, RecoveryRefusesSymlinkJournalWithoutWrites) {
+    TempSave save;
+    const auto target = save.path() / "foreign.json";
+    Put(target, kJournalPrefix + "]}");
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    fs::create_directories(txn.parent_path());
+    fs::create_symlink(target, txn);
+    const auto fingerprints = TreeFingerprints(save.path());
+    EXPECT_TRUE(fingerprints.contains("foreign.json"));
+    EXPECT_TRUE(fingerprints.contains("journal/txn.json"));
+    ExpectJournalRefusalWithoutWrites(save.path(), "cannot open bounded snapshot input");
+    EXPECT_TRUE(fs::is_symlink(txn));
+    EXPECT_EQ(fs::read_symlink(txn), target);
+    EXPECT_EQ(Get(target), kJournalPrefix + "]}");
+}
+#else
+TEST(SaveTransaction, RecoveryRefusesUnreadableAndLockedJournalsWithoutWrites) {
+    TempSave save;
+    const auto txn = journal_directory(save.path()) / "txn.json";
+    Put(txn, kJournalPrefix + "]}");
+    const auto before = Tree(save.path());
+    for (const bool exclusive_open : {true, false}) {
+        const HANDLE handle = ::CreateFileW(txn.c_str(),
+                                            GENERIC_READ,
+                                            exclusive_open ? 0 : FILE_SHARE_READ,
+                                            nullptr,
+                                            OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL,
+                                            nullptr);
+        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+        OVERLAPPED range{};
+        const bool locked =
+            exclusive_open ||
+            ::LockFileEx(
+                handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &range) != 0;
+        std::vector<std::string> errors;
+        if (locked)
+            EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_NE(::CloseHandle(handle), 0);
+        ASSERT_TRUE(locked);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find(exclusive_open ? "cannot open bounded snapshot input"
+                                                     : "cannot read bounded snapshot input"),
+                  std::string::npos);
+        EXPECT_EQ(Tree(save.path()), before);
+    }
+}
+#endif
+
+TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
+    TempSave save;
+    fs::create_directories(journal_directory(save.path()));
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::DiscardedStale);
+    EXPECT_FALSE(fs::exists(journal_directory(save.path())));
+}
+
+TEST(SaveTransaction, RecoverySweepsStagingTemporariesOfAnIndexedDirectoryWithoutJournal) {
+    TempSave dir;
+    ASSERT_TRUE(CommitOnce(dir.path(), 1, {{"world_info.json", "w"}}));
+    Put(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4", "partial");
+    Put(dir.path() / "world_info.json.tmp.5.6", "partial");
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(dir.path(), &errors), RecoveryOutcome::NothingToDo);
+    EXPECT_FALSE(fs::exists(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4"));
+    EXPECT_FALSE(fs::exists(dir.path() / "world_info.json.tmp.5.6"));
+    EXPECT_EQ(Get(dir.path() / "world_info.json"), "w");
+}
+
+TEST(SaveTransaction, RecoverySweepsStagingTemporaries) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "w"}}));
+    Put(save.path() / "chunks/region/r.0.0.lmr.tmp.123.4", "partial");
+    Put(save.path() / "world_info.json.tmp.5.6", "partial");
+    fs::create_directories(journal_directory(save.path()));
+
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::DiscardedStale);
+    EXPECT_FALSE(fs::exists(save.path() / "chunks/region/r.0.0.lmr.tmp.123.4"));
+    EXPECT_FALSE(fs::exists(save.path() / "world_info.json.tmp.5.6"));
+    EXPECT_TRUE(fs::exists(save.path() / "world_info.json"));
+}
+
+#if !defined(_WIN32)
+
+TEST(SaveTransactionDeathTest, KillAtEveryStepRecoversToBaselineOrFinal) {
+    // Fork-style death tests: the child inherits the parent's directories, so the paths computed
+    // below (which embed the pid) are valid inside the child.
+    ::testing::GTEST_FLAG(death_test_style) = "fast";
+
+    TempSave base;
+    ASSERT_TRUE(
+        CommitOnce(base.path(), 1, {{"world_info.json", "w0"}, {"aether_state.efs", "e0"}}));
+    const TreeMap baseline = Tree(base.path());
+
+    TreeMap final_tree;
+    ComputeFinalTree(base.path(), final_tree);
+    ASSERT_FALSE(final_tree.empty());
+    ASSERT_NE(final_tree, baseline);
+
+    TempSave work;
+    int killed = 0;
+    bool saw_finish = false;
+    for (int n = 1; n <= 200 && !saw_finish; ++n) {
+        CopyTree(base.path(), work.path());
+        EXPECT_EXIT(ChildKillScenario(work.path(), n), KilledOrFinished, "");
+        ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7)
+            << "N=" << n << " child exit=" << DeathState().last_exit_code;
+
+        const bool finished = DeathState().last_exit_code == 0;
+        if (!finished) {
+            ++killed;
+        }
+        std::vector<std::string> errors;
+        const RecoveryOutcome first = recover_pending_journal(work.path(), &errors);
+        ASSERT_NE(first, RecoveryOutcome::Failed) << "N=" << n << " errors=" << errors.size();
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo)
+            << "N=" << n;
+        const TreeMap tree = Tree(work.path());
+        ASSERT_TRUE(tree == baseline || tree == final_tree) << "N=" << n;
+        ASSERT_FALSE(journal_pending(work.path())) << "N=" << n;
+        if (finished) {
+            saw_finish = true;
+            EXPECT_EQ(tree, final_tree) << "N=" << n;
+        }
+    }
+    EXPECT_TRUE(saw_finish) << "scenario did not finish within 200 hook points";
+    EXPECT_GE(killed, 5);
+}
+
+TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
+    ::testing::GTEST_FLAG(death_test_style) = "fast";
+
+    TempSave base;
+    ASSERT_TRUE(
+        CommitOnce(base.path(), 1, {{"world_info.json", "w0"}, {"aether_state.efs", "e0"}}));
+    const TreeMap baseline = Tree(base.path());
+
+    TreeMap final_tree;
+    ComputeFinalTree(base.path(), final_tree);
+    ASSERT_FALSE(final_tree.empty());
+
+    // Probe the total hook count of the scenario, and the first journal-published hook.
+    TempSave probe;
+    CopyTree(base.path(), probe.path());
+    DeathState().calls = 0;
+    DeathState().published_at = 0;
+    {
+        HookGuard guard(&RecordHook);
+        ASSERT_TRUE(RunScenario(probe.path()));
+    }
+    ASSERT_GT(DeathState().published_at, 0);
+    ASSERT_GT(DeathState().calls, DeathState().published_at);
+    // Midway between journal publication and the end of the transaction: the journal still exists.
+    const int kill_at = (DeathState().published_at + DeathState().calls) / 2;
+
+    TempSave dead;
+    CopyTree(base.path(), dead.path());
+    EXPECT_EXIT(ChildKillScenario(dead.path(), kill_at), KilledOrFinished, "");
+    ASSERT_EQ(DeathState().last_exit_code, 7) << "transaction was not killed at hook " << kill_at;
+    ASSERT_TRUE(journal_pending(dead.path())) << "kill_at=" << kill_at;
+
+    bool saw_finish = false;
+    int recovery_kills = 0;
+    for (int m = 1; m <= 20 && !saw_finish; ++m) {
+        TempSave rec;
+        CopyTree(dead.path(), rec.path());
+        EXPECT_EXIT(ChildKilledRecovery(rec.path(), m), KilledOrFinished, "");
+        ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7)
+            << "M=" << m << " child exit=" << DeathState().last_exit_code;
+        const bool finished = DeathState().last_exit_code == 0;
+        if (!finished) {
+            ++recovery_kills;
+        }
+
+        std::vector<std::string> errors;
+        ASSERT_NE(recover_pending_journal(rec.path(), &errors), RecoveryOutcome::Failed)
+            << "M=" << m << " errors=" << errors.size();
+        const TreeMap tree = Tree(rec.path());
+        ASSERT_TRUE(tree == baseline || tree == final_tree) << "M=" << m;
+        ASSERT_FALSE(journal_pending(rec.path())) << "M=" << m;
+        EXPECT_EQ(recover_pending_journal(rec.path(), nullptr), RecoveryOutcome::NothingToDo)
+            << "M=" << m;
+        saw_finish = finished;
+    }
+    EXPECT_TRUE(saw_finish) << "recovery did not finish within 20 hook points";
+    EXPECT_GE(recovery_kills, 1);
+}
+
+#endif
+
+#if defined(_WIN32)
+namespace {
+int g_windows_cut = 0;
+int g_windows_calls = 0;
+void WindowsKillHook(const char*, const fs::path&) {
+    if (++g_windows_calls == g_windows_cut)
+        std::_Exit(7);
+}
+
+std::wstring WindowsTestEnv(const wchar_t* name) {
+    const DWORD count = ::GetEnvironmentVariableW(name, nullptr, 0);
+    if (count == 0)
+        return {};
+    std::wstring value(count, L'\0');
+    const DWORD copied = ::GetEnvironmentVariableW(name, value.data(), count);
+    value.resize(copied);
+    return value;
+}
+
+bool WindowsScenario(const fs::path& dir) {
+    SaveTransaction txn(dir, 5, {}, &RawDigest);
+    if (!txn.begin(nullptr) || !txn.protect({"world_info.json",
+                                             "aether_state.efs",
+                                             "chunks/region/plant-entities.json",
+                                             "chunks/region/active-regions.arl"},
+                                            nullptr))
+        return false;
+    return WorldSaveService::write_member_bytes(dir, "world_info.json", "w1") &&
+           WorldSaveService::write_member_bytes(dir, "aether_state.efs", "e1") &&
+           WorldSaveService::write_member_bytes(dir, "chunks/region/plant-entities.json", "p1") &&
+           WorldSaveService::remove_member(dir, "chunks/region/active-regions.arl") &&
+           txn.commit(nullptr);
+}
+
+std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery) {
+    std::wstring executable(32768, L'\0');
+    const DWORD count =
+        ::GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (count == 0 || count == executable.size())
+        return std::nullopt;
+    executable.resize(count);
+    const auto previous_dir = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DIR");
+    const auto previous_cut = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT");
+    const auto previous_mode = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_RECOVER");
+    const auto cut_text = std::to_wstring(cut);
+    const bool configured =
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DIR", dir.c_str()) &&
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_CUT", cut_text.c_str()) &&
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER", recovery ? L"1" : L"0");
+    std::wstring command = L"\"" + executable +
+                           L"\" --gtest_filter=SaveTransaction.DISABLED_WindowsInterruptionChild "
+                           L"--gtest_also_run_disabled_tests --gtest_color=no";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    const bool started = configured && ::CreateProcessW(executable.c_str(),
+                                                        command.data(),
+                                                        nullptr,
+                                                        nullptr,
+                                                        FALSE,
+                                                        CREATE_NO_WINDOW,
+                                                        nullptr,
+                                                        nullptr,
+                                                        &startup,
+                                                        &process) != FALSE;
+    ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DIR",
+                              previous_dir.empty() ? nullptr : previous_dir.c_str());
+    ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_CUT",
+                              previous_cut.empty() ? nullptr : previous_cut.c_str());
+    ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER",
+                              previous_mode.empty() ? nullptr : previous_mode.c_str());
+    if (!started)
+        return std::nullopt;
+    const DWORD waited = ::WaitForSingleObject(process.hProcess, 30000);
+    if (waited != WAIT_OBJECT_0) {
+        ::TerminateProcess(process.hProcess, 9);
+        ::WaitForSingleObject(process.hProcess, 30000);
+    }
+    DWORD code = 9;
+    const bool got_exit = ::GetExitCodeProcess(process.hProcess, &code) != FALSE;
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
+    return got_exit && waited == WAIT_OBJECT_0 ? std::optional<DWORD>(code) : std::nullopt;
+}
+} // namespace
+
+// Direct GoogleTest runs must leave this child to the interruption matrix below.
+// CTest also labels it manual via SaveTransactionCTest.cmake after discovery.
+TEST(SaveTransaction, DISABLED_WindowsInterruptionChild) {
+    const auto dir = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DIR");
+    if (dir.empty())
+        GTEST_SKIP() << "invoked only by the Windows interruption matrix";
+    g_windows_cut = std::stoi(WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT"));
+    g_windows_calls = 0;
+    set_snapshot_step_hook_for_testing(&WindowsKillHook);
+    if (WindowsTestEnv(L"LUM_TXN_TEST_CHILD_RECOVER") == L"1")
+        std::_Exit(recover_pending_journal(fs::path(dir), nullptr) == RecoveryOutcome::Failed ? 9
+                                                                                              : 0);
+    std::_Exit(WindowsScenario(fs::path(dir)) ? 0 : 9);
+}
+
+TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) {
+    TempSave base, final, work, interrupted;
+    ASSERT_TRUE(CommitOnce(base.path(),
+                           1,
+                           {{"world_info.json", "w0"},
+                            {"aether_state.efs", "e0"},
+                            {"chunks/region/active-regions.arl", "a0"}}));
+    const auto baseline = Tree(base.path());
+    CopyTree(base.path(), final.path());
+    ASSERT_TRUE(WindowsScenario(final.path()));
+    const auto finished_tree = Tree(final.path());
+    bool complete = false;
+    bool have_interrupted = false;
+    for (int cut = 1; cut <= 200 && !complete; ++cut) {
+        SCOPED_TRACE(cut);
+        CopyTree(base.path(), work.path());
+        const auto exit_code = WindowsTxnChild(work.path(), cut, false);
+        ASSERT_TRUE(exit_code.has_value());
+        if (!exit_code.has_value())
+            return;
+        const DWORD code = exit_code.value();
+        ASSERT_TRUE(code == 0 || code == 7) << code;
+        if (!have_interrupted && journal_pending(work.path()) &&
+            Get(work.path() / "aether_state.efs") != "e0") {
+            CopyTree(work.path(), interrupted.path());
+            have_interrupted = true;
+        }
+        std::vector<std::string> errors;
+        ASSERT_NE(recover_pending_journal(work.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+        const auto recovered = Tree(work.path());
+        EXPECT_TRUE(recovered == baseline || recovered == finished_tree);
+        complete = code == 0;
+    }
+    ASSERT_TRUE(complete);
+    ASSERT_TRUE(have_interrupted);
+    complete = false;
+    for (int cut = 1; cut <= 200 && !complete; ++cut) {
+        SCOPED_TRACE(cut);
+        CopyTree(interrupted.path(), work.path());
+        const auto exit_code = WindowsTxnChild(work.path(), cut, true);
+        ASSERT_TRUE(exit_code.has_value());
+        if (!exit_code.has_value())
+            return;
+        const DWORD code = exit_code.value();
+        ASSERT_TRUE(code == 0 || code == 7) << code;
+        ASSERT_NE(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+        const auto recovered = Tree(work.path());
+        EXPECT_TRUE(recovered == baseline || recovered == finished_tree);
+        complete = code == 0;
+    }
+    EXPECT_TRUE(complete);
+}
+#endif
+
+} // namespace Luminumbra::Persistence

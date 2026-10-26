@@ -1657,6 +1657,19 @@ class FrameAttributionWiring(unittest.TestCase):
                      "ReadinessRequiresPublishedSupportedAndMatchingResolution"):
             self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
 
+    def test_water_seed_initialization_preserves_durable_state_and_parking_budget(self):
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        seed = compact(block(water, "void WaterSystem::seed_chunk_water("))
+        self.assertIn("if (cp->needs_authority()) { cp->mark_water_state_dirty(); }", seed)
+        chunk = read(ROOT / "src/luminumbra_common/world/Chunk.h")
+        heap = compact(block(chunk, "std::size_t estimated_heap_bytes() const"))
+        self.assertIn("if (m_water_seed_inputs) { bytes += sizeof(HighWaterSeedInputs); }", heap)
+        parked = compact(block(chunk, "void normalize_for_park()"))
+        self.assertIn("stage_water_seed_inputs({});", parked)
+        native = read(ROOT / "test/common/WorldDurableResidency_test.cpp")
+        self.assertIn("bytes_without_seed + sizeof(Luminumbra::HighWaterSeedInputs)", native)
+        self.assertIn("EXPECT_EQ(chunk.water_seed_inputs(), nullptr);", native)
+
     def test_water_seed_inputs_require_supported_preset_and_matching_publication(self):
         header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
         self.assertIn("static constexpr bool supports_resolution(", header)

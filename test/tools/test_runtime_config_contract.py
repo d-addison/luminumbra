@@ -79,7 +79,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         rename = service[service.index("boolWorldSaveService::rename_file_durably("):]
         rename = rename[:rename.index("boolWorldSaveService::remove_file_and_staging(")]
         self.assertIn("{constSaveGuardguard;", rename)
-        self.assertLess(rename.index("contents.str()!=expected_bytes"),
+        self.assertLess(rename.index("contents!=expected_bytes"),
                         rename.index("ReclaimAbandonedStaging(destination)"))
         self.assertLess(rename.index("std::filesystem::equivalent(source,destination,error)"),
                         rename.index("WriteFileDurably(destination,bytes,destination,errors,&published_identity)"))
@@ -120,7 +120,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         parts = service.split("boolReplaceRegionFileAtomically(")[1:]
         self.assertEqual(len(parts), 2)
-        for implementation, syscall in zip(parts, ("::GetFileAttributesW(", "std::rename(")):
+        for implementation, syscall in zip(parts, ("::MoveFileExW(", "std::rename(")):
             self.assertLess(implementation.index("if(!FlushAncestorEntries(destination,errors))"),
                             implementation.index(syscall))
         remove = service[service.index("boolWorldSaveService::remove_file_and_staging("):]
@@ -299,6 +299,26 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
             self.assertIn("WriteDurableRegionTemp(staging,", write)
 
+    def test_far_snapshot_owner_paths_leave_durable_reads_to_the_worker(self):
+        world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                            .read_text(encoding="utf-8"))
+        start = world.index("SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
+        end = world.index("SHIELD_WorldSystem::find_streamed_chunk(", start)
+        owner_paths = world[start:end]
+        for disk_lookup in ("read_committed_chunk(", "find_authoritative_chunk(",
+                            "m_durable_chunk_loader(", "m_durable_chunks"):
+            self.assertNotIn(disk_lookup, owner_paths)
+        self.assertIn("snapshot_authoritative_chunks()", owner_paths)
+        self.assertIn("snapshot.authority_revision!=", owner_paths)
+        worker = compact_cpp((ROOT / "src/luminumbra_client/rendering/FarLodSystem.cpp")
+                             .read_text(encoding="utf-8"))
+        start = worker.index("FarLodWorkerBuildOutcomeBuildFarLodWorkerTile(")
+        durable_read = worker.index("read_authoritative_region_chunks(", start)
+        worker = worker[start:worker.index("returnoutcome;", durable_read)]
+        self.assertIn("neighbor_z=rz-1;neighbor_z<=rz+1;", worker)
+        self.assertIn("neighbor_x=rx-1;neighbor_x<=rx+1;", worker)
+        self.assertIn("read_authoritative_region_chunks(", worker)
+
     def test_session_save_owns_validation_payloads_metadata_and_acknowledgement(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
                               .read_text(encoding="utf-8"))
@@ -317,9 +337,26 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           "SavedPresetCompatible(save_dir)", "service.save_world(",
                           ".save_dirty_chunks(", "save_plant_entities(", "SaveEnergyFieldRecord(",
                           "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
-                          "m_activeRegionLedger.mark_saved(",
-                          "chunk->clear_voxel_data_dirty()"):
+                          "transaction->defer_until_commit(acknowledge)",
+                          "acknowledge()", "outer->Commit()"):
             self.assertLess(ownership, sequence.index(operation))
+        wrapper_start = session.index("boolGameSession::RunInSnapshotTransaction(")
+        wrapper = session[wrapper_start:session.index("boolGameSession::SaveWorld()", wrapper_start)]
+        self.assertIn("!m_worldUsable", wrapper)
+        self.assertNotIn("m_worldOpenError", wrapper)
+        self.assertLess(wrapper.index("quiesce_streaming_jobs_for_save();"), wrapper.index(guard))
+        self.assertLess(wrapper.index(guard), wrapper.index("StartOuterSave("))
+        metadata_start = session.index("boolGameSession::SaveWorldMetadataTo(")
+        metadata = session[metadata_start:session.index("GameSession::GetSaveRootPath", metadata_start)]
+        self.assertLess(metadata.index("saved_ledger.mark_saved(m_worldClock)"),
+                        metadata.index("save_metadata_and_active_regions("))
+        self.assertLess(metadata.index("transaction->defer_until_commit("),
+                        metadata.index("outer->Commit()"))
+        self.assertIn("m_activeRegionLedger.canonical_bytes()==expected_ledger", metadata)
+        self.assertLess(metadata.index("if(SameSaveDestination(save_dir,GetWorldSaveDir()))"),
+                        metadata.index("transaction->defer_until_commit("))
+        self.assertLess(sequence.index("ReconcileWorldStateMetadataTo("),
+                        sequence.index("transaction->defer_until_commit(acknowledge)"))
 
     def test_writers_hold_shared_ownership_through_cleanup_and_publication(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -327,7 +364,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for name in ("save_metadata", "save_metadata_and_active_regions", "save_plant_entities",
                      "save_active_regions", "upsert_container_records", "save_dirty_chunks",
                      "write_snapshot", "write_file_durably", "remove_file_and_staging",
-                     "create_file_durably", "rename_file_durably"):
+                     "create_file_durably", "rename_file_durably", "save_ground_objects",
+                     "save_field_pages", "durable_write_file", "durable_remove",
+                     "durable_flush_directory", "write_member_bytes", "remove_member"):
             start = service.index("WorldSaveService::" + name + "(")
             body = service.index("{", start)
             self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)
@@ -391,6 +430,735 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("std::filesystem::remove(path,ec);if(ec){", empty_roster)
         self.assertIn("returnfalse;", empty_roster)
         self.assertIn("returnFlushRemovalDirectory(path,errors);", service[end:])
+
+    def test_region_scheduler_records_both_modes_without_requiring_a_world(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        tick = session[session.index("std::uint32_tGameSession::TickSimulation("):]
+        schedule = tick.index("RunRegionScheduler(current_tick);")
+        self.assertTrue("try{RunRegionScheduler(current_tick);" in tick,
+                        "Each tick must enter the scheduler in both feature modes")
+        self.assertLess(schedule, tick.index("if(m_activeRegionsEnabled&&m_worldSystem)"))
+        scheduler = session[session.index("voidGameSession::RunRegionScheduler("):]
+        scheduler = scheduler[:scheduler.index("std::vector<RegionKey>GameSession::SortedDueRegions")]
+        self.assertIn("if(m_worldSystem){m_worldSystem->note_persistence_tick(", scheduler)
+        self.assertIn("if(!m_worldSystem)returnPersistence::WorldSaveService::region_simulation_digest(",
+                      scheduler)
+
+    def test_legacy_energy_adoption_precedes_the_chunkless_return(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        adopt = session[session.index("voidGameSession::AdoptWorldStateFrom("):]
+        fresh = adopt.index("if(!saved.snapshot_present&&!m_activeRegionsEnabled)")
+        reset_call = "m_energyFieldState->ResetEmptyAtTick(GetSimulationTickCount());"
+        self.assertTrue(reset_call in adopt, "Legacy adoption must clear reused energy state")
+        reset = adopt.index(reset_call)
+        restore = adopt.index("m_energyFieldState->DeserializeRecord(")
+        self.assertLess(reset, restore)
+        self.assertLess(restore, fresh)
+        normal = session[session.index("boolGameSession::LoadWorld("):]
+        normal = normal[:normal.index("boolGameSession::ClockConfigurationCompatible(")]
+        self.assertNotIn("DeserializeRecord(", normal)
+
+    def test_clock_metadata_alone_does_not_require_an_index(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        metadata = service[service.index("boolWorldSaveService::save_metadata("):]
+        metadata = metadata[:metadata.index("boolWorldSaveService::save_metadata_and_active_regions(")]
+        self.assertIn('TransactionScopescope(save_dir,{"world_info.json"},errors);', metadata)
+        self.assertLess(metadata.index("if(requires_active_regions&&!has_clock)"),
+                        metadata.index("TransactionScopescope("))
+        self.assertNotIn("if(requires_active_regions)returnreject(", service)
+        self.assertNotIn("if(present||required||format>=1)", service)
+
+
+class PersistenceAndFieldSourceContract(unittest.TestCase):
+    def source(self, relative):
+        return compact_cpp((ROOT / relative).read_text(encoding="utf-8"))
+
+    def test_hashing_reads_the_validated_regular_file_handle(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        hashing = source[source.index("boolhash_file("):source.index("booljournal_pending(")]
+        self.assertIn("SnapshotInputin(path);", hashing)
+        self.assertNotIn("ifstream", hashing)
+        self.assertNotIn("fs::exists(", hashing)
+        self.assertIn("if(in.missing())returntrue;", hashing)
+        self.assertLess(hashing.index("if(!in.valid())"), hashing.index("in.read("))
+        self.assertIn("if(!in.read(block.data(),request,count)||count==0)", hashing)
+        self.assertLess(hashing.index("in.size()>kMaxSnapshotPayloadBytes"), hashing.index("std::vector<char>block("))
+        self.assertIn("while(bytes<in.size())", hashing)
+        self.assertIn("!in.read(&extra,1,count)||count!=0", hashing)
+        self.assertIn("Fnv1aUpdate(fnv64,block.data(),count)", hashing)
+        native = source[source.index("classSnapshotInput{"):source.index("boolReadInputBytes(")]
+        for guard in ("O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW", "::fstat(m_descriptor,&information)",
+                      "S_ISREG(information.st_mode)", "::GetFileType(m_handle)==FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle,&information)",
+                      "FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT",
+                      "open_error==ERROR_FILE_NOT_FOUND||open_error==ERROR_PATH_NOT_FOUND",
+                      "m_descriptor<0&&errno==ENOENT"):
+            self.assertIn(guard, native)
+
+    def test_field_ownership_counts_only_overlapping_page_masks(self):
+        source = self.source("src/luminumbra_common/fields/FieldPageState.cpp")
+        count = source[source.index("std::size_tFieldPageState::owned_initialized_cells("):
+                       source.index("boolFieldPageState::activate_region(")]
+        self.assertNotIn("cells_of_region(", count)
+        self.assertNotIn("initialized(", count)
+        self.assertNotIn(":m_pages)", count)
+        for required in ("AxisCellRange(key.x)", "AxisCellRange(key.z)",
+                         "if(x.lo>x.hi||z.lo>z.hi)return0;", "m_pages.find(",
+                         "FloorDiv(z.lo,kPageSpan)", "FloorDiv(z.hi,kPageSpan)",
+                         "FloorDiv(x.lo,kPageSpan)", "FloorDiv(x.hi,kPageSpan)",
+                         "std::popcount(", "page->second.mask["):
+            self.assertIn(required, count)
+
+    def test_energy_ownership_reads_only_overlapping_pages_without_serialization(self):
+        source = self.source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        owns = source[source.index("boolEnergyFieldState::OwnsRegion("):
+                      source.index("std::stringEnergyFieldState::RegionBytes(")]
+        for forbidden in ("RegionBytes(", "CanonicalBytes(", "ostringstream", ":m_pages)"):
+            self.assertNotIn(forbidden, owns)
+        for required in ("OwnerOfCell(cx,cz)==owner", "cell_range(owner.x)",
+                         "cell_range(owner.z)", "if(x0>=x1||z0>=z1)returnfalse;",
+                         "RegionalFloorDiv(z0,kEnergyPageCells)",
+                         "RegionalFloorDiv(z1-1,kEnergyPageCells)",
+                         "RegionalFloorDiv(x0,kEnergyPageCells)",
+                         "RegionalFloorDiv(x1-1,kEnergyPageCells)",
+                         "m_pages.find(PackPageKey(",
+                         "static_cast<std::uint64_t>(offset+end_x)*"
+                         "static_cast<std::uint64_t>(m_channels)",
+                         "static_cast<std::uint64_t>(page->second.values.size())",
+                         "page->second.values[static_cast<std::size_t>(i)]!=0"):
+            self.assertIn(required, owns)
+
+    def test_hash_and_ownership_regressions_are_registered(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        for relative, cases in (
+                ("persistence/SaveTransaction_test.cpp",
+                 ("HashesMissingEmptyAndBlockBoundaryRegularFiles",
+                  "IndexedEnergyFifoIsRefusedWithoutWaitingForAWriter",
+                  "HashingRefusesSymlinksWithoutReadingTheirTargets",
+                  "HashingRefusesUnreadableAndLockedFiles")),
+                ("common/FieldPageState_test.cpp",
+                 ("OwnershipCountsOnlyRegionalMaskIntersectionsWithoutChangingBytes",)),
+                ("fields/energy_field_state_test.cpp",
+                 ("OwnershipQueriesOnlyOverlappingStoredValuesWithoutChangingBytes",))):
+            self.assertIn(relative, cmake)
+            fixture = self.source("test/" + relative)
+            for case in cases:
+                self.assertIn("," + case + "){", fixture)
+        fifo = self.source("test/persistence/SaveTransaction_test.cpp")
+        fifo = fifo[fifo.index(",IndexedEnergyFifoIsRefusedWithoutWaitingForAWriter){"):
+                    fifo.index(",HashingRefusesSymlinksWithoutReadingTheirTargets){")]
+        self.assertIn("::mkfifo(member.c_str(),0600)", fifo)
+        self.assertIn("::alarm(2)", fifo)
+        self.assertIn("WorldSaveService::validate_save(save.path(),&errors)", fifo)
+        self.assertIn("::testing::ExitedWithCode(0)", fifo)
+
+    def test_undo_protection_reads_each_payload_once_and_indexes_membership(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        protect = source[source.index("boolSaveTransaction::protect("):
+                         source.index("boolSaveTransaction::write_journal(")]
+        self.assertIn("m_protected_paths.contains(rel)", protect)
+        self.assertIn("m_protected_paths.insert(rel);", protect)
+        self.assertLess(protect.index("m_entries.size()>=kMaxJournalEntries"),
+                        protect.index("read_snapshot_bytes(destination,kMaxSnapshotPayloadBytes,previous,exists,errors)"))
+        self.assertLess(protect.index("m_entries.size()>=kMaxJournalEntries"),
+                        protect.index("m_protected_paths.insert(rel)"))
+        self.assertNotIn(":m_entries)", protect)
+        self.assertNotIn("hash_file(", protect)
+        self.assertEqual(protect.count("read_snapshot_bytes(destination,kMaxSnapshotPayloadBytes,previous,exists,errors)"), 1)
+        self.assertNotIn("fs::exists(", protect)
+        self.assertIn("entry.prev_fnv64=fnv1a64_bytes(previous.data(),previous.size());", protect)
+        self.assertLess(protect.index("durable_write_file("), protect.index("write_journal(errors)"))
+        read = source[source.index("boolReadInputBytes("):source.index("boolReadUndoBytes(")]
+        self.assertNotIn("istreambuf_iterator", read)
+        self.assertLess(read.index("in.size()>limit||in.size()>out.max_size()"),
+                        read.index("out.resize("))
+        self.assertIn("std::min(out.size()-offset,std::size_t{64}*1024)", read)
+        self.assertIn("!in.read(out.data()+offset,request,count)||count==0", read)
+        self.assertIn("!in.read(&extra,1,count)||count!=0", read)
+
+    def test_rollback_checks_the_same_undo_bytes_it_restores(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        rollback = source[source.index("boolRollbackEntries("):
+                          source.index("voidFinishJournal(")]
+        self.assertNotIn("hash_file(undo_path,", rollback)
+        read = rollback.index("ReadUndoBytes(undo_path,entry.prev_bytes,restored,errors)")
+        check = rollback.index("restored.size()!=entry.prev_bytes||"
+                               "fnv1a64_bytes(restored.data(),restored.size())!=entry.prev_fnv64")
+        write = rollback.index("durable_write_file(destination,restored,errors)")
+        self.assertLess(read, check)
+        self.assertLess(check, write)
+        self.assertIn("returnfalse;", rollback[check:write])
+
+    def test_undo_staging_does_not_scan_prior_undo_copies(self):
+        source = self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        staging = source[source.index("WorldSaveService::region_staging_path("):
+                         source.index("boolWorldSaveService::save_metadata(")]
+        self.assertIn('if(directory.filename()=="undo"&&'
+                      'directory.parent_path().filename()=="journal")'
+                      'returndirectory.parent_path()/destination.filename();', staging)
+        writer = source[source.index("boolWorldSaveService::durable_write_file("):
+                        source.index("boolWorldSaveService::durable_remove(")]
+        self.assertIn("constautostaging=region_staging_path(destination);", writer)
+        self.assertIn("ReclaimAbandonedStaging(staging);", writer)
+        self.assertNotIn("ReclaimAbandonedStaging(destination)", writer)
+        self.assertIn("WriteDurableRegionTemp(staging,bytes,temp,errors)", writer)
+        self.assertIn("ReplaceMember(temp,destination,errors)", writer)
+
+    def test_first_index_validates_each_protected_member_only_once(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        commit = source[source.index("boolSaveTransaction::commit("):
+                        source.index("voidSaveTransaction::abort(")]
+        baseline = commit[commit.index("for(conststd::string&rel:baseline)"):
+                          commit.index("for(constEntry&entry:m_entries)")]
+        self.assertLess(baseline.index("if(m_protected_paths.contains(rel))continue;"),
+                        baseline.index("digest_member(rel,digest)"))
+        final = commit[commit.index("for(constEntry&entry:m_entries)"):]
+        self.assertIn("if(!digest_member(entry.path,digest)){abort(errors);returnfalse;}", final)
+        self.assertLess(final.index("digest_member(entry.path,digest)"),
+                        final.index("m_state=State::Committing"))
+
+    def test_exact_chunk_reads_share_one_membership_verification(self):
+        source = self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        read = source[source.index("WorldSaveService::ChunkReadResultWorldSaveService::read_chunk("):
+                      source.index("WorldSaveService::chunk_save_acknowledgement(")]
+        self.assertEqual(read.count("VerifyRegionMembership(path,owned_records,&errors)"), 1)
+        self.assertNotIn("read_snapshot_index(", read)
+        self.assertNotIn("Lod0Fingerprint(", read)
+        self.assertIn("if(require_index&&!indexed)", read)
+        verify = source[source.index("boolVerifyRegionMembership("):
+                        source.index("WorldSaveService::SaveOwnership::SaveOwnership(")]
+        self.assertEqual(verify.count("read_snapshot_index(save_dir,index,errors)"), 1)
+        for check in ("CheckMetadataFile(save_dir,&format)", "format>=1",
+                      "member->present!=digest.present", "member->bytes!=digest.bytes",
+                      "member->fnv64!=digest.fnv64"):
+            self.assertIn(check, verify)
+        activation = self.source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        self.assertIn("dispatch_generation_jobs(generate_now);if(m_durable_read_failed)returnfalse;", activation)
+        self.assertIn("DiskRestorationFailureStopsActivationBeforeUnloading",
+                      self.source("test/common/DeterministicWorkBudget_test.cpp"))
+
+    def test_journal_and_index_reads_stop_at_their_byte_budgets(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        read = source[source.index("boolReadInputBytes("):source.index("boolReadUndoBytes(")]
+        self.assertLess(read.index("in.size()>limit||in.size()>out.max_size()"),
+                        read.index("out.resize("))
+        self.assertIn("while(offset<out.size())", read)
+        self.assertIn("!in.read(out.data()+offset,request,count)||count==0", read)
+        self.assertIn("!in.read(&extra,1,count)||count!=0", read)
+        self.assertIn("read_snapshot_bytes(txn_path,kMaxJournalBytes,bytes,txn_exists,errors)", source)
+        self.assertIn("read_snapshot_bytes(path,kMaxSnapshotIndexBytes,bytes,exists,errors)", source)
+        self.assertNotIn("ifstream", source)
+
+        native = source[source.index("classSnapshotInput{"):source.index("boolReadInputBytes(")]
+        for guard in ("O_NONBLOCK", "O_NOFOLLOW", "::fstat(m_descriptor,&information)",
+                      "S_ISREG(information.st_mode)", "::GetFileType(m_handle)==FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle,&information)",
+                      "FILE_ATTRIBUTE_REPARSE_POINT", "::ReadFile(m_handle,", "::read(m_descriptor,"):
+            self.assertIn(guard, native)
+
+    def test_journal_count_precedes_recovery_state_and_writer_uses_matching_caps(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        parse = source[source.index("boolParseJournal("):source.index("std::stringEncodeJournal(")]
+        self.assertLess(parse.index("bytes.size()>kMaxJournalBytes"),
+                        parse.index("nlohmann::json::parse("))
+        self.assertIn("nlohmann::json::parse(bytes.begin(),bytes.end(),nullptr,false)", parse)
+        self.assertNotIn("conststd::stringtext(bytes)", parse)
+        self.assertLess(parse.index("entries->size()>kMaxJournalEntries"),
+                        parse.index("JournalDocumentparsed;"))
+        self.assertLess(parse.index("entries->size()>kMaxJournalEntries"),
+                        parse.index("parsed.entries.reserve(entries->size())"))
+        writer = source[source.index("boolSaveTransaction::write_journal("):]
+        self.assertLess(writer.index("m_entries.size()>kMaxJournalEntries"),
+                        writer.index("entries.reserve("))
+        self.assertLess(writer.index("bytes.size()>kMaxJournalBytes"),
+                        writer.index("WorldSaveService::durable_write_file("))
+        header = self.source("src/luminumbra_common/persistence/SaveTransaction.h")
+        self.assertIn("kMaxJournalEntries=kMaxSnapshotMembers+1;", header)
+        self.assertIn("kMaxJournalBytes=2*kMaxSnapshotIndexBytes;", header)
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        load = session[session.index("boolGameSession::LoadWorld("):]
+        refusal = load[load.index("Persistence::recover_pending_journal("):
+                       load.index("Persistence::InspectSavedWorld(")]
+        self.assertIn("Persistence::RecoveryOutcome::Failed", refusal)
+        self.assertIn("returnfalse;", refusal)
+
+    def test_regional_energy_stages_participating_pages_and_reuses_diffusion_values(self):
+        source = self.source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        tick = source[source.index("boolEnergyFieldState::TickRegional("):]
+        self.assertIn("EnergyFieldStatestaged(m_channels);", tick)
+        self.assertNotIn("staged=*this", tick)
+        self.assertIn("for(constautoowner:firing)", tick)
+        self.assertIn("RegionalCellRange(owner.x)", tick)
+        self.assertIn("if(present(px,pz)&&present(npx,npz))", tick)
+        allocation = tick.index("next.emplace(key,std::vector<std::int32_t>(")
+        sweep = tick.index("for(intiteration=0;!next.empty()&&iteration<kEnergyDiffuseIterations;")
+        self.assertLess(allocation, sweep)
+        self.assertIn("constauto&snapshot=staged.m_pages;", tick[sweep:])
+        self.assertNotIn("constautosnapshot=staged.m_pages;", tick)
+        self.assertNotIn("next.emplace(", tick[sweep:])
+        self.assertIn("RegionalRecordFits(&staged)", tick)
+        self.assertIn("m_pages.insert(std::move(node))", tick)
+
+    def test_regional_evolution_queries_only_local_scent_and_indexed_weather(self):
+        source = self.source("src/luminumbra_common/fields/FieldPageState.cpp")
+        visit = source[source.index("boolVisitRegionScent("):source.index("voidAppendOwner(")]
+        self.assertIn("if(!ValidOwner(owner)||scent.empty())returnfalse;", visit)
+        self.assertIn("kRegionCells=512;", visit)
+        self.assertIn("for(autox=min_x;x<end_x;++x)", visit)
+        self.assertIn("scent.lower_bound({x,min_z})", visit)
+        self.assertIn("cell->first.x==x&&cell->first.z<end_z", visit)
+        owns = source[source.index("boolFieldPageState::owns_evolution_state("):
+                      source.index("boolFieldPageState::set_weather_age(")]
+        projection = source[source.index("std::stringFieldPageState::region_bytes("):]
+        for region_query in (owns, projection):
+            self.assertIn("VisitRegionScent(m_scent,key,", region_query)
+            self.assertNotIn(":m_scent)", region_query)
+            self.assertNotIn(":m_storms)", region_query)
+            self.assertNotIn(":m_strikes)", region_query)
+        self.assertIn("m_ownerStorms.contains(key)", owns)
+        self.assertIn("m_ownerStrikes.contains(key)", owns)
+        self.assertIn("m_ownerStorms.find(key)", projection)
+        self.assertIn("m_ownerStrikes.find(key)", projection)
+
+    def test_refusal_and_working_set_regressions_are_registered(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        for relative, cases in (
+                ("persistence/SaveTransaction_test.cpp",
+                 ("RecoveryRejectsOversizedJournalWithoutWrites",
+                  "RecoveryRejectsTooManyJournalEntriesBeforeEntryDecoding",
+                  "RecoveryAcceptsJournalAtByteLimit",
+                  "RecoveryRefusesEmptyTruncatedAndNonregularJournalsWithoutWrites",
+                  "RecoveryRefusesFifoJournalWithoutWaitingForAWriter",
+                  "RecoveryRefusesSymlinkJournalWithoutWrites",
+                  "RecoveryRefusesUnreadableAndLockedJournalsWithoutWrites",
+                  "FirstIndexDigestsProtectedAndUntouchedMembersOnce",
+                  "UndoCopiesAndRestoresEmptyAndBlockBoundaryPayloads",
+                  "MissingPartialCorruptAndNonregularUndoCannotBeRestored")),
+                ("fields/energy_field_state_test.cpp",
+                 ("IdleAndBorderTicksExcludeDormantPagesFromBuffers",
+                  "CommonBorderStagesBothExistingPhysicalPagesAndSkipsAbsentPages",
+                  "DepositOnlyTickStagesOnlyItsTargetAndRetainsLegacyEpochs",
+                  "NegativeCommonBordersStageBothAxesInCanonicalOrder",
+                  "IdleTickDropsLegacyEmptyPagesAndRejectsInvalidMetadataAtomically")),
+                ("common/FieldPageState_test.cpp",
+                 ("ScentRegionQueriesMatchCanonicalProjectionAtEveryBoundary",
+                  "ScentRegionQueriesExcludeOtherColumnsAtFullCapacity",
+                  "WeatherOwnerIndicesSurviveParseCopyRefusalReplacementAndClear"))):
+            self.assertIn(relative, cmake)
+            fixture = self.source("test/" + relative)
+            for case in cases:
+                self.assertIn("," + case + "){", fixture)
+
+    def test_undo_read_refuses_declared_size_and_nonregular_handles_before_allocating(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        read = source[source.index("boolReadUndoBytes("):source.index("boolSamePath(")]
+        self.assertIn("SnapshotInputin(file);", read)
+        self.assertIn("!in.valid()||declared>kMaxSnapshotPayloadBytes||in.size()!=declared", read)
+        self.assertLess(read.index("in.size()!=declared"), read.index("ReadInputBytes("))
+        parse = source[source.index("boolParseJournal("):source.index("std::stringEncodeJournal(")]
+        self.assertIn("entry.prev_bytes>kMaxSnapshotPayloadBytes", parse)
+        for case in ("RecoveryChecksUndoDeclaredAndActualSizesBeforeReading",
+                     "UndoFifosAndInfiniteOrHugeSymlinksRefuseWithoutReadingOrWriting",
+                     "LockedUndoRefusesWithoutChangingInstalledMembers"):
+            self.assertIn("," + case + "){", self.source("test/persistence/SaveTransaction_test.cpp"))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/SaveTransaction_test.cpp", cmake)
+
+    def test_snapshot_consumers_parse_only_bounded_handle_bytes(self):
+        service = self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        catalog = self.source("src/luminumbra_common/persistence/SavedWorldCatalog.cpp")
+        for source in (service, catalog):
+            for forbidden in ("std::ifstream", "istreambuf_iterator", ".rdbuf()"):
+                self.assertNotIn(forbidden, source)
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        for start, end in (("boolGameSession::ReconcileWorldStateMetadataTo(", "boolGameSession::SaveWorldMetadataTo("),
+                           ("boolGameSession::ReadWorldStateFrom(", "voidGameSession::RestoreRegionalScent(")):
+            readers = session[session.index(start):session.index(end)]
+            self.assertNotIn("std::ifstream", readers)
+            self.assertNotIn("istreambuf_iterator", readers)
+        self.assertIn("LoadTerrainPresetFromJson(document,runtime_root/", catalog)
+
+    def test_changed_identifiers_avoid_windows_macro_names(self):
+        for path in ("src/luminumbra_common/world/ActiveRegionLedger.cpp",
+                     "test/common/ActiveRegionLedger_test.cpp",
+                     "test/common/GameSessionHeadlessWorld_test.cpp",
+                     "test/common/WeatherSystem_test.cpp",
+                     "test/rendering/far_lod_worker_test.cpp",
+                     "test/persistence/verified_snapshot_region_test.cpp"):
+            source = (ROOT / path).read_text(encoding="utf-8")
+            source = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', "", source, flags=re.DOTALL)
+            self.assertNotRegex(source, r"\b(?:near|far|small|interface)\b", path)
+
+
+
+class SaveWorkSourceContract(unittest.TestCase):
+    def source(self, path):
+        return compact_cpp((ROOT / path).read_text(encoding="utf-8"))
+
+    def service(self):
+        return self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+
+    def test_snapshot_load_refuses_pending_catalog_before_parsing_and_binds_regional_fields(self):
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        load = session[session.index("boolGameSession::LoadWorldFrom("):
+                       session.index("boolGameSession::ClockConfigurationCompatible(")]
+        self.assertIn("if(m_worldOpenError.empty()&&saved.pending_recovery)", load)
+        self.assertIn("BindRegionalFieldQueries();", load)
+        self.assertIn("GetInitialChunkLoadList(saved.metadata.spawnPoint)", load)
+        self.assertLess(load.index("saved.pending_recovery"),
+                        load.index("nlohmann::json::parse(saved.preset_json)"))
+        self.assertLess(load.index("BindRegionalFieldQueries();"),
+                        load.index("AdoptWorldStateFrom(worldPath,loaded);"))
+        self.assertLess(load.index("GetInitialChunkLoadList(saved.metadata.spawnPoint)"),
+                        load.index("ReadWorldStateFrom(worldPath,loaded)"))
+        self.assertIn("m_worldSystem=std::move(staged_world);", load)
+
+    def test_exact_restores_cache_verified_containers_only_within_a_bounded_operation(self):
+        source = self.service()
+        read = source[source.index("WorldSaveService::ChunkReadResultWorldSaveService::read_chunk("):
+                      source.index("WorldSaveService::chunk_save_acknowledgement(")]
+        self.assertLess(read.index("cache->regions.find(path)"), read.index("ReadRegionFile("))
+        self.assertIn("if(cache&&indexed)", read)
+        for bound in ("cache->regions.size()>=128", "kMaxSnapshotPayloadBytes-cache->bytes"):
+            self.assertIn(bound, read)
+        self.assertIn("cached->second.positions.find(id)", read)
+        self.assertIn("ChunkReadCaches().erase(this);", source)
+        world = self.source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        activation = world[world.index("if(m_durable_residency){"):
+                           world.index("//5.Unloadchunks") if "//5.Unloadchunks" in world else world.index("constintUNLOAD_DISTANCE_XZ")]
+        self.assertNotIn("restore_authoritative_chunk(candidate.coords)", activation)
+        self.assertIn("unpark_chunk(id)", activation)
+        self.assertIn("static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget)", activation)
+        self.assertGreaterEqual(world.count("constPersistence::WorldSaveService::ChunkReadScopedurable_reads;"), 3)
+        restore = world[world.index("boolSHIELD_WorldSystem::restore_authoritative_chunk("):
+                        world.index("voidSHIELD_WorldSystem::release_clean_parked_chunks(")]
+        self.assertNotIn("MigrateWaterSimResolution()", restore)
+        self.assertIn("m_water_system->ResizeSimulationGrid(*chunk,", restore)
+        self.assertIn(",DiskOnlyRestorationSharesTheActivationGenerationBudget){",
+                      self.source("test/common/DeterministicWorkBudget_test.cpp"))
+        header = self.source("src/luminumbra_common/persistence/WorldSaveService.h")
+        self.assertNotIn("forget_snapshot_index_for_testing", header)
+
+    def test_scent_transfer_uses_columns_and_keeps_exact_sparse_oracle(self):
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        restore = session[session.index("voidGameSession::RestoreRegionalScent("):
+                          session.index("voidGameSession::CaptureRegionalScent(")]
+        self.assertIn("cells.lower_bound({origin_x+x,origin_z})", restore)
+        self.assertNotIn(".find(", restore)
+        capture = session[session.index("voidGameSession::CaptureRegionalScent("):
+                          session.index("voidGameSession::AdvanceNearScent(")]
+        self.assertIn("m_fieldPages.capture_scent_window(", capture)
+        self.assertNotIn(".find(", capture)
+        self.assertNotIn("update_scent(", capture)
+        self.assertIn("ColumnWindowMatchesSparseCaptureAndPreservesOutsideAuthority",
+                      self.source("test/common/FieldPageState_test.cpp"))
+        self.assertIn("ColumnWindowPreservesEmptyWorldEdgesAndRefusesCoordinateOverflow",
+                      self.source("test/common/FieldPageState_test.cpp"))
+        pages = self.source("src/luminumbra_common/fields/FieldPageState.cpp")
+        window = pages[pages.index("boolFieldPageState::capture_scent_window("):
+                       pages.index("RegionKeyFieldPageState::region_of_scent_cell(")]
+        self.assertNotIn("16777216", window)
+        self.assertIn("origin.x>std::numeric_limits<std::int32_t>::max()-(side-1)", window)
+        self.assertIn("origin.z>std::numeric_limits<std::int32_t>::max()-(side-1)", window)
+
+
+    def test_all_benchmark_versions_share_refusal_persistence_policy(self):
+        client = self.source("src/luminumbra_client/main_client.cpp")
+        self.assertIn('constboolbenchmark_v3=benchmark_schema=="v3"||benchmark_v4;', client)
+        self.assertIn("SessionPersistenceAllowed(benchmark_v3,exit_code,scenario_failed,", client)
+
+    def test_commit_reuses_exact_record_validation_with_bounded_storage(self):
+        source = self.service()
+        digest = source[source.index("boolWorldSaveService::member_digest("):
+                        source.index("boolWorldSaveService::write_member_bytes(")]
+        self.assertIn("cache->chunks.find(key)", digest)
+        self.assertIn("validated=cached->second;", digest)
+        self.assertIn("DecodeChunkRecord(record,path,&diagnostics)", digest)
+        self.assertIn("record.id,record.flags,record.uncompressed_size,record.compressed_payload", digest)
+        self.assertIn("validated.sdf_size!=0&&validated.sdf_size!=kLattice", digest)
+        cache = source[source.index("voidRememberValidatedChunk("):
+                       source.index("boolReplaceMember(")]
+        for guard in ("kMaxPayloadBytes=64u*1024u*1024u", "kMaxEntries=4096",
+                      "kMaxPayloadBytes-cache->payload_bytes", "cache->chunks.size()>=kMaxEntries"):
+            self.assertIn(guard, cache)
+        self.assertIn("cache->chunks.lower_bound(RecordValidationView{record.id,0,0,{}})", cache)
+        self.assertIn("previous=cache->chunks.erase(previous)", cache)
+        self.assertLess(cache.index("cache->chunks.erase(previous)"), cache.index("kMaxPayloadBytes"))
+        self.assertIn("RememberValidatedChunk(record,*chunks.front());", source)
+        self.assertIn("RetainedRecordValidationCache()=std::move(found->second);", source)
+        self.assertIn("caches.erase(found);", source)
+        # Commit still reads installed bytes and checks region identity and unknown far tiers.
+        for check in ("ReadRegionFile(path,records,&diagnostics,{},true)",
+                      "chunk_rx!=rx||chunk_rz!=rz", "FarLodStore::decode_payload("):
+            self.assertIn(check, digest)
+
+    def test_region_copy_batches_reads_and_replacements_and_refuses_partial_authority(self):
+        source = self.service()
+        copy = source[source.index("boolWorldSaveService::copy_authoritative_chunks("):
+                      source.index("WorldSaveService::ChunkReadResultWorldSaveService::read_chunk(")]
+        self.assertEqual(copy.count("read_snapshot_index("), 1)
+        region_loop = copy.index("for(constauto&[key,ids]:regions){constautorelative=")
+        self.assertLess(copy.index("read_snapshot_index("), region_loop)
+        self.assertIn("std::map<std::pair<int,int>,std::set<ChunkID>>regions", copy)
+        self.assertNotIn("read_chunk(", copy)
+        self.assertEqual(copy.count("WriteRegionFile("), 1)
+        for refusal in ("if(inventory.empty())returntrue;", "SameSaveDirectory(source,destination)",
+                        "if(index.generation==0)", "Chunk::decode_id(id)!=coords", "member==indexed.end()",
+                        "member->second.bytes!=digest.bytes", "member->second.fnv64!=digest.fnv64",
+                        "if(!ReadRegionFile(source_path,records,errors))returnfalse;",
+                        "copied!=ids.size()", "!chunk->sdf_data.empty()&&chunk->sdf_data.size()!=kLattice",
+                        "chunk->get_coords()!=Chunk::decode_id(record.id)",
+                        "!ReadRegionFile(target_path,target,errors,{},true)"):
+            self.assertIn(refusal, copy)
+        self.assertLess(copy.index("TransactionScopescope("), copy.index("WriteRegionFile("))
+        self.assertLess(copy.index("validate_save(destination,errors)"), copy.index("WriteRegionFile("))
+        parents = "std::filesystem::create_directories(region_directory(destination))"
+        self.assertIn(parents, copy)
+        self.assertLess(copy.index("validate_save(destination,errors)"), copy.index(parents))
+        self.assertLess(copy.index(parents), copy.index("WriteRegionFile("))
+        self.assertIn("scope.commit(errors)", copy)
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        save = session[session.index("boolGameSession::SaveWorldStateToImpl("):
+                       session.index("boolGameSession::LoadWorldState()")]
+        self.assertIn("copy_authoritative_chunks(m_regionDurableDirectory,save_dir,missing,&copy_errors)", save)
+        self.assertNotIn("WorldSaveService::read_chunk(", save)
+        self.assertIn("if(!state.find_chunk(Chunk::calculate_id(coords)))missing.push_back(coords);", save)
+        # Relocation writes clean live/parked chunks too, including into existing destinations.
+        self.assertIn("constboolrelocating_authority=m_activeRegionsEnabled&&"
+                      "!m_regionDurableDirectory.empty()&&source_directory!=target_directory&&!same_existing_directory;", save)
+        self.assertIn("constboolwrite_chunks=full_snapshot||relocating_authority||!dirty_ids.empty();", save)
+        self.assertIn("if(full_snapshot||relocating_authority||!has_snapshot)"
+                      "ok=service.save_world(state,save_dir,&errors);", save)
+
+    def test_legacy_complete_save_shares_validation_across_all_member_writers(self):
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        save = session[session.index("boolGameSession::SaveWorldStateToImpl("):
+                       session.index("boolGameSession::LoadWorldState()")]
+        self.assertIn("std::optional<Persistence::WorldSaveService::SaveFactsScope>legacy_facts;", save)
+        self.assertIn("!Persistence::WorldSaveService::SaveFactsScope::active_for(save_dir)", save)
+        self.assertLess(save.index("legacy_facts.emplace(save_dir)"), save.index("validate_save(save_dir)"))
+        self.assertLess(save.index("legacy_facts.emplace(save_dir)"), save.index("service.save_world("))
+        # The shared baseline cannot hide invalid newly serialized chunks or plants.
+        source = self.service()
+        chunks = source[source.index("boolWorldSaveService::write_snapshot("):]
+        self.assertLess(chunks.index("if(ActiveRecordValidationCache()&&!finite_values)"),
+                        chunks.index("CompressPayload(payload,record,errors)"))
+        invalid = chunks[chunks.index("if(ActiveRecordValidationCache()&&!finite_values)"):
+                         chunks.index("CompressPayload(payload,record,errors)")]
+        self.assertIn("returnfalse;", invalid)
+        plants = source[source.index("boolWorldSaveService::save_plant_entities("):
+                        source.index("boolWorldSaveService::load_plant_entities(")]
+        self.assertIn("if(ActiveFacts())", plants)
+        self.assertIn("if(!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes,checked,payload_errors))", plants)
+        self.assertLess(plants.index("LoadEntityRegistrySnapshotJson("), plants.index("ReclaimAbandonedStaging("))
+        self.assertIn("returnfalse;", plants[plants.index("LoadEntityRegistrySnapshotJson("):
+                                           plants.index("ReclaimAbandonedStaging(")])
+
+    def test_save_identity_uses_existing_directory_identity_in_every_sibling(self):
+        for filename, start, prefix in (
+            ("src/luminumbra_common/persistence/WorldSaveService.cpp", "boolSameSaveDirectory(", "std::filesystem"),
+            ("src/luminumbra_common/persistence/SaveTransaction.cpp", "boolSamePath(", "fs")):
+            source = self.source(filename)
+            identity = source[source.index(start):]
+            self.assertLess(identity.index("if(" + prefix + "::equivalent(lhs,rhs,ec))returntrue;"),
+                            identity.index(prefix + "::weakly_canonical(lhs,ec)"))
+            self.assertIn("ec.clear();", identity[:identity.index(prefix + "::weakly_canonical(lhs,ec)")])
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        save = session[session.index("boolGameSession::SaveWorldStateToImpl("):
+                       session.index("boolGameSession::LoadWorldState()")]
+        self.assertIn("constboolcanonical_save=SameSaveDestination(save_dir,GetWorldSaveDir());", save)
+        self.assertIn("SameSaveDestination(m_regionDurableDirectory,save_dir)", save)
+        self.assertIn("source_directory!=target_directory&&!same_existing_directory", save)
+        self.assertIn("lhs==rhs||(!lhs.empty()&&!rhs.empty()&&fs::equivalent(lhs,rhs,identity_error))", session)
+        self.assertIn("if(SameSaveDestination(save_dir,GetWorldSaveDir()))", session)
+
+    def test_validation_refresh_rereads_installed_bytes_without_materializing_cached_chunks(self):
+        service = self.service()
+        public = service[service.index("boolWorldSaveService::load_world("):
+                         service.index("boolWorldSaveService::load_world_impl(")]
+        self.assertIn("retain_chunk,authoritative_inventory,nullptr", public)
+        validation = service[service.index("boolWorldSaveService::load_world_impl("):
+                             service.index("std::stringWorldSaveService::world_hash(")]
+        self.assertIn("validation_chunks?ActiveRecordValidationCache():nullptr", validation)
+        self.assertIn("cache->chunks.find(proof)", validation)
+        self.assertIn("record.id,record.flags,record.uncompressed_size,record.compressed_payload", validation)
+        self.assertIn("ReadRegionFile(path,records,&errors,stop)", validation)
+        self.assertIn("DecodeChunkRecord(record,path,&errors)", validation)
+        for check in ("validated.sdf_size!=kLattice", "chunk_rx!=rx||chunk_rz!=rz",
+                      "!decoded_ids.insert(record.id).second", "*validation_chunks=false;",
+                      "if(validation_chunks){*validation_chunks=true;continue;}"):
+            self.assertIn(check, validation)
+        facts = service[service.index("boolWorldSaveService::SaveFactsScope::validate("):
+                        service.index("voidWorldSaveService::SaveFactsScope::defer_until_commit(")]
+        self.assertIn("if(refresh)m_validated=false;", facts)
+        self.assertIn("load_world_impl(state,m_save_dir,m_diagnostics,{},{},nullptr,&m_chunk_snapshot_present)", facts)
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        save = session[session.index("boolGameSession::SaveWorldStateToImpl("):
+                       session.index("boolGameSession::LoadWorldState()")]
+        self.assertIn("if(ok&&legacy_facts&&write_chunks)ok=legacy_facts->validate(&errors,true);", save)
+        refresh = save.rindex("legacy_facts->validate(&errors,true)")
+        self.assertLess(save.index("SaveEnergyFieldRecord(save_dir)"), refresh)
+        self.assertLess(refresh, save.index("write_metadata?SaveWorldMetadataTo(save_dir)"))
+        self.assertLess(refresh, save.index("acknowledge();"))
+
+    def test_water_authority_skips_unchanged_epochs_and_handles_saturation_and_adoption(self):
+        chunk = self.source("src/luminumbra_common/world/Chunk.h")
+        dirty = chunk[chunk.index("voidmark_water_state_dirty()"):chunk.index("boolis_water_state_dirty()")]
+        self.assertLess(dirty.index("m_water_state_dirty.store(true"), dirty.index("NoteWaterMutation();"))
+        implementation = self.source("src/luminumbra_common/world/Chunk.cpp")
+        self.assertIn("previous!=std::numeric_limits<std::uint64_t>::max()", implementation)
+        self.assertIn("epoch.compare_exchange_weak(previous,previous+1u", implementation)
+        world = self.source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        sync = world[world.index("voidSHIELD_WorldSystem::sync_water_authority()"):
+                     world.index("boolSHIELD_WorldSystem::adopt_streamed_chunk(")]
+        self.assertIn("constautoepoch=Chunk::water_mutation_epoch();", sync)
+        self.assertIn("epoch!=std::numeric_limits<std::uint64_t>::max()&&m_water_authority_epoch==epoch", sync)
+        self.assertLess(sync.index("m_water_authority_epoch==epoch"), sync.index(":m_streaming_state.chunks)"))
+        self.assertLess(sync.index(":m_parked)"), sync.index("m_water_authority_epoch=epoch;"))
+        for begin, end in (("voidSHIELD_WorldSystem::clear_world(", "voidSHIELD_WorldSystem::regenerate_all_chunks("),
+                           ("boolSHIELD_WorldSystem::unpark_chunk(", "voidSHIELD_WorldSystem::sync_water_authority()")):
+            self.assertIn("m_water_authority_epoch.reset();", world[world.index(begin):world.index(end)])
+        self.assertIn("if(adopted){m_water_authority_epoch.reset();", world)
+
+    def test_region_reads_use_one_regular_handle_on_both_platforms(self):
+        source = self.service()
+        native = source[source.index("classRegionInput{"):source.index("boolReadRegionFile(")]
+        for check in ("O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW", "::fstat(m_descriptor,&information)",
+                      "S_ISREG(information.st_mode)", "::GetFileType(m_handle)==FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle,&information)",
+                      "FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT",
+                      "open_error==ERROR_FILE_NOT_FOUND||open_error==ERROR_PATH_NOT_FOUND",
+                      "m_descriptor<0&&errno==ENOENT"):
+            self.assertIn(check, native)
+        reader = source[source.index("boolReadRegionFile("):source.index("boolWriteRegionFile(")]
+        self.assertIn("if(input.missing()&&allow_missing)returntrue;", reader)
+        self.assertIn("if(!input.valid()||input.size()>kMaxSnapshotPayloadBytes)", reader)
+        self.assertIn("stop.stop_requested()", reader)
+        self.assertIn("std::min(size,std::size_t{64}*1024)", reader)
+        for bound in ("compressed_size>remaining", "compressed_size>kMaxRecordBytes",
+                      "record.uncompressed_size>kMaxRecordBytes"):
+            self.assertLess(reader.index(bound), reader.index("record.compressed_payload.resize("))
+        self.assertIn("remaining!=0||!input.read(&extra,1,count)||count!=0", reader)
+        self.assertNotIn("ifstream", reader)
+        self.assertNotIn("std::filesystem::exists(", reader)
+
+    def test_fresh_snapshot_proof_checks_every_float_before_reusing_serialization(self):
+        source = self.source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
+        finite = source[source.index("boolHasOnlyFiniteFloats("):source.index("std::stringStableDump(")]
+        for check in ("value.is_number_float()", "std::isfinite(value.get<double>())",
+                      "value.is_structured()", "for(constauto&child:value)", "!HasOnlyFiniteFloats(child)"):
+            self.assertIn(check, finite)
+        serializer = source[source.index("std::stringSerializeWorldStreamingStateSnapshotJson("):
+                            source.index("boolLoadWorldStreamingStateSnapshotJson(")]
+        self.assertIn("if(finite_values)*finite_values=HasOnlyFiniteFloats(snapshot);", serializer)
+        dump = source[source.index("std::stringStableDump("):source.index("std::stringChecksum(")]
+        self.assertLess(dump.index("if(!stream)throwstd::runtime_error("), dump.index("returnstream.str();"))
+        service = self.service()
+        write = service[service.index("boolWorldSaveService::write_snapshot("):]
+        self.assertIn("boolfinite_values=false;", write)
+        self.assertIn("ActiveRecordValidationCache()?&finite_values:nullptr", write)
+        self.assertIn("if(finite_values)RememberValidatedChunk(record,*chunk);", write)
+        self.assertLess(write.index("CompressPayload(payload,record,errors)"),
+                        write.index("RememberValidatedChunk(record,*chunk)"))
+        region = service[service.index("boolWriteRegionFile("):
+                         service.index("std::stringSerializeSingleChunkSnapshot(")]
+        self.assertLess(region.index("bytes.max_size()-total_bytes"), region.index("bytes.reserve(total_bytes)"))
+        self.assertIn("std::numeric_limits<std::uint32_t>::max()", region)
+        compression = service[service.index("boolCompressPayload("):service.index("boolDecompressPayload(")]
+        self.assertLess(compression.index("payload.empty()||payload.size()>kMaxRecordBytes"),
+                        compression.index("LZ4_compressBound("))
+        self.assertIn("written<=0||static_cast<std::size_t>(written)>kMaxRecordBytes", compression)
+
+    def test_scheduler_and_world_hash_partition_chunk_inputs_once_per_invocation(self):
+        source = self.source("src/luminumbra_common/world/GameSession.cpp")
+        group = source[source.index("RegionalChunkInputsGroupRegionChunks("):
+                       source.index("structGameSession::LoadedWorldState")]
+        for destination in (".live.push_back(chunk)", ".parked.push_back(chunk)", ".durable.push_back(coords)"):
+            self.assertIn(destination, group)
+        schedule = source[source.index("voidGameSession::RunRegionScheduler("):
+                          source.index("std::vector<RegionKey>GameSession::SortedDueRegions(")]
+        self.assertIn("if(!digest_inputs)digest_inputs=GroupRegionChunks(", schedule)
+        self.assertIn("auto&inputs=(*digest_inputs)[key];", schedule)
+        self.assertIn("region_simulation_digest(directory,key,inputs)", schedule)
+        hashing = source[source.index("std::stringGameSession::ComputeChunkStateHash()"):
+                         source.index("voidGameSession::RestoreWorldClock(")]
+        self.assertIn("constautogrouped=GroupRegionChunks(live,parked,durable);", hashing)
+        self.assertIn("grouped.at(key)", hashing)
+        self.assertIn("?record->second.frozen_digest", hashing)
+
+    def test_energy_admission_reuses_immutable_page_facts_and_invalidates_every_writer(self):
+        source = self.source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        facts = source[source.index("EnergyFieldState::Page::regional_facts("):
+                       source.index("std::stringEnergyFieldState::RegionBytes(")]
+        self.assertLess(facts.index("if(regional_summary)return*regional_summary;"),
+                        facts.index("i<values.size()"))
+        for guard in ("channels>=1&&channels<=64", "px>=-43691&&px<=43690",
+                      "pz>=-43691&&pz<=43690", "if(!ValidEnergyOwner(owner))",
+                      "facts.owner_count==facts.owners.size()", "facts.record_bytes>kMaxRegionalRecordBytes",
+                      "token_bytes>kMaxRegionalRecordBytes-facts.record_bytes"):
+            self.assertIn(guard, facts)
+        self.assertIn("regional_summary=facts;return*regional_summary;", facts)
+        for begin, end in (("EnergyFieldState::Page&EnergyFieldState::EnsurePage(",
+                            "voidEnergyFieldState::CatchUpWindowPages()"),
+                           ("voidEnergyFieldState::CatchUpWindowPages()",
+                            "std::uint64_tEnergyFieldState::ApplyDeposits()"),
+                           ("voidEnergyFieldState::DecayAndDiffuseWindow()",
+                            "voidEnergyFieldState::StampWindowPages()"),
+                           ("voidEnergyFieldState::NormalizeAllPages()",
+                            "std::stringEnergyFieldState::SerializeRecord(")):
+            self.assertIn("regional_summary.reset();", source[source.index(begin):source.index(end)])
+        tick = source[source.index("boolEnergyFieldState::TickRegional("):]
+        stage = tick[tick.index("constautostage_page="):tick.index("std::set<std::pair<RegionKey,std::int64_t>>touched;")]
+        self.assertIn("existing->second.regional_summary.reset();", stage)
+        self.assertIn("page.regional_summary.reset();", stage)
+        owners = source[source.index("boolEnergyFieldState::ValidateRegionalOwners("):
+                        source.index("boolEnergyFieldState::TickRegional(")]
+        self.assertIn("page.regional_facts(key,m_channels)", owners)
+        self.assertIn("if(!facts.valid)returnfalse;", owners)
+        self.assertIn("!records.contains(facts.owners[i])||!ages.contains(facts.owners[i])", owners)
+        self.assertNotIn("page.values", owners)
+        capacity = source[source.index("boolEnergyFieldState::RegionalRecordFits("):
+                          source.index("boolEnergyFieldState::DeserializeRegionalRecord(")]
+        self.assertIn("page.regional_facts(key,m_channels).record_bytes", capacity)
+        self.assertIn("count>kMaxRegionalRecordBytes-bytes", capacity)
+        self.assertNotIn("page.values", capacity)
+
+    def test_energy_region_hash_projects_at_most_nine_pages_in_canonical_order(self):
+        source = self.source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        region = source[source.index("std::stringEnergyFieldState::RegionBytes("):
+                        source.index("std::stringEnergyFieldState::CanonicalRegionalBytes()")]
+        for required in ("if(!ValidEnergyOwner(owner))return{};", "std::array<std::int64_t,9>keys{};",
+                         "RegionalCellRange(owner.x)", "RegionalCellRange(owner.z)",
+                         "FloorDiv(end_x-1,kEnergyPageCells)", "FloorDiv(end_z-1,kEnergyPageCells)",
+                         "constautosorted_count=std::min(key_count,keys.size());",
+                         "for(std::size_ti=1;i<sorted_count;++i)",
+                         "constautokey=keys[i];autoposition=i;",
+                         "while(position>0&&key<keys[position-1])",
+                         "keys[position]=keys[position-1];--position;",
+                         "keys[position]=key;",
+                         "page_index<sorted_count",
+                         "constautofound=m_pages.find(key);", "if(found==m_pages.end())continue;",
+                         "OwnerOfCell(static_cast<int>(cx),static_cast<int>(cz))!=owner"):
+            self.assertIn(required, region)
+        self.assertNotIn(":m_pages)", region)
+        self.assertNotIn("std::sort(", region)
+
+    def test_load_from_uses_staged_energy_and_merge_retains_both_simulation_gates(self):
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        load = session[session.index("boolGameSession::LoadWorldFrom("):
+                       session.index("boolGameSession::ClockConfigurationCompatible(")]
+        self.assertNotIn("DeserializeRecord(", load)
+        self.assertLess(load.index("ReadWorldStateFrom(worldPath,loaded)"), load.index("ResetWorldSystems();"))
+        self.assertIn("AdoptWorldStateFrom(worldPath,loaded);m_worldUsable=true;", load)
+        client = self.source("src/luminumbra_client/main_client.cpp")
+        self.assertIn("if(!settling_benchmark_uploads){if(simulate_frame)", client)
+        self.assertIn("if(advance_frame_simulation){if(auto*physics=gameSession->GetPhysicsSystem();physics&&!settling_benchmark_uploads)", client)
+        self.assertIn("advance_frame_simulation);streaming_world->SetWaterBootPaused(false);", client)
+        world = self.source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        self.assertIn("booladvance_simulation){if(m_durable_read_failed)return;", world)
 
 
 if __name__ == "__main__":

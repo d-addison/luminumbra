@@ -118,6 +118,99 @@ TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication)
     }
 }
 
+TEST(DeterministicWorkBudget, DiskOnlyRestorationSharesTheActivationGenerationBudget) {
+    for (const bool at_active_cap : {false, true}) {
+        JobSystem jobs;
+        jobs.startup(1);
+        Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+        world.debug_set_streaming_radius_cap(8);
+        world.set_durable_residency(true);
+        // Cover the bounded radius-eight candidate volume, including vertical neighbours.
+        std::vector<IVec3> inventory;
+        for (int x = -8; x <= 8; ++x)
+            for (int z = -8; z <= 8; ++z)
+                for (int y = -16; y <= 16; ++y)
+                    inventory.emplace_back(x, y, z);
+        world.remember_durable_chunks(inventory);
+        std::size_t reads = 0, faults = 0;
+        world.set_durable_chunk_loader(
+            [&reads](const IVec3& coords) {
+                ++reads;
+                auto chunk = std::make_shared<Chunk>(coords);
+                chunk->sdf_data.assign(17 * 17 * 17, -1.0f);
+                return chunk;
+            },
+            [&faults](const std::string&) { ++faults; });
+        entt::registry registry;
+        for (std::int64_t tick = 1; tick <= 3; ++tick) {
+            world.begin_tick(tick);
+            world.update(registry, Vec3{8, 35, 8}, nullptr);
+            EXPECT_EQ(reads, 0u);
+        }
+        if (at_active_cap) {
+            const auto cap = world.get_last_streaming_budget_stats().max_active_chunks_budget;
+            ASSERT_GT(cap, 0u);
+            for (std::size_t index = 0; index < cap; ++index) {
+                auto chunk = std::make_shared<Chunk>(IVec3(100 + static_cast<int>(index), 0, 0));
+                chunk->set_state(ChunkState::Ready);
+                ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            }
+        }
+        world.begin_tick(4);
+        world.update(registry, Vec3{8, 35, 8}, nullptr);
+        const auto stats = world.get_last_streaming_budget_stats();
+        EXPECT_GT(stats.deferred_generation, 0u);
+        EXPECT_EQ(reads, stats.scheduled_generation);
+        EXPECT_LE(reads, static_cast<std::size_t>(stats.generation_budget));
+        EXPECT_EQ(faults, 0u);
+        if (at_active_cap)
+            EXPECT_EQ(reads, 0u);
+        else
+            EXPECT_GT(reads, 0u);
+        world.quiesce_streaming_jobs_for_save();
+        jobs.shutdown();
+    }
+}
+
+TEST(DeterministicWorkBudget, DiskRestorationFailureStopsActivationBeforeUnloading) {
+    JobSystem jobs;
+    jobs.startup(1);
+    Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+    world.debug_set_streaming_radius_cap(8);
+    world.set_durable_residency(true);
+    std::vector<IVec3> inventory;
+    for (int x = -8; x <= 8; ++x)
+        for (int z = -8; z <= 8; ++z)
+            for (int y = -16; y <= 16; ++y)
+                inventory.emplace_back(x, y, z);
+    world.remember_durable_chunks(inventory);
+    std::size_t reads = 0, faults = 0;
+    world.set_durable_chunk_loader(
+        [&reads](const IVec3&) -> std::shared_ptr<Chunk> {
+            ++reads;
+            return nullptr;
+        },
+        [&faults](const std::string&) { ++faults; });
+    entt::registry registry;
+    for (std::int64_t tick = 1; tick <= 3; ++tick) {
+        world.begin_tick(tick);
+        world.update(registry, Vec3{8, 35, 8}, nullptr);
+    }
+    const IVec3 distant_coords{100, 0, 0};
+    auto resident = std::make_shared<Chunk>(distant_coords);
+    resident->sdf_data.assign(17 * 17 * 17, -1.0f);
+    resident->mark_voxel_data_dirty();
+    resident->set_state(ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(resident));
+    world.begin_tick(4);
+    world.update(registry, Vec3{8, 35, 8}, nullptr);
+    EXPECT_EQ(reads, 1u);
+    EXPECT_EQ(faults, 1u);
+    EXPECT_EQ(world.find_streamed_chunk(distant_coords), resident);
+    world.quiesce_streaming_jobs_for_save();
+    jobs.shutdown();
+}
+
 TEST(DeterministicWorkBudget, DeferredGenerationKeepsTelemetryBackloggedBetweenActivationPasses) {
     for (const bool at_active_cap : {false, true}) {
         SCOPED_TRACE(at_active_cap);
@@ -519,6 +612,31 @@ TEST(DeterministicWorkBudget, SessionRegionCountersLeaveCanonicalIdentityUnchang
         for (const auto& samples : unobserved.GetSimBudgetTelemetry().WorkItems())
             EXPECT_TRUE(samples.empty());
     }
+}
+
+TEST(DeterministicWorkBudget, RegionOnlyHostsFreezeWithoutCreatingWorldFields) {
+    world::GameSession first, second;
+    const world::RegionKey key{0, 0};
+    for (auto* session : {&first, &second}) {
+        session->SetActiveRegionsEnabled(true);
+        session->SetRegionSchedulerConfig({1, 1, 1});
+        session->SetReplicatedSimulationAnchors({});
+        session->NotifyGroundObjectEdit({8, 0, 8});
+    }
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        for (auto* session : {&first, &second}) {
+            session->RecordActiveRegionWork({key, 2, 0, 0, 0});
+            ASSERT_EQ(session->TickSimulation(1.0 / 30.0), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+            EXPECT_EQ(session->GetWorldSystem(), nullptr);
+            EXPECT_FALSE(session->GetFieldPages().owns_region(key));
+        }
+        EXPECT_EQ(first.GetRegionSchedule(), second.GetRegionSchedule());
+        EXPECT_EQ(first.GetActiveRegionLedger().canonical_bytes(),
+                  second.GetActiveRegionLedger().canonical_bytes());
+    }
+    ASSERT_TRUE(first.GetActiveRegionLedger().records().contains(key));
+    EXPECT_EQ(first.GetActiveRegionLedger().records().at(key).state, world::RegionState::Frozen);
 }
 
 TEST(DeterministicWorkBudget, WorkTraceIsDiagnosticAndRejectsCounterOrTickDrift) {

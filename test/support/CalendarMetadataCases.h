@@ -1,5 +1,11 @@
 #pragma once
 
+#include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+
+#include <filesystem>
+#include <system_error>
+
 #include <nlohmann/json.hpp>
 #include <vector>
 
@@ -67,4 +73,30 @@ inline std::vector<nlohmann::json> InvalidCalendarMetadata() {
     return result;
 }
 
+} // namespace Luminumbra::TestSupport
+
+// Convert only disposable fixture directories to the pre-index save representation.
+namespace Luminumbra::TestSupport {
+inline bool ForgetSnapshotIndex(const std::filesystem::path& save_dir) {
+    namespace P = Luminumbra::Persistence;
+    std::error_code error;
+    std::filesystem::remove(P::snapshot_index_path(save_dir), error);
+    if (error)
+        return false;
+    std::filesystem::remove_all(P::journal_directory(save_dir), error);
+    if (error)
+        return false;
+    const auto path = save_dir / "world_info.json";
+    std::string bytes;
+    bool present = false;
+    if (!P::read_snapshot_bytes(path, P::kMaxSnapshotIndexBytes, bytes, present, nullptr))
+        return false;
+    if (!present)
+        return true;
+    auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    if (!metadata.is_object())
+        return false;
+    metadata.erase("snapshotFormat");
+    return P::WorldSaveService::durable_write_file(path, metadata.dump(2) + "\n");
+}
 } // namespace Luminumbra::TestSupport

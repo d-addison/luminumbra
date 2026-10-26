@@ -43,6 +43,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -648,6 +649,41 @@ TEST(StreamingHardening, FarLodSnapshotOwnsBytesAndRejectsStaleLiveData) {
     EXPECT_EQ(entry.sdf_data.front(), -1.0f);
     EXPECT_EQ(entry.material_data.front(), 7u);
     EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*captured));
+}
+
+TEST(StreamingHardening, FarLodCaptureAndFreshnessNeverReadDiskOnlyAuthority) {
+    SHIELD_WorldSystem world(nullptr, nullptr, FixtureParams(), kSeed);
+    world.set_durable_residency(true);
+    int reads = 0;
+    int faults = 0;
+    world.set_durable_chunk_loader(
+        [&reads](const IVec3&) -> std::shared_ptr<Chunk> {
+            ++reads;
+            throw std::runtime_error("unreadable durable authority");
+        },
+        [&faults](const std::string&) { ++faults; });
+    world.remember_durable_chunks({{0, 0, 0}, {1000, 0, 1000}});
+    const auto captured = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(captured);
+    EXPECT_TRUE(captured->entries.empty());
+    EXPECT_EQ(reads, 0);
+    EXPECT_EQ(faults, 0);
+
+    // An evicted entry already owns its bytes. The global authority revision checks durable
+    // replacements; freshness must not invoke the exact-chunk loader to revalidate that copy.
+    auto evicted = *captured;
+    evicted.entries.push_back({.coords = {0, 0, 0},
+                               .provenance = ChunkSdfProvenance::LoadedOrEdited,
+                               .voxel_revision = 1,
+                               .authority_durable = true,
+                               .sdf_data = {},
+                               .material_data = {}});
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(evicted));
+    EXPECT_EQ(reads, 0);
+    EXPECT_EQ(faults, 0);
+    world.notify_far_lod_authority_durable({0, 0, 0});
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(evicted));
+    EXPECT_EQ(reads, 0);
 }
 
 TEST(StreamingHardening, ChunkSdfProvenanceRevisionLifecycleIsSticky) {

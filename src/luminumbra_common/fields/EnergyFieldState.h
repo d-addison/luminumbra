@@ -1,5 +1,9 @@
 #pragma once
 
+// The window/catch-up/phase contract below describes the legacy path. Active
+// regions use the separate regional APIs: per-cell owners, durable ARL4 ages,
+// sealed common-phase borders and observational serialization, with no catch-up.
+//
 // the STATEFUL energy-field layer — the persistent half of
 // the engine's emissive scalar field. The re-derivable half (AetherFieldSystem)
 // is a pure function of (seed, tick, origin); THIS layer holds gameplay-caused
@@ -58,10 +62,16 @@
 // recorded for collision-avoidance only and intentionally never consumed
 // (the PhotoScoring +24 / PhotoFilters +35 precedent).
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
+
+#include "../world/ActiveRegionLedger.h"
 
 namespace luminumbra::fields {
 
@@ -86,6 +96,23 @@ inline constexpr unsigned kEnergyDecayD = 8;       // ~0.78% per cadence step
 
 class EnergyFieldState {
 public:
+    using RegionKey = Luminumbra::world::RegionKey;
+    using RegionRecords = std::map<RegionKey, Luminumbra::world::ActiveRegionRecord>;
+    using EnergyAges = Luminumbra::world::ActiveRegionLedger::EnergyAges;
+    // Same file/decoded allocation limits as the existing indexed energy reader.
+    static constexpr std::size_t kMaxRegionalRecordBytes = 16u * 1024u * 1024u;
+    static constexpr std::size_t kMaxRegionalValueBytes = 64u * 1024u * 1024u;
+    static constexpr std::size_t kMaxRegionalDeposits = kMaxRegionalRecordBytes / 32;
+    struct RegionalResult {
+        EnergyAges ages;
+        // page_updates counts distinct (owner, physical page) actually processed;
+        // border work is charged to both owners, even outside the interior due set.
+        std::vector<Luminumbra::world::RegionWork> work;
+        std::uint64_t clipped_raw = 0;
+        // Physical buffer counts for diagnostics; only potentially participating pages are staged.
+        std::size_t staged_pages = 0;
+        std::size_t diffusion_pages = 0;
+    };
     // channels >= 1. v1 ships single-channel;  constructs with 2
     // (Lumin/Umbra polarity) — the record header carries the count either way.
     explicit EnergyFieldState(int channels = 1);
@@ -106,6 +133,10 @@ public:
     // to it — the Factorio inactive-chunk rule).
     void
     QueueDeposit(std::uint64_t emitter_id, int cx, int cz, int channel, std::uint32_t amount_raw);
+    // Enabled admission: valid world cell/channel, and a deterministic bounded
+    // pending buffer (32 bytes per deposit). False leaves the buffer untouched.
+    bool QueueRegionalDeposit(
+        std::uint64_t emitter_id, int cx, int cz, int channel, std::uint32_t amount_raw);
 
     // Advance to `tick`: catch-up any page re-entering the window, apply the
     // sorted deposit buffer, then (on the cadence, honouring the persisted
@@ -113,6 +144,33 @@ public:
     // amount CLIPPED this tick (saturation + out-of-window drops) for the
     // conservation accounting (proving signal a2).
     std::uint64_t Tick(std::uint64_t tick);
+
+    // Independent enabled path. due must be unique, ascending and nonfrozen.
+    // Each due owner advances age once, including owners with no energy. An absent
+    // age starts at zero. Refusal (invalid input/age overflow/capacity) changes
+    // neither this object, its pending deposits nor out. No absolute-time catchup.
+    // Deposits for non-due targets are clipped; admitted deposits can create pages.
+    // Diffusion is sealed toward absent pages/owners and frozen owners. Four
+    // double-buffered sweeps run on intrinsic fires and eligible common borders.
+    bool TickRegional(std::uint64_t tick,
+                      const RegionRecords& records,
+                      std::span<const RegionKey> due,
+                      const EnergyAges& ages,
+                      RegionalResult& out);
+    [[nodiscard]] static RegionKey OwnerOfCell(int cx, int cz) noexcept;
+    [[nodiscard]] bool OwnsRegion(RegionKey key) const;
+    // Stored values only; ages are projected by ARL4. No legacy page epochs.
+    [[nodiscard]] std::string CanonicalRegionalBytes() const;
+    [[nodiscard]] std::string RegionBytes(RegionKey key) const;
+    // Empty layer => absent record (empty string). Nonempty EFS1 header has 0
+    // in the legacy phase slot, since all regional cadence lives in ARL4.
+    // An incompatible/oversized legacy object throws length_error, never absence.
+    [[nodiscard]] std::string SerializeRegionalRecord() const;
+    // Present records only: empty/header-only/noncanonical inputs refuse atomically.
+    bool DeserializeRegionalRecord(const std::string& record);
+    // Validate the jointly staged EFS/ARL snapshot before exposing it to consumers.
+    [[nodiscard]] bool ValidateRegionalOwners(const RegionRecords& records,
+                                              const EnergyAges& ages) const;
 
     // Point read at world cell coords (any page, frozen or active; 0 when the
     // cell/page does not exist). Frozen pages are read AS STORED — catch-up
@@ -148,10 +206,21 @@ public:
     }
 
 private:
+    // Derived only from one page's stored values; never serialized or hashed. A 384 m
+    // physical page overlaps at most four 512 m owners. Writers invalidate before editing.
+    struct RegionalPageFacts {
+        std::size_t record_bytes = 0;
+        std::array<RegionKey, 4> owners{};
+        std::size_t owner_count = 0;
+        bool valid = false;
+        bool any = false;
+    };
     struct Page {
         // cell-major, channel-interleaved: values[(lz*kEnergyPageCells+lx)*channels+ch]
         std::vector<std::uint16_t> values;
         std::uint64_t last_step = 0; // cadence step this page was last current at
+        mutable std::optional<RegionalPageFacts> regional_summary;
+        [[nodiscard]] const RegionalPageFacts& regional_facts(std::int64_t key, int channels) const;
         [[nodiscard]] bool all_zero() const noexcept;
     };
 
@@ -179,6 +248,10 @@ private:
     void StampWindowPages();
     void DropZeroPages();
     void NormalizeAllPages();
+    [[nodiscard]] bool RegionalRecordFits(const EnergyFieldState* replacements = nullptr) const;
+    [[nodiscard]] bool ValidateRegionalOwners(const RegionRecords& records,
+                                              const EnergyAges& ages,
+                                              std::vector<std::int64_t>* empty_pages) const;
 
     int m_channels = 1;
     // Window origin in world cell coords, page-aligned. Valid once anchored.

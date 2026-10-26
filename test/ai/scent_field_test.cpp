@@ -186,3 +186,35 @@ TEST(ScentField, WindCarriesScentFartherDownwindThanDiffusionAlone) {
     EXPECT_GT(wind.Sample(0, 14, 6), still.Sample(0, 14, 6));
     EXPECT_GT(wind.Sample(0, 14, 6), 0.0);
 }
+
+TEST(ScentField, RegionalFrozenEdgeSealsDepositsAdvectionDiffusionAndClamp) {
+    ScentField field(8, 4, 1);
+    field.RestoreCell(0, 4, 2, 80.0);
+    const ScentField::CellGate due = [](int x, int) {
+        return x < 4;
+    };
+    const ScentField::EdgeGate sealed = [](int x, int, int nx, int) {
+        return x < 4 && nx < 4;
+    };
+    field.BindDepositGate(due);
+    field.Deposit(0, 4, 2, 20.0);
+    field.Step(0.25, 4, 0.1, -1.0, 0.0, due, sealed);
+    field.Clamp(1e-9, 1e6, due);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 4, 2), 80.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 5, 2), 0.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 3, 2), 1e-9);
+}
+
+TEST(ScentField, RegionalCommonBorderExchangesWithoutInteriorEvaporation) {
+    ScentField field(4, 2, 1);
+    field.RestoreCell(0, 1, 0, 40.0);
+    const ScentField::CellGate neither_due = [](int, int) {
+        return false;
+    };
+    const ScentField::EdgeGate border = [](int x, int, int nx, int) {
+        return (x == 1 && nx == 2) || (x == 2 && nx == 1);
+    };
+    field.Step(0.25, 1, 0.1, 0.0, 0.0, neither_due, border);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 1, 0), 30.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 2, 0), 10.0);
+}

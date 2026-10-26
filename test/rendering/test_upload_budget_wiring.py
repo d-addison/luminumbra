@@ -235,7 +235,9 @@ class UploadBudgetWiring(unittest.TestCase):
 
         # The main loop uses the same wait selector for elapsed time and drawing.
         source = compact(self.main)
-        wait = source[source.index("const bool settling_benchmark_uploads"):]
+        wait = source[source.index("const bool settling_capture_uploads"):]
+        reload = compact(body(self.main, "const auto settle_workload_reload ="))
+        self.assertIn("*g_camera, 0.0f, g_app.overlay.wireframe_mode);", reload)
         call = re.search(r"\.render_frame\((.*?)\);", wait).group(1)
         arguments = [argument.strip() for argument in call.split(",")]
         self.assertEqual(len(arguments), 6)
@@ -262,6 +264,28 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("water_data.SetPresentedLadderWaterUpload(", self.pipeline)
         presentation = body(self.header, "void SetPresentedLadderWaterUpload(")
         self.assertIn("SetLadderWaterUpload(upload, mesh_version, enabled)", presentation)
+
+    def test_benchmark_qualification_holds_mesh_producers_while_streaming_drains(self):
+        self.assertTrue("if (!settling_benchmark_uploads)" in self.main,
+                        "Unmeasured qualification must hold simulation producers")
+        qualification = body(self.main, "if (!settling_benchmark_uploads)")
+        self.assertIn("gameSession->TickSimulation", qualification)
+        self.assertIn("traversal_target_tick", qualification)
+        self.assertRegex(compact(self.main),
+                         r"if \(auto\* physics = gameSession->GetPhysicsSystem\(\); "
+                         r"physics && !settling_benchmark_uploads\) "
+                         r"physics->update\(deltaTime \* g_app.capture.timeScale\);")
+        start = self.main.index("auto* streaming_world = gameSession->GetWorldSystem();")
+        streaming = self.main[start:]
+        pause = streaming.index("SetWaterBootPaused(settling_benchmark_uploads);")
+        update = streaming.index("gameSession->GetWorldSystem()->update(")
+        resume = streaming.index("SetWaterBootPaused(false);")
+        self.assertLess(pause, update)
+        self.assertLess(update, resume)
+        # Qualification retains the same finite wait and upload budgets.
+        wait = body(self.main, "const auto wait_for_uploads =")
+        self.assertIn("wait.waiting(pending,", wait)
+        self.assertIn("wait.failed()", wait)
 
     def test_settled_capture_and_per_frame_telemetry_are_both_wired(self):
         settled = body(self.header, "bool render_uploads_settled() const")

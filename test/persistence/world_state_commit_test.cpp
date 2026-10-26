@@ -1,6 +1,8 @@
+#include "../support/CalendarMetadataCases.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -211,24 +213,42 @@ protected:
         chunk->sdf_data =
             failure == LoadFailure::Sdf ? std::vector<float>{1.0f} : std::vector<float>{};
         ASSERT_TRUE(WorldSaveService{}.save_world(state, save));
+        const auto ledger_path = WorldSaveService::active_regions_path(save);
+        fs::remove(ledger_path);
         if (failure == LoadFailure::PartialLedger || failure == LoadFailure::EmptyLedger ||
             failure == LoadFailure::Scheduler || failure == LoadFailure::ActiveRegionsRequired) {
             auto clock_metadata = metadata;
             clock_metadata.erase("renderCalendar");
             world::WorldClock(0, world::WorldCalendar::Legacy()).write_metadata(clock_metadata);
-            ASSERT_TRUE(WorldSaveService::write_file_durably(save / "world_info.json",
-                                                             clock_metadata.dump()));
-        }
-        const auto ledger_path = WorldSaveService::active_regions_path(save);
-        fs::remove(ledger_path);
-        if (failure == LoadFailure::PartialLedger || failure == LoadFailure::EmptyLedger) {
-            ASSERT_TRUE(WorldSaveService::write_file_durably(
-                ledger_path, failure == LoadFailure::PartialLedger ? "partial ledger" : ""));
-        }
-        if (failure == LoadFailure::Scheduler) {
-            world::ActiveRegionLedger persisted(world::RegionSchedulerConfig{10, 3, 2});
-            persisted.set_local_anchor(Vec3(8, 18, 8));
-            ASSERT_TRUE(WorldSaveService::write_file_durably(ledger_path, persisted.encode()));
+            if (failure == LoadFailure::ActiveRegionsRequired) {
+                ASSERT_TRUE(WorldSaveService::save_metadata(clock_metadata.dump(), save));
+            } else {
+                world::ActiveRegionLedger persisted(world::RegionSchedulerConfig{10, 3, 2});
+                persisted.set_local_anchor(Vec3(8, 18, 8));
+                ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+                    clock_metadata.dump(), persisted, save));
+                if (failure != LoadFailure::Scheduler) {
+                    ASSERT_TRUE(WorldSaveService::write_file_durably(
+                        ledger_path,
+                        failure == LoadFailure::PartialLedger ? "partial ledger" : ""));
+                    // Authenticate the malformed payload so this fixture reaches the ledger
+                    // parser, rather than testing the independent checksum refusal.
+                    Persistence::SnapshotIndex index;
+                    ASSERT_TRUE(Persistence::read_snapshot_index(save, index, nullptr));
+                    bool found = false;
+                    for (auto& member : index.members) {
+                        if (member.path != "chunks/region/active-regions.arl")
+                            continue;
+                        found = true;
+                        ASSERT_TRUE(Persistence::hash_file(
+                            ledger_path, member.bytes, member.fnv64, member.present, nullptr));
+                    }
+                    ASSERT_TRUE(found);
+                    ASSERT_TRUE(WorldSaveService::write_file_durably(
+                        Persistence::snapshot_index_path(save),
+                        Persistence::encode_snapshot_index(index)));
+                }
+            }
         }
         if (failure == LoadFailure::Chunk) {
             const auto region = WorldSaveService::region_file_path(save, 0, 0);
@@ -361,6 +381,7 @@ TEST_P(WorldStateCommit, RefusedLoadsClearResidentChunksWithoutPublishingStagedM
     ASSERT_TRUE(source.CreateWorld("Refused candidate", "1337", "default"));
     const auto save = source.GetWorldSaveDir();
     const auto id = source.GetMetadata().worldId;
+    ASSERT_TRUE(Luminumbra::TestSupport::ForgetSnapshotIndex(save));
     auto metadata = Metadata(save);
     metadata.erase("calendar");
     metadata.erase("simulationTick");
