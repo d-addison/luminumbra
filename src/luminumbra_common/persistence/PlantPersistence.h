@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -28,6 +29,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/CropLifecycleComponents.h"
 #include "../components/DiseaseComponents.h"
+#include "../components/GrazeableComponent.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
@@ -143,12 +145,27 @@ inline bool ValidComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& com
                FitsNumber<std::uint32_t>(data.at("lifespan_ticks")) &&
                FitsNumber<std::uint16_t>(data.at("generations")) &&
                FitsNumber<std::uint16_t>(data.at("species_id"));
+    if (type == "Grazeable")
+        return FitsNumber<float>(data.at("biomass")) && data.at("biomass").get<double>() >= 0.0 &&
+               data.at("biomass").get<double>() <= 1.0 &&
+               FitsNumber<std::uint32_t>(data.at("last_grazed_tick"));
     return true; // Unknown components remain forward-compatible and are skipped.
+}
+
+inline std::optional<entt::entity>
+SavedPlantEntity(const ::Luminumbra::Ecs::EntitySnapshotRecord& record) {
+    if (!record.has_entity_id || record.entity_id > std::numeric_limits<entt::id_type>::max())
+        return std::nullopt;
+    const auto entity = static_cast<entt::entity>(record.entity_id);
+    // Historical records without a usable identity retain fresh-ID loading.
+    if (entity == entt::null || entity == entt::tombstone)
+        return std::nullopt;
+    return entity;
 }
 } // namespace pp_detail
 
 // Project all plant entities into a deterministic snapshot. Plants need (at minimum) PlantTag +
-// growth + genome + transform; soil/health/pollination/lifecycle are optional (per-plant opt-in).
+// growth + genome + transform; soil/health/pollination/lifecycle/grazing are optional.
 [[nodiscard]] inline ::Luminumbra::Ecs::EntityRegistrySnapshot
 BuildPlantEntitySnapshot(const entt::registry& reg) {
     namespace C = ::Luminumbra::Components;
@@ -209,6 +226,11 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
                                        {"generations", lc->generations},
                                        {"species_id", lc->species_id}}});
         }
+        if (const auto* grazing = reg.try_get<const C::GrazeableComponent>(e)) {
+            rec.components.push_back(
+                {"Grazeable",
+                 {{"biomass", grazing->biomass}, {"last_grazed_tick", grazing->last_grazed_tick}}});
+        }
         snap.entities.push_back(std::move(rec));
     }
     ::Luminumbra::Ecs::SortEntityRegistrySnapshot(snap);
@@ -219,17 +241,25 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
 // every plant passes, including plants after the first valid record.
 inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
     try {
+        // At most one slot per input record; storage is bounded by the roster.
+        std::vector<entt::id_type> slots;
         for (const auto& record : snap.entities) {
             if (record.name != "plant")
                 continue;
+            if (record.has_entity_id &&
+                record.entity_id > std::numeric_limits<entt::id_type>::max())
+                return false;
+            if (const auto entity = pp_detail::SavedPlantEntity(record))
+                slots.push_back(entt::to_entity(*entity));
             // Fixed shipping component set; unknown extension payloads are ignored.
-            constexpr std::array<std::string_view, 7> known = {"Transform",
+            constexpr std::array<std::string_view, 8> known = {"Transform",
                                                                "PlantGenome",
                                                                "PlantGrowth",
                                                                "SoilFeeder",
                                                                "PlantHealth",
                                                                "Pollination",
-                                                               "CropLifecycle"};
+                                                               "CropLifecycle",
+                                                               "Grazeable"};
             std::array<bool, known.size()> seen{};
             for (const auto& component : record.components) {
                 const auto found = std::find(known.begin(), known.end(), component.type);
@@ -243,73 +273,104 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
             if (!seen[0] || !seen[1] || !seen[2])
                 return false;
         }
-        return true;
+        // Different generations of the same slot cannot coexist either.
+        std::sort(slots.begin(), slots.end());
+        return std::adjacent_find(slots.begin(), slots.end()) == slots.end();
     } catch (const nlohmann::json::exception&) {
         return false;
     }
 }
 
-// Reconstruct plant entities from a snapshot into `reg` (creates fresh entities). Unknown component
+// Admission against a populated registry must compare slots, including other live
+// generations. EnTT's create(hint) silently falls back to a fresh ID on collision.
+inline bool CanApplyPlantEntitySnapshot(const entt::registry& reg,
+                                        const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
+    if (!ValidatePlantEntitySnapshot(snap))
+        return false;
+    for (const auto& record : snap.entities) {
+        if (record.name != "plant")
+            continue;
+        if (const auto entity = pp_detail::SavedPlantEntity(record)) {
+            const auto current = entt::entt_traits<entt::entity>::construct(
+                entt::to_entity(*entity), reg.current(*entity));
+            if (reg.valid(current))
+                return false;
+        }
+    }
+    return true;
+}
+
+// Reconstruct plant entities with their saved IDs (legacy records get fresh IDs). Unknown component
 // types are skipped. Returns false without registry mutation for invalid input.
 // Deterministic (snapshot is id-ordered).
 inline bool ApplyPlantEntitySnapshot(entt::registry& reg,
                                      const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
-    if (!ValidatePlantEntitySnapshot(snap))
+    if (!CanApplyPlantEntitySnapshot(reg, snap))
         return false;
     namespace C = ::Luminumbra::Components;
-    for (const auto& rec : snap.entities) {
-        if (rec.name != "plant")
-            continue;
-        const auto e = reg.create();
-        reg.emplace<C::PlantTag>(e);
-        for (const auto& comp : rec.components) {
-            const nlohmann::json& d = comp.data;
-            if (comp.type == "Transform") {
-                auto& tf = reg.emplace<C::TransformComponent>(e);
-                tf.position = ::Luminumbra::Vec3(
-                    d.at("x").get<float>(), d.at("y").get<float>(), d.at("z").get<float>());
-            } else if (comp.type == "PlantGenome") {
-                auto& gn = reg.emplace<C::PlantGenomeComponent>(e);
-                pp_detail::GenesFromJson(d.at("genes"), gn.genes);
-            } else if (comp.type == "PlantGrowth") {
-                auto& g = reg.emplace<C::PlantGrowthComponent>(e);
-                g.species_id = d.at("species_id").get<std::uint16_t>();
-                g.stage = d.at("stage").get<std::uint8_t>();
-                g.quality = d.at("quality").get<std::uint8_t>();
-                g.growth_points = d.at("growth_points").get<std::uint32_t>();
-                g.stress_points = d.at("stress_points").get<std::uint32_t>();
-                g.tended = d.at("tended").get<std::uint8_t>();
-                g.planted_tick = d.at("planted_tick").get<std::uint64_t>();
-                g.last_tick = d.at("last_tick").get<std::uint64_t>();
-            } else if (comp.type == "SoilFeeder") {
-                auto& sf = reg.emplace<C::SoilFeederComponent>(e);
-                sf.uptake = d.at("uptake").get<std::uint16_t>();
-                sf.absorbed = d.at("absorbed").get<std::uint32_t>();
-            } else if (comp.type == "PlantHealth") {
-                auto& h = reg.emplace<C::PlantHealthComponent>(e);
-                h.infection = d.at("infection").get<std::uint16_t>();
-                h.resistance = d.at("resistance").get<std::uint16_t>();
-                h.state = d.at("state").get<std::uint8_t>();
-                h.infected_ticks = d.at("infected_ticks").get<std::uint32_t>();
-            } else if (comp.type == "Pollination") {
-                // Restore the opt-in TAG too (a marker carries no data, so it isn't serialized): a
-                // persisted PollinationComponent means the plant participated in cross-pollination,
-                // and the pollination tick views PollinationTag — without it a reloaded field would
-                // stop drifting. Co-emplaced with the component (they are always added together at
-                // spawn).
-                reg.emplace<C::PollinationTag>(e);
-                auto& pc = reg.emplace<C::PollinationComponent>(e);
-                pc.pollinated = d.at("pollinated").get<bool>();
-                pc.last_pollen_tick = d.at("last_pollen_tick").get<std::uint64_t>();
-                pc.crosses = d.at("crosses").get<std::uint32_t>();
-                pp_detail::GenesFromJson(d.at("next_genome"), pc.next_genome.genes);
-            } else if (comp.type == "CropLifecycle") {
-                auto& lc = reg.emplace<C::CropLifecycleComponent>(e);
-                lc.perennial = d.at("perennial").get<bool>();
-                lc.ripe_ticks = d.at("ripe_ticks").get<std::uint32_t>();
-                lc.lifespan_ticks = d.at("lifespan_ticks").get<std::uint32_t>();
-                lc.generations = d.at("generations").get<std::uint16_t>();
-                lc.species_id = d.at("species_id").get<std::uint16_t>();
+    // Reserve saved slots first so fresh legacy IDs cannot consume a later hint.
+    for (const bool restore_ids : {true, false}) {
+        for (const auto& rec : snap.entities) {
+            if (rec.name != "plant")
+                continue;
+            const auto saved_entity = pp_detail::SavedPlantEntity(rec);
+            if (saved_entity.has_value() != restore_ids)
+                continue;
+            const auto e = saved_entity ? reg.create(*saved_entity) : reg.create();
+            reg.emplace<C::PlantTag>(e);
+            for (const auto& comp : rec.components) {
+                const nlohmann::json& d = comp.data;
+                if (comp.type == "Transform") {
+                    auto& tf = reg.emplace<C::TransformComponent>(e);
+                    tf.position = ::Luminumbra::Vec3(
+                        d.at("x").get<float>(), d.at("y").get<float>(), d.at("z").get<float>());
+                } else if (comp.type == "PlantGenome") {
+                    auto& gn = reg.emplace<C::PlantGenomeComponent>(e);
+                    pp_detail::GenesFromJson(d.at("genes"), gn.genes);
+                } else if (comp.type == "PlantGrowth") {
+                    auto& g = reg.emplace<C::PlantGrowthComponent>(e);
+                    g.species_id = d.at("species_id").get<std::uint16_t>();
+                    g.stage = d.at("stage").get<std::uint8_t>();
+                    g.quality = d.at("quality").get<std::uint8_t>();
+                    g.growth_points = d.at("growth_points").get<std::uint32_t>();
+                    g.stress_points = d.at("stress_points").get<std::uint32_t>();
+                    g.tended = d.at("tended").get<std::uint8_t>();
+                    g.planted_tick = d.at("planted_tick").get<std::uint64_t>();
+                    g.last_tick = d.at("last_tick").get<std::uint64_t>();
+                } else if (comp.type == "SoilFeeder") {
+                    auto& sf = reg.emplace<C::SoilFeederComponent>(e);
+                    sf.uptake = d.at("uptake").get<std::uint16_t>();
+                    sf.absorbed = d.at("absorbed").get<std::uint32_t>();
+                } else if (comp.type == "PlantHealth") {
+                    auto& h = reg.emplace<C::PlantHealthComponent>(e);
+                    h.infection = d.at("infection").get<std::uint16_t>();
+                    h.resistance = d.at("resistance").get<std::uint16_t>();
+                    h.state = d.at("state").get<std::uint8_t>();
+                    h.infected_ticks = d.at("infected_ticks").get<std::uint32_t>();
+                } else if (comp.type == "Pollination") {
+                    // Restore the opt-in TAG too (a marker carries no data, so it isn't
+                    // serialized): a persisted PollinationComponent means the plant participated in
+                    // cross-pollination, and the pollination tick views PollinationTag — without it
+                    // a reloaded field would stop drifting. Co-emplaced with the component (they
+                    // are always added together at spawn).
+                    reg.emplace<C::PollinationTag>(e);
+                    auto& pc = reg.emplace<C::PollinationComponent>(e);
+                    pc.pollinated = d.at("pollinated").get<bool>();
+                    pc.last_pollen_tick = d.at("last_pollen_tick").get<std::uint64_t>();
+                    pc.crosses = d.at("crosses").get<std::uint32_t>();
+                    pp_detail::GenesFromJson(d.at("next_genome"), pc.next_genome.genes);
+                } else if (comp.type == "CropLifecycle") {
+                    auto& lc = reg.emplace<C::CropLifecycleComponent>(e);
+                    lc.perennial = d.at("perennial").get<bool>();
+                    lc.ripe_ticks = d.at("ripe_ticks").get<std::uint32_t>();
+                    lc.lifespan_ticks = d.at("lifespan_ticks").get<std::uint32_t>();
+                    lc.generations = d.at("generations").get<std::uint16_t>();
+                    lc.species_id = d.at("species_id").get<std::uint16_t>();
+                } else if (comp.type == "Grazeable") {
+                    auto& grazing = reg.emplace<C::GrazeableComponent>(e);
+                    grazing.biomass = d.at("biomass").get<float>();
+                    grazing.last_grazed_tick = d.at("last_grazed_tick").get<std::uint32_t>();
+                }
             }
         }
     }

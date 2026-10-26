@@ -16,6 +16,7 @@
 #include <entt/entt.hpp>
 
 #include "luminumbra_common/ai/ScentSteeringSystem.h"
+#include "luminumbra_common/ai/WildlifeFoliageSystem.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CropLifecycleComponents.h"
 #include "luminumbra_common/components/DiseaseComponents.h"
@@ -25,7 +26,9 @@
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/IrrigationSystem.h"
+#include "luminumbra_common/systems/PollinationSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
@@ -76,6 +79,374 @@ entt::entity barePlant(entt::registry& r, float x, std::uint8_t stage, std::uint
     g.planted_tick = 100;
     g.last_tick = 100 + growth;
     return e;
+}
+
+TEST(PlantPersistence, SavedIdsPreservePollinationAndGerminationAfterDeletion) {
+    namespace P = ::Luminumbra::Persistence;
+    const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("plant-identity-");
+    struct Cleanup {
+        const std::filesystem::path& path;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } cleanup{directory};
+    entt::registry plants;
+    const auto removed = plants.create();
+    plants.destroy(removed);
+    const auto first =
+        barePlant(plants, 1.0f, static_cast<std::uint8_t>(C::PlantStage::Fruiting), 100);
+    const auto gap = plants.create();
+    const auto second =
+        barePlant(plants, 2.0f, static_cast<std::uint8_t>(C::PlantStage::Fruiting), 200);
+    plants.destroy(gap);
+    ASSERT_NE(entt::to_version(first), 0u);
+    for (const auto entity : {first, second}) {
+        plants.emplace<C::PollinationTag>(entity);
+        plants.emplace<C::PollinationComponent>(entity);
+        auto& lifecycle = plants.emplace<C::CropLifecycleComponent>(entity);
+        lifecycle.perennial = true;
+        lifecycle.lifespan_ticks = 1;
+    }
+    const auto saved = F::BuildPlantEntitySnapshot(plants);
+    const auto bytes = E::SerializeEntityRegistrySnapshotJson(saved);
+    ASSERT_TRUE(P::WorldSaveService::save_plant_entities(saved, directory));
+    constexpr std::uint64_t tick = 901;
+    ASSERT_EQ(F::RunPollinationOnTick(plants, tick).crossed, 2);
+    const auto first_cross = plants.get<C::PollinationComponent>(first).next_genome.genes;
+    const auto second_cross = plants.get<C::PollinationComponent>(second).next_genome.genes;
+    ASSERT_EQ(F::RunCropLifecycleOnTick(plants, tick).reseeded, 2);
+    const auto births = [](const entt::registry& registry) {
+        std::vector<std::string> result;
+        for (const auto entity : registry.view<const C::PlantGrowthComponent,
+                                               const C::PlantGenomeComponent,
+                                               const C::TransformComponent>()) {
+            if (registry.get<C::PlantGrowthComponent>(entity).planted_tick != tick)
+                continue;
+            const auto& position = registry.get<C::TransformComponent>(entity).position;
+            result.push_back(
+                nlohmann::json{{"x", position.x},
+                               {"y", position.y},
+                               {"z", position.z},
+                               {"genes", registry.get<C::PlantGenomeComponent>(entity).genes}}
+                    .dump());
+        }
+        std::sort(result.begin(), result.end());
+        return result;
+    };
+    const auto expected_births = births(plants);
+    ASSERT_EQ(expected_births.size(), 2u);
+    const auto view = plants.view<C::PlantTag>();
+    const std::vector<entt::entity> removed_plants(view.begin(), view.end());
+    for (const auto entity : removed_plants)
+        plants.destroy(entity);
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(P::WorldSaveService::load_plant_entities(loaded, directory));
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(plants, loaded));
+    ASSERT_TRUE(plants.valid(first));
+    ASSERT_TRUE(plants.valid(second));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(plants)), bytes);
+    ASSERT_EQ(F::RunPollinationOnTick(plants, tick).crossed, 2);
+    EXPECT_EQ(plants.get<C::PollinationComponent>(first).next_genome.genes, first_cross);
+    EXPECT_EQ(plants.get<C::PollinationComponent>(second).next_genome.genes, second_cross);
+    ASSERT_EQ(F::RunCropLifecycleOnTick(plants, tick).reseeded, 2);
+    EXPECT_EQ(births(plants), expected_births);
+}
+
+TEST(PlantPersistence, DuplicateSlotsAndOversizedIdsRefuseTheWholeRoster) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 100);
+    barePlant(source, 2.0f, 3, 200);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    using Traits = entt::entt_traits<entt::entity>;
+    for (const auto invalid_id :
+         {original.entities.front().entity_id,
+          static_cast<std::uint64_t>(entt::to_integral(Traits::construct(0, 1))),
+          static_cast<std::uint64_t>(std::numeric_limits<entt::id_type>::max()) + 1u,
+          std::numeric_limits<std::uint64_t>::max()}) {
+        SCOPED_TRACE(invalid_id);
+        auto snapshot = original;
+        snapshot.entities.back().entity_id = invalid_id;
+        entt::registry target;
+        EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot));
+        EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, snapshot));
+        EXPECT_TRUE(F::BuildPlantEntitySnapshot(target).entities.empty());
+        EXPECT_EQ(entt::to_integral(target.create()), 0u);
+    }
+}
+
+TEST(PlantPersistence, LiveSlotClashesRefuseBeforeCreatingAnEarlierPlant) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 100);
+    barePlant(source, 2.0f, 3, 200);
+    const auto snapshot = F::BuildPlantEntitySnapshot(source);
+    for (const auto version : std::array<entt::entt_traits<entt::entity>::version_type, 2>{0, 1}) {
+        SCOPED_TRACE(version);
+        entt::registry target;
+        const auto resident = target.create(entt::entt_traits<entt::entity>::construct(1, version));
+        target.emplace<C::TransformComponent>(resident).position = Luminumbra::Vec3(7.0f);
+        EXPECT_TRUE(F::ValidatePlantEntitySnapshot(snapshot));
+        EXPECT_FALSE(F::CanApplyPlantEntitySnapshot(target, snapshot));
+        EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, snapshot));
+        ASSERT_TRUE(target.valid(resident));
+        EXPECT_EQ(target.get<C::TransformComponent>(resident).position, Luminumbra::Vec3(7.0f));
+        EXPECT_TRUE(F::BuildPlantEntitySnapshot(target).entities.empty());
+        EXPECT_EQ(entt::to_integral(target.create()), 0u);
+    }
+}
+
+TEST(PlantPersistence, SavedIdsCanJoinADisjointResidentRoster) {
+    entt::registry source;
+    const auto unused = source.create();
+    const auto plant = barePlant(source, 1.0f, 3, 100);
+    source.destroy(unused);
+    entt::registry target;
+    const auto resident = target.create();
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, F::BuildPlantEntitySnapshot(source)));
+    EXPECT_TRUE(target.valid(resident));
+    ASSERT_TRUE(target.valid(plant));
+    EXPECT_EQ(target.get<C::PlantGrowthComponent>(plant).growth_points, 100u);
+}
+
+TEST(PlantPersistence, LegacyMissingIdsAndGrazingFieldsKeepFreshIdAndOptOutBehaviour) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 100);
+    barePlant(source, 2.0f, 3, 200);
+    auto json = nlohmann::json::parse(
+        E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(source)));
+    for (auto& record : json["entities"])
+        record.erase("entity_id");
+    E::EntityRegistrySnapshot loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(json.dump(), loaded, errors));
+    EXPECT_EQ(nlohmann::json::parse(E::SerializeEntityRegistrySnapshotJson(loaded)), json);
+    entt::registry target;
+    const auto resident = target.create();
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, loaded));
+    EXPECT_TRUE(target.valid(resident));
+    EXPECT_EQ(target.view<C::PlantTag>().size(), 2u);
+    EXPECT_TRUE(target.view<C::GrazeableComponent>().empty());
+    EXPECT_EQ(target.get<C::PlantGrowthComponent>(static_cast<entt::entity>(1)).growth_points,
+              100u);
+    EXPECT_EQ(target.get<C::PlantGrowthComponent>(static_cast<entt::entity>(2)).growth_points,
+              200u);
+}
+
+TEST(PlantPersistence, LegacyUnusableIdsAndMixedRostersDoNotConsumeSavedSlots) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 100);
+    barePlant(source, 2.0f, 3, 200);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    for (const auto unusable :
+         {entt::to_integral(static_cast<entt::entity>(entt::null)),
+          entt::to_integral(entt::entt_traits<entt::entity>::construct(
+              3, entt::to_version(static_cast<entt::entity>(entt::tombstone))))}) {
+        auto snapshot = original;
+        snapshot.entities.front().entity_id = unusable;
+        snapshot.entities.back().entity_id = 0;
+        entt::registry target;
+        ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, snapshot));
+        EXPECT_EQ(target.get<C::PlantGrowthComponent>(static_cast<entt::entity>(0)).growth_points,
+                  200u);
+        EXPECT_EQ(target.get<C::PlantGrowthComponent>(static_cast<entt::entity>(1)).growth_points,
+                  100u);
+    }
+    auto mixed = original;
+    mixed.entities.front().has_entity_id = false;
+    mixed.entities.back().entity_id = 0;
+    entt::registry target;
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, mixed));
+    EXPECT_EQ(target.get<C::PlantGrowthComponent>(static_cast<entt::entity>(0)).growth_points,
+              200u);
+    EXPECT_EQ(target.get<C::PlantGrowthComponent>(static_cast<entt::entity>(1)).growth_points,
+              100u);
+    EXPECT_TRUE(F::ApplyPlantEntitySnapshot(target, {}));
+    auto unknown = original;
+    unknown.entities.front().name = "future_entity";
+    unknown.entities.front().entity_id = std::numeric_limits<std::uint64_t>::max();
+    unknown.entities.pop_back();
+    EXPECT_TRUE(F::ApplyPlantEntitySnapshot(target, unknown));
+}
+
+TEST(PlantPersistence, SpeciesGrazingBiomassAndTickRoundTripAndKeepSimulating) {
+    entt::registry source;
+    auto rng = luminumbra::core::DeterministicRng::seeded(15, 17, 19);
+    F::SpeciesTemplate species;
+    species.id = "test_crop";
+    const auto plant = F::MakePlantFromSpecies(source, Luminumbra::Vec3(1.0f), species, rng, 0);
+    auto& grazing = source.get<C::GrazeableComponent>(plant);
+    grazing.biomass = 0.375f;
+    grazing.last_grazed_tick = 42;
+    const auto bytes = E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(source));
+    E::EntityRegistrySnapshot loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(bytes, loaded, errors));
+    entt::registry target;
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, loaded));
+    ASSERT_TRUE(target.all_of<C::GrazeableComponent>(plant));
+    EXPECT_EQ(target.get<C::GrazeableComponent>(plant).biomass, 0.375f);
+    EXPECT_EQ(target.get<C::GrazeableComponent>(plant).last_grazed_tick, 42u);
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target)), bytes);
+    for (auto* registry : {&source, &target}) {
+        const auto regrowth = luminumbra::ai::RunWildlifeFoliageOnTick(*registry, 43);
+        EXPECT_EQ(regrowth.plants, 1);
+        EXPECT_GT(regrowth.biomass_regrown, 0.0f);
+        const auto creature = registry->create();
+        registry->emplace<C::TransformComponent>(creature).position = Luminumbra::Vec3(1.0f);
+        registry->emplace<C::CreatureComponent>(creature).is_predator = false;
+        const auto grazed = luminumbra::ai::RunWildlifeFoliageOnTick(*registry, 44);
+        EXPECT_EQ(grazed.grazed_plants, 1);
+        EXPECT_GT(grazed.biomass_removed, 0.0f);
+    }
+    EXPECT_EQ(target.get<C::GrazeableComponent>(plant).biomass,
+              source.get<C::GrazeableComponent>(plant).biomass);
+    EXPECT_EQ(target.get<C::GrazeableComponent>(plant).last_grazed_tick, 44u);
+}
+
+TEST(PlantPersistence, InvalidGrazingDataRefusesBeforeAnyPlantIsRestored) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 100);
+    const auto plant = barePlant(source, 2.0f, 3, 200);
+    source.emplace<C::GrazeableComponent>(plant);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    const auto expect_refused = [](const E::EntityRegistrySnapshot& snapshot) {
+        entt::registry target;
+        EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot));
+        EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, snapshot));
+        EXPECT_TRUE(F::BuildPlantEntitySnapshot(target).entities.empty());
+        EXPECT_EQ(entt::to_integral(target.create()), 0u);
+    };
+    for (const auto* field : {"biomass", "last_grazed_tick"}) {
+        const std::vector<nlohmann::json> invalid =
+            std::string(field) == "biomass"
+                ? std::vector<nlohmann::json>{-0.1,
+                                              1.1,
+                                              -1e-50,
+                                              1.0 + 1e-12,
+                                              1e38,
+                                              std::numeric_limits<double>::infinity(),
+                                              std::numeric_limits<double>::quiet_NaN(),
+                                              "0",
+                                              nullptr,
+                                              true,
+                                              nlohmann::json::array()}
+                : std::vector<nlohmann::json>{-1,
+                                              1e38,
+                                              1.0,
+                                              std::numeric_limits<std::uint64_t>::max(),
+                                              "0",
+                                              nullptr,
+                                              true,
+                                              nlohmann::json::array()};
+        for (const auto& value : invalid) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(value.dump());
+            auto snapshot = original;
+            for (auto& component : snapshot.entities.back().components) {
+                if (component.type == "Grazeable")
+                    component.data[field] = value;
+            }
+            expect_refused(snapshot);
+        }
+        auto partial = original;
+        for (auto& component : partial.entities.back().components) {
+            if (component.type == "Grazeable")
+                component.data.erase(field);
+        }
+        expect_refused(partial);
+    }
+    for (const auto& invalid : {nlohmann::json(nullptr), nlohmann::json::array()}) {
+        auto snapshot = original;
+        for (auto& component : snapshot.entities.back().components) {
+            if (component.type == "Grazeable")
+                component.data = invalid;
+        }
+        expect_refused(snapshot);
+    }
+    auto duplicate = original;
+    duplicate.entities.back().components.push_back(
+        {"Grazeable", {{"biomass", 1.0f}, {"last_grazed_tick", 0}}});
+    expect_refused(duplicate);
+    for (const auto biomass : {0.0, 1.0}) {
+        auto boundary = original;
+        for (auto& component : boundary.entities.back().components) {
+            if (component.type == "Grazeable") {
+                component.data["biomass"] = biomass;
+                component.data["last_grazed_tick"] = std::numeric_limits<std::uint32_t>::max();
+            }
+        }
+        entt::registry target;
+        ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, boundary));
+        EXPECT_EQ(target.get<C::GrazeableComponent>(plant).biomass, biomass);
+        EXPECT_EQ(target.get<C::GrazeableComponent>(plant).last_grazed_tick,
+                  std::numeric_limits<std::uint32_t>::max());
+    }
+}
+
+TEST(PlantPersistence, SnapshotDecoderRefusesInvalidIntegerRepresentationsWithoutAdoption) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 100);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    const auto bytes = E::SerializeEntityRegistrySnapshotJson(original);
+    const auto json = nlohmann::json::parse(bytes);
+    const auto expect_refused = [&](const nlohmann::json& invalid) {
+        auto retained = original;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(E::LoadEntityRegistrySnapshotJson(invalid.dump(), retained, errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(retained), bytes);
+    };
+    for (const auto* field : {"entity_id", "entity_count", "component_count"}) {
+        for (const auto& value : std::vector<nlohmann::json>{1e38,
+                                                             -1e38,
+                                                             -1,
+                                                             0.5,
+                                                             1.0,
+                                                             true,
+                                                             "1",
+                                                             nullptr,
+                                                             nlohmann::json::array(),
+                                                             nlohmann::json::object()}) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(value.dump());
+            auto invalid = json;
+            (std::string(field) == "entity_id" ? invalid["entities"][0] : invalid)[field] = value;
+            expect_refused(invalid);
+        }
+    }
+    for (const auto* field : {"entity_count", "component_count"}) {
+        auto invalid = json;
+        invalid[field] = static_cast<double>(json.at(field).get<std::size_t>());
+        expect_refused(invalid);
+        invalid = json;
+        invalid.erase(field);
+        expect_refused(invalid);
+        invalid = json;
+        invalid[field] = std::numeric_limits<std::uint64_t>::max();
+        expect_refused(invalid);
+        invalid[field] = 0;
+        expect_refused(invalid);
+    }
+    for (const auto& invalid_array :
+         {nlohmann::json(nullptr), nlohmann::json::object(), nlohmann::json(1)}) {
+        auto invalid = json;
+        invalid["entities"] = invalid_array;
+        expect_refused(invalid);
+        invalid = json;
+        invalid["entities"][0]["components"] = invalid_array;
+        expect_refused(invalid);
+    }
+    // The generic schema supports 64-bit IDs even though EnTT plants use narrower IDs.
+    for (const auto& valid_id : {nlohmann::json(std::uint64_t{0}),
+                                 nlohmann::json(std::int64_t{1}),
+                                 nlohmann::json(std::numeric_limits<std::uint64_t>::max())}) {
+        auto valid = json;
+        valid["entities"][0]["entity_id"] = valid_id;
+        E::EntityRegistrySnapshot loaded;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(valid.dump(), loaded, errors));
+        EXPECT_EQ(nlohmann::json::parse(E::SerializeEntityRegistrySnapshotJson(loaded)), valid);
+    }
 }
 
 #if !defined(_WIN32)
@@ -322,10 +693,11 @@ TEST(PlantPersistence, ComponentDomainsAreCheckedBeforeAnyPlantIsAdopted) {
 
 TEST(PlantPersistence, PositionsMustFitThePackedChunkDomainBeforeAndAfterFloatRounding) {
     entt::registry source;
+    const auto unused = source.create();
     const auto plant = barePlant(source, 1.0f, 3, 500);
+    source.destroy(unused);
     source.emplace<C::SoilFeederComponent>(plant);
     const auto original = F::BuildPlantEntitySnapshot(source);
-    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
     for (const auto* axis : {"x", "y", "z"}) {
         const float limit = axis == std::string("y") ? 33554432.0f : 16777216.0f;
         for (const double coordinate :
@@ -349,6 +721,8 @@ TEST(PlantPersistence, PositionsMustFitThePackedChunkDomainBeforeAndAfterFloatRo
             entt::registry target;
             const auto existing = barePlant(target, 1.0f, 3, 500);
             target.emplace<C::SoilFeederComponent>(existing);
+            const auto expected =
+                E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target));
             EXPECT_EQ(F::ApplyPlantEntitySnapshot(target, snapshot), supported);
             if (!supported) {
                 EXPECT_EQ(

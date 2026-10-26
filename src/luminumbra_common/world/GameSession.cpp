@@ -2150,6 +2150,10 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
         return false;
     }
+    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(m_registry, state.plants)) {
+        m_worldOpenError = "Saved-input admission refused: plant entity identity clash.";
+        return false;
+    }
     AdoptWorldStateFrom(save_dir, state);
     return true;
 }

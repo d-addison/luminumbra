@@ -2181,6 +2181,26 @@ TEST_P(SavedWorldPresetTest, InvalidLivePlantRefusesBeforeAnySnapshotPayloadWrit
     EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
 }
 
+TEST_P(SavedWorldPresetTest, PlantIdentityClashRefusesSnapshotReloadWithoutAdoptionOrWrites) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, true));
+    const PendingSnapshotState pending(session);
+    const RetainedCreationState retained(session);
+    const auto save = session.GetWorldSaveDir();
+    const auto disk = SavedPresetTestDiskBytes(Root().path());
+    EXPECT_FALSE(session.LoadWorldStateFrom(save));
+    EXPECT_NE(session.GetWorldOpenError().find("plant entity identity clash"), std::string::npos);
+    retained.ExpectUnchanged(session);
+    pending.ExpectUnchanged(session, *chunk);
+    EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+    // Full world loads replace the registry, so their old roster is not a clash.
+    const auto world_id = session.GetMetadata().worldId;
+    ASSERT_TRUE(session.LoadWorldFrom(world_id, Root().path()));
+    EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+}
+
 TEST_P(SavedWorldPresetTest, InvalidPlantProjectionRefusesAllLoadPathsWithoutAdoptionOrWrites) {
     GameSession session;
     ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
