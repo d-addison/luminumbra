@@ -662,31 +662,31 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                      WindowsErrorMessage(attributes_error));
         return false;
     }
-    const auto file = ::CreateFileW(temp.c_str(),
-                                    GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                    nullptr,
-                                    OPEN_EXISTING,
-                                    FILE_FLAG_OPEN_REPARSE_POINT,
-                                    nullptr);
+    auto file = ::CreateFileW(temp.c_str(),
+                              GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr,
+                              OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT,
+                              nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         AddError(errors, "cannot bind file installation: " + WindowsErrorMessage(::GetLastError()));
         return false;
     }
     try {
-        Detail::WindowsRenameWithoutReplacement(file, temp, destination);
-        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(temp);
-        if (retirement_error != ERROR_SUCCESS)
-            throw std::system_error(static_cast<int>(retirement_error),
-                                    std::system_category(),
-                                    "Cannot confirm exclusive file installation");
-        // Flush the renamed object's data and metadata through the same handle.
+        file =
+            Detail::WindowsPublishWithoutReplacement(std::exchange(file, INVALID_HANDLE_VALUE),
+                                                     temp,
+                                                     destination,
+                                                     GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES);
+        // Flush the published object's data and metadata through its bound link.
         if (!::FlushFileBuffers(file))
             throw std::system_error(static_cast<int>(::GetLastError()),
                                     std::system_category(),
                                     "Cannot flush installed file");
     } catch (const std::exception& error) {
-        ::CloseHandle(file);
+        if (file != INVALID_HANDLE_VALUE)
+            ::CloseHandle(file);
         AddError(errors, "failed to atomically install region file: " + std::string(error.what()));
         return false;
     }
@@ -994,7 +994,7 @@ public:
         if (!AllowPublication(m_destination, false, errors))
             return false;
 #if defined(_WIN32)
-        // Keep identity through the move; rollback targets this handle, never a
+        // Keep the created destination link bound; rollback targets its handle, never a
         // replacement file found by looking up the destination a second time.
         m_handle = ::CreateFileW(m_temp.c_str(),
                                  GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
@@ -1010,12 +1010,11 @@ public:
             return false;
         }
         try {
-            Detail::WindowsRenameWithoutReplacement(m_handle, m_temp, m_destination);
-            const auto retirement_error = Detail::WindowsRenameSourceRetirementError(m_temp);
-            if (retirement_error != ERROR_SUCCESS)
-                throw std::system_error(static_cast<int>(retirement_error),
-                                        std::system_category(),
-                                        "Cannot confirm exclusive file publication");
+            m_handle = Detail::WindowsPublishWithoutReplacement(
+                std::exchange(m_handle, INVALID_HANDLE_VALUE),
+                m_temp,
+                m_destination,
+                GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES);
         } catch (const std::exception& error) {
             AddError(errors,
                      "cannot publish an unoccupied destination: " + std::string(error.what()));

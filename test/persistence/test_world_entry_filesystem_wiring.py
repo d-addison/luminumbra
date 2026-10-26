@@ -43,53 +43,53 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         windows = creation.split("#else", 1)[0]
         self.assertRegex(windows, r"recorded\.retained\s*=\s*duplicate_file\(")
 
-    def test_publication_binds_identity_and_detects_same_link_noop_before_claiming_target(self):
+    def test_publication_binds_source_identity_before_exclusive_link_creation(self):
         publication = body(self.journal, "void publish_windows(")
-        binding = publication.index("const ScopedFile bound(")
-        rename = publication.index("Detail::WindowsRenameWithoutReplacement(")
+        binding = publication.index("ScopedFile bound(")
+        link = publication.index("Detail::WindowsPublishWithoutReplacement(")
         identity = publication.index("identity_from(bound.get())")
         self.assertLess(binding, identity)
-        self.assertLess(identity, rename)
+        self.assertLess(identity, link)
         self.assertNotIn("FILE_SHARE_DELETE", publication[binding:identity])
-        self.assertIn("const auto published_name = handle_path(bound.get());", publication[rename:])
-        self.assertIn("published_name == original_name", publication[rename:])
-        self.assertIn("ERROR_ALREADY_EXISTS", publication[rename:])
+        self.assertIn("bound.release(), source.path, destination", publication[link:])
         caller = body(self.journal, "void publish_file(")
         self.assertLess(caller.index("publish_windows("), caller.index("target.identity ="))
 
-    def test_publication_checks_source_retirement_even_if_the_handle_name_changes(self):
-        publication = body(self.journal, "void publish_windows(")
-        rename = publication.index("Detail::WindowsRenameWithoutReplacement(")
-        inspect = publication.index("Detail::WindowsRenameSourceRetirementError(source.path)")
-        self.assertLess(rename, inspect)
-        self.assertLess(inspect, publication.index("published_name != destination"))
-        retirement = body(self.journal, "inline DWORD WindowsRenameSourceRetirementError(")
-        self.assertIn("::CreateFileW(source.c_str()", retirement)
-        self.assertIn("remaining != INVALID_HANDLE_VALUE", retirement)
-        self.assertIn("ERROR_ALREADY_EXISTS", retirement)
-        self.assertIn("error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : error", retirement)
-        writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
-        self.assertIn("Detail::WindowsRenameSourceRetirementError(temp)", writer)
-        self.assertIn("Detail::WindowsRenameSourceRetirementError(m_temp)", writer)
-        native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
-            encoding="utf-8")
-        self.assertIn("UnreadablePublicationSourceNeverClaimsTheDestination", native)
-        self.assertIn("RefusedPublicationNeverClaimsARacingHardLinkToTheSource", native)
+    def test_publication_checks_source_retirement_and_retains_verified_cleanup_ownership(self):
+        publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        link = publication.index("::CreateHardLinkW(")
+        retire = publication.index("original.get(), FileDispositionInfo")
+        self.assertLess(link, retire)
+        self.assertLess(retire, publication.index("original.reset();"))
+        self.assertLess(publication.index("WindowsVacantPublicationNameError(original_name)"),
+                        publication.index("return linked.release();"))
+        self.assertIn("retirement_error != ERROR_SUCCESS", publication)
+        journal = body(self.journal, "void publish_windows(")
+        recovery = journal[journal.index("catch (const Detail::WindowsPublicationRecoveryError&") :]
+        self.assertIn("if (error.verified_link())", recovery)
+        self.assertIn("target.identity = source.identity", recovery)
+        self.assertIn("throw;", recovery)
 
-    def test_every_windows_exclusive_publication_checks_vacancy_and_link_counts(self):
-        rename = body(self.journal, "inline void WindowsRenameWithoutReplacement(")
-        before = rename.index("const auto links_before = WindowsPublicationLinkCount(file)")
-        vacant = rename.index("WindowsVacantPublicationNameError(bound_destination)")
-        move = rename.index("::SetFileInformationByHandle(")
-        after = rename.index("WindowsPublicationLinkCount(file) != links_before")
-        self.assertLess(before, vacant)
-        self.assertLess(vacant, move)
-        self.assertIn("vacancy != ERROR_SUCCESS", rename[vacant:move])
-        self.assertLess(move, after)
-        self.assertIn("ERROR_ALREADY_EXISTS", rename[after:])
-        self.assertIn("WindowsRestorePublicationSource(file, original_name)", rename[after:])
-        self.assertLess(rename.index("const auto original_name = WindowsPublicationPath(file)"), move)
-        self.assertIn("retained_info.nFileIndexLow != published_info.nFileIndexLow", rename)
+    def test_every_windows_exclusive_publication_uses_atomic_link_creation_and_exact_counts(self):
+        publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        vacant = publication.index("WindowsVacantPublicationNameError(bound_destination)")
+        before = publication.index("WindowsPublicationLinkCount(original.get()) != 1")
+        link = publication.index("::CreateHardLinkW(")
+        two = publication.index("WindowsPublicationLinkCount(original.get()) != 2")
+        verified = publication.index("verified_link = true")
+        retire = publication.index("original.get(), FileDispositionInfo")
+        one = publication.index("WindowsPublicationLinkCount(linked.get()) != 1")
+        self.assertLess(vacant, link)
+        self.assertLess(before, link)
+        self.assertLess(link, two)
+        self.assertLess(two, verified)
+        self.assertLess(verified, retire)
+        self.assertLess(retire, one)
+        self.assertLess(one, publication.index("return linked.release();"))
+        self.assertIn("vacancy != ERROR_SUCCESS", publication[vacant:link])
+        self.assertIn("supported same-volume hard links", publication[link:two])
+        self.assertNotRegex(publication, r"::(?:MoveFileExW|ReplaceFileW)\(|FileRenameInfo")
+        self.assertIn("retained_info.nFileIndexLow != published_info.nFileIndexLow", publication)
         check = body(self.journal, "inline DWORD WindowsVacantPublicationNameError(")
         for token in ("::CreateFileW(destination.c_str()", "FILE_READ_ATTRIBUTES",
                       "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE",
@@ -104,19 +104,17 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertIn('"NtSetInformationFile"', recovery)
         self.assertNotRegex(recovery, r"::(?:DeleteFileW|MoveFileExW)\(")
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
-        self.assertIn("Detail::WindowsRenameWithoutReplacement(file, temp, destination)", writer)
-        self.assertIn("Detail::WindowsRenameWithoutReplacement(m_handle, m_temp, m_destination)",
-                      writer)
+        self.assertEqual(writer.count("Detail::WindowsPublishWithoutReplacement("), 2)
         self.assertNotIn("::MoveFileExW(", writer)
         for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):
             publishing = body(writer, marker).split("#else", 1)[0]
-            move = publishing.index("Detail::WindowsRenameWithoutReplacement(")
-            flush = publishing.index("::FlushFileBuffers(", move)
-            self.assertLess(move, flush)
+            linking = publishing.index("Detail::WindowsPublishWithoutReplacement(")
+            flush = publishing.index("::FlushFileBuffers(", linking)
+            self.assertLess(linking, flush)
             binding = publishing.index("::CreateFileW(")
-            self.assertNotIn("FILE_SHARE_DELETE", publishing[binding:move])
+            self.assertNotIn("FILE_SHARE_DELETE", publishing[binding:linking])
 
-    def test_windows_link_collision_is_created_before_delete_sharing_is_denied(self):
+    def test_windows_link_collisions_cover_preexisting_and_late_aliases(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")
         opening = body(native[native.rindex("HANDLE WINAPI Open("):], "HANDLE WINAPI Open(")
@@ -132,42 +130,62 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
                           "RefusedPublicationNeverClaimsARacingHardLinkToTheSource)")
         self.assertLess(regression.index("std::filesystem::equivalent(temp, destination)"),
                         regression.index("artifacts.rollback()"))
+        late = body(native, "TEST_F(CreatedWorldCleanup, "
+                    "LinkCreationAfterTheVacancyCheckIsNeverOverwrittenOrClaimed)")
+        for token in ("ERROR_ALREADY_EXISTS", "EXPECT_FALSE(Race().publication_completed)",
+                      "std::filesystem::equivalent(temp, destination)",
+                      'EXPECT_EQ(Read(temp), "owned bytes\\n")', "artifacts.rollback()"):
+            self.assertIn(token, late)
+        self.assertIn("#define CreateHardLinkW NativeRace::Link", native)
+        link = body(native[native.rindex("BOOL WINAPI Link("):], "BOOL WINAPI Link(")
+        self.assertLess(link.index("BeforePublish("), link.index("::CreateHardLinkW("))
 
-    def test_native_rename_name_comes_from_bound_parent_and_has_checked_storage(self):
+    def test_native_link_names_come_from_bound_parents_and_have_checked_lengths(self):
         publication = body(self.journal, "void publish_windows(")
         self.assertIn("handle_path(parent.get()) / target.path.filename()", publication)
         self.assertLess(publication.index("destination.make_preferred()"),
-                        publication.index("Detail::WindowsRenameWithoutReplacement("))
-        rename = body(self.journal, "inline void WindowsRenameWithoutReplacement(")
-        self.assertLess(rename.index("name.size() > 32767"),
-                        rename.index("std::vector<std::byte> storage"))
+                        publication.index("Detail::WindowsPublishWithoutReplacement("))
+        linking = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        self.assertLess(linking.index("bound_destination.native().size() > 32767"),
+                        linking.index("::CreateHardLinkW("))
+        self.assertIn("original_name = WindowsPublicationPath(original.get())", linking)
         parent = body(self.journal, "ScopedFile bind_publication_parent(")
         self.assertIn("identity_from(parent.get()) != find_artifact(path).identity", parent)
         self.assertNotIn("FILE_SHARE_DELETE", parent)
         for artifact in ("source", "target"):
             self.assertIn(f"bind_publication_parent({artifact}.path.parent_path())", publication)
 
-    def test_native_rename_record_includes_an_explicit_uncounted_terminator(self):
-        publication = body(self.journal, "inline void WindowsRenameWithoutReplacement(")
-        compact = re.sub(r"\s+", " ", publication)
-        self.assertIn("offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t)", compact)
-        self.assertIn("rename_info->FileNameLength = static_cast<DWORD>(name_bytes);", compact)
-        terminator = "rename_info->FileName[name.size()] = L'\\0';"
-        self.assertIn(terminator, publication)
-        self.assertLess(publication.index(terminator),
-                        publication.index("::SetFileInformationByHandle("))
+    def test_native_link_recovery_record_has_bounded_counted_storage(self):
+        recovery = body(self.journal, "inline void WindowsRestorePublicationSource(")
+        compact = re.sub(r"\s+", " ", recovery)
+        self.assertIn("offsetof(LinkInformation, FileName) + name_bytes", compact)
+        self.assertIn("link->FileNameLength = static_cast<ULONG>(name_bytes);", compact)
+        self.assertLess(recovery.index("win32_name.size() > 32767"),
+                        recovery.index("std::vector<std::byte> storage"))
+        self.assertIn("std::memcpy(link->FileName, name.data(), name_bytes)", recovery)
+        # CreateHardLinkW consumes the paths' own null-terminated wide strings;
+        # publication no longer constructs a variable-sized rename record.
+        linking = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        self.assertIn("::CreateHardLinkW(bound_destination.c_str(), original_name.c_str(), nullptr)",
+                      linking)
+        self.assertNotIn("FILE_RENAME_INFO", linking)
 
-    def test_publication_requires_the_exact_destination_before_claiming_ownership(self):
-        publication = body(self.journal, "void publish_windows(")
-        rename = publication.index("Detail::WindowsRenameWithoutReplacement(")
-        self.assertIn("published_name != destination", publication[rename:])
-        self.assertIn("ERROR_INVALID_DATA", publication[rename:])
+    def test_publication_requires_the_exact_destination_and_rolls_back_through_its_handle(self):
+        publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        self.assertIn("WindowsPublicationPath(linked.get()) != bound_destination", publication)
+        self.assertIn("ERROR_INVALID_DATA", publication)
+        recovery = publication[publication.index("catch (const std::exception& error)"):]
+        self.assertIn("WindowsRestorePublicationSource(linked.get(), original_name)", recovery)
+        self.assertIn("linked.get(), FileDispositionInfo", recovery)
+        self.assertNotRegex(recovery, r"::(?:DeleteFileW|MoveFileExW)\(")
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")
-        self.assertIn("UnexpectedPublicationNameNeverClaimsTheDestination", native)
-        self.assertIn("PublicationPreservesExactLeafNamesAcrossRenameBufferLengths", native)
-        self.assertIn("EXPECT_LT(length_in_chars, capacity);", native)
-        self.assertIn("EXPECT_EQ(rename_info->FileName[length_in_chars], L'\\0');", native)
+        self.assertIn("RefusedPublicationInspectionRestoresSourceAndRetiresOnlyTheCreatedLink", native)
+        for fault in ("PublicationFinalNameMismatch", "PublicationSourceInspectionFailure",
+                      "PublicationDestinationIdentityUnknown", "PublicationSourceUnlinkDenied"):
+            self.assertIn(fault, native)
+        self.assertIn("PublicationPreservesExactLeafNamesAcrossHardLinkPathLengths", native)
+        self.assertIn("InterruptedLinkedPublicationRetainsBothNamesUntilRollbackCanRetry", native)
 
     def test_posix_publication_verifies_the_quarantined_entry_before_descriptor_relative_move(self):
         self.assertIn("publish_posix(source, target);", body(self.journal, "void publish_file("))
@@ -360,7 +378,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
     def test_native_regressions_and_legacy_fault_discrimination_remain_registered(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")
-        for api in ("MoveFileExW", "ReOpenFile", "DuplicateHandle", "OpenFileById",
+        for api in ("MoveFileExW", "CreateHardLinkW", "ReOpenFile", "DuplicateHandle", "OpenFileById",
                     "SetFileInformationByHandle"):
             self.assertIn(f"#define {api} NativeRace::", native)
         cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")

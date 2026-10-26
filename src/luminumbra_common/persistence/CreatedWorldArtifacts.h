@@ -59,6 +59,14 @@ public:
     HANDLE get() const {
         return m_file;
     }
+    HANDLE release() {
+        return std::exchange(m_file, INVALID_HANDLE_VALUE);
+    }
+    void reset(HANDLE file = INVALID_HANDLE_VALUE) {
+        if (m_file != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_file);
+        m_file = file;
+    }
 
 private:
     HANDLE m_file;
@@ -110,8 +118,6 @@ inline DWORD WindowsPublicationLinkCount(HANDLE file) {
 // DELETE access, already held by the publication handle; ReplaceIfExists is false.
 inline void WindowsRestorePublicationSource(HANDLE file, const std::filesystem::path& source) {
     const auto vacancy = WindowsVacantPublicationNameError(source);
-    if (vacancy == ERROR_ALREADY_EXISTS)
-        return; // Never overwrite even an unrelated racing source occupant.
     if (vacancy != ERROR_SUCCESS)
         throw std::system_error(static_cast<int>(vacancy),
                                 std::system_category(),
@@ -162,15 +168,32 @@ inline void WindowsRestorePublicationSource(HANDLE file, const std::filesystem::
                                 "Could not restore publication source link; destination retained");
 }
 
-// The caller holds DELETE access without FILE_SHARE_DELETE. We fix both
-// parents. This excludes another DELETE handle, including FileLinkInformation
-// callers, while the destination is checked and renamed. A different-file racer
-// is refused atomically by ReplaceIfExists = FALSE. NTFS exceptionally accepts a
-// same-file destination and retires one link; the link-count check detects that
-// outcome too, without ever adopting or deleting the pre-existing link.
-inline void WindowsRenameWithoutReplacement(HANDLE file,
-                                            const std::filesystem::path& source,
-                                            const std::filesystem::path& destination) {
+// A failed recovery may leave a link created by this operation. Only a verified
+// two-link state can enter the journal for a later identity-checked rollback.
+class WindowsPublicationRecoveryError : public std::system_error {
+public:
+    WindowsPublicationRecoveryError(const std::string& message, bool verified_link)
+        : std::system_error(ERROR_CANNOT_MAKE, std::system_category(), message)
+        , m_verified_link(verified_link) {}
+    bool verified_link() const {
+        return m_verified_link;
+    }
+
+private:
+    bool m_verified_link;
+};
+
+// Takes ownership of the source handle, opened with DELETE access and without
+// FILE_SHARE_DELETE. Parents and the source name remain bound while the hard
+// link is created. CreateHardLinkW atomically refuses ANY occupied destination,
+// including another link to this file; a vacancy probe is only an early refusal.
+// Unsupported filesystems (including FAT/exFAT and some network shares) fail
+// closed with the native error. There is deliberately no rename fallback.
+inline HANDLE WindowsPublishWithoutReplacement(HANDLE file,
+                                               const std::filesystem::path& source,
+                                               const std::filesystem::path& destination,
+                                               DWORD access) {
+    WindowsPublicationHandle original(file);
     const WindowsPublicationHandle parent(
         ::CreateFileW(destination.parent_path().empty() ? L"." : destination.parent_path().c_str(),
                       FILE_READ_ATTRIBUTES,
@@ -197,96 +220,162 @@ inline void WindowsRenameWithoutReplacement(HANDLE file,
                                 "Could not bind publication parents");
     auto bound_destination = WindowsPublicationPath(parent.get()) / destination.filename();
     bound_destination.make_preferred();
-    const auto original_name = WindowsPublicationPath(file);
-    const auto& name = bound_destination.native();
-    // At most 32767 UTF-16 code units: the rename record is less than 65 KiB.
-    if (name.size() > 32767)
-        throw std::runtime_error("World artifact destination is too long.");
-    const auto name_bytes = name.size() * sizeof(wchar_t);
-    // Win32 also consumes a terminator, excluded from FileNameLength.
-    const auto record_bytes =
-        (std::max)(sizeof(FILE_RENAME_INFO),
-                   offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t));
-    std::vector<std::byte> storage(record_bytes);
-    auto* rename_info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
-    rename_info->ReplaceIfExists = FALSE;
-    rename_info->RootDirectory = nullptr;
-    rename_info->FileNameLength = static_cast<DWORD>(name_bytes);
-    std::memcpy(rename_info->FileName, name.data(), name_bytes);
-    rename_info->FileName[name.size()] = L'\0';
-    const auto links_before = WindowsPublicationLinkCount(file);
+    const auto original_name = WindowsPublicationPath(original.get());
+    // Both Win32 names are bounded before passing them to the link operation.
+    if (bound_destination.native().size() > 32767)
+        throw std::system_error(ERROR_FILENAME_EXCED_RANGE,
+                                std::system_category(),
+                                "World artifact destination is too long");
     const auto vacancy = WindowsVacantPublicationNameError(bound_destination);
     if (vacancy != ERROR_SUCCESS)
         throw std::system_error(static_cast<int>(vacancy),
                                 std::system_category(),
                                 "Refusing an occupied or unreadable publication name");
-    if (!::SetFileInformationByHandle(
-            file, FileRenameInfo, rename_info, static_cast<DWORD>(record_bytes)))
-        throw std::system_error(static_cast<int>(::GetLastError()),
-                                std::system_category(),
-                                "Could not exclusively publish world artifact");
-    try {
-        if (WindowsPublicationLinkCount(file) != links_before)
-            throw std::system_error(ERROR_ALREADY_EXISTS,
-                                    std::system_category(),
-                                    "Refusing an existing world artifact alias");
-    } catch (...) {
-        // Even an unreadable/unknown post-rename count cannot convey ownership.
-        WindowsRestorePublicationSource(file, original_name);
-        throw;
-    }
-    const WindowsPublicationHandle published(
+    if (WindowsPublicationLinkCount(original.get()) != 1)
+        throw std::system_error(
+            ERROR_ALREADY_EXISTS, std::system_category(), "Refusing an aliased publication source");
+    if (!::CreateHardLinkW(bound_destination.c_str(), original_name.c_str(), nullptr))
+        throw std::system_error(
+            static_cast<int>(::GetLastError()),
+            std::system_category(),
+            "Exclusive world publication requires supported same-volume hard links");
+
+    // The source's denied delete sharing protects the newly created link until
+    // it is opened. This handle names that link, rather than the source link.
+    // It cannot request DELETE while the original denies delete sharing.
+    WindowsPublicationHandle linked(
         ::CreateFileW(bound_destination.c_str(),
-                      FILE_READ_ATTRIBUTES,
+                      access & ~static_cast<DWORD>(DELETE),
                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                       nullptr,
                       OPEN_EXISTING,
                       FILE_FLAG_OPEN_REPARSE_POINT,
                       nullptr));
-    BY_HANDLE_FILE_INFORMATION retained_info{};
-    BY_HANDLE_FILE_INFORMATION published_info{};
-    if (published.get() == INVALID_HANDLE_VALUE ||
-        !::GetFileInformationByHandle(file, &retained_info) ||
-        !::GetFileInformationByHandle(published.get(), &published_info))
-        throw std::system_error(static_cast<int>(::GetLastError()),
-                                std::system_category(),
-                                "Could not inspect published world artifact identity");
-    if ((retained_info.nFileIndexHigh == 0 && retained_info.nFileIndexLow == 0) ||
-        ((retained_info.dwFileAttributes | published_info.dwFileAttributes) &
-         FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-        retained_info.dwVolumeSerialNumber != published_info.dwVolumeSerialNumber ||
-        retained_info.nFileIndexHigh != published_info.nFileIndexHigh ||
-        retained_info.nFileIndexLow != published_info.nFileIndexLow)
-        throw std::system_error(ERROR_INVALID_DATA,
-                                std::system_category(),
-                                "Published world artifact changed identity");
+    const auto binding_error =
+        linked.get() == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
+    bool source_retired = false;
+    bool linked_deletable = false;
+    bool verified_link = false;
+    try {
+        if (WindowsPublicationLinkCount(original.get()) != 2)
+            throw std::system_error(ERROR_INVALID_DATA,
+                                    std::system_category(),
+                                    "Could not verify created publication link count");
+        verified_link = true;
+        if (linked.get() == INVALID_HANDLE_VALUE)
+            throw std::system_error(static_cast<int>(binding_error),
+                                    std::system_category(),
+                                    "Could not bind created publication link");
+        BY_HANDLE_FILE_INFORMATION retained_info{};
+        BY_HANDLE_FILE_INFORMATION published_info{};
+        if (!::GetFileInformationByHandle(original.get(), &retained_info) ||
+            !::GetFileInformationByHandle(linked.get(), &published_info))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not inspect published world artifact identity");
+        if ((retained_info.nFileIndexHigh == 0 && retained_info.nFileIndexLow == 0) ||
+            ((retained_info.dwFileAttributes | published_info.dwFileAttributes) &
+             FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            retained_info.dwVolumeSerialNumber != published_info.dwVolumeSerialNumber ||
+            retained_info.nFileIndexHigh != published_info.nFileIndexHigh ||
+            retained_info.nFileIndexLow != published_info.nFileIndexLow)
+            throw std::system_error(ERROR_INVALID_DATA,
+                                    std::system_category(),
+                                    "Published world artifact changed identity");
+        FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
+        if (!::SetFileInformationByHandle(
+                original.get(), FileDispositionInfo, &disposition, sizeof(disposition)))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not retire publication source link");
+        // Disposition takes effect on close. Open-by-ID journal handles retain
+        // identity without keeping this named source link alive.
+        original.reset();
+        source_retired = true;
+        const auto deleting = ::ReOpenFile(
+            linked.get(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT);
+        if (deleting == INVALID_HANDLE_VALUE)
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not retain created publication link for cleanup");
+        linked.reset(deleting);
+        linked_deletable = true;
+        if (WindowsPublicationLinkCount(linked.get()) != 1)
+            throw std::system_error(ERROR_INVALID_DATA,
+                                    std::system_category(),
+                                    "Could not verify retired publication source link count");
+        if (WindowsPublicationPath(linked.get()) != bound_destination)
+            throw std::system_error(ERROR_INVALID_DATA,
+                                    std::system_category(),
+                                    "Could not confirm world artifact publication name");
+        const auto retirement_error = WindowsVacantPublicationNameError(original_name);
+        if (retirement_error != ERROR_SUCCESS)
+            throw std::system_error(static_cast<int>(retirement_error),
+                                    std::system_category(),
+                                    "Could not confirm world artifact source retirement");
+        return linked.release();
+    } catch (const std::exception& error) {
+        // Roll back only the alias created by the successful link call. Keep a
+        // bound destination handle across source close; reopening that handle
+        // never looks up a replacement destination. If retirement completed,
+        // first restore the source without replacing any new source occupant.
+        try {
+            if (linked.get() == INVALID_HANDLE_VALUE) {
+                // Retry binding only for rollback while the original still
+                // denies deletion of every alias. Never remove by pathname.
+                linked.reset(::CreateFileW(bound_destination.c_str(),
+                                           FILE_READ_ATTRIBUTES,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                           nullptr,
+                                           OPEN_EXISTING,
+                                           FILE_FLAG_OPEN_REPARSE_POINT,
+                                           nullptr));
+                if (linked.get() == INVALID_HANDLE_VALUE)
+                    throw std::runtime_error("Created publication link could not be bound");
+            }
+            original.reset();
+            if (!linked_deletable) {
+                const auto deleting = ::ReOpenFile(linked.get(),
+                                                   DELETE | FILE_READ_ATTRIBUTES,
+                                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                   FILE_FLAG_OPEN_REPARSE_POINT);
+                if (deleting == INVALID_HANDLE_VALUE)
+                    throw std::system_error(
+                        static_cast<int>(::GetLastError()),
+                        std::system_category(),
+                        "Could not reopen created publication link for rollback");
+                linked.reset(deleting);
+            }
+            if (source_retired) {
+                WindowsRestorePublicationSource(linked.get(), original_name);
+                if (WindowsPublicationLinkCount(linked.get()) != 2)
+                    throw std::runtime_error("Publication source recovery is unverified");
+            }
+            FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
+            if (!::SetFileInformationByHandle(
+                    linked.get(), FileDispositionInfo, &disposition, sizeof(disposition)))
+                throw std::system_error(static_cast<int>(::GetLastError()),
+                                        std::system_category(),
+                                        "Could not retire created publication link");
+        } catch (const std::exception& recovery_error) {
+            throw WindowsPublicationRecoveryError(
+                std::string(error.what()) + "; created destination retained for recovery: " +
+                    Filesystem::GenericUtf8PathString(bound_destination) + "; " +
+                    recovery_error.what(),
+                verified_link);
+        }
+        throw;
+    }
 }
 
-// A successful same-file rename can update the handle name without retiring
-// the original link. Refuse ownership unless that source name is absent; any
-// inspection failure also refuses.
-inline DWORD WindowsRenameSourceRetirementError(const std::filesystem::path& source) {
-    const auto remaining = ::CreateFileW(source.c_str(),
-                                         FILE_READ_ATTRIBUTES,
-                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                         nullptr,
-                                         OPEN_EXISTING,
-                                         FILE_FLAG_OPEN_REPARSE_POINT,
-                                         nullptr);
-    if (remaining != INVALID_HANDLE_VALUE) {
-        ::CloseHandle(remaining);
-        return ERROR_ALREADY_EXISTS;
-    }
-    const auto error = ::GetLastError();
-    return error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : error;
-}
 } // namespace Detail
 #endif
 
 // A journal for one exclusively created save. Writers reserve vacant names
 // before publishing, including temporary files; absent names need no cleanup.
-// Loading never populates this journal. Call rollback only after draining all
-// readers/writers, or release after entry succeeds. Destruction never deletes.
+// Loading never populates this in-memory journal; process crashes retain files
+// for inspection, not automatic ownership recovery. Call rollback after
+// draining all readers/writers, or release after entry succeeds. Destruction never deletes.
 class CreatedWorldArtifacts {
 public:
     CreatedWorldArtifacts() = default;
@@ -332,8 +421,8 @@ public:
     }
 
     // Retain the source before exclusive publication. Claim the destination
-    // only after rename succeeds, before any caller's directory flush. Even a
-    // racing hard link to the source must remain unowned when rename refuses.
+    // only after exclusive publication succeeds, before any caller's directory
+    // flush. Even a racing hard link to the source remains unowned on refusal.
     void publish_file(const std::filesystem::path& temp, const std::filesystem::path& destination) {
         const auto& source = find_artifact(temp);
         auto& target = find_artifact(destination);
@@ -666,23 +755,23 @@ private:
         return parent;
     }
 
-    void publish_windows(const Artifact& source, const Artifact& target) {
+    void publish_windows(const Artifact& source, Artifact& target) {
         const auto parent = bind_publication_parent(target.path.parent_path());
         // Keep both named parents fixed until publication and name inspection
         // complete, including when the reserved source is in another directory.
         const auto source_parent = bind_publication_parent(source.path.parent_path());
         // Use the handle's normalized, extended Win32 name. The caller may
-        // supply forward slashes or an 8.3 ancestor; neither is a native rename
-        // record spelling. Preserve UTF-16 throughout.
+        // supply forward slashes or an 8.3 ancestor. Resolve the bound names and
+        // preserve UTF-16 throughout.
         auto destination = handle_path(parent.get()) / target.path.filename();
         destination.make_preferred();
-        const ScopedFile bound(::CreateFileW(source.path.c_str(),
-                                             FILE_READ_ATTRIBUTES | DELETE,
-                                             FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                             nullptr,
-                                             OPEN_EXISTING,
-                                             FILE_FLAG_OPEN_REPARSE_POINT,
-                                             nullptr));
+        ScopedFile bound(::CreateFileW(source.path.c_str(),
+                                       FILE_READ_ATTRIBUTES | DELETE,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       nullptr,
+                                       OPEN_EXISTING,
+                                       FILE_FLAG_OPEN_REPARSE_POINT,
+                                       nullptr));
         if (bound.get() == INVALID_HANDLE_VALUE)
             throw std::system_error(static_cast<int>(::GetLastError()),
                                     std::system_category(),
@@ -690,30 +779,17 @@ private:
         if (identity_from(bound.get()) != source.identity)
             throw std::runtime_error("World artifact changed identity: " +
                                      Filesystem::GenericUtf8PathString(source.path));
-        const auto original_name = handle_path(bound.get());
-        // The DELETE handle denies other delete access while this operation
-        // runs, binding its opened link through both rename and name inspection.
-        // Windows rename can return success for an existing hard-link alias
-        // without moving anything. Such a no-op never conveys ownership.
-        Detail::WindowsRenameWithoutReplacement(bound.get(), original_name, destination);
-        const auto published_name = handle_path(bound.get());
-        if (published_name == original_name)
-            throw std::system_error(ERROR_ALREADY_EXISTS,
-                                    std::system_category(),
-                                    "Refusing an existing world artifact alias");
-        // The bound source denies delete sharing and both parents stay fixed
-        // through rename and the original-link inspection.
-        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(source.path);
-        if (retirement_error != ERROR_SUCCESS)
-            throw std::system_error(static_cast<int>(retirement_error),
-                                    std::system_category(),
-                                    "Could not confirm world artifact source retirement");
-        // A move to any other name does not publish the reserved destination.
-        // Leave its identity unclaimed and preserve the bytes for recovery.
-        if (published_name != destination)
-            throw std::system_error(ERROR_INVALID_DATA,
-                                    std::system_category(),
-                                    "Could not confirm world artifact publication name");
+        try {
+            const ScopedFile published(Detail::WindowsPublishWithoutReplacement(
+                bound.release(), source.path, destination, FILE_READ_ATTRIBUTES | DELETE));
+        } catch (const Detail::WindowsPublicationRecoveryError& error) {
+            // A verified alias created by this call is safe to retain for
+            // rollback even when source retirement or recovery failed. This
+            // records cleanup ownership, never a successful publication.
+            if (error.verified_link())
+                target.identity = source.identity;
+            throw;
+        }
     }
 #endif
 
