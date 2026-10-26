@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 import unittest
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import perf
 import render_budget as budget
 import render_contract as contract

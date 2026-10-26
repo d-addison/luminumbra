@@ -18,6 +18,7 @@
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
+#include "luminumbra_client/rendering/passes/FroxelPass.h"
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
 #include "luminumbra_client/rendering/passes/GlassOitPass.h"
 #include "luminumbra_client/rendering/passes/GroundDecalPass.h"
@@ -41,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -1274,5 +1276,258 @@ TEST(PassContext, ShippingTemporalResolveBuildsHistoryJittersAndResets) {
         ASSERT_TRUE(pipeline.apply_graphics(resolved));
         EXPECT_TRUE(pipeline.taau_history_valid()); // Unchanged application preserves history.
     }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+
+// Real compilation/storage with deterministic failures at the public GL boundary.
+// At most two initialization attempts create four programs and four textures.
+class FroxelInitCalls {
+public:
+    FroxelInitCalls() {
+        current() = this;
+        glad_glGetShaderiv = ShaderStatus;
+        glad_glGetProgramResourceiv = ResourceProperties;
+        glad_glCreateProgram = CreateProgram;
+        glad_glDeleteProgram = DeleteProgram;
+        glad_glGenTextures = GenTextures;
+        glad_glDeleteTextures = DeleteTextures;
+        glad_glTexStorage3D = TexStorage;
+        glad_glObjectLabel = ObjectLabel;
+        glad_glDispatchCompute = Dispatch;
+    }
+    ~FroxelInitCalls() {
+        glad_glGetShaderiv = shader_status;
+        glad_glGetProgramResourceiv = resource_properties;
+        glad_glCreateProgram = create_program;
+        glad_glDeleteProgram = delete_program;
+        glad_glGenTextures = gen_textures;
+        glad_glDeleteTextures = delete_textures;
+        glad_glTexStorage3D = tex_storage;
+        glad_glObjectLabel = object_label;
+        glad_glDispatchCompute = dispatch;
+        current() = nullptr;
+    }
+    FroxelInitCalls(const FroxelInitCalls&) = delete;
+    FroxelInitCalls& operator=(const FroxelInitCalls&) = delete;
+
+    int failed_shader = 0;
+    int failed_texture = 0;
+    int failed_storage = 0;
+    bool invalid_layout = false;
+    bool label_exception = false;
+    int shader_checks = 0;
+    int texture_calls = 0;
+    int storage_calls = 0;
+    int live_programs = 0;
+    int live_textures = 0;
+    int dispatches = 0;
+
+private:
+    static FroxelInitCalls*& current() {
+        static FroxelInitCalls* instance = nullptr;
+        return instance;
+    }
+    static void GLAPIENTRY ShaderStatus(GLuint shader, GLenum property, GLint* value) {
+        auto& calls = *current();
+        calls.shader_status(shader, property, value);
+        if (property == GL_COMPILE_STATUS && ++calls.shader_checks == calls.failed_shader)
+            *value = GL_FALSE;
+    }
+    static void GLAPIENTRY ResourceProperties(GLuint program,
+                                              GLenum interface_type,
+                                              GLuint index,
+                                              GLsizei count,
+                                              const GLenum* properties,
+                                              GLsizei size,
+                                              GLsizei* length,
+                                              GLint* values) {
+        auto& calls = *current();
+        calls.resource_properties(
+            program, interface_type, index, count, properties, size, length, values);
+        if (calls.invalid_layout && interface_type == GL_UNIFORM) {
+            for (GLsizei offset = 0; offset < count && offset < size; ++offset) {
+                if (properties[offset] == GL_TYPE && values[offset] == GL_SAMPLER_2D_ARRAY)
+                    values[offset] = GL_SAMPLER_2D;
+            }
+        }
+    }
+    static GLuint GLAPIENTRY CreateProgram() {
+        auto& calls = *current();
+        const GLuint program = calls.create_program();
+        if (program)
+            ++calls.live_programs;
+        return program;
+    }
+    static void GLAPIENTRY DeleteProgram(GLuint program) {
+        auto& calls = *current();
+        if (program)
+            --calls.live_programs;
+        calls.delete_program(program);
+    }
+    static void GLAPIENTRY GenTextures(GLsizei count, GLuint* textures) {
+        auto& calls = *current();
+        EXPECT_EQ(count, 1);
+        if (++calls.texture_calls == calls.failed_texture) {
+            textures[0] = 0;
+            return;
+        }
+        calls.gen_textures(count, textures);
+        calls.live_textures += count;
+    }
+    static void GLAPIENTRY DeleteTextures(GLsizei count, const GLuint* textures) {
+        auto& calls = *current();
+        for (GLsizei index = 0; index < count; ++index) {
+            if (textures[index])
+                --calls.live_textures;
+        }
+        calls.delete_textures(count, textures);
+    }
+    static void GLAPIENTRY TexStorage(GLenum target,
+                                      GLsizei levels,
+                                      GLenum format,
+                                      GLsizei width,
+                                      GLsizei height,
+                                      GLsizei depth) {
+        auto& calls = *current();
+        if (++calls.storage_calls != calls.failed_storage)
+            calls.tex_storage(target, levels, format, width, height, depth);
+    }
+    static void GLAPIENTRY ObjectLabel(GLenum type,
+                                       GLuint name,
+                                       GLsizei length,
+                                       const char* label) {
+        auto& calls = *current();
+        if (calls.label_exception && std::strcmp(label, "froxel.integrated") == 0)
+            throw std::runtime_error("volume label failure");
+        calls.object_label(type, name, length, label);
+    }
+    static void GLAPIENTRY Dispatch(GLuint, GLuint, GLuint) {
+        auto& calls = *current();
+        // Verify injection/integration bind real allocated images without running
+        // a kernel against unrelated shadow fixtures.
+        GLint texture = 0;
+        glGetIntegeri_v(GL_IMAGE_BINDING_NAME, 0, &texture);
+        EXPECT_NE(texture, 0);
+        EXPECT_EQ(glIsTexture(static_cast<GLuint>(texture)), GL_TRUE);
+        ++calls.dispatches;
+    }
+    PFNGLGETSHADERIVPROC shader_status = glad_glGetShaderiv;
+    PFNGLGETPROGRAMRESOURCEIVPROC resource_properties = glad_glGetProgramResourceiv;
+    PFNGLCREATEPROGRAMPROC create_program = glad_glCreateProgram;
+    PFNGLDELETEPROGRAMPROC delete_program = glad_glDeleteProgram;
+    PFNGLGENTEXTURESPROC gen_textures = glad_glGenTextures;
+    PFNGLDELETETEXTURESPROC delete_textures = glad_glDeleteTextures;
+    PFNGLTEXSTORAGE3DPROC tex_storage = glad_glTexStorage3D;
+    PFNGLOBJECTLABELPROC object_label = glad_glObjectLabel;
+    PFNGLDISPATCHCOMPUTEPROC dispatch = glad_glDispatchCompute;
+};
+
+struct ScopedFroxelPass {
+    Luminumbra::Rendering::FroxelPass pass;
+    ~ScopedFroxelPass() {
+        pass.destroy();
+    }
+};
+
+} // namespace
+
+TEST(PassContext, FroxelInitializationFailureCleansUpAndRequiresExplicitRetry) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    // Either shader, either texture name/storage, reflection, missing files, and unwind.
+    for (int failure = 0; failure < 9; ++failure) {
+        SCOPED_TRACE(failure);
+        FroxelInitCalls calls;
+        ScopedFroxelPass scoped;
+        auto& pass = scoped.pass;
+        Luminumbra::Rendering::Camera camera;
+        RenderContext ctx;
+        ctx.camera = &camera;
+        ctx.screen_width = 64;
+        ctx.screen_height = 64;
+        ctx.volumetric_quality = 1;
+        calls.failed_shader = failure < 2 ? failure + 1 : 0;
+        calls.failed_texture = failure >= 2 && failure < 4 ? failure - 1 : 0;
+        calls.failed_storage = failure >= 4 && failure < 6 ? failure - 3 : 0;
+        calls.invalid_layout = failure == 6;
+        calls.label_exception = failure == 8;
+        const std::filesystem::path root = LUMINUMBRA_SOURCE_ROOT;
+        if (calls.label_exception)
+            EXPECT_THROW(pass.execute_inject(ctx, root), std::runtime_error);
+        else
+            EXPECT_FALSE(pass.execute_inject(ctx, failure == 7 ? root / "res" : root));
+        EXPECT_EQ(pass.integrated_texture(), 0u);
+        EXPECT_EQ(calls.live_programs, 0);
+        EXPECT_EQ(calls.live_textures, 0);
+        EXPECT_EQ(calls.dispatches, 0);
+        const int checks = calls.shader_checks;
+        const int textures = calls.texture_calls;
+        calls.failed_shader = calls.failed_texture = calls.failed_storage = 0;
+        calls.invalid_layout = false;
+        calls.label_exception = false;
+        // Fixing the input alone does not clear failure, create, or dispatch.
+        EXPECT_FALSE(pass.execute_inject(ctx, root));
+        pass.execute_integrate(ctx);
+        EXPECT_EQ(calls.shader_checks, checks);
+        EXPECT_EQ(calls.texture_calls, textures);
+        EXPECT_EQ(calls.dispatches, 0);
+
+        pass.destroy();
+        pass.destroy();
+        ASSERT_TRUE(pass.execute_inject(ctx, root));
+        EXPECT_EQ(calls.shader_checks, checks + 2);
+        EXPECT_EQ(calls.texture_calls, textures + 2);
+        EXPECT_EQ(calls.live_programs, 2);
+        EXPECT_EQ(calls.live_textures, 2);
+        ASSERT_NE(pass.integrated_texture(), 0u);
+        GLint immutable = GL_FALSE;
+        glGetTextureParameteriv(pass.integrated_texture(), GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
+        EXPECT_EQ(immutable, GL_TRUE);
+        pass.execute_integrate(ctx);
+        EXPECT_EQ(calls.dispatches, 2);
+        ASSERT_TRUE(pass.execute_inject(ctx, root));
+        EXPECT_EQ(calls.shader_checks, checks + 2);
+        EXPECT_EQ(calls.texture_calls, textures + 2);
+        pass.destroy();
+        EXPECT_EQ(calls.live_programs, 0);
+        EXPECT_EQ(calls.live_textures, 0);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+}
+
+TEST(PassContext, FroxelOffAndUninitializedFrozenReplayDoNotAllocateOrLatchFailure) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    FroxelInitCalls calls;
+    ScopedFroxelPass scoped;
+    RenderContext ctx;
+    ctx.volumetric_quality = 0;
+    EXPECT_TRUE(scoped.pass.execute_inject(ctx, LUMINUMBRA_SOURCE_ROOT));
+    scoped.pass.execute_integrate(ctx);
+    ctx.volumetric_quality = 1;
+    ctx.frozen_replay = true;
+    EXPECT_FALSE(scoped.pass.execute_inject(ctx, LUMINUMBRA_SOURCE_ROOT));
+    scoped.pass.execute_integrate(ctx);
+    EXPECT_EQ(calls.shader_checks, 0);
+    EXPECT_EQ(calls.texture_calls, 0);
+    EXPECT_EQ(calls.dispatches, 0);
+    Luminumbra::Rendering::Camera camera;
+    ctx.camera = &camera;
+    ctx.screen_width = 64;
+    ctx.screen_height = 64;
+    ctx.frozen_replay = false;
+    ASSERT_TRUE(scoped.pass.execute_inject(ctx, LUMINUMBRA_SOURCE_ROOT));
+    EXPECT_EQ(calls.live_programs, 2);
+    EXPECT_EQ(calls.live_textures, 2);
+    EXPECT_EQ(calls.dispatches, 1);
+    ctx.frozen_replay = true;
+    ASSERT_TRUE(scoped.pass.execute_inject(ctx, LUMINUMBRA_SOURCE_ROOT));
+    EXPECT_EQ(calls.shader_checks, 2);
+    EXPECT_EQ(calls.texture_calls, 2);
+    scoped.pass.destroy();
+    EXPECT_EQ(calls.live_programs, 0);
+    EXPECT_EQ(calls.live_textures, 0);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -192,7 +193,8 @@ class Specification:
                     f"source digest mismatch: {name}")
 
 
-def git(source: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
+def git(source: Path, *args: str, input_bytes: bytes | None = None,
+        cancellation: CommandCancellation | None = None) -> bytes:
     # Exclude inherited Git directories, filters, hooks, credential helpers and config.
     environment = {k.upper(): v for k, v in os.environ.items()
                    if k.upper() in {"PATH", "SYSTEMROOT", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR"}}
@@ -209,7 +211,7 @@ def git(source: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     argv = [str(Path(executable).resolve()), "-c", "core.autocrlf=false", "-c", "core.safecrlf=false",
             "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
             "-c", "protocol.file.allow=never", "-C", str(source), *args]
-    return run_command(source, argv, environment, input_bytes)
+    return run_command(source, argv, environment, input_bytes, cancellation=cancellation)
 
 
 def shutdown_refusal(primary_error: BaseException | None, shutdown_errors: list[BaseException]) -> Refusal:
@@ -217,6 +219,96 @@ def shutdown_refusal(primary_error: BaseException | None, shutdown_errors: list[
     detail = "; ".join(f"{type(error).__name__}: {error}" for error in shutdown_errors)
     reason = (str(primary_error) + "\n" if primary_error is not None else "")
     return Refusal(reason + "Git shutdown refused: " + detail)
+
+
+class CommandCancellation:
+    """Main-thread signal ownership shared explicitly with command workers.
+
+    Handlers record the first cancellation; commands retire their retained tree
+    before this scope restores and forwards the original handler. Workers must
+    join this scope before spawning. Failed handler restorations retain their
+    original callbacks and pending cancellation for explicit recovery.
+    """
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.active = 0
+        self.open = False
+        self.pending = None
+        self.handlers = {}
+
+    def __enter__(self):
+        require(threading.current_thread() is threading.main_thread(),
+                "Git cancellation requires a main-thread owner")
+        require(not self.open and not self.handlers, "Git cancellation owner already entered")
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous = signal.getsignal(signum)
+                if previous == signal.SIG_IGN:
+                    continue
+                self.handlers[signum] = previous
+                signal.signal(signum, self.record)
+            self.open = True
+            return self
+        except BaseException as error:
+            failures = self.restore_handlers()
+            if failures:
+                raise shutdown_refusal(error, failures) from error
+            raise
+
+    def restore_handlers(self):
+        failures = []
+        # At most two handlers. An error restoring either must not prevent the
+        # other restoration; retain failed entries instead of losing custody.
+        for signum, previous in tuple(self.handlers.items()):
+            try:
+                signal.signal(signum, previous)
+            except BaseException as error:
+                failures.append(error)
+            else:
+                del self.handlers[signum]
+        return failures
+
+    def record(self, signum, frame):
+        # Two handlers, one retained signal/frame. Repeated signals cannot
+        # interrupt spawn custody, tree shutdown, or handler restoration.
+        if self.pending is None:
+            self.pending = (signum, frame, self.handlers[signum])
+
+    def check(self):
+        require(self.open and self.pending is None, "Git command cancelled")
+
+    @contextmanager
+    def command(self):
+        with self.condition:
+            self.check()
+            # Reuse the storage entry bound for outstanding registrations.
+            require(self.active < STORAGE_ENTRIES, "Git command ownership bound exceeded")
+            self.active += 1
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.active -= 1
+                self.condition.notify_all()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        with self.condition:
+            self.open = False  # Atomically close admission before waiting.
+            # Each registered command retains its existing 120-second deadline
+            # and bounded shutdown. Cancellation is checked before each scan/read.
+            while self.active:
+                self.condition.wait(0.01)
+        failures = self.restore_handlers()
+        if failures:
+            raise shutdown_refusal(exc_value, failures) from (exc_value or failures[0])
+        pending, self.pending = self.pending, None
+        if pending is not None:
+            signum, frame, previous = pending
+            if previous == signal.SIG_DFL:
+                signal.raise_signal(signum)
+            else:
+                previous(signum, frame)
 
 
 class WindowsJob:
@@ -350,8 +442,19 @@ def contained_git(name: str, argv: list[str]) -> int:
 
 
 def run_command(source: Path, argv: list[str], environment: dict[str, str],
-                input_bytes: bytes | None = None) -> bytes:
+                input_bytes: bytes | None = None, *,
+                cancellation: CommandCancellation | None = None) -> bytes:
     """Run one owned tree, with bounded output, storage and shutdown."""
+    if cancellation is None:
+        with CommandCancellation() as owner:
+            with owner.command():
+                return owned_command(source, argv, environment, input_bytes, owner)
+    with cancellation.command():
+        return owned_command(source, argv, environment, input_bytes, cancellation)
+
+
+def owned_command(source: Path, argv: list[str], environment: dict[str, str],
+                  input_bytes: bytes | None, cancellation: CommandCancellation) -> bytes:
     require(input_bytes is None or len(input_bytes) <= 22655, "Git input bound exceeded")
     require(os.name == "nt" or (os.name == "posix" and all(hasattr(os, key) for key in
             ("waitid", "P_PID", "WNOWAIT", "WEXITED", "WNOHANG"))), "process containment unavailable")
@@ -373,6 +476,7 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
         except BlockingIOError:
             return None
     try:
+        cancellation.check()
         command = argv
         if os.name == "nt":
             name = "rmlui-source-" + uuid.uuid4().hex
@@ -383,6 +487,7 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
                                    stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    start_new_session=os.name == "posix", bufsize=0)
+        cancellation.check()
         if input_bytes is not None:
             def send_input() -> None:
                 try:
@@ -416,6 +521,7 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
         next_scan = time.monotonic() + 0.1
         eof = False
         while True:
+            cancellation.check()
             now = time.monotonic()
             require(now < deadline, "Git command deadline exceeded")
             require(not failures, "Git input refused")

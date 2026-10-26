@@ -18,10 +18,9 @@ import types
 import unittest
 from unittest import mock
 
-import test_render_contract as contract_fixtures
-
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import test_render_contract as contract_fixtures
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument('--runner', type=Path, default=Path(__file__).with_name('test_render_runner.py'))
@@ -65,7 +64,8 @@ print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=Tr
 print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
 print('unrelated trailing line', flush=True)
 pathlib.Path(sys.argv[1]).touch()
-time.sleep(30)
+while True:
+    time.sleep(1)
 '''
 
 

@@ -767,6 +767,9 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             sig *= 1099511628211ull;
         };
         mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
+        // Losing or restoring the sampler changes active/inactive output even
+        // when every chunk and render setting is unchanged.
+        mix(query != nullptr ? 1ull : 0ull);
         mix(m_evidence_phase);
         mix(static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
             (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull));
@@ -825,6 +828,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                 config_sig *= 1099511628211ull;
             };
             config_mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
+            config_mix(query != nullptr ? 1ull : 0ull);
             config_mix(m_evidence_phase);
             if (m_readback_enabled) {
                 config_mix(static_cast<std::uint64_t>(std::llround(m_wind_xz.x * 2.0f)) ^
