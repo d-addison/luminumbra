@@ -237,7 +237,15 @@ private:
     std::vector<Frame> m_frames;
 };
 
+void CheckSettingsBytes(const std::string& json_text) {
+    const auto nul = json_text.find('\0');
+    if (nul != std::string::npos)
+        throw nlohmann::json::parse_error::create(
+            101, nul + 1, "raw NUL in settings JSON", nullptr);
+}
+
 nlohmann::json ParseSettingsJson(const std::string& json_text) {
+    CheckSettingsBytes(json_text);
     // Keep the ordinary path unchanged. Retry only numeric overflow in the layouts subtree;
     // syntax errors and errors from sim/render or other user settings keep their behavior.
     std::string recovered;
@@ -589,7 +597,7 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
 }
 
 SystemConfig SystemConfig::LoadFromFile(const std::filesystem::path& path) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file)
         return SystemConfig{}; // missing/unreadable -> defaults
     std::ostringstream buffer;
@@ -602,7 +610,7 @@ SystemConfig SystemConfig::LoadFromFile(const std::filesystem::path& path) {
 bool SystemConfig::TryLoadFromFile(const std::filesystem::path& path,
                                    SystemConfig& config,
                                    std::string& error) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file) {
         error =
             "cannot read systems config: " + Luminumbra::Filesystem::GenericUtf8PathString(path);
@@ -616,7 +624,9 @@ bool SystemConfig::TryLoadFromFile(const std::filesystem::path& path,
         return false;
     }
     try {
-        const auto document = nlohmann::json::parse(buffer.str());
+        const auto bytes = buffer.str();
+        CheckSettingsBytes(bytes);
+        const auto document = nlohmann::json::parse(bytes);
         if (!document.is_object()) {
             error = "systems config must be a JSON object: " +
                     Luminumbra::Filesystem::GenericUtf8PathString(path);

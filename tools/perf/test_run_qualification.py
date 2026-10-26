@@ -57,8 +57,8 @@ def value(flag):
 if mode == 'exit3':
     sys.exit(3)
 if mode == 'hang':
-    time.sleep(30)
-    sys.exit(0)
+    while True:
+        time.sleep(1)
 artifact = Path(value('--render-benchmark'))
 if mode == 'noartifact':
     sys.exit(0)
@@ -205,6 +205,9 @@ def passing_results(matrix, renderer=RENDERER):
             'script': script, 'state': 'pass', 'reason': None, 'adapter': adapter(renderer),
             'artifact': f"cells/{cell['id']}.json", 'verdict': verdict(), 'checker_canonical': True,
             'matrix_canonical': True,
+            'gl_debug': {'verified': True, 'client_sha256': 'a' * 64,
+                         'verdict': {'schema': rq.GL_DEBUG_SCHEMA, 'verdict': 'pass',
+                                     'installed': True, 'error_count': 0, 'malformed_count': 0}},
             'traversal': None if script is None else {
                 'sha256': rq.BOUND_TRAVERSAL_SHA256.get(cell['workload'], 'b' * 64),
                 'verified': True},
@@ -734,6 +737,92 @@ class CaptureBindingTests(RunnerTestBase):
 
 
 class ArtifactHandlingTests(RunnerTestBase):
+    def test_capture_readers_refuse_over_capacity_without_truncating(self):
+        path = self.tmp / 'oversized-capture.json'
+        # Sparse input exercises the real capacity without allocating its payload.
+        with path.open('wb') as output:
+            output.write(b'{}')
+            output.truncate(rq.MAX_CAPTURE_BYTES + 1)
+        for reader in (rq.read_capture_bytes, rq.capture_file_sha256,
+                       lambda path: rq.debug_json(path, capture=True)):
+            with self.subTest(reader=reader), self.assertRaisesRegex(
+                    rq.UsageError, f'capture evidence exceeds {rq.MAX_CAPTURE_BYTES} byte cap'):
+                reader(path)
+        self.assertIsNone(rq.read_json_object(path, capture=True))
+        self.assertEqual(path.stat().st_size, rq.MAX_CAPTURE_BYTES + 1)
+
+    def test_capture_byte_boundary_and_growth_are_bounded(self):
+        path = self.tmp / 'growing-capture.json'
+        bound = 128
+        payload = b'{}' + b' ' * (bound - 2)
+        original_fstat = os.fstat
+        with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
+            path.write_bytes(payload)
+            self.assertEqual(rq.read_capture_bytes(path), payload)
+            self.assertEqual(rq.read_json_object(path, capture=True), {})
+            for phase in ('open', 'read'):
+                with self.subTest(phase=phase):
+                    path.write_bytes(payload)
+
+                    def grow(descriptor):
+                        info = original_fstat(descriptor)
+                        with path.open('ab') as output:
+                            output.write(b' ')
+                        return original_fstat(descriptor) if phase == 'open' else info
+
+                    with mock.patch.object(os, 'fstat', side_effect=grow), \
+                            self.assertRaisesRegex(rq.UsageError, 'capture evidence exceeds 128 byte cap'):
+                        rq.read_capture_bytes(path)
+
+    def test_capture_readers_refuse_invalid_and_unreadable_inputs(self):
+        path = self.tmp / 'invalid-capture.json'
+        for payload in (b'', b'{', b'[]', b'\xff', b'{"value":1}\0ignored',
+                        b'[' * 65 + b']' * 65):
+            with self.subTest(payload=payload):
+                path.write_bytes(payload)
+                self.assertIsNone(rq.read_json_object(path, capture=True))
+        path.unlink()
+        self.assertIsNone(rq.read_json_object(path, capture=True))
+        with self.assertRaisesRegex(rq.UsageError, 'cannot read capture evidence'):
+            rq.debug_json(path, capture=True)
+        path.write_bytes(b'{}')
+        with mock.patch.object(os, 'open', side_effect=PermissionError('access denied')):
+            with self.assertRaisesRegex(rq.UsageError, 'cannot read capture evidence.*access denied'):
+                rq.read_capture_bytes(path)
+            self.assertIsNone(rq.read_json_object(path, capture=True))
+        for mode in (stat.S_IFDIR, stat.S_IFLNK, stat.S_IFIFO, stat.S_IFCHR):
+            with self.subTest(mode=mode):
+                info = types.SimpleNamespace(st_mode=mode)
+                with mock.patch.object(Path, 'lstat', return_value=info), \
+                        mock.patch.object(os, 'open') as opening:
+                    with self.assertRaisesRegex(rq.UsageError, 'capture evidence must be a regular file'):
+                        rq.read_capture_bytes(path)
+                    opening.assert_not_called()
+                with mock.patch.object(os, 'fstat', return_value=info):
+                    with self.assertRaisesRegex(rq.UsageError, 'capture evidence must be a regular file'):
+                        rq.read_capture_bytes(path)
+        info = path.lstat()
+        changed = types.SimpleNamespace(st_mode=info.st_mode, st_dev=info.st_dev,
+                                        st_ino=info.st_ino + 1)
+        with mock.patch.object(os, 'fstat', return_value=changed):
+            with self.assertRaisesRegex(rq.UsageError, 'capture evidence changed while opening'):
+                rq.read_capture_bytes(path)
+
+    def test_json_object_readers_share_regular_file_byte_and_depth_bounds(self):
+        path = self.tmp / 'bounded-evidence.json'
+        path.write_bytes(b'\xef\xbb\xbf{"value": 1}')
+        self.assertEqual(rq.read_json_object(path), {'value': 1})
+        for payload in (b'[]', b'', b'{', b'\xff', b'{"value":1}\0ignored',
+                        b'[' * 65 + b']' * 65,
+                        b'{"value":"' + b'x' * MAX_FILE_BYTES + b'"}'):
+            with self.subTest(size=len(payload)):
+                path.write_bytes(payload)
+                self.assertIsNone(rq.read_json_object(path))
+        path.unlink()
+        self.assertIsNone(rq.read_json_object(path))
+        path.mkdir()
+        self.assertIsNone(rq.read_json_object(path))
+
     def test_unready_cell_retires_capture_verdict_and_receipt(self):
         # Reuse the same output directory after a passing pose-recorded run.
         self.assertEqual(self.run_main(self.argv('--only', FOREST_CELL))[0], 0)
@@ -1830,6 +1919,7 @@ class BuildManifestTests(RealCheckerTests):
         results = passing_results(matrix)
         for result in results:
             result['client'] = client
+            result['gl_debug']['client_sha256'] = client['sha256']
         with placeholder_bindings():
             document = rq.aggregate(matrix, results, partial=False,
                                     declared_refresh={'3440x1440': 60})
@@ -1879,7 +1969,8 @@ class BuildManifestTests(RealCheckerTests):
                 self.assertFalse(rq.native_executable(client))
 
     def native_control(self, manifest_mode='match', mutate=False, capture_mode='private',
-                       receipt_defect=None, mutate_checked_capture=False):
+                       receipt_defect=None, mutate_checked_capture=False, debug_mode='pass',
+                       capture_bytes=None, debug_capture_bytes=None):
         # Copy an existing native binary; never compile or claim GPU performance.
         client = self.tmp / ('native-client.exe' if os.name == 'nt' else 'native-client')
         shutil.copy2(sys.executable, client)
@@ -1891,9 +1982,12 @@ class BuildManifestTests(RealCheckerTests):
             path.write_text(json.dumps(document), encoding='utf-8')
         fixture, cell_id = self.positive_control()
         original = rq.runner.run_process
+        self.native_launch_environments = []
 
         def native_process(command, **kwargs):
             def emit_capture(argv, **spawn_kwargs):
+                debug = spawn_kwargs['env'].get('LUMIN_GL_DEBUG') == '1'
+                self.native_launch_environments.append(dict(spawn_kwargs['env']))
                 self.assertEqual(Path(argv[0]), client.resolve())
                 capture = Path(argv[argv.index('--render-benchmark') + 1])
                 self.assertEqual(capture, kwargs['artifact'])
@@ -1901,6 +1995,63 @@ class BuildManifestTests(RealCheckerTests):
                 self.assertNotEqual(capture, public)
                 target = capture if capture_mode == 'private' else public
                 target.write_bytes(fixture.read_bytes())
+                if debug:
+                    data = json.loads(target.read_bytes())
+                    declaration = Path(argv[argv.index('--declare-render-overrides') + 1])
+                    declared = json.loads(declaration.read_bytes())
+                    self.assertEqual(declared, {'cli:--systems-config': str(self.tmp / 'data/common/systems.json'),
+                                                'env:LUMIN_GL_DEBUG': '1'})
+                    data['debug_overrides'] = {'active': declared, 'declared': declared}
+                    if debug_mode == 'schema':
+                        data['schema'] = 'other'
+                    if debug_mode == 'kind':
+                        data['workload']['kind'] = 'traversal'
+                    if debug_mode in ('seed', 'preset_revision'):
+                        data['workload'][debug_mode] += 1
+                    if debug_mode in ('preset', 'preset_identity', 'content_identity'):
+                        data['workload'][debug_mode] = {
+                            'preset': 'different-preset', 'preset_identity': 'f' * 16,
+                            'content_identity': '123456789'}[debug_mode]
+                    if debug_mode == 'camera':
+                        data['camera']['position'][0] += 1
+                    if debug_mode == 'override':
+                        data['debug_overrides']['active'] = {}
+                    if debug_mode == 'invalidcapture':
+                        data.pop('frame_samples')
+                    target.write_text(json.dumps(data), encoding='utf-8')
+                    log = spawn_kwargs['stdout']
+                    if debug_mode != 'missing':
+                        log.write(b'GL KHR_debug output installed (synchronous)\n')
+                    if debug_mode == 'error':
+                        log.write(b'[GL][API][Error][HIGH] id=1 failure\n')
+                    if debug_mode == 'malformed':
+                        log.write(b'[GL][bad record\n')
+                    if debug_mode == 'unreadable':
+                        log.write(b'\xff\n')
+                    if debug_mode == 'no-capture':
+                        target.unlink()
+                    if debug_mode == 'wrongadapter':
+                        data = json.loads(target.read_bytes())
+                        data['adapter']['renderer'] = 'other'
+                        target.write_text(json.dumps(data), encoding='utf-8')
+                    if debug_mode in ('partialcapture', 'emptycapture', 'deepcapture'):
+                        target.write_bytes({'partialcapture': b'{', 'emptycapture': b'',
+                                            'deepcapture': b'[' * 65 + b']' * 65}[debug_mode])
+                    if debug_mode in ('measured-artifact', 'measured-retained'):
+                        measured = public if debug_mode == 'measured-artifact' else (
+                            self.out / 'cells' / f'{cell_id}.artifact.json')
+                        with measured.open('ab') as output:
+                            output.write(b'\n')
+                    if debug_mode == 'timeout':
+                        raise subprocess.TimeoutExpired(argv, 1)
+                    if debug_mode == 'spawn':
+                        raise OSError('debug launch refused')
+                    if debug_mode == 'exit':
+                        return subprocess.CompletedProcess(argv, 3)
+                size = debug_capture_bytes if debug and debug_capture_bytes is not None else capture_bytes
+                if size is not None:
+                    with target.open('ab') as output:
+                        output.write(b' ' * (size - output.tell()))
                 if mutate:
                     with client.open('ab') as output:
                         output.write(b'changed')
@@ -1914,6 +2065,11 @@ class BuildManifestTests(RealCheckerTests):
                 receipt = rq.read_json_object(kwargs['receipt_path'])
                 receipt.update(receipt_defect)
                 kwargs['receipt_path'].write_text(json.dumps(receipt), encoding='utf-8')
+            if kwargs['environment'].get('LUMIN_GL_DEBUG') == '1':
+                malformed = {'receipt-list': b'[]', 'receipt-partial': b'{',
+                             'receipt-large': b'{"value":"' + b'x' * MAX_FILE_BYTES + b'"}'}
+                if debug_mode in malformed:
+                    kwargs['receipt_path'].write_bytes(malformed[debug_mode])
             return result
 
         args = self.argv('--only', cell_id, checker=False)
@@ -1924,6 +2080,9 @@ class BuildManifestTests(RealCheckerTests):
 
         def checker_command(*command_args, **kwargs):
             command = original_checker(*command_args, **kwargs)
+            if debug_mode == 'config':
+                with (self.tmp / 'data/common/systems.json').open('ab') as output:
+                    output.write(b'\n')
             if mutate_checked_capture:
                 # Whitespace preserves every parsed field and verdict, but changes ownership.
                 with kwargs['artifact'].open('ab') as output:
@@ -1936,6 +2095,41 @@ class BuildManifestTests(RealCheckerTests):
         document = self.load_qualification()
         receipt = rq.read_json_object(self.out / 'cells' / f'{cell_id}.process.json')
         return code, document['cells'][0], receipt
+
+    def test_measured_and_debug_captures_over_host_cap_are_accepted(self):
+        size = MAX_FILE_BYTES + 1
+        code, cell, _ = self.native_control(capture_bytes=size)
+        self.assertEqual(code, 0)
+        self.assertEqual(cell['state'], 'pass')
+        self.assertEqual(cell['adapter'], dict(adapter(), version='4.5 synthetic fixture'))
+        self.assertTrue(rq.gl_debug_passes(cell['gl_debug'], cell['client']))
+        for suffix in ('.json', '.artifact.json', '.debug.artifact.json'):
+            path = self.out / 'cells' / (cell['id'] + suffix)
+            self.assertEqual(path.stat().st_size, size)
+            with self.assertRaisesRegex(rq.UsageError, f'host evidence exceeds {MAX_FILE_BYTES} byte cap'):
+                rq.read_host_bytes(path)
+            self.assertIsNone(rq.read_json_object(path))
+        self.assertTrue(cell['client']['native_build'])
+        self.assertTrue(cell['client']['sha256_verified'])
+        self.assertTrue(cell['checker_canonical'])
+
+    def test_over_capacity_captures_fail_closed_with_clear_reason(self):
+        bound = 1024 * 1024
+        with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
+            code, cell, _ = self.native_control(capture_bytes=bound + 1)
+            self.assertEqual(code, 1)
+            self.assertEqual(cell['state'], 'process_failed')
+            self.assertIn(f'capture evidence exceeds {bound} byte cap', cell['reason'])
+            self.assertIsNone(cell['artifact'])
+            self.assertFalse((self.out / 'cells' / (cell['id'] + '.json')).exists())
+            retained = self.out / 'cells' / (cell['id'] + '.artifact.json')
+            self.assertEqual(retained.stat().st_size, bound + 1)
+            code, cell, _ = self.native_control(debug_capture_bytes=bound + 1)
+            self.assertEqual(code, 0)
+            self.assertEqual(cell['state'], 'pass')
+            self.assertIn(f'capture evidence exceeds {bound} byte cap', cell['gl_debug']['reason'])
+            self.assertFalse(rq.gl_debug_passes(cell['gl_debug'], cell['client']))
+            self.assertFalse(rq.cell_qualifies(cell))
 
     def test_manifest_bound_native_control_can_qualify(self):
         code, cell, receipt = self.native_control()
@@ -1952,15 +2146,45 @@ class BuildManifestTests(RealCheckerTests):
         self.assertEqual(rq.runner.file_sha256(self.out / receipt['capture_path']), digest)
         self.assertTrue(client['sha256_verified'])
         self.assertTrue(client['native_build'])
+        self.assertEqual(len(self.native_launch_environments), 2)
+        self.assertNotIn('LUMIN_GL_DEBUG', self.native_launch_environments[0])
+        self.assertEqual(self.native_launch_environments[1]['LUMIN_GL_DEBUG'], '1')
+        self.assertTrue(rq.gl_debug_passes(cell['gl_debug'], client))
         matrix = matrix_lib.load_matrix(MATRIX_PATH)
         results = passing_results(matrix)
         for result in results:
             result['client'] = client
+            result['gl_debug']['client_sha256'] = client['sha256']
         with placeholder_bindings():
             document = rq.aggregate(matrix, results, partial=False,
                                     declared_refresh={'3440x1440': 60})
         self.assertTrue(document['render_floor_qualified'])
         self.assertFalse(document['expanded_qualified'])
+
+    def test_separate_debug_pass_requires_installed_clean_matching_evidence(self):
+        for mode in ('missing', 'error', 'malformed', 'unreadable', 'no-capture',
+                     'wrongadapter', 'timeout', 'spawn', 'exit', 'partialcapture',
+                     'emptycapture', 'deepcapture', 'config', 'schema', 'kind',
+                     'override', 'invalidcapture', 'seed', 'preset', 'preset_revision',
+                     'preset_identity', 'content_identity', 'camera',
+                     'receipt-list', 'receipt-partial', 'receipt-large'):
+            with self.subTest(mode=mode):
+                code, cell, _ = self.native_control(debug_mode=mode)
+                self.assertEqual(code, 0)
+                self.assertEqual(cell['state'], 'pass')
+                self.assertEqual(len(self.native_launch_environments), 2)
+                self.assertIsNotNone(cell['gl_debug']['reason'])
+                self.assertFalse(rq.gl_debug_passes(cell['gl_debug'], cell['client']))
+                self.assertFalse(rq.cell_qualifies(cell))
+
+    def test_debug_pass_cannot_change_measured_capture_or_retention(self):
+        for mode in ('measured-artifact', 'measured-retained'):
+            with self.subTest(mode=mode):
+                code, cell, _ = self.native_control(debug_mode=mode)
+                self.assertEqual(code, 1)
+                self.assertEqual(cell['state'], 'invalid')
+                self.assertEqual(cell['reason'], 'capture evidence: debug pass changed measured bytes')
+                self.assertFalse(rq.cell_qualifies(cell))
 
     def test_public_artifact_without_owned_capture_is_refused(self):
         code, cell, receipt = self.native_control(capture_mode='public')
@@ -2024,6 +2248,28 @@ class BuildManifestTests(RealCheckerTests):
 
 
 class AggregateTests(unittest.TestCase):
+    def test_missing_failed_or_mismatched_debug_evidence_never_qualifies(self):
+        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        for defect in ('missing', 'unverified', 'identity', 'schema', 'verdict',
+                       'installed', 'error_count', 'malformed_count'):
+            with self.subTest(defect=defect):
+                results = passing_results(matrix)
+                debug = results[0]['gl_debug']
+                if defect == 'missing':
+                    results[0].pop('gl_debug')
+                elif defect == 'unverified':
+                    debug['verified'] = False
+                elif defect == 'identity':
+                    debug['client_sha256'] = 'b' * 64
+                else:
+                    debug['verdict'][defect] = {'schema': 'other', 'verdict': 'fail',
+                                                'installed': False, 'error_count': 1,
+                                                'malformed_count': 1}[defect]
+                with placeholder_bindings():
+                    document = rq.aggregate(matrix, results, partial=False,
+                                            declared_refresh={'3440x1440': 60})
+                self.assertFalse(document['render_floor_qualified'])
+
     def test_changed_or_unverified_traversal_bytes_never_qualify(self):
         with placeholder_bindings():
             for evidence in (None, {'sha256': '0' * 64, 'verified': True},

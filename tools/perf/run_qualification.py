@@ -29,8 +29,9 @@ import perf
 import plan_qualification as planner
 import qualification_matrix as matrix_lib
 import render_budget
+import render_contract
 import render_runner_process as runner
-from check_gl_debug_log import MAX_FILE_BYTES
+from check_gl_debug_log import MAX_FILE_BYTES, SCHEMA as GL_DEBUG_SCHEMA
 
 SCHEMA = 'luminumbra.render_qualification.v1'
 VERDICT_SCHEMA = 'luminumbra.render_verdict.v1'
@@ -53,6 +54,10 @@ EXPECTED_FOV = 45.0  # The client default from SystemConfig.
 # Geometry and settling checks are supplied by the matrix checker command.
 FIXED_VIEW_CHECK_FLAGS = ('--require-camera-chunk',)
 MAX_HOST_JSON_DEPTH = 64  # Object/array levels, checked before recursive JSON decoding.
+# Allow pretty-printed samples, camera/far-world observations and debug fields
+# for every supported frame, plus 1 MiB of report metadata. Host/log caps stay separate.
+CAPTURE_FRAME_BYTES = 16 * 1024
+MAX_CAPTURE_BYTES = render_contract.MAX_FRAMES * CAPTURE_FRAME_BYTES + 1024 * 1024
 
 # The canonical qualification universe. A run qualifies only against exactly these.
 CANONICAL_RENDERER = 'NVIDIA GeForce RTX 5070 Ti'
@@ -129,17 +134,29 @@ def set_aside(path):
     path.rename(path.with_name(f'{path.name}.prev-{number}'))
 
 
-def read_json_object(path):
-    """Parsed JSON object from path, or None when missing, unreadable or not an object."""
+def read_json_object(path, *, capture=False):
+    """Bounded regular-file JSON object, or None for any unreadable/invalid input."""
     try:
-        data = json.loads(Path(path).read_text(encoding='utf-8-sig'))
-    except (OSError, ValueError, UnicodeError):
+        text = (read_capture_bytes(path) if capture else read_host_bytes(path)).decode('utf-8-sig')
+        check_host_json_depth(text)
+        data = json.loads(text)
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
 
 def read_host_bytes(path, *, missing_ok=False):
     """Read only regular, non-symlink host files within the shared 16 MiB cap."""
+    return read_evidence_bytes(path, MAX_FILE_BYTES, 'host evidence', missing_ok=missing_ok)
+
+
+def read_capture_bytes(path):
+    """Read a whole capture within the supported frame/metadata byte budget."""
+    return read_evidence_bytes(path, MAX_CAPTURE_BYTES, 'capture evidence')
+
+
+def read_evidence_bytes(path, max_bytes, label, *, missing_ok=False):
+    """Read at most the selected byte cap plus one refusal byte; never truncate."""
     try:
         path = Path(path)
         try:
@@ -149,28 +166,28 @@ def read_host_bytes(path, *, missing_ok=False):
                 return None
             raise
         if not stat.S_ISREG(info.st_mode):
-            raise UsageError(f'host evidence must be a regular file, not a symlink: {path}')
-        if info.st_size > MAX_FILE_BYTES:
-            raise UsageError(f'host evidence exceeds {MAX_FILE_BYTES} byte cap: {path}')
+            raise UsageError(f'{label} must be a regular file, not a symlink: {path}')
+        if info.st_size > max_bytes:
+            raise UsageError(f'{label} exceeds {max_bytes} byte cap: {path}')
         # Do not follow a replacement symlink or block on a replacement FIFO.
         flags = (os.O_RDONLY | getattr(os, 'O_BINARY', 0)
                  | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
         with os.fdopen(os.open(path, flags), 'rb') as source:
             opened = os.fstat(source.fileno())
             if not stat.S_ISREG(opened.st_mode):
-                raise UsageError(f'host evidence must be a regular file: {path}')
+                raise UsageError(f'{label} must be a regular file: {path}')
             if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-                raise UsageError(f'host evidence changed while opening: {path}')
-            if opened.st_size > MAX_FILE_BYTES:
-                raise UsageError(f'host evidence exceeds {MAX_FILE_BYTES} byte cap: {path}')
-            payload = source.read(MAX_FILE_BYTES + 1)
-        if len(payload) > MAX_FILE_BYTES:
-            raise UsageError(f'host evidence exceeds {MAX_FILE_BYTES} byte cap: {path}')
+                raise UsageError(f'{label} changed while opening: {path}')
+            if opened.st_size > max_bytes:
+                raise UsageError(f'{label} exceeds {max_bytes} byte cap: {path}')
+            payload = source.read(max_bytes + 1)
+        if len(payload) > max_bytes:
+            raise UsageError(f'{label} exceeds {max_bytes} byte cap: {path}')
         return payload
     except UsageError:
         raise
     except (OSError, ValueError) as error:
-        raise UsageError(f'cannot read host evidence {path}: {error}') from error
+        raise UsageError(f'cannot read {label} {path}: {error}') from error
 
 
 def check_host_json_depth(text):
@@ -262,17 +279,18 @@ def adapter_triple(data):
 
 
 def finish(cell, state, reason, artifact, verdict=None, *, checker_canonical,
-           out_dir, matrix_canonical, client_evidence, traversal_evidence=None):
+           out_dir, matrix_canonical, client_evidence, traversal_evidence=None,
+           gl_debug=None):
     """Cell result; the artifact path and adapter are reported only when the file exists."""
     present = Path(artifact).is_file()
     return {'id': cell['id'], 'workload': cell['workload'], 'kind': cell['kind'],
                 'warmup_frames': cell['warmup_frames'], 'measured_frames': cell['measured_frames'],
                 'script': cell['script'], 'state': state, 'reason': reason,
-                'adapter': adapter_triple(read_json_object(artifact)) if present else None,
+                'adapter': adapter_triple(read_json_object(artifact, capture=True)) if present else None,
                 'artifact': Path(artifact).relative_to(out_dir).as_posix() if present else None,
                 'verdict': verdict, 'checker_canonical': checker_canonical,
                 'matrix_canonical': matrix_canonical, 'client': client_evidence,
-                'traversal': traversal_evidence}
+                'traversal': traversal_evidence, 'gl_debug': gl_debug}
 
 
 def binding_mismatch(cell, data):
@@ -384,7 +402,18 @@ def cell_qualifies(result):
             and result['state'] == 'pass' and valid_adapter(result['adapter'])
             and result['adapter']['renderer'] == CANONICAL_RENDERER
             and result['artifact'] is not None and verdict_passes(result['verdict'])
-            and result['checker_canonical'] is True and canonical_record(result))
+            and result['checker_canonical'] is True and canonical_record(result)
+            and gl_debug_passes(result.get('gl_debug'), client))
+
+
+def gl_debug_passes(evidence, client):
+    if not isinstance(evidence, dict) or evidence.get('verified') is not True:
+        return False
+    verdict = evidence.get('verdict')
+    return (isinstance(verdict, dict) and verdict.get('schema') == GL_DEBUG_SCHEMA
+            and verdict.get('verdict') == 'pass' and verdict.get('installed') is True
+            and verdict.get('error_count') == 0 and verdict.get('malformed_count') == 0
+            and evidence.get('client_sha256') == client.get('sha256'))
 
 
 def matrix_identity(matrix, path=planner.DEFAULT_MATRIX):
@@ -601,7 +630,7 @@ def check_command(cell, *, matrix, artifact, verdict_path, root, python, checker
     return command
 
 
-def capture_ownership(receipt, retained, capture, out_dir):
+def capture_ownership(receipt, retained, capture, out_dir, *, hash_file=None):
     """Return a refusal reason unless the receipt owns the retained capture bytes."""
     if receipt is None or receipt.get('schema') != runner.RECEIPT_SCHEMA:
         return 'capture evidence: process receipt missing/malformed'
@@ -620,8 +649,9 @@ def capture_ownership(receipt, retained, capture, out_dir):
     if index >= len(command) or command[index] != str(capture):
         return 'capture evidence: capture command path mismatch'
     try:
-        digest = runner.file_sha256(retained)
-        if digest != receipt.get('capture_sha256') or digest != runner.file_sha256(capture):
+        hash_file = runner.file_sha256 if hash_file is None else hash_file
+        digest = hash_file(retained)
+        if digest != receipt.get('capture_sha256') or digest != hash_file(capture):
             return 'capture evidence: retained hash mismatch'
     except OSError as error:
         return f'capture evidence: capture read failed: {error}'
@@ -634,6 +664,113 @@ def runtime_options(systems_config, runtime_root, save_root):
             '--save-root', str(save_root)]
 
 
+def debug_sha256(path):
+    return hashlib.sha256(read_host_bytes(path)).hexdigest()
+
+
+def capture_file_sha256(path):
+    return hashlib.sha256(read_capture_bytes(path)).hexdigest()
+
+
+def debug_json(path, *, capture=False):
+    payload = (read_capture_bytes(path) if capture else read_host_bytes(path)).decode('utf-8-sig')
+    check_host_json_depth(payload)
+    return json.loads(payload)
+
+
+def run_gl_debug_pass(cell, command, *, client, build_manifest, systems_config,
+                      runtime_root, out_dir, work, environment, timeout_seconds,
+                      performance_data, performance_client, performance_receipt):
+    """Run separately from the measured pass; retain and check its own debug log."""
+    cells = out_dir / 'cells'
+    prefix = cells / f"{cell['id']}.debug"
+    log = Path(str(prefix) + '.log')
+    receipt_path = Path(str(prefix) + '.process.json')
+    retained = Path(str(prefix) + '.artifact.json')
+    verdict_path = Path(str(prefix) + '.verdict.json')
+    evidence = {'verified': False, 'verdict': None, 'client_sha256': None,
+                'reason': None, 'log': log.relative_to(out_dir).as_posix(),
+                'log_sha256': None, 'capture_sha256': None,
+                'receipt': receipt_path.relative_to(out_dir).as_posix()}
+    debug_environment = dict(environment, LUMIN_GL_DEBUG='1')
+    save_root = work / 'debug-storage'
+    try:
+        save_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='.debug-', dir=work) as directory:
+            capture = Path(directory) / 'capture.json'
+            declaration = Path(directory) / 'render-overrides.json'
+            runner.atomic_write(declaration, json.dumps(
+                {'cli:--systems-config': str(systems_config),
+                 'env:LUMIN_GL_DEBUG': '1'}).encode('utf-8'))
+            debug_command = list(command)
+            debug_command[debug_command.index('--render-benchmark') + 1] = str(capture)
+            debug_command[debug_command.index('--save-root') + 1] = str(save_root)
+            debug_command[debug_command.index('--declare-render-overrides') + 1] = str(declaration)
+            completed, errors, identity = run_client_process(
+                debug_command, client=client, build_manifest=build_manifest,
+                systems_config=systems_config, runtime_root=runtime_root,
+                save_root=save_root, cwd=work, environment=debug_environment, log=log,
+                artifact=capture, retained=retained, receipt_path=receipt_path,
+                timeout_seconds=timeout_seconds)
+            evidence['client_sha256'] = identity['sha256']
+            receipt = read_json_object(receipt_path)
+            reason = capture_ownership(receipt, retained, capture, out_dir,
+                                       hash_file=capture_file_sha256)
+            if completed.returncode != 0 or errors or reason is not None:
+                evidence['reason'] = reason or f'debug process exit {completed.returncode}: {errors}'
+                return evidence
+            data = debug_json(retained, capture=True)
+            if (not isinstance(data, dict) or binding_mismatch(cell, data) is not None
+                    or data.get('schema') != performance_data.get('schema')
+                    or data.get('frames') != performance_data.get('frames')
+                    or not isinstance(data.get('workload'), dict)
+                    or data['workload'].get('kind') != cell['kind']
+                    or any(data['workload'].get(key) != performance_data['workload'].get(key)
+                           for key in ('seed', 'preset', 'preset_revision',
+                                       'preset_identity', 'content_identity'))
+                    or (cell['kind'] == 'fixed_view'
+                        and data.get('camera') != performance_data.get('camera'))
+                    or adapter_triple(data) != adapter_triple(performance_data)
+                    or identity != performance_client
+                    or receipt.get('systems_config') != performance_receipt.get('systems_config')):
+                evidence['reason'] = 'debug pass does not match measured pass'
+                return evidence
+            expected_overrides = {'cli:--systems-config': str(systems_config),
+                                  'env:LUMIN_GL_DEBUG': '1'}
+            if data.get('debug_overrides') != {'active': expected_overrides,
+                                               'declared': expected_overrides}:
+                evidence['reason'] = 'debug overrides missing or mismatched'
+                return evidence
+            traversal = (debug_command[debug_command.index('--traversal') + 1]
+                         if '--traversal' in debug_command else None)
+            render_contract.validate(data, performance_data['adapter']['renderer'],
+                                     performance_data['adapter']['vendor'], traversal=traversal)
+            capture_sha256 = receipt['capture_sha256']
+            evidence['capture_sha256'] = capture_sha256
+        # Feed the checker these same bounded bytes, rather than reopening the
+        # mutable pathname in another process. Retained bytes are checked below.
+        log_bytes = read_host_bytes(log)
+        log_sha256 = hashlib.sha256(log_bytes).hexdigest()
+        evidence['log_sha256'] = log_sha256
+        checker = Path(__file__).with_name('check_gl_debug_log.py').resolve()
+        with verdict_path.open('wb') as output:
+            checked = subprocess.run([sys.executable, '-I', '-B', str(checker), '--stdin'],
+                                     cwd=work, env=debug_environment, stdout=output,
+                                     stderr=subprocess.STDOUT, timeout=CHECKER_TIMEOUT_SECONDS,
+                                     input=log_bytes, check=False)
+        evidence['verdict'] = debug_json(verdict_path)
+        evidence['verified'] = (
+            checked.returncode == 0 and debug_sha256(log) == log_sha256
+            and capture_file_sha256(retained) == capture_sha256)
+        if not gl_debug_passes(evidence, performance_client):
+            evidence['reason'] = 'debug checker did not produce verified passing evidence'
+            evidence['verified'] = False
+    except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError,
+            KeyError, TypeError) as error:
+        evidence['reason'] = f'debug evidence failed: {error}'
+    return evidence
+
+
 def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_seconds,
              environment, checker_canonical, matrix_canonical, build_manifest, runtime_root):
     state, reason = matrix_lib.readiness(cell, root)
@@ -642,16 +779,19 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
     artifact = cells_dir / f'{cell_id}.json'
     client_evidence = None
     traversal_evidence = None
+    gl_debug = None
 
     def record(state, reason, artifact, verdict=None):
         return finish(cell, state, reason, artifact, verdict,
                       checker_canonical=checker_canonical, out_dir=out_dir,
                       matrix_canonical=matrix_canonical, client_evidence=client_evidence,
-                      traversal_evidence=traversal_evidence)
+                      traversal_evidence=traversal_evidence, gl_debug=gl_debug)
 
     verdict_path = cells_dir / f'{cell_id}.verdict.json'
     for previous in (artifact, verdict_path, cells_dir / f'{cell_id}.artifact.json',
-                     cells_dir / f'{cell_id}.process.json'):
+                     cells_dir / f'{cell_id}.process.json',
+                     *(cells_dir / f'{cell_id}.debug{suffix}' for suffix in
+                       ('.log', '.artifact.json', '.process.json', '.verdict.json'))):
         set_aside(previous)
     if state != 'ready':
         return record('unevaluated', reason, artifact)
@@ -703,7 +843,7 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
             ownership = capture_ownership(receipt, retained, capture, out_dir)
             if ownership is None:
                 capture_sha256 = receipt['capture_sha256']
-                payload = retained.read_bytes()
+                payload = read_capture_bytes(retained)
                 if hashlib.sha256(payload).hexdigest() != capture_sha256:
                     ownership = 'capture evidence: retained hash mismatch'
                 else:
@@ -714,6 +854,8 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
         receipt = read_json_object(cells_dir / f'{cell_id}.process.json')
         client_evidence = None if receipt is None else receipt.get('client')
         return record('process_failed', 'timed_out', artifact)
+    except UsageError as error:
+        return record('process_failed', str(error), artifact)
     except OSError as error:
         receipt = read_json_object(cells_dir / f'{cell_id}.process.json')
         client_evidence = None if receipt is None else receipt.get('client')
@@ -726,7 +868,7 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
         return record('process_failed', ownership or 'no-artifact', artifact)
     if ownership is not None:
         return record('process_failed', ownership, artifact)
-    data = read_json_object(artifact)
+    data = read_json_object(artifact, capture=True)
     field = None if data is None else binding_mismatch(cell, data)
     if field is not None:
         return record('invalid', f'capture-does-not-match-cell: {field}', artifact)
@@ -763,6 +905,29 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
         reason = verdict_reason(verdict, data or {}, cell)
         if reason is not None:
             return record('invalid', reason, artifact, verdict)
+        if client_evidence.get('native_build') is True:
+            gl_debug = run_gl_debug_pass(
+                cell, command, client=client, build_manifest=build_manifest,
+                systems_config=systems_config, runtime_root=runtime_root, out_dir=out_dir,
+                work=work, environment=environment, timeout_seconds=timeout_seconds,
+                performance_data=data, performance_client=client_evidence,
+                performance_receipt=receipt)
+            try:
+                unchanged = (runner.file_sha256(artifact) == capture_sha256
+                             and runner.file_sha256(retained) == capture_sha256)
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                return record('invalid', 'capture evidence: debug pass changed measured bytes',
+                              artifact, verdict)
+        if traversal_path is not None:
+            try:
+                traversal_evidence['verified'] = (
+                    runner.file_sha256(traversal_path) == traversal_evidence['sha256'])
+            except OSError:
+                traversal_evidence['verified'] = False
+            if not traversal_evidence['verified']:
+                return record('invalid', 'traversal changed during debug evidence pass', artifact, verdict)
         return record('pass', None, artifact, verdict)
     if checked.returncode == FLOOR_FAILURE_EXIT:
         return record('fail', 'floor', artifact, verdict)
@@ -856,7 +1021,8 @@ def aggregate(matrix, results, *, partial, declared_refresh, matrix_provenance=N
                     'adapter': result['adapter'], 'artifact': result['artifact'],
                     'verdict': result['verdict'], 'checker_canonical': result['checker_canonical'],
                     'matrix_canonical': result.get('matrix_canonical', False),
-                    'client': result.get('client'), 'traversal': result.get('traversal')}
+                    'client': result.get('client'), 'traversal': result.get('traversal'),
+                    'gl_debug': result.get('gl_debug')}
                for result in results],
         'summary': summary, 'adapter_identical': adapter_identical,
         'adapter_matches_qualified': adapter_matches, 'harness_complete': harness_complete,

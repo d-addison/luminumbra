@@ -356,6 +356,41 @@ TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
     std::filesystem::remove_all(directory, remove_error);
 }
 
+TEST(SystemConfig, FileReadersRefuseRawNulWithoutChangingExplicitSnapshot) {
+    const auto directory =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("lumin-systemconfig-nul-");
+    const auto path = directory / "override.json";
+    SystemConfig config =
+        SystemConfig::FromJsonString(R"({"sim":{"water_high_res":{"enabled":false}}})");
+    const auto identity = ConfigIdentity(config);
+    const std::string valid = R"({"sim":{"plant_growth":{"enabled":false}}})";
+    for (const auto position : {std::size_t{0}, valid.size() / 2, valid.size()}) {
+        auto bytes = valid;
+        bytes.insert(position, 1, '\0');
+        bytes += "garbage";
+        {
+            std::ofstream file(path, std::ios::binary);
+            ASSERT_TRUE(file.good());
+            file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            file.close();
+            ASSERT_FALSE(file.fail());
+        }
+        std::string error;
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(path, config, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(ConfigIdentity(config), identity);
+        EXPECT_TRUE(SystemConfig::LoadFromFile(path).enabled(SysKey::SimPlantGrowth));
+        EXPECT_TRUE(SystemConfig::FromJsonString(bytes).enabled(SysKey::SimPlantGrowth));
+        config.user().frame_cap = 60;
+        config.OverlayUserFromJsonString(bytes);
+        EXPECT_EQ(config.user().frame_cap, 60);
+        EXPECT_EQ(config.settings_load_report().state,
+                  luminumbra::core::SettingsLoadState::Recovery);
+    }
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+}
+
 TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
     for (const char* text : {"",
                              "{}",

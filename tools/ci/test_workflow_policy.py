@@ -169,7 +169,7 @@ class WorkflowShellTests(unittest.TestCase):
 
     def test_overrides_require_absolute_regular_executable_files_without_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve(strict=True)
             for candidate in ("", "relative/bash", str(root / "missing"), str(root)):
                 with self.subTest(candidate=candidate), patch.object(shell, "_absolute_which") as which, patch.object(
                         shell.subprocess, "run") as run, self.assertRaises(RuntimeError):
@@ -207,7 +207,7 @@ class WorkflowShellTests(unittest.TestCase):
 
     def test_resolved_bash_executes_literal_arguments_cwd_crlf_and_exit_status(self):
         with tempfile.TemporaryDirectory(prefix="shell contract ") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve(strict=True)
             (root / "input with spaces.txt").write_bytes(b"first\r\nsecond\r\n")
             script = ('[[ "$1" == \'C:/directory with spaces/file\' && "$2" == \'a "quote"\' && -z "$3" ]]\n'
                       '[[ "$CONTRACT_VALUE" == kept ]]\n'
@@ -944,7 +944,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         with patch.object(shutil, "which", return_value=None):
             self.assertEqual(bash_executable(), "bash")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve(strict=True)
             with patch.object(shutil, "which", return_value=str(root / "cmd/git.exe")):
                 self.assertEqual(bash_executable(), "bash")
                 bash = root / "bin/bash.exe"
@@ -1341,8 +1341,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", upload)
         diagnostics = shard_steps["Upload sanitizer evidence"]
         self.assertEqual(value(diagnostics, "name", 10),
-                         "asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}")
-        self.assertEqual(value(diagnostics, "overwrite", 10), "true")
+                         "asan-test-evidence-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
+        self.assertIsNone(value(diagnostics, "overwrite", 10))
         self.assertEqual(value(shard_steps["Bind manual qualification shard evidence"], "QUALIFICATION_PRODUCERS", 10),
                          "'{\"identity\":\"${{ steps.identity.outcome }}\",\"configure\":\"${{ steps.configure.outcome }}\",\"build\":\"${{ steps.build.outcome }}\",\"tests\":\"${{ steps.tests.outcome }}\"}'")
         for name in ("identity", "configure", "build", "tests"):
@@ -1499,7 +1499,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertNotIn("git fetch", script)
             for event, base_ref, outputs, full, repo, head_repo in cases:
                 with self.subTest(workflow=filename, event=event, base_ref=base_ref, outputs=outputs), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
+                    root = Path(directory).resolve(strict=True)
                     fixtures = (
                         'git() { case "$1" in\n'
                         'diff) return 0;;\nshow) cat "$FAKE_BASE_SCRIPT";;\n'
@@ -1703,7 +1703,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for full, owner in (("false", 1), ("true", 0)):
             for missing in (None, "ctest-discovery.json", "netsoak.junit.xml"):
                 with self.subTest(full=full, missing=missing), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
+                    root = Path(directory).resolve(strict=True)
                     (root / "build/release").mkdir(parents=True)
                     source = root / f"build/gcc-shards/shard-{owner}"
                     source.mkdir(parents=True)
@@ -1938,7 +1938,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertNotIn("ctest_shards.py", prepare)
         for omitted in (None, 3):
             with self.subTest(omitted=omitted), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve(strict=True)
                 for name, (attempt, shard) in selected.items():
                     if shard != omitted:
                         source = root / "build/asan-shards" / name

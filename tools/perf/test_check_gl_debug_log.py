@@ -7,6 +7,7 @@ import json
 import os
 import stat
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -60,6 +61,24 @@ class GlDebugLogTest(unittest.TestCase):
         self.assertEqual(document['warning_count'], 1)
         self.assertEqual(document['notification_count'], 1)
         self.assertEqual(document['errors'], [])
+
+    def test_stdin_subprocess_preserves_decoding_refusals_and_bounds(self):
+        for payload, expected in (
+                ((MARKER + INFO).encode(), 0),
+                ((MARKER + BAD_TYPE).encode(), 1),
+                ((MARKER + BAD_SEVERITY).encode(), 1),
+                (MARKER.replace('\n', '\r\n').encode('utf-16'), 0),
+                (b'', 3), (b'no installation\n', 3),
+                (b'\xff\n', 2), (MARKER.encode() + b'\0\n', 2),
+                ((b'x' * 1023 + b'\n') * (checker.MAX_FILE_BYTES // 1024) + b'x', 2)):
+            with self.subTest(size=len(payload), expected=expected):
+                result = subprocess.run([sys.executable, '-I', '-B', checker.__file__, '--stdin'],
+                                        input=payload, capture_output=True, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if len(payload) > checker.MAX_FILE_BYTES:
+                    self.assertIn(b'byte cap', result.stderr)
+                if expected != 2:
+                    self.assertEqual(json.loads(result.stdout)['schema'], checker.SCHEMA)
 
     def test_verified_sources_are_never_reopened_or_closed_by_readers(self):
         path = self.root / 'handle-only'
