@@ -82,13 +82,14 @@
 #include "entt/entity/entity.hpp"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <atomic>
-#include <cmath> // std::floor (energy-layer anchor quantization)
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
 #include <exception>
 #include <functional>
 #include <ios>
+#include <limits>
 #include <map>
 #include <span>
 #include <string>
@@ -177,6 +178,16 @@ void ClampTerrainParams(TerrainGenParams& p) {
 
 float ScentOriginFor(float anchor) {
     return anchor - (static_cast<float>(kScentFieldCells) * kScentCellSize * 0.5f);
+}
+
+int RoundedScentCell(float position, float anchor) {
+    const float cell = (position - ScentOriginFor(anchor)) / kScentCellSize;
+    // Keep the existing nearest-cell rule, but refuse invalid inputs before
+    // lround (whose long result is only 32 bits on Windows) or narrowing to int.
+    if (!std::isfinite(cell) || static_cast<double>(cell) < std::numeric_limits<int>::min() ||
+        static_cast<double>(cell) > std::numeric_limits<int>::max())
+        return -1;
+    return static_cast<int>(std::lround(cell));
 }
 } // namespace
 
@@ -504,10 +515,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // mirroring the weather slot-order rule above. Neither system present
             // -> the -1 sentinel -> the channel's deterministic neutral 0.
             if (m_energyFieldState) {
-                const int stim_cell_x = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-                const int stim_cell_z = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+                const int stim_cell_x = luminumbra::ai::WorldToCell(
+                    m_metadata.spawnPoint.x, 0.0f, Systems::kAetherCellSizeM);
+                const int stim_cell_z = luminumbra::ai::WorldToCell(
+                    m_metadata.spawnPoint.z, 0.0f, Systems::kAetherCellSizeM);
                 stimulus_context.aether_level =
                     static_cast<float>(m_energyFieldState->at_cell(stim_cell_x, stim_cell_z)) /
                     static_cast<float>(luminumbra::fields::kEnergyRawPerUnit);
@@ -823,10 +834,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // block entirely (byte-identical). Deposits are queued by emitters
         // right below; Tick applies them sorted.
         if (m_energyFieldState) {
-            const int anchor_cx =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-            const int anchor_cz =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+            const int anchor_cx = luminumbra::ai::WorldToCell(
+                m_metadata.spawnPoint.x, 0.0f, Systems::kAetherCellSizeM);
+            const int anchor_cz = luminumbra::ai::WorldToCell(
+                m_metadata.spawnPoint.z, 0.0f, Systems::kAetherCellSizeM);
             m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
             // gather this tick's FieldEmitterComponent deposits
             // (id-sorted, two-phase) into the layer before it ticks.
@@ -2353,12 +2364,10 @@ int GameSession::ScentFieldCells() const {
     return kScentFieldCells;
 }
 int GameSession::ScentWorldToCellX(float world_x) const {
-    return static_cast<int>(
-        std::lround((world_x - ScentOriginFor(m_metadata.spawnPoint.x)) / kScentCellSize));
+    return RoundedScentCell(world_x, m_metadata.spawnPoint.x);
 }
 int GameSession::ScentWorldToCellZ(float world_z) const {
-    return static_cast<int>(
-        std::lround((world_z - ScentOriginFor(m_metadata.spawnPoint.z)) / kScentCellSize));
+    return RoundedScentCell(world_z, m_metadata.spawnPoint.z);
 }
 float GameSession::ScentCellToWorldX(int cell_x) const {
     return ScentOriginFor(m_metadata.spawnPoint.x) + static_cast<float>(cell_x) * kScentCellSize;

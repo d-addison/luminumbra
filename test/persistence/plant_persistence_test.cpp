@@ -3,6 +3,11 @@
 // pollination/lifecycle sim truth). Empty roster -> empty snapshot (no-plant save byte-identical).
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <limits>
 #include <string>
@@ -10,6 +15,7 @@
 
 #include <entt/entt.hpp>
 
+#include "luminumbra_common/ai/ScentSteeringSystem.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CropLifecycleComponents.h"
 #include "luminumbra_common/components/DiseaseComponents.h"
@@ -19,6 +25,9 @@
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/IrrigationSystem.h"
+#include "luminumbra_common/systems/SoilNutrientSystem.h"
+#include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 #include "support/UniqueTempPath.h"
@@ -27,7 +36,17 @@
 #include <ios>
 #include <system_error>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include "luminumbra_common/core/FilesystemPath.h"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <winioctl.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -301,6 +320,107 @@ TEST(PlantPersistence, ComponentDomainsAreCheckedBeforeAnyPlantIsAdopted) {
     }
 }
 
+TEST(PlantPersistence, PositionsMustFitThePackedChunkDomainBeforeAndAfterFloatRounding) {
+    entt::registry source;
+    const auto plant = barePlant(source, 1.0f, 3, 500);
+    source.emplace<C::SoilFeederComponent>(plant);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    for (const auto* axis : {"x", "y", "z"}) {
+        const float limit = axis == std::string("y") ? 33554432.0f : 16777216.0f;
+        for (const double coordinate :
+             {-static_cast<double>(limit),
+              static_cast<double>(std::nextafter(limit, 0.0f)),
+              static_cast<double>(limit),
+              static_cast<double>(limit) - 0.01,
+              static_cast<double>(std::nextafter(-limit, -std::numeric_limits<float>::infinity())),
+              static_cast<double>(std::numeric_limits<float>::max()),
+              -static_cast<double>(std::numeric_limits<float>::max())}) {
+            SCOPED_TRACE(axis);
+            SCOPED_TRACE(coordinate);
+            auto snapshot = original;
+            for (auto& component : snapshot.entities.front().components) {
+                if (component.type == "Transform")
+                    component.data[axis] = coordinate;
+            }
+            const bool supported = coordinate >= -static_cast<double>(limit) &&
+                                   coordinate < static_cast<double>(limit) - 0.01;
+            EXPECT_EQ(F::ValidatePlantEntitySnapshot(snapshot), supported);
+            entt::registry target;
+            const auto existing = barePlant(target, 1.0f, 3, 500);
+            target.emplace<C::SoilFeederComponent>(existing);
+            EXPECT_EQ(F::ApplyPlantEntitySnapshot(target, snapshot), supported);
+            if (!supported) {
+                EXPECT_EQ(
+                    E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target)),
+                    expected);
+                EXPECT_EQ(entt::to_integral(target.create()), entt::to_integral(existing) + 1u);
+            }
+        }
+    }
+}
+
+TEST(PlantPersistence, GridCoordinateConversionsRefuseUnrepresentableCells) {
+    const auto maximum = std::numeric_limits<float>::max();
+    const auto infinity = std::numeric_limits<float>::infinity();
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    struct Input {
+        float position;
+        float origin;
+        float cell_size;
+    };
+    for (const auto& input : std::array<Input, 14>{
+             {{maximum, 0.0f, 1.0f},
+              {-maximum, 0.0f, 1.0f},
+              {infinity, 0.0f, 1.0f},
+              {nan, 0.0f, 1.0f},
+              {0.0f, infinity, 1.0f},
+              {0.0f, nan, 1.0f},
+              {1.0f, 0.0f, 0.0f},
+              {1.0f, 0.0f, -1.0f},
+              {1.0f, 0.0f, infinity},
+              {1.0f, 0.0f, nan},
+              {maximum, -maximum, 1.0f},
+              {static_cast<float>(std::numeric_limits<int>::max()), 0.0f, 1.0f},
+              {std::nextafter(static_cast<float>(std::numeric_limits<int>::min()), -infinity),
+               0.0f,
+               1.0f},
+              {1.0f, 0.0f, std::numeric_limits<float>::min()}}}) {
+        int cx = 0;
+        int cz = 0;
+        F::WorldToCell(input.position, 0.0f, input.origin, 0.0f, input.cell_size, cx, cz);
+        EXPECT_EQ(cx, -1);
+        EXPECT_EQ(cz, -1);
+        F::IrrigationWorldToCell(0.0f, input.position, 0.0f, input.origin, input.cell_size, cx, cz);
+        EXPECT_EQ(cx, -1);
+        EXPECT_EQ(cz, -1);
+        EXPECT_EQ(luminumbra::ai::WorldToCell(input.position, input.origin, input.cell_size), -1);
+    }
+    int cx = 0;
+    int cz = 0;
+    F::WorldToCell(-0.5f, 5.9f, 0.0f, 0.0f, 1.0f, cx, cz);
+    EXPECT_EQ(cx, -1);
+    EXPECT_EQ(cz, 5);
+    F::IrrigationWorldToCell(-0.5f, 5.9f, 0.0f, 0.0f, 1.0f, cx, cz);
+    EXPECT_EQ(cx, -1);
+    EXPECT_EQ(cz, 5);
+    EXPECT_EQ(luminumbra::ai::WorldToCell(-0.5f, 0.0f, 1.0f), -1);
+    EXPECT_EQ(luminumbra::ai::WorldToCell(5.9f, 0.0f, 1.0f), 5);
+    const auto minimum = static_cast<float>(std::numeric_limits<int>::min());
+    F::WorldToCell(minimum, minimum, 0.0f, 0.0f, 1.0f, cx, cz);
+    EXPECT_EQ(cx, std::numeric_limits<int>::min());
+    EXPECT_EQ(cz, std::numeric_limits<int>::min());
+    F::IrrigationWorldToCell(minimum, minimum, 0.0f, 0.0f, 1.0f, cx, cz);
+    EXPECT_EQ(cx, std::numeric_limits<int>::min());
+    EXPECT_EQ(cz, std::numeric_limits<int>::min());
+    EXPECT_EQ(luminumbra::ai::WorldToCell(minimum, 0.0f, 1.0f), std::numeric_limits<int>::min());
+    const Luminumbra::world::GameSession session;
+    for (const float value : {maximum, -maximum, infinity, nan}) {
+        EXPECT_EQ(session.ScentWorldToCellX(value), -1);
+        EXPECT_EQ(session.ScentWorldToCellZ(value), -1);
+    }
+}
+
 TEST(PlantPersistence, EveryPlantRequiresAllCoreComponentsBeforeRegistryMutation) {
     entt::registry source;
     barePlant(source, 1.0f, 3, 500);
@@ -337,7 +457,7 @@ TEST(PlantPersistence, RepresentableMaximaAndHistoricalPartialGenomesStillLoad) 
     auto snapshot = F::BuildPlantEntitySnapshot(source);
     for (auto& component : snapshot.entities.front().components) {
         if (component.type == "Transform")
-            component.data["x"] = std::numeric_limits<float>::max();
+            component.data["x"] = std::nextafter(16777216.0f, 0.0f);
         if (component.type == "PlantGenome")
             component.data["genes"] = nlohmann::json::array({0.25f});
         if (component.type == "PlantGrowth") {
@@ -362,6 +482,8 @@ TEST(PlantPersistence, RepresentableMaximaAndHistoricalPartialGenomesStillLoad) 
     const auto restored = *target.view<C::PlantTag>().begin();
     EXPECT_EQ(target.get<C::PlantGrowthComponent>(restored).last_tick,
               std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(target.get<C::TransformComponent>(restored).position.x,
+              std::nextafter(16777216.0f, 0.0f));
     EXPECT_EQ(target.get<C::PlantGenomeComponent>(restored).genes[0], 0.25f);
     EXPECT_EQ(target.get<C::PlantGenomeComponent>(restored).genes[1], 0.0f);
     EXPECT_EQ(target.get<C::PlantGrowthComponent>(restored).stage, C::kPlantStageCount - 1u);
@@ -619,6 +741,320 @@ TEST_F(PlantSaveRecovery, MissingIsCleanButInvalidPathsAndPayloadsPreserveTheOut
         EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
     }
 }
+
+TEST_F(PlantSaveRecovery, MissingParentsAreCleanButNonDirectoryAndLoopingParentsAreRefused) {
+    namespace SS = ::Luminumbra::Persistence;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    auto loaded = original;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(
+        loaded, Directory() / "missing" / "nested", &errors));
+    EXPECT_TRUE(loaded.entities.empty());
+    EXPECT_TRUE(errors.empty());
+    // Also reach the current-directory ancestor when no absolute root is given.
+    const auto relative_missing = Directory().filename() / "missing" / "nested";
+    ASSERT_FALSE(std::filesystem::exists(relative_missing.begin()->native()));
+    loaded = original;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, relative_missing, &errors));
+    EXPECT_TRUE(loaded.entities.empty());
+    EXPECT_TRUE(errors.empty());
+    const auto parent = Directory() / "file-parent";
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(parent, expected));
+    loaded = original;
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, parent, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+#if !defined(_WIN32)
+    const auto loop = Directory() / "loop";
+    std::filesystem::create_symlink(loop, loop);
+    errors.clear();
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, loop, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+#endif
+}
+
+TEST_F(PlantSaveRecovery, PayloadCapAcceptsTheBoundaryAndRefusesOneByteMore) {
+    namespace SS = ::Luminumbra::Persistence;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    std::filesystem::create_directories(path.parent_path());
+    {
+        std::ofstream output(path, std::ios::binary);
+        ASSERT_TRUE(output);
+        output << expected;
+        // Bound temporary storage to 64 KiB; valid JSON whitespace reaches the
+        // real compatibility boundary without a second payload-sized buffer.
+        const std::string padding(std::size_t{64} * 1024, ' ');
+        auto remaining = SS::WorldSaveService::kMaxPlantPayloadBytes - expected.size();
+        while (remaining != 0) {
+            const auto count = std::min<std::uint64_t>(remaining, padding.size());
+            output.write(padding.data(), static_cast<std::streamsize>(count));
+            remaining -= count;
+        }
+        output.close();
+        ASSERT_TRUE(output);
+    }
+    auto loaded = original;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    EXPECT_TRUE(errors.empty());
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::app);
+        output.put(' ');
+        output.close();
+        ASSERT_TRUE(output);
+    }
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("256 MiB"), std::string::npos);
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+}
+
+TEST_F(PlantSaveRecovery, SparseOversizedPayloadIsRefusedBeforeAllocationOnAllLoadPaths) {
+    namespace SS = ::Luminumbra::Persistence;
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, "{}"));
+#if defined(_WIN32)
+    const HANDLE file = ::CreateFileW(path.c_str(),
+                                      GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL,
+                                      nullptr);
+    ASSERT_NE(file, INVALID_HANDLE_VALUE);
+    DWORD returned = 0;
+    const bool sparse =
+        ::DeviceIoControl(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr) != 0;
+    const bool closed = ::CloseHandle(file) != 0;
+    ASSERT_TRUE(sparse);
+    ASSERT_TRUE(closed);
+#endif
+    std::filesystem::resize_file(path, SS::WorldSaveService::kMaxPlantPayloadBytes + 1);
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    auto loaded = original;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("256 MiB"), std::string::npos);
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded),
+              E::SerializeEntityRegistrySnapshotJson(original));
+    Luminumbra::WorldStreamingState chunks;
+    errors.clear();
+    EXPECT_FALSE(SS::WorldSaveService{}.load_world(chunks, Directory(), errors));
+    EXPECT_FALSE(errors.empty());
+    errors.clear();
+    EXPECT_FALSE(SS::WorldSaveService::validate_save(Directory(), &errors));
+    EXPECT_FALSE(errors.empty());
+}
+
+#if defined(_WIN32)
+TEST_F(PlantSaveRecovery, WindowsDriveExtendedAndShortSpellingsReadTheSameRoster) {
+    namespace SS = ::Luminumbra::Persistence;
+    namespace FS = ::Luminumbra::Filesystem;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(original, Directory()));
+    const auto absolute = FS::AbsolutePath(Directory());
+    const auto extended = FS::IsWindowsUncPath(absolute)
+                              ? std::filesystem::path(LR"(\\?\UNC\)" + absolute.native().substr(2))
+                              : std::filesystem::path(LR"(\\?\)" + absolute.native());
+    // Filesystems with short-name generation disabled return the long spelling;
+    // both forms must remain usable, including on such runners.
+    std::array<wchar_t, 32768> short_name{};
+    const DWORD length = ::GetShortPathNameW(
+        absolute.c_str(), short_name.data(), static_cast<DWORD>(short_name.size()));
+    ASSERT_GT(length, 0u);
+    ASSERT_LT(length, short_name.size());
+    for (const auto& spelling : {absolute, extended, std::filesystem::path(short_name.data())}) {
+        E::EntityRegistrySnapshot loaded;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, spelling, &errors));
+        EXPECT_TRUE(errors.empty());
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    }
+}
+
+TEST_F(PlantSaveRecovery, WindowsLockedPayloadIsARefusalAndPreservesOutput) {
+    namespace SS = ::Luminumbra::Persistence;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(original, Directory()));
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    const HANDLE file = ::CreateFileW(path.c_str(),
+                                      GENERIC_READ | GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL,
+                                      nullptr);
+    ASSERT_NE(file, INVALID_HANDLE_VALUE);
+    OVERLAPPED range{};
+    const bool locked =
+        ::LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &range) !=
+        0;
+    if (!locked) {
+        ::CloseHandle(file);
+        FAIL() << "cannot lock plant payload";
+    }
+    auto loaded = original;
+    std::vector<std::string> errors;
+    const bool read = SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors);
+    const bool unlocked = ::UnlockFileEx(file, 0, 1, 0, &range) != 0;
+    const bool closed = ::CloseHandle(file) != 0;
+    EXPECT_FALSE(read);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    EXPECT_TRUE(unlocked);
+    EXPECT_TRUE(closed);
+}
+
+TEST_F(PlantSaveRecovery, WindowsStreamReadersReportInitialAndPartialReadFailures) {
+    namespace SS = ::Luminumbra::Persistence;
+    const auto path = Directory() / "world_info.json";
+    std::string bytes(std::size_t{128} * 1024, ' ');
+    bytes.replace(0, 2, "{}");
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, bytes));
+    for (const DWORD offset : {0u, 64u * 1024u}) {
+        const HANDLE file = ::CreateFileW(path.c_str(),
+                                          GENERIC_READ | GENERIC_WRITE,
+                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                          nullptr,
+                                          OPEN_EXISTING,
+                                          FILE_ATTRIBUTE_NORMAL,
+                                          nullptr);
+        ASSERT_NE(file, INVALID_HANDLE_VALUE);
+        OVERLAPPED range{};
+        range.Offset = offset;
+        const bool locked =
+            ::LockFileEx(
+                file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &range) != 0;
+        if (!locked) {
+            ::CloseHandle(file);
+            FAIL() << "cannot lock metadata payload";
+        }
+        Luminumbra::world::WorldClock clock;
+        bool required = false;
+        std::vector<std::string> errors;
+        const bool read =
+            SS::WorldSaveService::read_clock_metadata(Directory(), clock, required, &errors);
+        const bool unlocked = ::UnlockFileEx(file, 0, 1, 0, &range) != 0;
+        const bool closed = ::CloseHandle(file) != 0;
+        EXPECT_FALSE(read);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_TRUE(unlocked);
+        EXPECT_TRUE(closed);
+    }
+}
+
+TEST_F(PlantSaveRecovery, WindowsInvalidNamesCannotNormalizeIntoCleanAbsenceOrAnotherRoster) {
+    namespace SS = ::Luminumbra::Persistence;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    // The ordinary spelling exists, so dot/space normalization would read a
+    // different roster successfully even if all Win32 open errors were refused.
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(original, Directory() / "alias"));
+    for (const auto& name : {std::string(512, 'x'),
+                             std::string("alias."),
+                             std::string("alias "),
+                             std::string("NUL"),
+                             std::string("con.txt"),
+                             std::string("COM1"),
+                             std::string("LPT9.txt")}) {
+        SCOPED_TRACE(name);
+        auto loaded = original;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(
+            SS::WorldSaveService::load_plant_entities(loaded, Directory() / name, &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    }
+}
+
+TEST_F(PlantSaveRecovery, WindowsReparseEntriesAreRefusedIncludingWithoutSymlinkPrivilege) {
+    namespace SS = ::Luminumbra::Persistence;
+    namespace fs = std::filesystem;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    fs::create_directories(path.parent_path());
+    const auto target = Directory() / "valid-roster.json";
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(target, expected));
+    // Developer-mode file symlinks need no elevation. If that mode is unavailable,
+    // assert the denied operation and exercise a mount-point reparse entry below.
+    const bool linked = ::CreateSymbolicLinkW(path.c_str(),
+                                              target.c_str(),
+                                              SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != 0;
+    if (!linked) {
+        EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_PRIVILEGE_NOT_HELD));
+        fs::create_directory(path);
+        const auto junction_target = L"\\??\\" + fs::absolute(Directory()).native();
+        struct MountPointData {
+            DWORD tag;
+            WORD data_length;
+            WORD reserved;
+            WORD substitute_offset;
+            WORD substitute_length;
+            WORD print_offset;
+            WORD print_length;
+            // The complete reparse buffer is bounded to the Win32 16 KiB limit.
+            std::array<wchar_t, (MAXIMUM_REPARSE_DATA_BUFFER_SIZE - 16) / sizeof(wchar_t)> names;
+        } data{};
+        ASSERT_LT(junction_target.size() + 2, data.names.size());
+        data.tag = IO_REPARSE_TAG_MOUNT_POINT;
+        data.substitute_length = static_cast<WORD>(junction_target.size() * sizeof(wchar_t));
+        data.print_offset = static_cast<WORD>(data.substitute_length + sizeof(wchar_t));
+        data.data_length = static_cast<WORD>(8 + data.print_offset + sizeof(wchar_t));
+        std::copy(junction_target.begin(), junction_target.end(), data.names.begin());
+        const HANDLE directory =
+            ::CreateFileW(path.c_str(),
+                          GENERIC_WRITE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                          nullptr);
+        ASSERT_NE(directory, INVALID_HANDLE_VALUE);
+        DWORD returned = 0;
+        const bool installed = ::DeviceIoControl(directory,
+                                                 FSCTL_SET_REPARSE_POINT,
+                                                 &data,
+                                                 static_cast<DWORD>(data.data_length) + 8,
+                                                 nullptr,
+                                                 0,
+                                                 &returned,
+                                                 nullptr) != 0;
+        const bool closed = ::CloseHandle(directory) != 0;
+        ASSERT_TRUE(installed);
+        ASSERT_TRUE(closed);
+    }
+    EXPECT_NE(::GetFileAttributesW(path.c_str()) & FILE_ATTRIBUTE_REPARSE_POINT, 0u);
+    auto loaded = original;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    fs::remove(path);
+}
+#endif
 
 #if !defined(_WIN32)
 TEST_F(PlantSaveRecovery, SymlinksIncludingDeviceAndDanglingTargetsAreRefusedBeforeReading) {

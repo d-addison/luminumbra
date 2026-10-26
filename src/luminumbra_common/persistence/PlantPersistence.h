@@ -32,10 +32,29 @@
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../ecs/EntitySnapshot.h"
+#include "../world/Chunk.h"
 
 namespace luminumbra::foliage {
 
 namespace pp_detail {
+// Packed chunks span [-2^20,2^20) in X/Z and [-2^21,2^21) in Y.
+// Chunk width/height convert those ranges to simulation coordinates. These
+// limits are exclusive at the positive end and inclusive at the negative end.
+inline constexpr float kPlantHorizontalPositionLimit =
+    static_cast<float>(::Luminumbra::Chunk::kPackedMaxXz + 1) * ::Luminumbra::CHUNK_SIZE_X;
+inline constexpr float kPlantVerticalPositionLimit =
+    static_cast<float>(::Luminumbra::Chunk::kPackedMaxY + 1) * ::Luminumbra::CHUNK_SIZE_Y;
+static_assert(::Luminumbra::CHUNK_SIZE_X == ::Luminumbra::CHUNK_SIZE_Z);
+
+inline bool ValidPosition(const nlohmann::json& value, float limit) {
+    if (!value.is_number())
+        return false;
+    const double number = value.get<double>();
+    // Check the adopted float too: a double just below the upper end can round
+    // to the unsupported boundary during reconstruction.
+    return std::isfinite(number) && number >= -limit && number < limit &&
+           static_cast<float>(number) < limit;
+}
 inline nlohmann::json
 GenesToJson(const std::array<float, ::Luminumbra::Components::kPlantGeneCount>& g) {
     nlohmann::json a = nlohmann::json::array();
@@ -85,9 +104,11 @@ inline bool ValidComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& com
     namespace C = ::Luminumbra::Components;
     const auto& data = component.data;
     const auto& type = component.type;
-    if (type == "Transform")
-        return FitsNumber<float>(data.at("x")) && FitsNumber<float>(data.at("y")) &&
-               FitsNumber<float>(data.at("z"));
+    if (type == "Transform") {
+        return ValidPosition(data.at("x"), kPlantHorizontalPositionLimit) &&
+               ValidPosition(data.at("y"), kPlantVerticalPositionLimit) &&
+               ValidPosition(data.at("z"), kPlantHorizontalPositionLimit);
+    }
     if (type == "PlantGenome")
         return ValidGenes(data.at("genes"));
     if (type == "PlantGrowth")

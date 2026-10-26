@@ -581,6 +581,42 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)",
                       session)
 
+    def test_plant_admission_bounds_allocation_and_keeps_windows_replacement_possible(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        admission = source.split("class PlantInputFile {", 1)[1].split(
+            "bool ReadAmbientAnchor(", 1)[0]
+        self.assertIn("size > WorldSaveService::kMaxPlantPayloadBytes", admission)
+        self.assertLess(admission.index("size > WorldSaveService::kMaxPlantPayloadBytes"),
+                        admission.index("bytes.resize("))
+        self.assertIn("FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE", admission)
+        self.assertIn("ValidPlantPathSpelling(path)", admission)
+        self.assertIn("error == ERROR_PATH_NOT_FOUND && MissingPlantParent(path)", admission)
+        reader = source.split("bool WorldSaveService::load_plant_entities(", 1)[1].split(
+            "std::filesystem::path WorldSaveService::active_regions_path(", 1)[0]
+        for exception in ("std::bad_alloc", "std::length_error"):
+            self.assertIn("catch (const " + exception + "&", reader)
+        writer = self.function(source, "save_plant_entities", "WorldSaveService::")
+        self.assertLess(writer.index("bytes.size() > kMaxPlantPayloadBytes"),
+                        writer.index("ReclaimAbandonedStaging("))
+        self.assertLess(writer.index("bytes.size() > kMaxPlantPayloadBytes"),
+                        writer.index("WriteFileDurably("))
+        # Include the stream readers as well as explicit attribute/plant handles.
+        windows_stream = source.split("class SharedSaveInputBuffer", 1)[1].split(
+            "bool ValidPlantPathSpelling(", 1)[0]
+        self.assertIn("FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE", windows_stream)
+        self.assertNotRegex(source, r"std::ifstream\s+input\s*\(")
+        self.assertEqual(source.count("SharedSaveInputStream input("), 6)
+        for caller in ("read_clock_metadata", "load_active_regions",
+                       "rename_file_durably", "load_world"):
+            self.assertIn("SharedSaveInputStream input(",
+                          self.function(source, caller, "WorldSaveService::"))
+
+    def test_session_energy_coordinates_use_the_guarded_cell_conversion(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        self.assertNotIn("std::floor(m_metadata.spawnPoint.", source)
+        self.assertEqual(source.count("m_metadata.spawnPoint.x, 0.0f, Systems::kAetherCellSizeM"), 2)
+        self.assertEqual(source.count("m_metadata.spawnPoint.z, 0.0f, Systems::kAetherCellSizeM"), 2)
+
     def test_operation_refusal_cannot_change_current_session_usability(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
         header = read_source("src/luminumbra_common/world/GameSession.h")

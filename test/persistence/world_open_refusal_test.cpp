@@ -63,6 +63,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winioctl.h>
 #endif
 
 namespace {
@@ -2575,6 +2576,45 @@ void WorldOpenRefusal::CheckLegacyFullSnapshotRefusalAndRecovery() {
     EXPECT_EQ(retained.spawnPoint, metadata.spawnPoint);
     EXPECT_EQ(callback_count, 1u);
     runner.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, OversizedPlantsRefuseLiveSnapshotLoadAndCatalogWithoutChangingState) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    const auto plant_hash = session.ComputePlantSubHash();
+    const auto world_system = session.GetWorldSystem();
+    const auto streamed = world_system->snapshot_streamed_chunks();
+    const auto path = WorldSaveService::plant_entities_path(save);
+    ASSERT_NO_FATAL_FAILURE(Write(path, "{}"));
+#if defined(_WIN32)
+    const HANDLE file = ::CreateFileW(path.c_str(),
+                                      GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL,
+                                      nullptr);
+    ASSERT_NE(file, INVALID_HANDLE_VALUE);
+    DWORD returned = 0;
+    const bool sparse =
+        ::DeviceIoControl(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr) != 0;
+    const bool closed = ::CloseHandle(file) != 0;
+    ASSERT_TRUE(sparse);
+    ASSERT_TRUE(closed);
+#endif
+    fs::resize_file(path, WorldSaveService::kMaxPlantPayloadBytes + 1);
+    EXPECT_FALSE(session.LoadWorldStateFrom(save));
+    EXPECT_NE(session.GetWorldOpenError().find("256 MiB"), std::string::npos);
+    EXPECT_EQ(session.ComputePlantSubHash(), plant_hash);
+    EXPECT_EQ(session.GetWorldSystem(), world_system);
+    EXPECT_EQ(world_system->snapshot_streamed_chunks(), streamed);
+    const auto catalog = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_NE(catalog.error.find("256 MiB"), std::string::npos);
+    EXPECT_EQ(fs::file_size(path), WorldSaveService::kMaxPlantPayloadBytes + 1);
+    ASSERT_TRUE(fs::remove(path));
+    EXPECT_TRUE(session.SaveWorld()) << session.GetWorldOpenError();
 }
 
 TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {

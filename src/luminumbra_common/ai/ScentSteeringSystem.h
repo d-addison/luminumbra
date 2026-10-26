@@ -16,6 +16,8 @@
 // canonical headless roster carries none).
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include "entt/entt.hpp"
@@ -36,6 +38,11 @@ struct ScentSteeringStats {
 // coords map correctly — unlike a plain truncating cast).
 inline int WorldToCell(float world, float origin, float cell_size) {
     const float v = (world - origin) / cell_size;
+    // An invalid coordinate is outside every scent grid, never a narrowing cast.
+    if (!(cell_size > 0.0f) || !std::isfinite(cell_size) || !std::isfinite(v) ||
+        static_cast<double>(v) < std::numeric_limits<int>::min() ||
+        static_cast<double>(v) > std::numeric_limits<int>::max())
+        return -1;
     int c = static_cast<int>(v);
     if (v < static_cast<float>(c))
         --c;
