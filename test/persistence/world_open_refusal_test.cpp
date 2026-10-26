@@ -14,6 +14,8 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/persistence/SavedEnergyInput.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
@@ -2674,6 +2676,135 @@ TEST_F(WorldOpenRefusal, DirectoryWatchWildcardAndMissingDirectoryRemainSafe) {
     fs::remove_all(ui);
     std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     EXPECT_NO_THROW(reload.Update());
+}
+
+TEST_F(WorldOpenRefusal, AllEnergyOpenPathsRefuseWithoutAdoptingOrWriting) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    session.SetAetherStateEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Live world", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save));
+    const auto loaded_count = session.GetLastLoadedChunkCount();
+    ASSERT_EQ(loaded_count, 1u);
+    session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, false));
+    const PendingSnapshotState pending(session);
+    std::string too_many_pages = "EFS1 2 8\n";
+    for (std::size_t page = 0; page <= luminumbra::fields::kEnergyReadPages; ++page)
+        too_many_pages += "P " + std::to_string(page) + " 0 0:1\n";
+    for (const auto& invalid :
+         {std::string("EFS1 17 8\n"), too_many_pages, std::string("EFS1 2 8\nP 0 0 0:1junk\n")}) {
+        Write(save / "aether_state.efs", invalid);
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(session.LoadWorld("fixture"));
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), loaded_count);
+        EXPECT_FALSE(session.LoadWorldFrom("fixture", root));
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), loaded_count);
+        EXPECT_FALSE(session.LoadWorldStateFrom(save));
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), loaded_count);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+    Write(save / "aether_state.efs", "EFS1 16 8\nP 0 0 4095:65535\n");
+    EXPECT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetEnergyFieldState()->channels(), 16);
+}
+
+TEST_F(WorldOpenRefusal, OversizedEnergyFileIsRefusedBeforeBufferingAndPartialHeaderIsInvalid) {
+    const auto path = save / "aether_state.efs";
+    Write(path, "EFS1 2 8\n");
+    fs::resize_file(path, luminumbra::fields::kEnergyReadRecordBytes + 1);
+    {
+        const Persistence::SavedInputFile input(path);
+        std::string record = "unchanged";
+        EXPECT_FALSE(Persistence::ReadSavedEnergy(input, record));
+        EXPECT_EQ(record, "unchanged");
+    }
+    for (const auto* malformed : {"EFS1 2", "EFS1 2 8\nP 0 0 0:1junk\n"}) {
+        Write(path, malformed);
+        const Persistence::SavedInputFile partial(path);
+        std::string record = "unchanged";
+        EXPECT_FALSE(Persistence::ReadSavedEnergy(partial, record));
+        EXPECT_EQ(record, "unchanged");
+    }
+}
+
+TEST_F(WorldOpenRefusal, AdmissionWordsInPathsDoNotReclassifyCorruptRegionRefusals) {
+    const auto snapshot = root / "oversized compatibility limit";
+    fs::copy(save, snapshot, fs::copy_options::recursive);
+    Write(WorldSaveService::region_file_path(snapshot, 0, 0), std::string("BAD!\2\0\0\0", 8));
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetAetherStateEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Live world", "1337", "default"));
+    session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, false));
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(session.LoadWorldStateFrom(snapshot));
+    EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_FALSE(session.SaveWorldStateTo(save));
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, EnergyWriterCapRefusesBeforeAnySiblingWriterOrDirtyAcknowledgement) {
+    const auto config = SnapshotRunnerConfig(RootString(), false);
+    Server::ServerWorldRunner runner(config);
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, false));
+    auto* session = runner.Session();
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+    std::string record = "EFS1 2 8\n";
+    for (std::size_t page = 0; page <= luminumbra::fields::kEnergyWritePages; ++page)
+        record += "P " + std::to_string(page) + " 0 0:1\n";
+    ASSERT_TRUE(session->GetEnergyFieldState()->DeserializeRecord(record, 0));
+    const PendingSnapshotState pending(*session);
+    const auto before = DiskBytes(root);
+    for (const bool full : {false, true}) {
+        EXPECT_FALSE(session->SaveWorldStateTo(session->GetWorldSaveDir(), nullptr, full));
+        pending.ExpectUnchanged(*session, *chunk);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, CatalogKeepsItsOneMiBLimitAndTextLimitsAreInclusive) {
+    const auto original = nlohmann::json::parse(Read(save / "world_info.json"));
+    auto metadata = original;
+    metadata["name"] = std::string(Persistence::SavedInputLimits::kWorldNameBytes, 'x');
+    metadata["seed"] = std::string(Persistence::SavedInputLimits::kWorldSeedBytes, '7');
+    auto bytes = metadata.dump();
+    bytes.resize(Persistence::SavedInputLimits::kCatalogMetadataBytes, ' ');
+    Write(save / "world_info.json", bytes);
+    EXPECT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    bytes += ' ';
+    Write(save / "world_info.json", bytes);
+    EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    for (const auto* key : {"name", "seed"}) {
+        metadata = original;
+        metadata[key] = std::string(Persistence::SavedInputLimits::kWorldNameBytes + 1, 'x');
+        Write(save / "world_info.json", metadata.dump());
+        EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    }
+}
+
+TEST_F(WorldOpenRefusal, MetadataTextWriterRefusesBeforeWorldCreationChangesAnything) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateTransientWorld("Live world", "1337", "default"));
+    const auto before = DiskBytes(root);
+    const auto old_name = session.GetMetadata().name;
+    const std::string excessive(Persistence::SavedInputLimits::kWorldNameBytes + 1, 'x');
+    EXPECT_FALSE(session.CreateWorld(excessive, "1337", "default"));
+    EXPECT_FALSE(session.CreateWorld("Valid", excessive, "default"));
+    EXPECT_EQ(session.GetMetadata().name, old_name);
+    EXPECT_EQ(DiskBytes(root), before);
 }
 
 } // namespace

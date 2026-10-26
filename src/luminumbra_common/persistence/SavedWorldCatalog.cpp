@@ -1,5 +1,6 @@
 #include "SavedWorldCatalog.h"
 
+#include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
@@ -102,18 +103,17 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         if (!fs::is_directory(save) || fs::is_symlink(save))
             return result;
         const auto metadata_path = save / "world_info.json";
-        if (!fs::is_regular_file(metadata_path))
+        nlohmann::json json;
+        bool missing = false;
+        const bool readable =
+            ReadSavedJson(metadata_path, SavedInputLimits::kCatalogMetadataBytes, json, missing);
+        if (missing)
             return result;
-        // Bound metadata to 1 MiB before parsing.
-        constexpr std::uintmax_t kMaxMetadataBytes = 1'048'576;
-        if (fs::file_size(metadata_path) > kMaxMetadataBytes) {
-            result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
+        if (!readable || !AdmitMetadata(json)) {
+            result.error = "Corrupt world metadata: unreadable or exceeds the 1 MiB limit or text "
+                           "compatibility limits.";
             return result;
         }
-        std::ifstream input(metadata_path);
-        if (!input)
-            return result;
-        const auto json = nlohmann::json::parse(input);
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.

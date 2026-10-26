@@ -553,13 +553,12 @@ class SessionUsabilitySourceContract(unittest.TestCase):
     def test_every_plant_reader_admits_and_reads_the_same_regular_file_handle(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         reader = self.function(source, "load_plant_entities", "WorldSaveService::")
-        self.assertIn("const PlantInputFile input(path);", reader)
+        self.assertIn("const SavedInputFile input(path);", reader)
         self.assertNotIn("std::filesystem::exists(", reader)
         self.assertNotIn("ifstream", reader)
-        self.assertLess(reader.index("input.read(bytes)"),
+        self.assertLess(reader.index("input.read(bytes, SavedInputLimits::kPlantFileBytes)"),
                         reader.index("LoadEntityRegistrySnapshotJson(bytes,"))
-        admission = source.split("class PlantInputFile {", 1)[1].split(
-            "bool ReadAmbientAnchor(", 1)[0]
+        admission = read_source("src/luminumbra_common/persistence/SavedInputFile.h")
         self.assertIn("O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC", admission)
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS", admission)
         for check in ("::fstat(m_descriptor, &information)", "S_ISREG(information.st_mode)",
@@ -567,10 +566,14 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                       "::GetFileInformationByHandle(m_handle, &information)",
                       "FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY",
                       "::GetFileSizeEx(m_handle, &length)", "size > bytes.max_size()"):
-            self.assertLess(admission.index(check), admission.index("bytes.resize("))
-        self.assertLess(admission.index("bytes.resize("), admission.index("::read(m_descriptor,"))
-        self.assertLess(admission.index("bytes.resize("), admission.index("::ReadFile(m_handle,"))
-        self.assertIn("bytes.size() - offset", admission)
+            self.assertLess(admission.index(check), admission.index("std::string candidate("))
+        self.assertLess(admission.index("std::string candidate("), admission.index("::read(m_descriptor,"))
+        self.assertLess(admission.index("std::string candidate("), admission.index("::ReadFile(m_handle,"))
+        self.assertIn("size - offset", admission)
+        self.assertLess(admission.index("size > maximum"),
+                        admission.index("std::string candidate("))
+        self.assertLess(reader.index("AdmitPlantComponentBytes(bytes)"),
+                        reader.index("LoadEntityRegistrySnapshotJson(bytes,"))
         self.assertIn("::read(m_descriptor, &trailing, 1) == 0", admission)
         self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
                       admission)
@@ -580,6 +583,37 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                                 "ReadWorldStateFrom")
         self.assertIn("WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)",
                       session)
+
+    def test_saved_input_budgets_precede_allocations_and_publication(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        region = source.split("bool ReadRegionFile(", 1)[1].split("bool AdmitRegionWrite(", 1)[0]
+        self.assertLess(region.index("RegionFileLengthAllowed(file_size)"), region.index("std::string manifest("))
+        self.assertLess(region.index("ReadU16(control + 4)"), region.index("std::string manifest("))
+        for budget in ("kRegionRecordBytes", "kRegionCompressedBytes", "kRegionReadWorkBytes",
+                       "kRegionCompressedAggregateBytes"):
+            self.assertLess(region.index(budget), region.index("payload.resize("))
+        energy_file = read_source("src/luminumbra_common/persistence/SavedEnergyInput.h")
+        for budget in ("length > kEnergyReadRecordBytes", "++pages > kEnergyReadPages",
+                       "EnergyFieldState::AdmitRecord(header)"):
+            self.assertLess(energy_file.index(budget), energy_file.index("input.read(candidate,"))
+        energy = read_source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        decode = self.function(energy, "DeserializeRecord", "EnergyFieldState::")
+        self.assertLess(decode.index("AdmitRecord(record)"), decode.index("std::istringstream"))
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        save = self.function(session, "SaveWorldStateToImpl")
+        for admission in ("PrepareWorldMetadataTo(", "prepare_plant_entities(",
+                          "admit_world_write(", "energy_snapshot.SerializeRecord(" ):
+            self.assertLess(save.index(admission), save.index("service.save_world("))
+        metadata = self.function(session, "SaveWorldMetadataTo")
+        self.assertLess(metadata.index("PrepareWorldMetadataTo("), metadata.index("PersistSavedPreset("))
+        reader = self.function(session, "ReadWorldStateFrom")
+        self.assertIn('m_worldOpenError.find("Saved-input admission refused:") == 0', reader)
+        self.assertNotIn('m_worldOpenError.find("oversized")', reader)
+        metadata_admission = self.function(source, "admit_metadata_bytes", "WorldSaveService::")
+        self.assertLess(metadata_admission.index("clock.write_metadata(metadata)"),
+                        metadata_admission.index("BoundedJsonDump("))
+        pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
+        self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
 
     def test_operation_refusal_cannot_change_current_session_usability(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
@@ -594,7 +628,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             if name in ("LoadWorld", "LoadWorldFrom"):
                 self.assertIn("LoadedWorldState loaded;", preparation)
                 preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
-                self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded))", state_read)
+                self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded, true))", state_read)
                 self.assertLess(state_read.index("m_worldUsable = false;"),
                                 state_read.index("m_worldSystem->clear_world("))
             self.assertNotIn("m_worldUsable", preparation)
@@ -606,7 +640,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(metadata_failure.index("m_worldUsable = false;"),
                         metadata_failure.index("return false;"))
         opening = self.function(source, "LoadWorld")
-        self.assertLess(opening.index("ReadWorldStateFrom(worldPath, loaded)"),
+        self.assertLess(opening.index("ReadWorldStateFrom(worldPath, loaded, true)"),
                         opening.index("ResetWorldSystems();"))
         self.assertLess(opening.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         opening.index("m_worldUsable = true;"))
@@ -622,8 +656,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertNotIn("m_saveRootPath =", body)
         self.assertLess(adoption.index("m_speciesTable ="),
                         adoption.index("m_worldUsable = true;"))
-        self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded))", state_read)
-        self.assertLess(body.index("ReadWorldStateFrom(worldPath, loaded)"),
+        self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded, true))", state_read)
+        self.assertLess(body.index("ReadWorldStateFrom(worldPath, loaded, true)"),
                         body.index("ResetWorldSystems();"))
         self.assertLess(adoption.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         adoption.index("m_worldUsable = true;"))
@@ -656,16 +690,20 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         for name in ("LoadWorld", "LoadWorldFrom"):
             self.assertIn("if (!loaded.input_refused)", self.function(source, name))
         reader = self.function(source, "ReadWorldStateFrom")
-        self.assertEqual(reader.count("return false;"), 6)
-        self.assertEqual(reader.count("m_worldOpenError ="), 6)
+        self.assertEqual(reader.count("return false;"), 7)
+        self.assertEqual(reader.count("m_worldOpenError ="), 7)
         for validation in ("service.load_world(", "WorldSaveService::read_clock_metadata(",
                            "WorldSaveService::load_active_regions(", "m_regionSchedulerOverride",
-                           "chunk->sdf_data.size() != kFullSdfLattice"):
+                           "chunk->sdf_data.size() != kFullSdfLattice",
+                           "ReadSavedEnergy(input, record)",
+                           "state.energy->DeserializeRecord(record, tick_base)"):
             self.assertIn(validation, reader)
         self.assertLess(reader.index("load_plant_entities(state.plants"),
                         reader.index("service.load_world("))
         adoption = self.function(source, "AdoptWorldStateFrom")
         self.assertNotIn("load_plant_entities(", adoption)
+        self.assertNotIn("aether_state.efs", adoption)
+        self.assertIn("*m_energyFieldState = std::move(*saved.energy)", adoption)
         self.assertIn("ApplyPlantEntitySnapshot(m_registry, saved.plants)", adoption)
         self.assertNotIn("m_worldUsable", reader)
         self.assertNotIn("m_worldSystem->", reader)

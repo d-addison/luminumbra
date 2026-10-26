@@ -3,6 +3,9 @@
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "PlantPersistence.h"
+#include "SavedInputFile.h"
+#include "SavedInputLimits.h"
+#include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "core/FilesystemPath.h"
 #include "luminumbra/core/Types.h"
@@ -18,6 +21,7 @@
 #include <lz4.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <charconv>
@@ -287,110 +291,6 @@ void AddError(std::vector<std::string>* errors, std::string message) {
         errors->push_back(std::move(message));
     }
 }
-
-// Every plant reader uses this handle for both type/size admission and payload
-// reads. A pathname check followed by an ifstream open can race a leaf replacement.
-class PlantInputFile {
-public:
-    explicit PlantInputFile(const std::filesystem::path& path) {
-#if defined(_WIN32)
-        m_handle = ::CreateFileW(path.c_str(),
-                                 GENERIC_READ,
-                                 FILE_SHARE_READ,
-                                 nullptr,
-                                 OPEN_EXISTING,
-                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                                 nullptr);
-        if (m_handle == INVALID_HANDLE_VALUE) {
-            const DWORD error = ::GetLastError();
-            m_missing = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
-        }
-#else
-        // NONBLOCK prevents a FIFO open from waiting for a writer; NOFOLLOW
-        // refuses even dangling symlinks rather than mistaking them for absence.
-        m_descriptor = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
-        m_missing = m_descriptor < 0 && errno == ENOENT;
-#endif
-    }
-
-    PlantInputFile(const PlantInputFile&) = delete;
-    PlantInputFile& operator=(const PlantInputFile&) = delete;
-
-    ~PlantInputFile() {
-#if defined(_WIN32)
-        if (m_handle != INVALID_HANDLE_VALUE)
-            ::CloseHandle(m_handle);
-#else
-        if (m_descriptor >= 0)
-            ::close(m_descriptor);
-#endif
-    }
-
-    [[nodiscard]] bool missing() const {
-        return m_missing;
-    }
-
-    [[nodiscard]] bool read(std::string& bytes) const {
-        std::uint64_t size = 0;
-#if defined(_WIN32)
-        BY_HANDLE_FILE_INFORMATION information{};
-        LARGE_INTEGER length{};
-        if (m_handle == INVALID_HANDLE_VALUE || ::GetFileType(m_handle) != FILE_TYPE_DISK ||
-            !::GetFileInformationByHandle(m_handle, &information) ||
-            (information.dwFileAttributes &
-             (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
-            !::GetFileSizeEx(m_handle, &length) || length.QuadPart < 0)
-            return false;
-        size = static_cast<std::uint64_t>(length.QuadPart);
-#else
-        struct stat information {};
-        if (m_descriptor < 0 || ::fstat(m_descriptor, &information) != 0 ||
-            !S_ISREG(information.st_mode) || information.st_size < 0)
-            return false;
-        size = static_cast<std::uint64_t>(information.st_size);
-#endif
-        // Allocate only the verified regular file length, checked before narrowing.
-        // Each read is bounded to 64 KiB; growth after admission cannot extend the allocation.
-        if (size > bytes.max_size())
-            return false;
-        bytes.resize(static_cast<std::size_t>(size));
-        constexpr std::size_t kReadBlockSize = std::size_t{64} * 1024;
-        std::size_t offset = 0;
-        while (offset < bytes.size()) {
-            const auto count = std::min(kReadBlockSize, bytes.size() - offset);
-#if defined(_WIN32)
-            DWORD received = 0;
-            if (!::ReadFile(m_handle,
-                            bytes.data() + offset,
-                            static_cast<DWORD>(count),
-                            &received,
-                            nullptr) ||
-                received == 0)
-                return false;
-#else
-            const auto received = ::read(m_descriptor, bytes.data() + offset, count);
-            if (received <= 0)
-                return false;
-#endif
-            offset += static_cast<std::size_t>(received);
-        }
-        char trailing = 0;
-#if defined(_WIN32)
-        DWORD received = 0;
-        return ::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0;
-#else
-        return ::read(m_descriptor, &trailing, 1) == 0;
-#endif
-    }
-
-private:
-#if defined(_WIN32)
-    HANDLE m_handle = INVALID_HANDLE_VALUE;
-#else
-    int m_descriptor = -1;
-#endif
-    bool m_missing = false;
-};
 
 bool ReadAmbientAnchor(const nlohmann::json& metadata,
                        std::optional<Vec3>& anchor,
@@ -943,8 +843,8 @@ private:
 bool CompressPayload(const std::string& payload,
                      RegionRecord& record,
                      std::vector<std::string>* errors) {
-    if (payload.size() > static_cast<std::size_t>(LZ4_MAX_INPUT_SIZE)) {
-        AddError(errors, "region record payload exceeds the LZ4 input limit");
+    if (payload.empty() || payload.size() > SavedInputLimits::kRegionRecordBytes) {
+        AddError(errors, "region record payload exceeds the 64 MiB compatibility limit");
         return false;
     }
     const int bound = LZ4_compressBound(static_cast<int>(payload.size()));
@@ -965,9 +865,10 @@ bool DecompressPayload(const RegionRecord& record,
                        std::string& out_payload,
                        std::vector<std::string>* errors) {
     // Bound allocation before trusting an on-disk length or narrowing to LZ4's int API.
-    constexpr std::uint32_t kMaxRecordBytes = 64u * 1024u * 1024u;
-    if (record.uncompressed_size == 0 || record.uncompressed_size > kMaxRecordBytes ||
-        record.compressed_payload.empty() || record.compressed_payload.size() > kMaxRecordBytes) {
+    if (record.uncompressed_size == 0 ||
+        record.uncompressed_size > SavedInputLimits::kRegionRecordBytes ||
+        record.compressed_payload.empty() ||
+        record.compressed_payload.size() > SavedInputLimits::kRegionCompressedBytes) {
         AddError(errors, "corrupt region record payload length");
         return false;
     }
@@ -986,101 +887,119 @@ bool DecompressPayload(const RegionRecord& record,
 bool ReadRegionFile(const std::filesystem::path& path,
                     std::vector<RegionRecord>& out_records,
                     std::vector<std::string>* errors,
-                    const std::stop_token& stop = {}) {
+                    const std::stop_token& stop = {},
+                    bool missing_allowed = false) {
     LUMIN_PROFILE_ZONE_N("File save read");
-    out_records.clear();
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-        AddError(errors,
-                 "failed to open region file for reading: " +
-                     Filesystem::GenericUtf8PathString(path));
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
         return false;
     }
-    std::ostringstream buffer;
-    char read_buffer[64 * 1024];
-    while (input) {
-        if (stop.stop_requested()) {
-            AddError(errors, "Saved-world validation cancelled.");
-            return false;
-        }
-        input.read(read_buffer, sizeof(read_buffer));
-        buffer.write(read_buffer, input.gcount());
-    }
-    if (input.bad()) {
-        AddError(errors, "failed to read region file: " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    const std::string bytes = buffer.str();
-
-    if (bytes.size() < kRegionFileHeaderSize ||
-        std::memcmp(bytes.data(), kRegionMagic, sizeof(kRegionMagic)) != 0) {
-        AddError(errors,
-                 "region file is missing the LMR1 magic: " +
-                     Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
-    const std::uint16_t version = ReadU16(data + 4);
-    if (version != kRegionVersion) {
-        AddError(errors,
-                 version < kRegionVersion
-                     ? WorldSaveService::kObsoleteWorldMessage
-                     : "unsupported future LMR1 container version " + std::to_string(version) +
-                           ": " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    const std::uint16_t record_count = ReadU16(data + 6);
-
-    const std::size_t manifest_bytes = static_cast<std::size_t>(record_count) * kRecordHeaderSize;
-    if (bytes.size() < kRegionFileHeaderSize + manifest_bytes) {
-        AddError(errors,
-                 "region file record manifest is truncated: " +
-                     Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-
-    std::set<std::pair<u8, u64>> keys;
-    out_records.resize(record_count);
-    std::size_t payload_offset = kRegionFileHeaderSize + manifest_bytes;
-    for (std::uint16_t i = 0; i < record_count; ++i) {
-        if (stop.stop_requested()) {
-            AddError(errors, "Saved-world validation cancelled.");
-            out_records.clear();
-            return false;
-        }
-        const unsigned char* header =
-            data + kRegionFileHeaderSize + static_cast<std::size_t>(i) * kRecordHeaderSize;
-        RegionRecord& record = out_records[i];
-        record.id = ReadU64(header);
-        record.lod_level = header[8];
-        record.flags = header[9];
-        if (record.lod_level > 2 || (record.flags & ~3u) != 0u ||
-            !keys.emplace(record.lod_level, record.id).second) {
-            AddError(errors,
-                     "corrupt or unknown region record header: " +
-                         Filesystem::GenericUtf8PathString(path));
-            out_records.clear();
-            return false;
-        }
-        record.uncompressed_size = ReadU32(header + 10);
-        const std::uint32_t compressed_size = ReadU32(header + 14);
-        if (payload_offset > bytes.size() || compressed_size > bytes.size() - payload_offset) {
-            AddError(errors,
-                     "region file record payload is truncated: " +
-                         Filesystem::GenericUtf8PathString(path));
-            out_records.clear();
-            return false;
-        }
-        record.compressed_payload.assign(bytes.data() + payload_offset, compressed_size);
-        payload_offset += compressed_size;
-    }
-    if (payload_offset != bytes.size()) {
-        AddError(errors,
-                 "region file has trailing bytes after the last record: " +
-                     Filesystem::GenericUtf8PathString(path));
+    const SavedInputFile input(path);
+    if (missing_allowed && input.missing()) {
         out_records.clear();
+        return true;
+    }
+    const auto refuse = [errors, &path](const std::string& reason) {
+        AddError(errors, reason + ": " + Filesystem::GenericUtf8PathString(path));
         return false;
+    };
+    std::uint64_t file_size = 0;
+    std::array<char, kRegionFileHeaderSize> header{};
+    if (!input.length(file_size))
+        return refuse("Saved-input admission refused: unreadable or non-regular region file");
+    if (!SavedInputLimits::RegionFileLengthAllowed(file_size))
+        return refuse(
+            "Saved-input admission refused: region file exceeds byte compatibility limit");
+    if (!input.read_exact(header.data(), header.size()))
+        return refuse("truncated region file header");
+    if (std::memcmp(header.data(), kRegionMagic, sizeof(kRegionMagic)) != 0)
+        return refuse("region file is missing the LMR1 magic");
+    const auto* control = reinterpret_cast<const unsigned char*>(header.data());
+    const auto version = ReadU16(control + 4);
+    if (version != kRegionVersion)
+        return refuse(version < kRegionVersion
+                          ? WorldSaveService::kObsoleteWorldMessage
+                          : "unsupported future LMR1 container version " + std::to_string(version));
+    const auto count = ReadU16(control + 6);
+    const std::size_t manifest_bytes = static_cast<std::size_t>(count) * kRecordHeaderSize;
+    if (file_size < kRegionFileHeaderSize + manifest_bytes)
+        return refuse("region file record manifest is truncated");
+    // The 8-byte control is validated before buffering anything proportional.
+    // u16 count bounds this manifest to 65535 * 18 bytes.
+    std::string manifest(manifest_bytes, '\0');
+    if (!input.read_exact(manifest.data(), manifest.size()))
+        return refuse("region file record manifest is truncated");
+    std::vector<RegionRecord> candidate(count);
+    std::set<std::pair<u8, u64>> keys;
+    std::uint64_t payload_bytes = 0;
+    std::uint64_t work_bytes = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (stop.stop_requested())
+            return refuse("Saved-world validation cancelled.");
+        const auto* entry =
+            reinterpret_cast<const unsigned char*>(manifest.data()) + index * kRecordHeaderSize;
+        auto& record = candidate[index];
+        record.id = ReadU64(entry);
+        record.lod_level = entry[8];
+        record.flags = entry[9];
+        record.uncompressed_size = ReadU32(entry + 10);
+        const auto compressed_size = ReadU32(entry + 14);
+        if (record.lod_level > 2 || (record.flags & ~3u) != 0u ||
+            !keys.emplace(record.lod_level, record.id).second)
+            return refuse("corrupt or unknown region record header");
+        if (record.uncompressed_size == 0 ||
+            record.uncompressed_size > SavedInputLimits::kRegionRecordBytes ||
+            compressed_size == 0 || compressed_size > SavedInputLimits::kRegionCompressedBytes ||
+            record.uncompressed_size > SavedInputLimits::kRegionReadWorkBytes - work_bytes)
+            return refuse("Saved-input admission refused: region record or aggregate exceeds "
+                          "compatibility limit");
+        work_bytes += record.uncompressed_size;
+        if (compressed_size > SavedInputLimits::kRegionCompressedAggregateBytes - payload_bytes)
+            return refuse("Saved-input admission refused: region compressed aggregate exceeds "
+                          "compatibility limit");
+        payload_bytes += compressed_size; // u16 * bounded u32 fits u64.
+    }
+    if (payload_bytes != file_size - kRegionFileHeaderSize - manifest_bytes)
+        return refuse("region file payload lengths do not match file size");
+    // All declared sizes and aggregate decompression work pass before any payload allocation.
+    for (std::size_t index = 0; index < count; ++index) {
+        if (stop.stop_requested())
+            return refuse("Saved-world validation cancelled.");
+        const auto* entry =
+            reinterpret_cast<const unsigned char*>(manifest.data()) + index * kRecordHeaderSize;
+        auto& payload = candidate[index].compressed_payload;
+        payload.resize(ReadU32(entry + 14));
+        if (!input.read_exact(payload.data(), payload.size()))
+            return refuse("truncated region record payload");
+    }
+    if (!input.at_end())
+        return refuse("region file has trailing bytes after the last record");
+    out_records = std::move(candidate);
+    return true;
+}
+
+bool AdmitRegionWrite(const std::vector<RegionRecord>& records, std::vector<std::string>* errors) {
+    if (records.size() > SavedInputLimits::kRegionRecords) {
+        AddError(errors, "region file exceeds the 65535-record compatibility limit");
+        return false;
+    }
+    std::uint64_t work_bytes = 0;
+    std::set<std::pair<u8, u64>> keys;
+    for (const auto& record : records) {
+        if (record.lod_level > 2 || (record.flags & ~3u) != 0u ||
+            !keys.emplace(record.lod_level, record.id).second || record.uncompressed_size == 0 ||
+            record.uncompressed_size > SavedInputLimits::kRegionRecordBytes ||
+            record.compressed_payload.empty() ||
+            record.compressed_payload.size() > SavedInputLimits::kRegionCompressedBytes ||
+            // Preserved records must obey the same LZ4 writer bound as newly
+            // compressed records, keeping aggregate output within its derivation.
+            record.compressed_payload.size() >
+                record.uncompressed_size + record.uncompressed_size / 255u + 16u ||
+            record.uncompressed_size > SavedInputLimits::kRegionWriteWorkBytes - work_bytes) {
+            AddError(errors, "region record or aggregate exceeds writer compatibility limit");
+            return false;
+        }
+        work_bytes += record.uncompressed_size;
     }
     return true;
 }
@@ -1088,12 +1007,8 @@ bool ReadRegionFile(const std::filesystem::path& path,
 bool WriteRegionFile(const std::filesystem::path& path,
                      std::vector<RegionRecord>& records,
                      std::vector<std::string>* errors) {
-    if (records.size() > 0xffffu) {
-        AddError(errors,
-                 "region file exceeds the 65535-record limit: " +
-                     Filesystem::GenericUtf8PathString(path));
+    if (!AdmitRegionWrite(records, errors))
         return false;
-    }
 
     // Deterministic record order: lod_level ascending, then id ascending.
     std::sort(records.begin(), records.end(), [](const RegionRecord& lhs, const RegionRecord& rhs) {
@@ -1235,7 +1150,11 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
                                      {"container", "LMR1"},
                                      {"container_version", kRegionVersion}};
 
-    const std::string bytes = manifest.dump(4) + "\n";
+    std::string bytes;
+    if (!BoundedJsonDump(manifest, SavedInputLimits::kManifestBytes, bytes, 4)) {
+        AddError(errors, "world manifest exceeds 2 MiB compatibility limit");
+        return false;
+    }
     std::filesystem::path temp;
     const auto staging = WorldSaveService::region_staging_path(manifest_path);
     ReclaimAbandonedStaging(staging);
@@ -1272,11 +1191,61 @@ WorldSaveService::region_staging_path(const std::filesystem::path& destination) 
     return destination;
 }
 
+bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
+                                            std::vector<std::string>* errors) {
+    if (bytes.size() > SavedInputLimits::kMetadataBytes) {
+        AddError(errors,
+                 "Saved-input admission refused: metadata exceeds 2 MiB compatibility limit.");
+        return false;
+    }
+    if (!AdmitMetadataText(bytes)) {
+        AddError(
+            errors,
+            "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.");
+        return false;
+    }
+    auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    if (!AdmitMetadata(metadata)) {
+        AddError(
+            errors,
+            "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.");
+        return false;
+    }
+    const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
+    const bool has_render_calendar = metadata.contains("renderCalendar");
+    if (has_clock || has_render_calendar) {
+        // Match save_metadata's normalization before a paired writer can publish
+        // its ledger. Even adding an absent simulationTick can cross the byte cap.
+        world::WorldClock clock;
+        std::string error;
+        std::optional<Vec3> anchor;
+        std::optional<world::WorldCalendar> calendar;
+        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+            !ReadAmbientAnchor(metadata, anchor, error) ||
+            !world::WorldClock::read_render_calendar(metadata, calendar, error)) {
+            AddError(errors, error);
+            return false;
+        }
+        if (has_clock)
+            clock.write_metadata(metadata);
+        if (calendar)
+            metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
+        std::string normalized;
+        if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes, normalized, 4)) {
+            AddError(errors,
+                     "Saved-input admission refused: normalized metadata exceeds 2 MiB "
+                     "compatibility limit.");
+            return false;
+        }
+    }
+    return true;
+}
+
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
                                      std::vector<std::string>* errors) {
     const SaveGuard guard;
-    if (!validate_save(save_dir, errors))
+    if (!admit_metadata_bytes(bytes, errors) || !validate_save(save_dir, errors))
         return false;
     world::WorldClock clock;
     std::string clock_error;
@@ -1317,6 +1286,8 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     }
     const std::string output_bytes =
         (has_clock || has_render_calendar) ? metadata.dump(4) + "\n" : bytes;
+    if (!admit_metadata_bytes(output_bytes, errors))
+        return false;
     const auto destination = save_dir / "world_info.json";
     ReclaimAbandonedStaging(destination);
     std::filesystem::path temp;
@@ -1339,6 +1310,8 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
                                                         const std::filesystem::path& save_dir,
                                                         std::vector<std::string>* errors) {
     const SaveGuard guard;
+    if (!admit_metadata_bytes(bytes, errors))
+        return false;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
     world::WorldClock clock;
     std::optional<Vec3> ambient_anchor;
@@ -1395,10 +1368,21 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         // Root-level .tmp.* siblings are uncommitted staging, never authority.
         requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
         const auto path = save_dir / "world_info.json";
-        if (!std::filesystem::exists(path))
+        nlohmann::json metadata;
+        bool missing = false;
+        bool malformed_json = false;
+        if (!ReadSavedJson(
+                path, SavedInputLimits::kMetadataBytes, metadata, missing, true, &malformed_json) ||
+            (!missing && !AdmitMetadata(metadata))) {
+            AddError(
+                errors,
+                malformed_json
+                    ? "Corrupt world metadata: invalid JSON."
+                    : "Saved-input admission refused: unreadable or oversized world metadata.");
+            return false;
+        }
+        if (missing)
             return true;
-        std::ifstream input(path, std::ios::binary);
-        const auto metadata = nlohmann::json::parse(input);
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
@@ -1463,10 +1447,69 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
     return region_directory(save_dir) / "plant-entities.json";
 }
 
+bool WorldSaveService::prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                              std::string& bytes,
+                                              std::vector<std::string>* errors) {
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot)) {
+        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
+    std::size_t aggregate = 0;
+    for (const auto& entity : snapshot.entities) {
+        for (const auto& component : entity.components) {
+            std::string encoded;
+            if (!BoundedJsonDump(component.data, SavedInputLimits::kPlantComponentBytes, encoded) ||
+                encoded.size() > SavedInputLimits::kPlantComponentAggregateBytes - aggregate) {
+                AddError(errors,
+                         "Saved-input admission refused: plant component JSON compatibility limit "
+                         "(1 MiB each, 128 MiB aggregate).");
+                return false;
+            }
+            aggregate += encoded.size();
+        }
+    }
+    // Preserve the existing serializer's ordering and exact pretty-file bytes,
+    // with bounded output rather than an unbounded dump followed by a size check.
+    nlohmann::json entities = nlohmann::json::array();
+    std::size_t components = 0;
+    for (const auto& entity : snapshot.entities) {
+        nlohmann::json values = nlohmann::json::array();
+        for (const auto& component : entity.components) {
+            values.push_back({{"type", component.type}, {"data", component.data}});
+            ++components;
+        }
+        std::sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.at("type") < rhs.at("type");
+        });
+        entities.push_back({{"entity_id", entity.entity_id},
+                            {"name", entity.name},
+                            {"components", std::move(values)}});
+    }
+    std::sort(entities.begin(), entities.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.at("entity_id") < rhs.at("entity_id");
+    });
+    const nlohmann::json envelope = {{"schema", Ecs::EntitySnapshotSchema()},
+                                     {"order_contract", Ecs::EntitySnapshotOrderContract()},
+                                     {"entity_count", snapshot.entities.size()},
+                                     {"component_count", components},
+                                     {"entities", std::move(entities)}};
+    std::string checked;
+    if (!BoundedJsonDump(envelope, SavedInputLimits::kPlantFileBytes, checked, 4)) {
+        AddError(errors,
+                 "Saved-input admission refused: plant file exceeds 256 MiB compatibility limit.");
+        return false;
+    }
+    bytes = std::move(checked);
+    return true;
+}
+
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
     const SaveGuard guard;
+    std::string bytes;
+    if (!prepare_plant_entities(snapshot, bytes, errors))
+        return false;
     LUMIN_PROFILE_ZONE_N("File plant entities save");
     if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot)) {
         AddError(errors, "Saved-input admission refused: invalid plant component value.");
@@ -1496,8 +1539,7 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
         AddError(errors, "failed to create plant directory: " + ec.message());
         return false;
     }
-    return WriteFileDurably(
-        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), staging, errors);
+    return WriteFileDurably(path, bytes, staging, errors);
 }
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
@@ -1505,20 +1547,27 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
                                            std::vector<std::string>* errors) {
     LUMIN_PROFILE_ZONE_N("File plant entities load");
     const std::filesystem::path path = plant_entities_path(save_dir);
-    const PlantInputFile input(path);
+    const SavedInputFile input(path);
     if (input.missing()) {
         out = Luminumbra::Ecs::EntityRegistrySnapshot{};
         return true; // clean miss: a fresh / no-plant world
     }
     std::string bytes;
-    if (!input.read(bytes)) {
+    if (!input.read(bytes, SavedInputLimits::kPlantFileBytes)) {
         AddError(errors,
-                 "Saved-input admission refused: unreadable or non-regular plant entities file: " +
+                 "Saved-input admission refused: unreadable, non-regular or over 256 MiB plant "
+                 "entities file: " +
                      Filesystem::GenericUtf8PathString(path));
         return false;
     }
     std::vector<std::string> load_errors;
     Luminumbra::Ecs::EntityRegistrySnapshot candidate;
+    if (!AdmitPlantComponentBytes(bytes)) {
+        AddError(errors,
+                 "Saved-input admission refused: plant component JSON compatibility limit (1 MiB "
+                 "each, 128 MiB aggregate).");
+        return false;
+    }
     if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, candidate, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
@@ -1719,17 +1768,8 @@ bool WorldSaveService::read_container_records(const std::filesystem::path& regio
                                               std::vector<ContainerRecord>& out_records,
                                               std::vector<std::string>* errors) {
     out_records.clear();
-    std::error_code exists_error;
-    const bool exists = std::filesystem::exists(region_file, exists_error);
-    if (exists_error) {
-        AddError(errors, "failed to inspect region file: " + exists_error.message());
-        return false;
-    }
-    if (!exists)
-        return true; // clean miss
-
     std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors)) {
+    if (!ReadRegionFile(region_file, raw_records, errors, {}, true)) {
         return false;
     }
     out_records.reserve(raw_records.size());
@@ -1751,17 +1791,8 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
                                           std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                           std::vector<std::string>* errors) {
     out_chunks.clear();
-    std::error_code exists_error;
-    const bool exists = std::filesystem::exists(region_file, exists_error);
-    if (exists_error) {
-        AddError(errors, "failed to inspect region file: " + exists_error.message());
-        return false;
-    }
-    if (!exists)
-        return true; // clean miss
-
     std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors)) {
+    if (!ReadRegionFile(region_file, raw_records, errors, {}, true)) {
         return false;
     }
     for (const RegionRecord& record : raw_records) {
@@ -1795,17 +1826,8 @@ bool WorldSaveService::read_authoritative_region_chunks(
         AddError(errors, "authoritative chunk read bounds are invalid");
         return false;
     }
-    std::error_code exists_error;
-    const bool exists = std::filesystem::exists(region_file, exists_error);
-    if (exists_error) {
-        AddError(errors, "failed to inspect region file: " + exists_error.message());
-        return false;
-    }
-    if (!exists)
-        return true; // clean miss
-
     std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors)) {
+    if (!ReadRegionFile(region_file, raw_records, errors, {}, true)) {
         return false;
     }
     for (const RegionRecord& record : raw_records) {
@@ -1846,17 +1868,9 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
             return false;
     }
     try {
-        if (!parent.empty()) {
-            std::filesystem::create_directories(parent);
-        }
-
         std::vector<RegionRecord> raw_records;
-        std::error_code exists_error;
-        if (std::filesystem::exists(region_file, exists_error) && !exists_error) {
-            if (!ReadRegionFile(region_file, raw_records, errors)) {
-                return false;
-            }
-        }
+        if (!ReadRegionFile(region_file, raw_records, errors, {}, true))
+            return false;
 
         std::map<std::pair<std::uint8_t, std::uint64_t>, std::size_t> record_index;
         for (std::size_t i = 0; i < raw_records.size(); ++i) {
@@ -1880,6 +1894,10 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
             }
         }
 
+        if (!AdmitRegionWrite(raw_records, errors))
+            return false;
+        if (!parent.empty())
+            std::filesystem::create_directories(parent);
         return WriteRegionFile(region_file, raw_records, errors);
     } catch (const std::exception& e) {
         AddError(errors, std::string("failed to upsert region records: ") + e.what());
@@ -2120,6 +2138,12 @@ void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook
     BeforeActiveRegionsReplaceForTesting() = hook;
 }
 
+bool WorldSaveService::admit_world_write(const WorldStreamingState& state,
+                                         const std::filesystem::path& save_dir,
+                                         std::vector<std::string>* errors) const {
+    return write_snapshot(state.snapshot_chunks(), save_dir, errors, nullptr, true);
+}
+
 bool WorldSaveService::save_world(const WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>* errors) const {
@@ -2142,9 +2166,21 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
         const auto metadata_path = save_dir / "world_info.json";
-        if (std::filesystem::exists(metadata_path)) {
-            std::ifstream input(metadata_path, std::ios::binary);
-            const auto metadata = nlohmann::json::parse(input);
+        nlohmann::json metadata;
+        bool metadata_missing = false;
+        bool malformed_json = false;
+        if (!ReadSavedJson(metadata_path,
+                           SavedInputLimits::kMetadataBytes,
+                           metadata,
+                           metadata_missing,
+                           true,
+                           &malformed_json) ||
+            (!metadata_missing && !AdmitMetadata(metadata)))
+            return reject(
+                malformed_json
+                    ? "corrupt world metadata: invalid JSON"
+                    : "Saved-input admission refused: unreadable or oversized world metadata.");
+        if (!metadata_missing) {
             if (!metadata.is_object())
                 return reject("corrupt world metadata: expected an object");
             // Old worlds can contain only metadata: no chunk container exists yet
@@ -2212,9 +2248,19 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         }
         if (!present)
             return false;
-        if (std::filesystem::exists(world_manifest_path(save_dir))) {
-            std::ifstream input(world_manifest_path(save_dir), std::ios::binary);
-            const auto manifest = nlohmann::json::parse(input);
+        nlohmann::json manifest;
+        bool manifest_missing = false;
+        if (!ReadSavedJson(world_manifest_path(save_dir),
+                           SavedInputLimits::kManifestBytes,
+                           manifest,
+                           manifest_missing,
+                           false,
+                           &malformed_json))
+            return reject(
+                malformed_json
+                    ? "corrupt world manifest: invalid JSON"
+                    : "Saved-input admission refused: unreadable or oversized world manifest.");
+        if (!manifest_missing) {
             if (manifest.is_object() && manifest.contains("schema") &&
                 manifest.at("schema").is_string()) {
                 const auto schema = manifest.at("schema").get<std::string>();
@@ -2365,14 +2411,14 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
 bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
                                       const std::filesystem::path& save_dir,
                                       std::vector<std::string>* errors,
-                                      std::size_t* regions_written) const {
+                                      std::size_t* regions_written,
+                                      bool validate_only) const {
     const SaveGuard guard;
     LUMIN_PROFILE_ZONE_N("File world save");
     try {
         if (!validate_save(save_dir, errors))
             return false;
         const std::filesystem::path region_dir = region_directory(save_dir);
-        std::filesystem::create_directories(region_dir);
 
         // Group the chunks to persist by region (deterministic order).
         std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;
@@ -2386,6 +2432,7 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
             regions[{rx, rz}].push_back(chunk);
         }
 
+        std::map<std::filesystem::path, std::vector<RegionRecord>> prepared;
         std::size_t written = 0;
         for (auto& [region_coords, region_chunks] : regions) {
             const std::filesystem::path path =
@@ -2395,12 +2442,8 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
             // and far-LOD tile records (lod_level > 0) are preserved
             // verbatim; records for the chunks being written are replaced.
             std::vector<RegionRecord> records;
-            std::error_code exists_error;
-            if (std::filesystem::exists(path, exists_error) && !exists_error) {
-                if (!ReadRegionFile(path, records, errors)) {
-                    return false;
-                }
-            }
+            if (!ReadRegionFile(path, records, errors, {}, true))
+                return false;
             std::map<std::pair<std::uint8_t, std::uint64_t>, std::size_t> record_index;
             for (std::size_t i = 0; i < records.size(); ++i) {
                 record_index[{records[i].lod_level, records[i].id}] = i;
@@ -2430,6 +2473,14 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                 }
             }
 
+            if (!AdmitRegionWrite(records, errors))
+                return false;
+            prepared.emplace(path, std::move(records));
+        }
+        if (validate_only)
+            return true;
+        std::filesystem::create_directories(region_dir);
+        for (auto& [path, records] : prepared) {
             if (!WriteRegionFile(path, records, errors)) {
                 return false;
             }

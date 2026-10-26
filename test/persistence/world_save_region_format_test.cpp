@@ -6,8 +6,10 @@
 
 #include "../support/UniqueTempPath.h"
 
+#include "persistence/SavedJsonAdmission.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
+#include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
 #include <array>
@@ -559,4 +561,346 @@ TEST(WorldSaveRegionFormat, HasWorldSaveRecognizesOnlySupportedContainers) {
     std::vector<std::string> errors;
     ASSERT_TRUE(service.save_world(state, v2_dir.path, &errors));
     EXPECT_TRUE(WorldSaveService::has_world_save(v2_dir.path));
+}
+
+TEST(WorldSaveRegionFormat, MetadataByteAndTextCompatibilityBoundariesPreserveExistingFiles) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("metadata_limits");
+    const auto path = directory.path / "world_info.json";
+    auto write = [&path](const std::string& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << bytes;
+        return output.good();
+    };
+    const std::string base = R"({"container_version":2})";
+    std::string exact = base;
+    exact.resize(SavedInputLimits::kMetadataBytes, ' ');
+    ASSERT_TRUE(WorldSaveService::save_metadata(exact, directory.path));
+    Luminumbra::world::WorldClock clock;
+    bool required = false;
+    ASSERT_TRUE(WorldSaveService::read_clock_metadata(directory.path, clock, required));
+    EXPECT_EQ(ReadFileBytes(path), exact);
+    exact += ' ';
+    EXPECT_FALSE(WorldSaveService::save_metadata(exact, directory.path));
+    EXPECT_EQ(ReadFileBytes(path).size(), SavedInputLimits::kMetadataBytes);
+    ASSERT_TRUE(write(exact));
+    EXPECT_FALSE(WorldSaveService::read_clock_metadata(directory.path, clock, required));
+    WorldStreamingState state;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService{}.load_world(state, directory.path, errors));
+    EXPECT_FALSE(errors.empty());
+    ASSERT_TRUE(write(base));
+    for (const auto* key : {"name", "seed"}) {
+        const auto maximum = std::string_view(key) == "name" ? SavedInputLimits::kWorldNameBytes
+                                                             : SavedInputLimits::kWorldSeedBytes;
+        nlohmann::json metadata = {{"container_version", 2}, {key, std::string(maximum, 'x')}};
+        ASSERT_TRUE(WorldSaveService::save_metadata(metadata.dump(), directory.path));
+        EXPECT_TRUE(WorldSaveService::read_clock_metadata(directory.path, clock, required));
+        const auto accepted = ReadFileBytes(path);
+        metadata[key] = std::string(maximum + 1, 'x');
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), directory.path));
+        EXPECT_EQ(ReadFileBytes(path), accepted);
+        ASSERT_TRUE(write(metadata.dump()));
+        EXPECT_FALSE(WorldSaveService::read_clock_metadata(directory.path, clock, required));
+        ASSERT_TRUE(write(base));
+    }
+}
+
+TEST(WorldSaveRegionFormat, NormalizedMetadataLimitIsAdmittedBeforeEitherPairedWrite) {
+    using namespace Luminumbra::Persistence;
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::WorldCalendar;
+    using Luminumbra::world::WorldClock;
+    for (const bool over : {false, true}) {
+        TempSaveDir directory("normalized_metadata_limits");
+        ActiveRegionLedger installed_ledger;
+        ASSERT_TRUE(installed_ledger.try_set_local_anchor(Vec3{}));
+        nlohmann::json installed = {{"container_version", 2}};
+        WorldClock(100, WorldCalendar::Legacy()).write_metadata(installed);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            installed.dump(), installed_ledger, directory.path));
+        const auto metadata_path = directory.path / "world_info.json";
+        const auto ledger_path = WorldSaveService::active_regions_path(directory.path);
+        const auto before_metadata = ReadFileBytes(metadata_path);
+        const auto before_ledger = ReadFileBytes(ledger_path);
+        ActiveRegionLedger ledger;
+        ASSERT_TRUE(ledger.try_set_local_anchor(Vec3{}));
+        const auto before_live = ledger.encode();
+
+        nlohmann::json candidate = {
+            {"container_version", 2}, {"calendar", installed.at("calendar")}, {"extension", ""}};
+        auto normalized = candidate;
+        WorldClock(0, WorldCalendar::Legacy()).write_metadata(normalized);
+        const auto base_bytes = normalized.dump(4).size() + 1;
+        candidate["extension"] =
+            std::string(SavedInputLimits::kMetadataBytes + (over ? 1 : 0) - base_bytes, 'x');
+        const auto bytes = candidate.dump(4) + "\n";
+        ASSERT_LT(bytes.size(), SavedInputLimits::kMetadataBytes);
+        EXPECT_EQ(WorldSaveService::save_metadata_and_active_regions(bytes, ledger, directory.path),
+                  !over);
+        if (over) {
+            EXPECT_EQ(ReadFileBytes(metadata_path), before_metadata);
+            EXPECT_EQ(ReadFileBytes(ledger_path), before_ledger);
+            EXPECT_EQ(ledger.encode(), before_live);
+        } else {
+            EXPECT_EQ(ReadFileBytes(metadata_path).size(), SavedInputLimits::kMetadataBytes);
+            WorldClock loaded;
+            bool required = false;
+            EXPECT_TRUE(WorldSaveService::read_clock_metadata(directory.path, loaded, required));
+            EXPECT_EQ(loaded.tick(), 0u);
+        }
+    }
+}
+
+TEST(WorldSaveRegionFormat, JsonAdmissionDistinguishesLimitsFromMalformedSavedData) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("json_refusal_diagnostics");
+    const auto path = directory.path / "world_info.json";
+    nlohmann::json output = {{"unchanged", true}};
+    const auto original = output;
+    bool missing = false;
+    bool malformed = true;
+    EXPECT_TRUE(
+        ReadSavedJson(path, SavedInputLimits::kMetadataBytes, output, missing, true, &malformed));
+    EXPECT_TRUE(missing);
+    EXPECT_FALSE(malformed);
+    EXPECT_EQ(output, original);
+    for (const bool oversized : {false, true}) {
+        auto bytes = oversized ? std::string(SavedInputLimits::kMetadataBytes + 1, ' ') : "{";
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+        EXPECT_FALSE(ReadSavedJson(
+            path, SavedInputLimits::kMetadataBytes, output, missing, true, &malformed));
+        EXPECT_FALSE(missing);
+        EXPECT_EQ(malformed, !oversized);
+        EXPECT_EQ(output, original);
+    }
+}
+
+TEST(WorldSaveRegionFormat, ManifestExactCompatibilityLimitLoadsButOneMoreByteRefuses) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("manifest_limits");
+    WorldStreamingState empty;
+    ASSERT_TRUE(WorldSaveService{}.save_world(empty, directory.path));
+    const auto path = WorldSaveService::world_manifest_path(directory.path);
+    auto bytes = ReadFileBytes(path);
+    bytes.resize(SavedInputLimits::kManifestBytes, ' ');
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+    std::vector<std::string> errors;
+    EXPECT_TRUE(WorldSaveService{}.load_world(empty, directory.path, errors));
+    bytes += ' ';
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+    EXPECT_FALSE(WorldSaveService{}.load_world(empty, directory.path, errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(ReadFileBytes(path), bytes);
+}
+
+TEST(WorldSaveRegionFormat, RegionPayloadWriterAndReaderShareThe64MiBLimit) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("record_limits");
+    const auto path = directory.path / "container.lmr";
+    WorldSaveService::ContainerRecord record{
+        .id = 1,
+        .lod_level = 1,
+        .flags = 0,
+        .payload = std::string(SavedInputLimits::kRegionRecordBytes, 'x')};
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+    const auto accepted = ReadFileBytes(path);
+    std::vector<WorldSaveService::ContainerRecord> loaded;
+    ASSERT_TRUE(WorldSaveService::read_container_records(path, loaded));
+    ASSERT_EQ(loaded.size(), 1u);
+    EXPECT_EQ(loaded.front().payload, record.payload);
+    record.payload += 'x';
+    EXPECT_FALSE(WorldSaveService::upsert_container_records(path, {record}));
+    EXPECT_EQ(ReadFileBytes(path), accepted);
+    auto damaged = accepted;
+    const auto oversized = static_cast<std::uint32_t>(SavedInputLimits::kRegionRecordBytes + 1);
+    for (unsigned byte = 0; byte < 4; ++byte)
+        damaged[18 + byte] = static_cast<char>((oversized >> (8u * byte)) & 255u);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, damaged));
+    EXPECT_FALSE(WorldSaveService::read_container_records(path, loaded));
+    // The shared central decoder also protects both chunk-only delegates.
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(path, chunks));
+    EXPECT_FALSE(WorldSaveService::read_authoritative_region_chunks(path, 0, 31, 0, 31, chunks));
+}
+
+TEST(WorldSaveRegionFormat, RegionControlAndDeclaredAggregatesRefuseBeforePayloadReads) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("region_control_limits");
+    const auto path = directory.path / "container.lmr";
+    std::vector<WorldSaveService::ContainerRecord> records;
+    for (const std::string& bytes : {std::string("LMR1\2\0\1\0", 8),
+                                     std::string("BAD!\2\0\0\0", 8),
+                                     std::string("LMR1\2\0\0\0x", 9)}) {
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+        EXPECT_FALSE(WorldSaveService::read_container_records(path, records));
+    }
+    // Seventeen declared 64 MiB records exceed the 1 GiB read work budget.
+    // No compressed payload is needed: all lengths are admitted before buffering.
+    std::string bytes("LMR1\2\0\21\0", 8);
+    for (unsigned index = 0; index < 17; ++index) {
+        std::array<char, 18> header{};
+        header[0] = static_cast<char>(index);
+        header[8] = 1;
+        header[13] = 4; // little-endian 64 MiB uncompressed size
+        header[14] = 1;
+        bytes.append(header.data(), header.size());
+    }
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::read_container_records(path, records, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("aggregate"), std::string::npos);
+}
+
+TEST(WorldSaveRegionFormat, RegionWriterAggregateAccepts512MiBAndRefusesOneMoreByte) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("region_write_work_limits");
+    const auto path = directory.path / "container.lmr";
+    // Reuse one 64 MiB input for eight writes; compression keeps on-disk fixtures small.
+    WorldSaveService::ContainerRecord record{
+        .id = 0,
+        .lod_level = 1,
+        .flags = 0,
+        .payload = std::string(SavedInputLimits::kRegionRecordBytes, 'x')};
+    for (std::uint64_t index = 0; index < 8; ++index) {
+        record.id = index;
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+    }
+    const auto accepted = ReadFileBytes(path);
+    record.id = 8;
+    record.payload = "x";
+    EXPECT_FALSE(WorldSaveService::upsert_container_records(path, {record}));
+    EXPECT_EQ(ReadFileBytes(path), accepted);
+}
+
+TEST(WorldSaveRegionFormat, RegionReadAggregateAcceptsExactlyOneGiBOfDeclaredWork) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("region_read_work_limits");
+    const auto path = directory.path / "container.lmr";
+    WorldSaveService::ContainerRecord record{
+        .id = 0,
+        .lod_level = 1,
+        .flags = 0,
+        .payload = std::string(SavedInputLimits::kRegionRecordBytes, 'x')};
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+    const auto single = ReadFileBytes(path);
+    const auto compressed = single.substr(26);
+    auto header = single.substr(8, 18);
+    std::string exact("LMR1\2\0\20\0", 8);
+    for (unsigned index = 0; index < 16; ++index) {
+        header[0] = static_cast<char>(index);
+        exact += header;
+    }
+    for (unsigned index = 0; index < 16; ++index)
+        exact += compressed;
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, exact));
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    ASSERT_TRUE(WorldSaveService::read_region_chunks(path, chunks));
+    EXPECT_TRUE(chunks.empty());
+    // Insert a seventeenth one-byte declared record and one compressed byte.
+    exact[6] = 17;
+    std::string extra(18, '\0');
+    extra[0] = 16;
+    extra[8] = 1;
+    extra[10] = 1;
+    extra[14] = 1;
+    exact.insert(8 + 16 * 18, extra);
+    exact += 'x';
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, exact));
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(path, chunks));
+}
+
+TEST(WorldSaveRegionFormat, RegionRecordCountAcceptsAll65535EntriesAndRefusesOneMore) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("region_count_limits");
+    const auto path = directory.path / "container.lmr";
+    std::vector<WorldSaveService::ContainerRecord> records;
+    records.reserve(SavedInputLimits::kRegionRecords + 1);
+    for (std::size_t index = 0; index < SavedInputLimits::kRegionRecords; ++index)
+        records.push_back({.id = index, .lod_level = 1, .flags = 0, .payload = "x"});
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, records));
+    const auto accepted = ReadFileBytes(path);
+    std::vector<WorldSaveService::ContainerRecord> loaded;
+    ASSERT_TRUE(WorldSaveService::read_container_records(path, loaded));
+    EXPECT_EQ(loaded.size(), SavedInputLimits::kRegionRecords);
+    records.push_back(
+        {.id = SavedInputLimits::kRegionRecords, .lod_level = 1, .flags = 0, .payload = "x"});
+    EXPECT_FALSE(WorldSaveService::upsert_container_records(path, records));
+    EXPECT_EQ(ReadFileBytes(path), accepted);
+}
+
+TEST(WorldSaveRegionFormat, AbsoluteRegionLengthAdmissionIsInclusiveAndDoesNotNarrowTo32Bits) {
+    using Luminumbra::Persistence::SavedInputLimits::RegionFileLengthAllowed;
+    // 2 * (8 + 65535 * (18 + compressBound(64 MiB))). A physically valid
+    // region hits the aggregate work limit first; test its absolute length
+    // admission without manufacturing a multi-terabyte file or allocating it.
+    EXPECT_TRUE(RegionFileLengthAllowed(8'830'457'214'916ull));
+    EXPECT_FALSE(RegionFileLengthAllowed(8'830'457'214'917ull));
+    EXPECT_FALSE(RegionFileLengthAllowed(std::numeric_limits<std::uint64_t>::max()));
+}
+
+TEST(WorldSaveRegionFormat, PreservedCompressedRecordsObeyTheirWriterDerivedBound) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("preserved_compression_bound");
+    const auto path = directory.path / "container.lmr";
+    for (const bool over : {false, true}) {
+        // A one-byte raw input has compressBound(1) == 17. Chunk-only readers
+        // preserve far records without decoding them; the writer still admits
+        // their lengths before publishing a merge.
+        std::string bytes("LMR1\2\0\1\0", 8);
+        std::array<char, 18> header{};
+        header[8] = 1;
+        header[10] = 1;
+        header[14] = over ? 18 : 17;
+        bytes.append(header.data(), header.size());
+        bytes.append(over ? 18 : 17, 'x');
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+        std::vector<std::shared_ptr<Chunk>> chunks;
+        ASSERT_TRUE(WorldSaveService::read_region_chunks(path, chunks));
+        EXPECT_EQ(WorldSaveService::upsert_container_records(path, {}), !over);
+        EXPECT_EQ(ReadFileBytes(path), bytes);
+    }
+}
+
+TEST(WorldSaveRegionFormat, CompressedRecordAndAggregateLengthsAreAdmittedBeforeMissingPayload) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("compressed_lengths");
+    const auto path = directory.path / "container.lmr";
+    const auto append_record = [](std::string& bytes, unsigned id, std::uint32_t size) {
+        std::array<char, 18> header{};
+        header[0] = static_cast<char>(id);
+        header[8] = 1;
+        header[10] = 1;
+        for (unsigned byte = 0; byte < 4; ++byte)
+            header[14 + byte] = static_cast<char>((size >> (8u * byte)) & 255u);
+        bytes.append(header.data(), header.size());
+    };
+    for (const bool aggregate : {false, true}) {
+        for (const bool over : {false, true}) {
+            std::string bytes("LMR1\2\0\0\0", 8);
+            auto budget = aggregate ? SavedInputLimits::kRegionCompressedAggregateBytes
+                                    : SavedInputLimits::kRegionCompressedBytes;
+            budget += over ? 1 : 0;
+            unsigned count = 0;
+            while (budget != 0) {
+                const auto size =
+                    aggregate
+                        ? std::min<std::uint64_t>(budget, SavedInputLimits::kRegionCompressedBytes)
+                        : budget;
+                append_record(bytes, count++, static_cast<std::uint32_t>(size));
+                budget -= size;
+            }
+            bytes[6] = static_cast<char>(count);
+            ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+            std::vector<std::shared_ptr<Chunk>> chunks;
+            std::vector<std::string> errors;
+            EXPECT_FALSE(WorldSaveService::read_region_chunks(path, chunks, &errors));
+            ASSERT_FALSE(errors.empty());
+            // At the exact cap length admission succeeds and reaches the later
+            // missing-payload check. One byte over must refuse at the limit itself.
+            EXPECT_NE(errors.front().find(over ? "compatibility limit" : "lengths do not match"),
+                      std::string::npos);
+        }
+    }
 }

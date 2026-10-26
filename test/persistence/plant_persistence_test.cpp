@@ -18,6 +18,7 @@
 #include "luminumbra_common/components/SoilComponents.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -747,4 +748,113 @@ TEST(PlantPersistence, EmptyRosterRemovalErrorIsReportedAndCanRetry) {
     EXPECT_TRUE(errors.empty());
     EXPECT_FALSE(fs::exists(path));
     fs::remove_all(dir);
+}
+
+TEST_F(PlantSaveRecovery, ComponentJsonAcceptsExactLimitAndRefusesOneMoreWithoutWriting) {
+    namespace SS = Luminumbra::Persistence;
+    E::EntityRegistrySnapshot snapshot;
+    snapshot.entities.push_back(
+        {.entity_id = 1,
+         .name = "extension",
+         .components = {
+             {"Future", std::string(SS::SavedInputLimits::kPlantComponentBytes - 2, 'x')}}});
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    const auto read = [&path]() {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const auto accepted = read();
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), accepted);
+    snapshot.entities.front().components.front().data =
+        std::string(SS::SavedInputLimits::kPlantComponentBytes - 1, 'x');
+    EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    EXPECT_EQ(read(), accepted);
+    const auto excessive = E::SerializeEntityRegistrySnapshotJson(snapshot);
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, excessive));
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), accepted);
+    EXPECT_EQ(read(), excessive);
+}
+
+TEST_F(PlantSaveRecovery, ComponentAggregateAcceptsExactLimitAndRefusesOneMoreByte) {
+    namespace SS = Luminumbra::Persistence;
+    E::EntityRegistrySnapshot snapshot;
+    E::EntitySnapshotRecord entity{.entity_id = 1, .name = "extension", .components = {}};
+    const auto count = SS::SavedInputLimits::kPlantComponentAggregateBytes /
+                       SS::SavedInputLimits::kPlantComponentBytes;
+    for (std::size_t index = 0; index < count; ++index)
+        entity.components.push_back(
+            {"Future" + std::to_string(index),
+             std::string(SS::SavedInputLimits::kPlantComponentBytes - 2, 'x')});
+    snapshot.entities.push_back(std::move(entity));
+    std::string bytes;
+    ASSERT_TRUE(SS::WorldSaveService::prepare_plant_entities(snapshot, bytes));
+    EXPECT_TRUE(SS::AdmitPlantComponentBytes(bytes));
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, bytes));
+    {
+        E::EntityRegistrySnapshot accepted;
+        ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(accepted, Directory()));
+        ASSERT_EQ(accepted.entities.size(), 1u);
+        EXPECT_EQ(accepted.entities.front().components.size(), count);
+    }
+    // No second large roster copy is needed to test writer refusal on aggregate+1.
+    snapshot.entities.front().components.push_back({"Last", 0});
+    EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    {
+        std::ifstream unchanged(path, std::ios::binary);
+        EXPECT_EQ(std::string(std::istreambuf_iterator<char>(unchanged), {}), bytes);
+    }
+    const auto components_end = bytes.find("            ]");
+    ASSERT_NE(components_end, std::string::npos);
+    bytes.insert(components_end, ",{\"data\":0,\"type\":\"Last\"}");
+    const auto count_text = "\"component_count\": " + std::to_string(count);
+    const auto count_position = bytes.find(count_text);
+    ASSERT_NE(count_position, std::string::npos);
+    bytes.replace(
+        count_position, count_text.size(), "\"component_count\": " + std::to_string(count + 1));
+    EXPECT_FALSE(SS::AdmitPlantComponentBytes(bytes));
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, bytes));
+    E::EntityRegistrySnapshot loaded;
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_TRUE(loaded.entities.empty());
+}
+
+TEST_F(PlantSaveRecovery, PlantFileAcceptsExact256MiBAndRefusesOneMoreBeforeParsing) {
+    namespace SS = Luminumbra::Persistence;
+    E::EntityRegistrySnapshot snapshot;
+    // Names and envelope bytes are covered even when there are no components.
+    snapshot.entities.push_back({.entity_id = 1, .name = "extension", .components = {}});
+    auto bytes = E::SerializeEntityRegistrySnapshotJson(snapshot);
+    bytes.resize(SS::SavedInputLimits::kPlantFileBytes, ' ');
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, bytes));
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded),
+              E::SerializeEntityRegistrySnapshotJson(snapshot));
+    bytes += ' ';
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, bytes));
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded),
+              E::SerializeEntityRegistrySnapshotJson(snapshot));
+    // Names and envelope bytes exercise the writer's whole-file limit independently
+    // of component admission. Release the large padded fixture before serializing.
+    std::string().swap(bytes);
+    const auto original = E::SerializeEntityRegistrySnapshotJson(snapshot);
+    const auto name_bytes = SS::SavedInputLimits::kPlantFileBytes -
+                            (original.size() - snapshot.entities.front().name.size());
+    auto& name = snapshot.entities.front().name;
+    name.reserve(name_bytes + 1);
+    name.assign(name_bytes, 'x');
+    std::string exact;
+    ASSERT_TRUE(SS::WorldSaveService::prepare_plant_entities(snapshot, exact));
+    EXPECT_EQ(exact.size(), SS::SavedInputLimits::kPlantFileBytes);
+    std::string().swap(exact);
+    name += 'x';
+    EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    EXPECT_EQ(std::filesystem::file_size(path), SS::SavedInputLimits::kPlantFileBytes + 1);
 }

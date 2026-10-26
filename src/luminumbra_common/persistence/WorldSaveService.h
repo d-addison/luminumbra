@@ -269,6 +269,16 @@ public:
     // The hook runs while save ownership is held; nullptr disables it.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
+    // Read-only writer preflight, including merged records and aggregate limits.
+    bool admit_world_write(const WorldStreamingState& state,
+                           const std::filesystem::path& save_dir,
+                           std::vector<std::string>* errors = nullptr) const;
+    static bool admit_metadata_bytes(const std::string& bytes,
+                                     std::vector<std::string>* errors = nullptr);
+    static bool prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                       std::string& bytes,
+                                       std::vector<std::string>* errors = nullptr);
+
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in
     // errors when provided) if the snapshot could not be written.
@@ -314,7 +324,8 @@ private:
     bool write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
                         const std::filesystem::path& save_dir,
                         std::vector<std::string>* errors,
-                        std::size_t* regions_written = nullptr) const;
+                        std::size_t* regions_written = nullptr,
+                        bool validate_only = false) const;
 };
 
 } // namespace Luminumbra::Persistence
