@@ -1745,7 +1745,11 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
                                  fx * (256 - fz) * at(x1, z0) + (256 - fx) * fz * at(x0, z1) +
                                  fx * fz * at(x1, z1) + 32768;
         // Explicit floor division avoids implementation-defined negative shifts.
-        return static_cast<std::int32_t>(sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536));
+        const std::int64_t rounded = sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536);
+        return static_cast<std::int32_t>(
+            std::clamp<std::int64_t>(rounded,
+                                     std::numeric_limits<std::int32_t>::min(),
+                                     std::numeric_limits<std::int32_t>::max()));
     };
 
     // Resize arrays

@@ -532,6 +532,33 @@ MigratedWaterOracle(const std::vector<std::int32_t>& source, int old_res, int ne
     return result;
 }
 
+TEST(WaterSeedInputs, MigrationKeepsInt32ExtremesInBothDirections) {
+    constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
+    constexpr std::int32_t kMin = std::numeric_limits<std::int32_t>::min();
+    for (const int old_res : {2, 8, 16}) {
+        for (const int new_res : {2, 8, 16}) {
+            if (old_res == new_res) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << old_res << " -> " << new_res);
+            SeedFixture fixture;
+            fixture.water().SetSimResolution(old_res);
+            fixture.tick();
+            auto& chunk = *fixture.chunks().begin()->second;
+            const auto old_cells = static_cast<std::size_t>(old_res * old_res);
+            ASSERT_EQ(chunk.water_bed_mm.size(), old_cells);
+            ASSERT_EQ(chunk.water_depth_mm.size(), old_cells);
+            chunk.water_bed_mm.assign(old_cells, kMax);
+            chunk.water_depth_mm.assign(old_cells, kMin);
+            fixture.water().SetSimResolution(new_res);
+            ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+            const auto new_cells = static_cast<std::size_t>(new_res * new_res);
+            EXPECT_EQ(chunk.water_bed_mm, std::vector<std::int32_t>(new_cells, kMax));
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(new_cells, kMin));
+        }
+    }
+}
+
 TEST(WaterSeedInputs, EditedChannelAndDamSurviveMigrationAndSavedContinuation) {
     // Every supported session resolution, both directions and identity controls.
     for (const int old_res : {2, 4, 8, 16}) {
