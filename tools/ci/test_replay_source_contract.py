@@ -614,25 +614,38 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         readiness = self.function(source, "LoadWorldState")
         self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
         snapshot = self.function(source, "LoadWorldStateFrom")
-        # Every staged refusal reaches the same invalidation before adoption.
+        # Fatal snapshot refusals invalidate; admission refuses before live state changes.
         failure = snapshot.split("if (!ReadWorldStateFrom(save_dir, state))", 1)[1]
         self.assertLess(failure.index("m_worldUsable = false;"),
                         failure.index("m_worldSystem->clear_world("))
         self.assertLess(failure.index("return false;"),
                         failure.index("AdoptWorldStateFrom(save_dir, state);"))
         self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 1)
+        self.assertIn("if (!state.input_refused)", failure)
+        for name in ("LoadWorld", "LoadWorldFrom"):
+            self.assertIn("if (!loaded.input_refused)", self.function(source, name))
         reader = self.function(source, "ReadWorldStateFrom")
-        self.assertEqual(reader.count("return false;"), 5)
-        self.assertEqual(reader.count("m_worldOpenError ="), 5)
+        self.assertEqual(reader.count("return false;"), 6)
+        self.assertEqual(reader.count("m_worldOpenError ="), 6)
         for validation in ("service.load_world(", "WorldSaveService::read_clock_metadata(",
                            "WorldSaveService::load_active_regions(", "m_regionSchedulerOverride",
                            "chunk->sdf_data.size() != kFullSdfLattice"):
             self.assertIn(validation, reader)
+        self.assertLess(reader.index("load_plant_entities(state.plants"),
+                        reader.index("service.load_world("))
+        adoption = self.function(source, "AdoptWorldStateFrom")
+        self.assertNotIn("load_plant_entities(", adoption)
+        self.assertIn("ApplyPlantEntitySnapshot(m_registry, saved.plants)", adoption)
         self.assertNotIn("m_worldUsable", reader)
         self.assertNotIn("m_worldSystem->", reader)
         self.assertNotIn("m_renderCalendar =", reader)
         self.assertNotIn("RestoreWorldClock(", reader)
         self.assertNotIn("m_worldUsable = true;", snapshot)
+        saving = self.function(source, "SaveWorldStateToImpl")
+        self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
+                        saving.index("service.save_world("))
+        self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
+                        saving.index("save_plant_entities(plant_snapshot"))
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
         full_snapshot = runner.split("ServerWorldRunner::SaveFullSnapshot()", 1)[1].split(
             "ServerWorldRunner::StreamedChunkCount()", 1)[0]

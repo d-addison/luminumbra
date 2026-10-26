@@ -190,6 +190,8 @@ struct GameSession::LoadedWorldState {
     std::optional<WorldCalendar> render_calendar;
     std::optional<ActiveRegionLedger> ledger;
     bool snapshot_present = false;
+    Ecs::EntityRegistrySnapshot plants;
+    bool input_refused = false;
 };
 
 GameSession::GameSession() {
@@ -1441,9 +1443,11 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
     if (!ReadWorldStateFrom(worldPath, loaded)) {
-        m_worldUsable = false;
-        if (m_worldSystem)
-            m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!loaded.input_refused) {
+            m_worldUsable = false;
+            if (m_worldSystem)
+                m_worldSystem->clear_world(m_physicsSystem.get());
+        }
         return false;
     }
 
@@ -1572,9 +1576,11 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
     if (!ReadWorldStateFrom(worldPath, loaded)) {
-        m_worldUsable = false;
-        if (m_worldSystem)
-            m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!loaded.input_refused) {
+            m_worldUsable = false;
+            if (m_worldSystem)
+                m_worldSystem->clear_world(m_physicsSystem.get());
+        }
         return false;
     }
 
@@ -2029,6 +2035,10 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // empty roster writes NO file, so a no-plant save stays byte-identical (the save-less path
     // holds).
     const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot)) {
+        LUMINUMBRA_CORE_ERROR("Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
 
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
@@ -2122,9 +2132,11 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
     LoadedWorldState state;
     if (!ReadWorldStateFrom(save_dir, state)) {
-        m_worldUsable = false;
-        // Refused snapshots invalidate resident chunks, but never publish staged members.
-        m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!state.input_refused) {
+            m_worldUsable = false;
+            // Refused snapshots invalidate resident chunks, but never publish staged members.
+            m_worldSystem->clear_world(m_physicsSystem.get());
+        }
         return false;
     }
     AdoptWorldStateFrom(save_dir, state);
@@ -2134,6 +2146,12 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState& state) {
     const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
+    if (!Persistence::WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)) {
+        state.input_refused = true;
+        m_worldOpenError = errors.empty() ? "Saved-input admission refused: invalid plant snapshot."
+                                          : errors.front();
+        return false;
+    }
     state.snapshot_present = service.load_world(state.chunks, save_dir, errors);
     if (!state.snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
@@ -2263,19 +2281,8 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         }
     }
 
-    //  reload persisted plant entities into the live registry (a missing file is
-    // a clean miss). Geometry rebakes from the reloaded genome+stage on the render bridge.
-    {
-        Luminumbra::Ecs::EntityRegistrySnapshot plant_snapshot;
-        std::vector<std::string> plant_errors;
-        if (Persistence::WorldSaveService::load_plant_entities(
-                plant_snapshot, save_dir, &plant_errors)) {
-            luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, plant_snapshot);
-        } else {
-            for (const std::string& e : plant_errors)
-                LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
-        }
-    }
+    // Plant numeric projection was admitted before any live state changed.
+    luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, saved.plants);
 
     // restore the stateful energy layer's record (a
     // missing file is a clean miss == all zeros by contract). Epoch-rebased

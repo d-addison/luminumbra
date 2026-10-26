@@ -55,6 +55,7 @@
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
@@ -2151,6 +2152,61 @@ TEST_P(SavedWorldPresetTest, RefusedOpenAndMissingJobsPreserveSaveEligibility) {
     ASSERT_TRUE(session.SaveWorldState());
     ASSERT_TRUE(session.SaveWorld());
     ExpectSnapshotReloaded(pending, *chunk, session.GetWorldSaveDir(), id);
+}
+
+TEST_P(SavedWorldPresetTest, InvalidLivePlantRefusesBeforeAnySnapshotPayloadWrite) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, true));
+    auto plants = session.GetRegistry().view<C::PlantTag, C::PlantGenomeComponent>();
+    ASSERT_NE(plants.begin(), plants.end());
+    plants.get<C::PlantGenomeComponent>(*plants.begin()).genes[0] =
+        std::numeric_limits<float>::infinity();
+    const PendingSnapshotState pending(session);
+    const RetainedCreationState retained(session);
+    const auto disk = SavedPresetTestDiskBytes(Root().path());
+    const auto destination = Root().path() / "invalid-live-plant";
+    EXPECT_FALSE(session.SaveWorldStateTo(destination));
+    EXPECT_FALSE(fs::exists(destination));
+    EXPECT_FALSE(session.SaveWorldState());
+    retained.ExpectUnchanged(session);
+    pending.ExpectUnchanged(session, *chunk);
+    EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+}
+
+TEST_P(SavedWorldPresetTest, InvalidPlantProjectionRefusesAllLoadPathsWithoutAdoptionOrWrites) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, true));
+    const PendingSnapshotState pending(session);
+    const RetainedCreationState retained(session);
+    const auto save = session.GetWorldSaveDir();
+    const auto path = P::WorldSaveService::plant_entities_path(save);
+    auto snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(session.GetRegistry());
+    ASSERT_FALSE(snapshot.entities.empty());
+    for (auto& component : snapshot.entities.front().components) {
+        if (component.type == "PlantGrowth")
+            component.data["stage"] = 1e38;
+    }
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(
+        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot)));
+    const auto disk = SavedPresetTestDiskBytes(Root().path());
+    const auto world_id = session.GetMetadata().worldId;
+    for (int entry = 0; entry < 3; ++entry) {
+        SCOPED_TRACE(entry);
+        const bool loaded = entry == 0   ? session.LoadWorld(world_id)
+                            : entry == 1 ? session.LoadWorldFrom(world_id, Root().path())
+                                         : session.LoadWorldStateFrom(save);
+        EXPECT_FALSE(loaded);
+        EXPECT_NE(session.GetWorldOpenError().find("invalid plant component"), std::string::npos);
+        retained.ExpectUnchanged(session);
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+    }
+    // A refused load did not disable saving a coherent live session to another destination.
+    EXPECT_TRUE(session.SaveWorldStateTo(Root().path() / "after-refused-plant"));
 }
 
 TEST_P(SavedWorldPresetTest, FatalSnapshotAndFinalMetadataRefusalsCannotBeClearedByCreation) {

@@ -2,6 +2,7 @@
 #include "core/Profiler.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
+#include "PlantPersistence.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "core/FilesystemPath.h"
 #include "luminumbra/core/Types.h"
@@ -1363,6 +1364,10 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
                                            std::vector<std::string>* errors) {
     const SaveGuard guard;
     LUMIN_PROFILE_ZONE_N("File plant entities save");
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot)) {
+        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
     if (!validate_save(save_dir, errors))
         return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
@@ -1395,10 +1400,10 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
     LUMIN_PROFILE_ZONE_N("File plant entities load");
-    out = Luminumbra::Ecs::EntityRegistrySnapshot{};
     const std::filesystem::path path = plant_entities_path(save_dir);
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
+        out = Luminumbra::Ecs::EntityRegistrySnapshot{};
         return true; // clean miss: a fresh / no-plant world
     }
     const std::ifstream in(path, std::ios::binary);
@@ -1410,11 +1415,17 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     std::ostringstream ss;
     ss << in.rdbuf();
     std::vector<std::string> load_errors;
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
+    Luminumbra::Ecs::EntityRegistrySnapshot candidate;
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), candidate, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
         return false;
     }
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(candidate)) {
+        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
+    out = std::move(candidate);
     return true;
 }
 
