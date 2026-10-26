@@ -67,13 +67,19 @@ removed before Git runs. Top-level source `.git` directories cannot be symlinks.
 Internal metadata links are checked before Git runs; a linked config receives the same
 execution restrictions as an ordinary config.
 
-All 18 declared dependencies must be present:
+All 17 generic FetchContent dependencies must be present:
 
 ```text
-entt glm glfw glad nlohmann_json joltphysics freetype rmlui soil2
+entt glm glfw glad nlohmann_json joltphysics freetype soil2
 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb
 googletest lz4_upstream
 ```
+
+RmlUi is delivered separately by `cmake/rmlui_source.cmake`, using the pinned
+manifest and patch through `tools/ci/rmlui_source.py`. It is absent from the
+generic lock and stage; never supply `FETCHCONTENT_SOURCE_DIR_RMLUI` or a
+dependency provider. Each build root needs its own owned source and valid ready
+receipt. A shared FetchContent base directory cannot supply that ownership.
 
 A vendor revision or dependency-set change requires a new snapshot and lock.
 Never fill in a digest by guessing, or mark an unresolved lock resolved by
@@ -86,6 +92,31 @@ The baseline database cannot validate disabled configurations. A changed source
 fails explicitly when neither a database entry nor a configured translation
 unit's dependency closure consumes it. Sources included only by unconfigured
 translation units also fail.
+
+After the generic snapshot is verified, the owner runs this additional
+provisioning step **with network access, outside any sandbox**, from this clone:
+
+```bash
+set -euo pipefail
+: "${LUMINUMBRA_DEPS_CACHE:?Set the provisioned dependency snapshot path}"
+nice -n 10 python3 -I -B tools/ci/offline_deps.py prepare \
+  --root "$PWD" --cache "$LUMINUMBRA_DEPS_CACHE"
+for build_root in scratch/local-gcc scratch/local-tidy; do
+  nice -n 10 python3 -I -B tools/ci/rmlui_source.py init --root "$build_root"
+  nice -n 10 python3 -I -B tools/ci/rmlui_source.py download --root "$build_root"
+  nice -n 10 python3 -I -B tools/ci/rmlui_source.py verify --root "$build_root"
+done
+```
+
+`prepare` checks all original path components and existing entries before
+creating only `scratch/tmp` and `scratch/ccache`. Absent build roots remain
+absent, so `init` can enroll them afterwards. `init` refuses every preexisting
+build root, even an empty one; do not create those directories manually. An
+unknown, interrupted, nonempty or unowned root requires a fresh root, never
+adoption. Reuse only roots whose existing owner and readiness receipt verify
+with the unchanged helper, manifest and patch. On reuse, omit `init` and
+`download` and run `verify` for both roots. Keep both roots exclusive to this
+checkout. The worker checks below perform no download or network operation.
 
 ## Worker recipe
 
@@ -125,6 +156,11 @@ export CCACHE_COMPILERCHECK=content
 export PYTHONDONTWRITEBYTECODE=1
 export GIT_OPTIONAL_LOCKS=0
 
+for build_root in scratch/local-gcc scratch/local-tidy; do
+  nice -n 10 python3 -I -B tools/ci/rmlui_source.py preflight \
+    --root "$build_root" --fully-disconnected
+done
+
 nice -n 10 python3 -I -B tools/ci/offline_deps.py stage \
   --cache "$LUMINUMBRA_DEPS_CACHE" \
   --lock tools/ci/deps-lock.json \
@@ -132,7 +168,7 @@ nice -n 10 python3 -I -B tools/ci/offline_deps.py stage \
   --init scratch/offline-init.cmake
 
 configure_local() {
-  nice -n 10 cmake --preset release -B "$1" \
+  nice -n 10 cmake --preset release -B "$1" "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" \
     -C "$PWD/scratch/offline-init.cmake" \
     -DFETCHCONTENT_BASE_DIR="$PWD/$1/_deps" \
     -DFETCHCONTENT_FULLY_DISCONNECTED=ON \

@@ -51,20 +51,13 @@
           "tools/ci/jolt_startup.py": "1d528911f75e4731e31a0219785798c46be9abc30f4303cdad7d782c6368b628",
           "tools/ci/path_safety.py": "49e30553bee8495838e69adf41802f3a881df60a38987a776ce7c47f30696146",
           "cmake/jolt_startup.cmake": "3e5f5a062709b857d19e9ca633d10a3cd965838db5497b09af51e7dcf9ccfd98",
-          "vendor/CMakeLists.txt": "217da236f9b27f856b0ff2aa2e190e7a092fa4c12ed17d7780908d10abf48bdf"
+          "vendor/CMakeLists.txt": "f518e687e93ca1942cc3a07e9c8fd49c9ba4bd9e77ef2b8a96938c1afc75db0e"
         }
       }
     },
     "freetype": {
       "repository": "https://github.com/freetype/freetype.git",
       "revision": "0a0221a1347e2f1e07c395263540026e9a0aa7c7",
-      "commit": null,
-      "sha256": null,
-      "submodules": null
-    },
-    "rmlui": {
-      "repository": "https://github.com/mikke89/RmlUi.git",
-      "revision": "6.1",
       "commit": null,
       "sha256": null,
       "submodules": null

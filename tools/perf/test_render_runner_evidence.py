@@ -21,6 +21,8 @@ from unittest import mock
 import test_render_contract as contract_fixtures
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument('--runner', type=Path, default=Path(__file__).with_name('test_render_runner.py'))
 options, remaining = parser.parse_known_args()
