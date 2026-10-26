@@ -129,6 +129,28 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                                       service.index("boolFlushRemovalDirectory(") + 1):]
         self.assertIn("return!exists||FlushDirectoryEntry(parent,errors);", flush)
 
+    def test_explicit_config_reader_checks_original_bytes_before_replacing_snapshot(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
+                             .read_text(encoding="utf-8"))
+        reader = source.split("boolSystemConfig::TryLoadFromFile(", 1)[1].split(
+            "voidSystemConfig::ReplaceSystemsFrom(", 1)[0]
+        self.assertIn("std::ifstreamfile(path,std::ios::binary);", reader)
+        self.assertIn("constautobytes=buffer.str();", reader)
+        self.assertIn("CheckSettingsBytes(bytes);", reader)
+        self.assertIn("constautodocument=nlohmann::json::parse(bytes);", reader)
+        self.assertLess(reader.index("CheckSettingsBytes(bytes)"),
+                        reader.index("nlohmann::json::parse(bytes)"))
+        self.assertLess(reader.index("nlohmann::json::parse(bytes)"),
+                        reader.index("config.ReplaceSystemsFrom("))
+        guard = source.split("voidCheckSettingsBytes(", 1)[1].split(
+            "nlohmann::jsonParseSettingsJson(", 1)[0]
+        self.assertIn("json_text.find('\\0')", guard)
+        self.assertIn("if(nul!=std::string::npos)throw", guard)
+        parser = source.split("nlohmann::jsonParseSettingsJson(", 1)[1].split(
+            "voidParseUserSection(", 1)[0]
+        self.assertLess(parser.index("CheckSettingsBytes(json_text);"),
+                        parser.index("nlohmann::json::parse(text)"))
+
     def test_config_io_retains_native_paths(self):
         header = compact_cpp((ROOT / "src/luminumbra_common/core/SystemConfig.h")
                              .read_text(encoding="utf-8"))
@@ -141,7 +163,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           source)
         self.assertIn('returnLoadLayered(root/"data/common/systems.json",overlay_path);', source)
         self.assertNotIn("LoadLayered(Luminumbra::Filesystem::GenericPathString(", source)
-        self.assertIn("std::ifstreamfile(path);", source)
+        self.assertIn("std::ifstreamfile(path,std::ios::binary);", source)
         self.assertIn("std::ifstreamoverlay(overlay_path,std::ios::binary);", source)
         self.assertIn("::GetEnvironmentVariableW(L\"APPDATA\"", source)
         service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(

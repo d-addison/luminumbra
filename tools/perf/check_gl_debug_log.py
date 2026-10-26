@@ -173,8 +173,11 @@ def evaluate(lines):
 def build_parser():
     parser = argparse.ArgumentParser(
         description='Verdict on GL KHR_debug output recorded in a client log.')
-    parser.add_argument('--log', required=True, type=Path,
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--log', type=Path,
                         help='Client log path (UTF-8 or UTF-16 with BOM)')
+    inputs.add_argument('--stdin', action='store_true',
+                        help='Read bounded binary client log bytes from standard input')
     parser.add_argument('--artifact', type=Path, default=None,
                         help='Optional render benchmark v3 capture to validate')
     parser.add_argument('--format', choices=('json',), default='json',
@@ -187,7 +190,8 @@ def main(argv=None):
     try:
         if args.artifact is not None:
             check_artifact(args.artifact)
-        result = evaluate(read_log(args.log))
+        result = evaluate(read_log('<stdin>' if args.stdin else args.log,
+                                   source=sys.stdin.buffer if args.stdin else None))
     except InputError as error:
         print(f'check_gl_debug_log: {str(error)[:MAX_ERROR_CHARS]}', file=sys.stderr)
         return 2

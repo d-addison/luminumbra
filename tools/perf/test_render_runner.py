@@ -158,7 +158,7 @@ class RenderRunnerTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(dir=OPTIONS.artifacts)
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve(strict=True)
         # Runtime discovery starts at cwd. Isolate saves and settings; shared asset
         # inputs are read-only, and presets get independent copies for mutations.
         def link_or_copy(source, target):
