@@ -50,6 +50,25 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         caller = body(self.journal, "void publish_file(")
         self.assertLess(caller.index("publish_windows("), caller.index("target.identity ="))
 
+    def test_publication_checks_source_retirement_even_if_the_handle_name_changes(self):
+        publication = body(self.journal, "void publish_windows(")
+        rename = publication.index("::SetFileInformationByHandle(")
+        inspect = publication.index("Detail::WindowsRenameSourceRetirementError(source.path)")
+        self.assertLess(rename, inspect)
+        self.assertLess(inspect, publication.index("published_name != destination"))
+        retirement = body(self.journal, "inline DWORD WindowsRenameSourceRetirementError(")
+        self.assertIn("::CreateFileW(source.c_str()", retirement)
+        self.assertIn("remaining != INVALID_HANDLE_VALUE", retirement)
+        self.assertIn("ERROR_ALREADY_EXISTS", retirement)
+        self.assertIn("error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : error", retirement)
+        writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
+        self.assertIn("Detail::WindowsRenameSourceRetirementError(temp)", writer)
+        self.assertIn("Detail::WindowsRenameSourceRetirementError(m_temp)", writer)
+        native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
+            encoding="utf-8")
+        self.assertIn("UnreadablePublicationSourceNeverClaimsTheDestination", native)
+        self.assertIn("RefusedPublicationNeverClaimsARacingHardLinkToTheSource", native)
+
     def test_native_rename_name_comes_from_bound_parent_and_has_checked_storage(self):
         publication = body(self.journal, "void publish_windows(")
         self.assertIn("handle_path(parent.get()) / target.path.filename()", publication)

@@ -1289,6 +1289,9 @@ void main() { color = vec4(1); }
     SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
     FarLodSystem far;
     far.attach_job_system(&jobs);
+    // Exercise camera-region ownership without a distant-tier upload backlog.
+    // The full-horizon byte/count admission policy has its own FIFO regressions.
+    far.set_horizon(FarLodSystem::kF1OuterRangeMeters, FarLodSystem::kF1OuterRangeMeters + 50.0f);
     const glm::vec3 camera(256, 1200, 256);
     for (int frame = 0; frame < 12; ++frame) {
         far.update(world, camera);
@@ -1460,6 +1463,10 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
         SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
         FarLodSystem far;
         far.attach_job_system(&jobs);
+        // Keep all nine neighbouring regions, including boundary crossings,
+        // while isolating ownership from the full-horizon FIFO upload budget.
+        far.set_horizon(FarLodSystem::kF1OuterRangeMeters,
+                        FarLodSystem::kF1OuterRangeMeters + 50.0f);
         far.set_coverage_diagnostics_enabled(true);
         const glm::mat4 projection =
             ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);

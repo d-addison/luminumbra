@@ -605,12 +605,16 @@ TEST(ActivationResidencyIndex, VoxelEditPreparationMaintainsResidencyAndPublicat
     EXPECT_EQ(prepared.index_updates, initial.index_updates + 2u);
     ASSERT_TRUE(world.PrepareTerrainVoxelEdit(anchor, 1.0f));
     EXPECT_EQ(world.activation_index_counters().index_updates, prepared.index_updates);
+    // Candidates are measured before generation, while FullScan below observes
+    // the published result. Only the prepared chunk is resident at admission.
+    const auto missing = FullScan(world, {anchor}, 1);
+    ASSERT_EQ(missing.size(), 14u);
     for (int frame = 0; frame < 4; ++frame) {
         world.update(registry, {anchor}, nullptr);
         world.wait_for_streaming_jobs();
     }
     EXPECT_TRUE(FullScan(world, {anchor}, 1).empty());
-    EXPECT_EQ(world.get_last_streaming_budget_stats().generation_candidates, 0u);
+    EXPECT_EQ(world.get_last_streaming_budget_stats().generation_candidates, missing.size());
 
     // Preparing a pre-existing authoritative full lattice must preserve both
     // the data and the cached span version.

@@ -11,7 +11,7 @@
 #include "../world/WorldgenDependencySnapshot.h"
 #include "FastNoise/FastNoise.h"
 #include "core/Profiler.h"
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include <array>
 #include <atomic>
 #include <condition_variable>

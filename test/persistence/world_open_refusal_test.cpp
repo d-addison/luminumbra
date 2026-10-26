@@ -1,4 +1,5 @@
 #include "../support/CalendarMetadataCases.h"
+#include "../support/PersistenceFileOps.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
@@ -1971,9 +1972,9 @@ INSTANTIATE_TEST_SUITE_P(RegionModesAndSnapshotPaths,
                          SnapshotEnergyFailure,
                          testing::Combine(testing::Values(0, 1), testing::Range(0, 6)));
 
-// Fail the selected sibling writer after the chunk and manifest replacements.
-// Windows denies replacement while still allowing validation to read the file;
-// POSIX injects a directory-flush failure through the existing persistence seam.
+// Refuse the selected sibling publication after chunk and manifest progress.
+// Match the actual destination on every platform, independently of how many
+// directory entries the durable writer flushes before reaching it.
 class SiblingWriteFailure {
 public:
     SiblingWriteFailure() = default;
@@ -1984,53 +1985,38 @@ public:
     SiblingWriteFailure& operator=(const SiblingWriteFailure&) = delete;
 
     void Arm(const fs::path& destination, bool energy) {
-#if defined(_WIN32)
-        const auto path = energy ? destination / "aether_state.efs"
-                                 : WorldSaveService::plant_entities_path(destination);
-        handle = ::CreateFileW(path.c_str(),
-                               GENERIC_READ,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               nullptr,
-                               OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL,
-                               nullptr);
-        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
-#else
-        // One resident region and its manifest each flush all ancestor entries
-        // and then their own directory before the selected sibling writer.
-        int flushes = 2;
-        for (auto ancestor = WorldSaveService::region_directory(destination);
-             !ancestor.empty() && ancestor != ancestor.root_path();
-             ancestor = ancestor.parent_path())
-            flushes += 2;
-        if (energy) {
-            const auto plants = WorldSaveService::plant_entities_path(destination);
-            // The plant writer flushes every ancestor entry and its replacement.
-            for (auto ancestor = plants.parent_path();
-                 !ancestor.empty() && ancestor != ancestor.root_path();
-                 ancestor = ancestor.parent_path())
-                ++flushes;
-            ++flushes;
-        }
-        WorldSaveService::set_directory_flush_failure_for_testing(flushes);
-#endif
+        Target() = energy ? destination / "aether_state.efs"
+                          : WorldSaveService::plant_entities_path(destination);
+        Reached() = false;
+        Persistence::detail::set_file_publication_hook_for_testing(&Publish);
     }
 
     void Reset() {
-#if defined(_WIN32)
-        if (handle != INVALID_HANDLE_VALUE) {
-            EXPECT_TRUE(::CloseHandle(handle));
-            handle = INVALID_HANDLE_VALUE;
-        }
-#else
-        WorldSaveService::set_directory_flush_failure_for_testing(-1);
-#endif
+        Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+        // A writer may already have loaded the hook. Keep its target immutable
+        // until this session has drained, before the next fixture arms it.
+    }
+
+    bool reached() const {
+        return Reached();
     }
 
 private:
-#if defined(_WIN32)
-    HANDLE handle = INVALID_HANDLE_VALUE;
-#endif
+    static fs::path& Target() {
+        static fs::path target;
+        return target;
+    }
+    static bool& Reached() {
+        static bool reached = false;
+        return reached;
+    }
+    static bool Publish(const fs::path& path, bool removing) {
+        if (!removing && path == Target()) {
+            Reached() = true;
+            return false;
+        }
+        return true;
+    }
 };
 
 class CompleteSaveFailure : public WorldOpenRefusal {};
@@ -2231,6 +2217,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     } else {
         runner.Shutdown(&report);
     }
+    EXPECT_TRUE(failure.reached());
     failure.Reset();
     EXPECT_FALSE(report.saved);
     EXPECT_EQ(report.chunks_saved, 0u);

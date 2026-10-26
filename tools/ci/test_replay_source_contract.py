@@ -203,7 +203,10 @@ class ReplaySourceContract(unittest.TestCase):
                       "EXPECT_FALSE(world.PrepareTerrainVoxelEdit(anchor, 17.0f));",
                       "EXPECT_EQ(loaded->sdf_data, partial_sdf);",
                       "EXPECT_EQ(prepared.index_updates, initial.index_updates + 2u);",
-                      "world.get_last_streaming_budget_stats().generation_candidates, 0u"):
+                      "const auto missing = FullScan(world, {anchor}, 1);",
+                      "ASSERT_EQ(missing.size(), 14u);",
+                      "EXPECT_TRUE(FullScan(world, {anchor}, 1).empty());",
+                      "world.get_last_streaming_budget_stats().generation_candidates, missing.size()"):
             self.assertIn(token, native)
         self.assertIn("common/ActivationResidencyIndex_test.cpp", read_source("test/CMakeLists.txt"))
         self.assertNotRegex(native, r'(?<![\w:])Test::SyntheticTerrainParams\(')

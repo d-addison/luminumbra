@@ -663,7 +663,13 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
         return false;
     }
     if (::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        return true;
+        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(temp);
+        if (retirement_error == ERROR_SUCCESS)
+            return true;
+        AddError(errors,
+                 "cannot confirm exclusive file installation: " +
+                     WindowsErrorMessage(retirement_error));
+        return false;
     }
     const DWORD error = ::GetLastError();
     AddError(errors,
@@ -969,6 +975,9 @@ public:
     bool Publish(std::vector<std::string>* errors) {
         if (!FlushAncestorEntries(m_destination, errors))
             return false;
+        const auto publish = LockPublication(m_destination);
+        if (!AllowPublication(m_destination, false, errors))
+            return false;
 #if defined(_WIN32)
         // Keep identity through the move; rollback targets this handle, never a
         // replacement file found by looking up the destination a second time.
@@ -984,6 +993,13 @@ public:
             AddError(errors,
                      "cannot publish an unoccupied destination: " +
                          WindowsErrorMessage(::GetLastError()));
+            return false;
+        }
+        const auto retirement_error = Detail::WindowsRenameSourceRetirementError(m_temp);
+        if (retirement_error != ERROR_SUCCESS) {
+            AddError(errors,
+                     "cannot confirm exclusive file publication: " +
+                         WindowsErrorMessage(retirement_error));
             return false;
         }
         m_published = true;
