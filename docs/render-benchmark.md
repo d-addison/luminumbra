@@ -1034,7 +1034,11 @@ last collected invocation's diagnostic without affecting its rebuild decision.
 Use the dedicated `profile` variant for Tracy captures (issue #395):
 
 ```sh
-cmake --preset profile
+if [ ! -e build/profile ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/profile || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/profile || exit
+cmake --preset profile "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset profile --target luminumbra_client_app
 ```
 

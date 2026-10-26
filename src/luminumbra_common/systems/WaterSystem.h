@@ -2,7 +2,7 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
 #include "../core/WaterAttribution.h"
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include <cstdint>
 #include <memory>
 #include <span>

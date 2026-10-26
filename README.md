@@ -110,13 +110,36 @@ Luminumbra uses CMake presets and Ninja. A first configure downloads dependencie
 at revisions pinned by the repository, so it requires Git and network access.
 
 ```sh
-cmake --preset debug
+if [ ! -e build/debug ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
+cmake --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset debug --parallel
 ctest --preset debug -LE manual --no-tests=error --output-on-failure
 ```
 
+When upgrading an existing `build/debug` without a matching ownership receipt,
+use a new, absent directory for the one-time migration. Leave the old directory
+and all its contents untouched; never initialize it again or remove its records.
+For example, if `build/debug-fresh` does not exist:
+
+```sh
+python3 -I -B tools/ci/rmlui_source.py init --root build/debug-fresh || exit
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug-fresh || exit
+cmake -B build/debug-fresh --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
+cmake --build build/debug-fresh --parallel
+ctest --test-dir build/debug-fresh -LE manual --no-tests=error --output-on-failure
+```
+
+The explicit build and test directories above match the configure override;
+`--build --preset debug` would still select `build/debug`. If the example directory
+already exists, choose another absent directory and use it in every command.
+Use the same fresh-directory procedure after a delivery change or interruption.
+
 Use `release` for optimized builds and `debug-asan` for AddressSanitizer builds.
-All generated files stay under `build/<preset>/`.
+Preset defaults keep generated files under `build/<preset>/`; an explicit build
+directory override uses that directory instead.
 
 The primary executables are written to `build/<preset>/bin/`:
 

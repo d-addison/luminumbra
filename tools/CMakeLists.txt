@@ -1998,6 +1998,97 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py" ProtectionTests)
     set_tests_properties(ReleaseGatesProtectionContract
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    # Every borrowed-input consumer shares custody; recovery cases have separate
+    # entries so real Git publication stays inside the existing deadlines.
+    set(_rmlui_source_contracts
+        RmlUiSourceScriptContract RmlUiSourceCommandContract
+        LocalRmlUiRecipeContract LocalRmlUiRecoveryFailureContract)
+    add_test(
+        NAME RmlUiSourceScriptContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
+                SourceFiles.test_full_pin_publication_and_readonly_repeat)
+    set_tests_properties(RmlUiSourceScriptContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+    # Individual file-fixture cases keep real publication inside its deadline.
+    foreach(fixture IN ITEMS
+            every_changed_file_preserves_operations_defaults_and_enum_declarations
+            files_mixed_missing_extra_and_partial_refuse_untouched
+            git_pin_index_modes_flags_alternates_and_config_refusals
+            mode_and_unreadable_refuse
+            nonordinary_files_and_links
+            operation_assertions_use_strict_utf8_with_a_cp1252_default
+)
+        add_test(
+            NAME RmlUiSourceFixture_${fixture}
+            COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
+                    SourceFiles.test_${fixture})
+        set_tests_properties(RmlUiSourceFixture_${fixture}
+            PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts RmlUiSourceFixture_${fixture})
+    endforeach()
+    foreach(boundary IN ITEMS check apply postverify rename receipt admission)
+        add_test(
+            NAME RmlUiSourceInterruption_${boundary}
+            COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
+                    SourceFiles.test_interruption_at_${boundary}_never_marks_incomplete_ready)
+        set_tests_properties(RmlUiSourceInterruption_${boundary}
+            PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts RmlUiSourceInterruption_${boundary})
+    endforeach()
+    add_test(
+        NAME RmlUiSourceCommandContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
+                DeliveryRefusals PairedWorkflowInitialization HostedConfigurationContracts BootstrapInterpreterBinding
+                OwnedCommandLifetime WindowsContainmentRefusal OwnershipFieldDiagnostics RootMismatchObservations
+                ConfigureCallerBoundaries Utf8SourceReads FixtureCleanupCustody)
+    set_tests_properties(RmlUiSourceCommandContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+    foreach(recovery IN ITEMS
+            borrowed_archive_without_git_returns_its_original_metadata
+            borrowed_recovery_refuses_unknown_partial_and_changed_metadata
+            setup_final_verification_failure_returns_the_complete_input
+            teardown_refusal_preserves_ancestor_and_can_retry_both_locations)
+        add_test(
+            NAME RmlUiSourceRecovery_${recovery}
+            COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
+                    BorrowedFixtureRecovery.test_${recovery})
+        set_tests_properties(RmlUiSourceRecovery_${recovery}
+            PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts RmlUiSourceRecovery_${recovery})
+    endforeach()
+    add_test(
+        NAME LocalRmlUiRecipeContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_rmlui_recipe.py"
+                LocalSourceRecipe.test_documented_local_recipe_requires_both_owned_disconnected_sources)
+    set_tests_properties(LocalRmlUiRecipeContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+    foreach(recipe IN ITEMS
+            worker_configures_both_owned_disconnected_sources
+            worker_refuses_invalid_gcc_receipts
+            worker_refuses_invalid_tidy_receipts)
+        add_test(
+            NAME LocalRmlUiRecipe_${recipe}
+            COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_rmlui_recipe.py"
+                    LocalSourceRecipe.test_${recipe})
+        set_tests_properties(LocalRmlUiRecipe_${recipe}
+            PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts LocalRmlUiRecipe_${recipe})
+    endforeach()
+    foreach(boundary IN ITEMS beforepatch afterpatch beforerename afterrename receipt configure)
+        add_test(
+            NAME LocalRmlUiRecovery_${boundary}
+            COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_rmlui_recipe.py"
+                    LocalRecipeRecovery.test_publication_${boundary}_returns_borrowed_input)
+        set_tests_properties(LocalRmlUiRecovery_${boundary}
+            PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
+        list(APPEND _rmlui_source_contracts LocalRmlUiRecovery_${boundary})
+    endforeach()
+    add_test(
+        NAME LocalRmlUiRecoveryFailureContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_rmlui_recipe.py"
+                LocalRecipeRecovery.test_failed_restoration_preserves_recoverable_input_and_both_errors)
+    set_tests_properties(LocalRmlUiRecoveryFailureContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
     add_test(
         NAME SlowestTestsScriptContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
@@ -2030,6 +2121,7 @@ if(BUILD_TESTING)
             WorkflowPolicyContractPart8 WorkflowPolicyContractPart9
             QualificationCaptureContract SlowestTestsScriptContract
             LocalCheckRegistrationContract
+            ${_rmlui_source_contracts}
             PROPERTIES PROCESSORS 4)
         # Explicit costs seed longest-first scheduling on fresh runners.
         set_property(TEST WorkflowPolicyContract PROPERTY COST 30)

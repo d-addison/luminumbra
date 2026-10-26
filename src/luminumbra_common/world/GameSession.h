@@ -18,7 +18,7 @@
 #include "TerrainPresetLoader.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include <chrono>
 #include <cstdint>
 #include <ctime>
