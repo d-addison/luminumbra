@@ -535,8 +535,8 @@ class ReplaySourceContract(unittest.TestCase):
 
 class SessionUsabilitySourceContract(unittest.TestCase):
     @staticmethod
-    def function(source, name):
-        start = source.index("GameSession::" + name + "(")
+    def function(source, name, prefix="GameSession::"):
+        start = source.index(prefix + name + "(")
         opening = source.index("{", start)
         # Ignore braces inside diagnostics and comments when locating the body.
         tokens = re.finditer(r'"(?:\\.|[^"\\])*"|\{|\}', source[opening:])
@@ -549,6 +549,37 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 if depth == 0:
                     return source[start:opening + token.end()]
         raise AssertionError("unterminated session function")
+
+    def test_every_plant_reader_admits_and_reads_the_same_regular_file_handle(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        reader = self.function(source, "load_plant_entities", "WorldSaveService::")
+        self.assertIn("const PlantInputFile input(path);", reader)
+        self.assertNotIn("std::filesystem::exists(", reader)
+        self.assertNotIn("ifstream", reader)
+        self.assertLess(reader.index("input.read(bytes)"),
+                        reader.index("LoadEntityRegistrySnapshotJson(bytes,"))
+        admission = source.split("class PlantInputFile {", 1)[1].split(
+            "bool ReadAmbientAnchor(", 1)[0]
+        self.assertIn("O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC", admission)
+        self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS", admission)
+        for check in ("::fstat(m_descriptor, &information)", "S_ISREG(information.st_mode)",
+                      "::GetFileType(m_handle) != FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle, &information)",
+                      "FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY",
+                      "::GetFileSizeEx(m_handle, &length)", "size > bytes.max_size()"):
+            self.assertLess(admission.index(check), admission.index("bytes.resize("))
+        self.assertLess(admission.index("bytes.resize("), admission.index("::read(m_descriptor,"))
+        self.assertLess(admission.index("bytes.resize("), admission.index("::ReadFile(m_handle,"))
+        self.assertIn("bytes.size() - offset", admission)
+        self.assertIn("::read(m_descriptor, &trailing, 1) == 0", admission)
+        self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
+                      admission)
+        world = self.function(source, "load_world", "WorldSaveService::")
+        self.assertIn("load_plant_entities(plants, save_dir, &errors)", world)
+        session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
+                                "ReadWorldStateFrom")
+        self.assertIn("WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)",
+                      session)
 
     def test_operation_refusal_cannot_change_current_session_usability(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")

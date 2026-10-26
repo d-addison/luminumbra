@@ -288,6 +288,110 @@ void AddError(std::vector<std::string>* errors, std::string message) {
     }
 }
 
+// Every plant reader uses this handle for both type/size admission and payload
+// reads. A pathname check followed by an ifstream open can race a leaf replacement.
+class PlantInputFile {
+public:
+    explicit PlantInputFile(const std::filesystem::path& path) {
+#if defined(_WIN32)
+        m_handle = ::CreateFileW(path.c_str(),
+                                 GENERIC_READ,
+                                 FILE_SHARE_READ,
+                                 nullptr,
+                                 OPEN_EXISTING,
+                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                                 nullptr);
+        if (m_handle == INVALID_HANDLE_VALUE) {
+            const DWORD error = ::GetLastError();
+            m_missing = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+        }
+#else
+        // NONBLOCK prevents a FIFO open from waiting for a writer; NOFOLLOW
+        // refuses even dangling symlinks rather than mistaking them for absence.
+        m_descriptor = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        m_missing = m_descriptor < 0 && errno == ENOENT;
+#endif
+    }
+
+    PlantInputFile(const PlantInputFile&) = delete;
+    PlantInputFile& operator=(const PlantInputFile&) = delete;
+
+    ~PlantInputFile() {
+#if defined(_WIN32)
+        if (m_handle != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_handle);
+#else
+        if (m_descriptor >= 0)
+            ::close(m_descriptor);
+#endif
+    }
+
+    [[nodiscard]] bool missing() const {
+        return m_missing;
+    }
+
+    [[nodiscard]] bool read(std::string& bytes) const {
+        std::uint64_t size = 0;
+#if defined(_WIN32)
+        BY_HANDLE_FILE_INFORMATION information{};
+        LARGE_INTEGER length{};
+        if (m_handle == INVALID_HANDLE_VALUE || ::GetFileType(m_handle) != FILE_TYPE_DISK ||
+            !::GetFileInformationByHandle(m_handle, &information) ||
+            (information.dwFileAttributes &
+             (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
+            !::GetFileSizeEx(m_handle, &length) || length.QuadPart < 0)
+            return false;
+        size = static_cast<std::uint64_t>(length.QuadPart);
+#else
+        struct stat information {};
+        if (m_descriptor < 0 || ::fstat(m_descriptor, &information) != 0 ||
+            !S_ISREG(information.st_mode) || information.st_size < 0)
+            return false;
+        size = static_cast<std::uint64_t>(information.st_size);
+#endif
+        // Allocate only the verified regular file length, checked before narrowing.
+        // Each read is bounded to 64 KiB; growth after admission cannot extend the allocation.
+        if (size > bytes.max_size())
+            return false;
+        bytes.resize(static_cast<std::size_t>(size));
+        constexpr std::size_t kReadBlockSize = std::size_t{64} * 1024;
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            const auto count = std::min(kReadBlockSize, bytes.size() - offset);
+#if defined(_WIN32)
+            DWORD received = 0;
+            if (!::ReadFile(m_handle,
+                            bytes.data() + offset,
+                            static_cast<DWORD>(count),
+                            &received,
+                            nullptr) ||
+                received == 0)
+                return false;
+#else
+            const auto received = ::read(m_descriptor, bytes.data() + offset, count);
+            if (received <= 0)
+                return false;
+#endif
+            offset += static_cast<std::size_t>(received);
+        }
+        char trailing = 0;
+#if defined(_WIN32)
+        DWORD received = 0;
+        return ::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0;
+#else
+        return ::read(m_descriptor, &trailing, 1) == 0;
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+    int m_descriptor = -1;
+#endif
+    bool m_missing = false;
+};
+
 bool ReadAmbientAnchor(const nlohmann::json& metadata,
                        std::optional<Vec3>& anchor,
                        std::string& error) {
@@ -1401,22 +1505,21 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
                                            std::vector<std::string>* errors) {
     LUMIN_PROFILE_ZONE_N("File plant entities load");
     const std::filesystem::path path = plant_entities_path(save_dir);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
+    const PlantInputFile input(path);
+    if (input.missing()) {
         out = Luminumbra::Ecs::EntityRegistrySnapshot{};
         return true; // clean miss: a fresh / no-plant world
     }
-    const std::ifstream in(path, std::ios::binary);
-    if (!in) {
+    std::string bytes;
+    if (!input.read(bytes)) {
         AddError(errors,
-                 "failed to open plant entities file: " + Filesystem::GenericUtf8PathString(path));
+                 "Saved-input admission refused: unreadable or non-regular plant entities file: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
-    std::ostringstream ss;
-    ss << in.rdbuf();
     std::vector<std::string> load_errors;
     Luminumbra::Ecs::EntityRegistrySnapshot candidate;
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), candidate, load_errors)) {
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, candidate, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
         return false;

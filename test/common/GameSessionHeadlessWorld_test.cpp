@@ -67,6 +67,12 @@
 
 #include <nlohmann/json.hpp>
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
@@ -2208,6 +2214,70 @@ TEST_P(SavedWorldPresetTest, InvalidPlantProjectionRefusesAllLoadPathsWithoutAdo
     // A refused load did not disable saving a coherent live session to another destination.
     EXPECT_TRUE(session.SaveWorldStateTo(Root().path() / "after-refused-plant"));
 }
+
+#if !defined(_WIN32)
+TEST_P(SavedWorldPresetTest, NonRegularPlantFilesRefuseAllLoadPathsBeforeAdoption) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, true));
+    const PendingSnapshotState pending(session);
+    const RetainedCreationState retained(session);
+    const auto save = session.GetWorldSaveDir();
+    const auto path = P::WorldSaveService::plant_entities_path(save);
+    const auto snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(session.GetRegistry());
+    ASSERT_FALSE(snapshot.entities.empty());
+    const auto bytes = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot);
+    const auto target = save / "valid-plant-roster.json";
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(target, bytes));
+    const auto world_id = session.GetMetadata().worldId;
+    for (const int kind : {0, 1, 2, 3}) {
+        SCOPED_TRACE(kind);
+        ASSERT_TRUE(fs::remove(path));
+        if (kind == 0)
+            ASSERT_EQ(::mkfifo(path.c_str(), 0600), 0);
+        else
+            fs::create_symlink(kind == 1   ? target
+                               : kind == 2 ? fs::path("/dev/zero")
+                                           : save / "absent-roster",
+                               path);
+        const int keeper = kind == 0 ? ::open(path.c_str(), O_RDONLY | O_NONBLOCK) : -1;
+        struct CloseReader {
+            int descriptor;
+            ~CloseReader() {
+                if (descriptor >= 0)
+                    ::close(descriptor);
+            }
+        } close_reader{keeper};
+        if (kind == 0)
+            ASSERT_GE(keeper, 0);
+        for (int entry = 0; entry < 3; ++entry) {
+            SCOPED_TRACE(entry);
+            if (kind == 0) {
+                const int writer = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+                ASSERT_GE(writer, 0);
+                const auto written = ::write(writer, bytes.data(), bytes.size());
+                const int closed = ::close(writer);
+                ASSERT_EQ(written, static_cast<ssize_t>(bytes.size()));
+                ASSERT_EQ(closed, 0);
+            }
+            const bool loaded = entry == 0   ? session.LoadWorld(world_id)
+                                : entry == 1 ? session.LoadWorldFrom(world_id, Root().path())
+                                             : session.LoadWorldStateFrom(save);
+            if (kind == 0) {
+                // Each entry point sees one valid JSON payload, even when the
+                // preceding refusal left all FIFO bytes unread.
+                std::string unread(bytes.size(), '\0');
+                EXPECT_GE(::read(keeper, unread.data(), unread.size()), 0);
+            }
+            ASSERT_FALSE(loaded);
+            EXPECT_FALSE(session.GetWorldOpenError().empty());
+            retained.ExpectUnchanged(session);
+            pending.ExpectUnchanged(session, *chunk);
+        }
+    }
+}
+#endif
 
 TEST_P(SavedWorldPresetTest, FatalSnapshotAndFinalMetadataRefusalsCannotBeClearedByCreation) {
     const auto invalid = std::string("{");

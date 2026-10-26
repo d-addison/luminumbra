@@ -74,13 +74,15 @@ inline bool ValidGenes(const nlohmann::json& genes) {
     // Historical snapshots may contain a partial genome; missing genes stay zero.
     for (std::size_t i = 0; i < genes.size() && i < ::Luminumbra::Components::kPlantGeneCount;
          ++i) {
-        if (!FitsNumber<float>(genes[i]))
+        if (!FitsNumber<float>(genes[i]) || genes[i].get<double>() < 0.0 ||
+            genes[i].get<double>() > 1.0)
             return false;
     }
     return true;
 }
 
 inline bool ValidComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& component) {
+    namespace C = ::Luminumbra::Components;
     const auto& data = component.data;
     const auto& type = component.type;
     if (type == "Transform")
@@ -91,7 +93,9 @@ inline bool ValidComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& com
     if (type == "PlantGrowth")
         return FitsNumber<std::uint16_t>(data.at("species_id")) &&
                FitsNumber<std::uint8_t>(data.at("stage")) &&
+               data.at("stage").get<std::uint8_t>() < C::kPlantStageCount &&
                FitsNumber<std::uint8_t>(data.at("quality")) &&
+               data.at("quality").get<std::uint8_t>() <= 100 &&
                FitsNumber<std::uint32_t>(data.at("growth_points")) &&
                FitsNumber<std::uint32_t>(data.at("stress_points")) &&
                FitsNumber<std::uint8_t>(data.at("tended")) &&
@@ -102,8 +106,11 @@ inline bool ValidComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& com
                FitsNumber<std::uint32_t>(data.at("absorbed"));
     if (type == "PlantHealth")
         return FitsNumber<std::uint16_t>(data.at("infection")) &&
+               data.at("infection").get<std::uint16_t>() <= C::kDiseaseUnitScale &&
                FitsNumber<std::uint16_t>(data.at("resistance")) &&
+               data.at("resistance").get<std::uint16_t>() <= C::kDiseaseUnitScale &&
                FitsNumber<std::uint8_t>(data.at("state")) &&
+               data.at("state").get<std::uint8_t>() < C::kPlantDiseaseStateCount &&
                FitsNumber<std::uint32_t>(data.at("infected_ticks"));
     if (type == "Pollination")
         return data.at("pollinated").is_boolean() &&
@@ -212,6 +219,8 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
                     return false;
                 seen[index] = true;
             }
+            if (!seen[0] || !seen[1] || !seen[2])
+                return false;
         }
         return true;
     } catch (const nlohmann::json::exception&) {

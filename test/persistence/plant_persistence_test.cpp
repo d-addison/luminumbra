@@ -27,6 +27,12 @@
 #include <ios>
 #include <system_error>
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace {
 
 namespace C = ::Luminumbra::Components;
@@ -235,6 +241,92 @@ TEST(PlantPersistence, DiskRefusalsLeaveOutputAndExistingFilesUnchanged) {
     EXPECT_EQ(disk_bytes, invalid_bytes);
 }
 
+TEST(PlantPersistence, ComponentDomainsAreCheckedBeforeAnyPlantIsAdopted) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 500);
+    const auto last = barePlant(source, 2.0f, 3, 600);
+    source.emplace<C::PlantHealthComponent>(last);
+    source.emplace<C::PollinationComponent>(last);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    struct InvalidField {
+        std::string type;
+        std::string field;
+        nlohmann::json value;
+    };
+    const std::vector<InvalidField> invalid = {
+        {"PlantGrowth", "stage", C::kPlantStageCount},
+        {"PlantGrowth", "stage", 255},
+        {"PlantGrowth", "quality", 101},
+        {"PlantHealth", "state", C::kPlantDiseaseStateCount},
+        {"PlantHealth", "infection", C::kDiseaseUnitScale + 1u},
+        {"PlantHealth", "resistance", C::kDiseaseUnitScale + 1u}};
+    const auto expect_refused = [](const E::EntityRegistrySnapshot& snapshot) {
+        entt::registry target;
+        const auto existing = barePlant(target, 4.0f, 3, 700);
+        const auto before =
+            E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target));
+        EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot));
+        EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, snapshot));
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target)),
+                  before);
+        EXPECT_EQ(entt::to_integral(target.create()), entt::to_integral(existing) + 1u);
+    };
+    for (const auto& field : invalid) {
+        SCOPED_TRACE(field.type + "." + field.field);
+        auto snapshot = original;
+        for (auto& component : snapshot.entities.back().components) {
+            if (component.type == field.type)
+                component.data[field.field] = field.value;
+        }
+        expect_refused(snapshot);
+    }
+    // Check every adopted gene in both the current and pending pollination genome.
+    // The tiny excursions would round back into [0,1] if checked after float conversion.
+    for (const auto& type : {"PlantGenome", "Pollination"}) {
+        for (std::size_t gene = 0; gene < C::kPlantGeneCount; ++gene) {
+            for (const double value : {-0.01, 1.01, 1e20, -1e-50, 1.0 + 1e-12}) {
+                SCOPED_TRACE(type);
+                SCOPED_TRACE(gene);
+                SCOPED_TRACE(value);
+                auto snapshot = original;
+                for (auto& component : snapshot.entities.back().components) {
+                    if (component.type == type)
+                        component
+                            .data[component.type == "PlantGenome" ? "genes" : "next_genome"][gene] =
+                            value;
+                }
+                expect_refused(snapshot);
+            }
+        }
+    }
+}
+
+TEST(PlantPersistence, EveryPlantRequiresAllCoreComponentsBeforeRegistryMutation) {
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 500);
+    barePlant(source, 2.0f, 3, 600);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    for (unsigned mask = 0; mask < 7; ++mask) {
+        SCOPED_TRACE(mask);
+        auto snapshot = original;
+        auto& components = snapshot.entities.back().components;
+        std::erase_if(components, [mask](const auto& component) {
+            return (component.type == "Transform" && (mask & 1u) == 0) ||
+                   (component.type == "PlantGenome" && (mask & 2u) == 0) ||
+                   (component.type == "PlantGrowth" && (mask & 4u) == 0);
+        });
+        entt::registry target;
+        const auto existing = barePlant(target, 4.0f, 3, 700);
+        const auto before =
+            E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target));
+        EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot));
+        EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, snapshot));
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target)),
+                  before);
+        EXPECT_EQ(entt::to_integral(target.create()), entt::to_integral(existing) + 1u);
+    }
+}
+
 TEST(PlantPersistence, RepresentableMaximaAndHistoricalPartialGenomesStillLoad) {
     entt::registry source;
     const auto plant = barePlant(source, 1.0f, 3, 500);
@@ -249,11 +341,19 @@ TEST(PlantPersistence, RepresentableMaximaAndHistoricalPartialGenomesStillLoad) 
         if (component.type == "PlantGenome")
             component.data["genes"] = nlohmann::json::array({0.25f});
         if (component.type == "PlantGrowth") {
-            component.data["stage"] = std::numeric_limits<std::uint8_t>::max();
+            component.data["stage"] = C::kPlantStageCount - 1u;
+            component.data["quality"] = 100;
             component.data["species_id"] = std::numeric_limits<std::uint16_t>::max();
             component.data["growth_points"] = std::numeric_limits<std::uint32_t>::max();
             component.data["last_tick"] = std::numeric_limits<std::uint64_t>::max();
         }
+        if (component.type == "PlantHealth") {
+            component.data["infection"] = C::kDiseaseUnitScale;
+            component.data["resistance"] = C::kDiseaseUnitScale;
+            component.data["state"] = C::kPlantDiseaseStateCount - 1u;
+        }
+        if (component.type == "Pollination")
+            component.data["next_genome"] = nlohmann::json::array({0.0, 1.0});
     }
     snapshot.entities.front().components.push_back({"FuturePlantExtension", {{"opaque", true}}});
     snapshot.entities.front().components.push_back({"FuturePlantExtension", nullptr});
@@ -264,6 +364,13 @@ TEST(PlantPersistence, RepresentableMaximaAndHistoricalPartialGenomesStillLoad) 
               std::numeric_limits<std::uint64_t>::max());
     EXPECT_EQ(target.get<C::PlantGenomeComponent>(restored).genes[0], 0.25f);
     EXPECT_EQ(target.get<C::PlantGenomeComponent>(restored).genes[1], 0.0f);
+    EXPECT_EQ(target.get<C::PlantGrowthComponent>(restored).stage, C::kPlantStageCount - 1u);
+    EXPECT_EQ(target.get<C::PlantGrowthComponent>(restored).quality, 100);
+    EXPECT_EQ(target.get<C::PlantHealthComponent>(restored).infection, C::kDiseaseUnitScale);
+    EXPECT_EQ(target.get<C::PlantHealthComponent>(restored).resistance, C::kDiseaseUnitScale);
+    EXPECT_EQ(target.get<C::PlantHealthComponent>(restored).state, C::kPlantDiseaseStateCount - 1u);
+    EXPECT_EQ(target.get<C::PollinationComponent>(restored).next_genome.genes[0], 0.0f);
+    EXPECT_EQ(target.get<C::PollinationComponent>(restored).next_genome.genes[1], 1.0f);
 }
 
 TEST(PlantPersistence, EmptyRosterIsEmptySnapshot) {
@@ -477,6 +584,107 @@ TEST_F(PlantSaveRecovery, InterruptedReplacementPreservesRosterAndRetryLeavesNoR
     ASSERT_TRUE(SS::WorldSaveService::write_file_durably(unknown, "unknown artifact"));
     EXPECT_FALSE(SS::WorldSaveService::validate_save(Directory()));
 }
+
+TEST_F(PlantSaveRecovery, MissingIsCleanButInvalidPathsAndPayloadsPreserveTheOutput) {
+    namespace SS = ::Luminumbra::Persistence;
+    namespace fs = std::filesystem;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    auto loaded = original;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    EXPECT_TRUE(loaded.entities.empty());
+    EXPECT_TRUE(errors.empty());
+    loaded = original;
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(
+        loaded, Directory() / std::string(512, 'x'), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    fs::create_directories(path);
+    errors.clear();
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    fs::remove(path);
+    for (const auto& bytes :
+         {std::string{}, std::string("{"), expected.substr(0, expected.size() / 2)}) {
+        SCOPED_TRACE(bytes);
+        ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, bytes));
+        errors.clear();
+        EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    }
+}
+
+#if !defined(_WIN32)
+TEST_F(PlantSaveRecovery, SymlinksIncludingDeviceAndDanglingTargetsAreRefusedBeforeReading) {
+    namespace SS = ::Luminumbra::Persistence;
+    namespace fs = std::filesystem;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    fs::create_directories(path.parent_path());
+    const auto valid_target = Directory() / "valid-roster.json";
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(valid_target, expected));
+    for (const auto& target : {valid_target, Directory() / "absent", fs::path("/dev/zero")}) {
+        SCOPED_TRACE(target);
+        fs::create_symlink(target, path);
+        auto loaded = original;
+        std::vector<std::string> errors;
+        ASSERT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+        Luminumbra::WorldStreamingState chunks;
+        errors.clear();
+        EXPECT_FALSE(SS::WorldSaveService{}.load_world(chunks, Directory(), errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_TRUE(fs::is_symlink(path));
+        fs::remove(path);
+    }
+}
+
+TEST_F(PlantSaveRecovery, FifoWithValidPayloadIsRefusedBeforeOpeningAStream) {
+    namespace SS = ::Luminumbra::Persistence;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    const auto expected = E::SerializeEntityRegistrySnapshotJson(original);
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    std::filesystem::create_directories(path.parent_path());
+    ASSERT_EQ(::mkfifo(path.c_str(), 0600), 0);
+    // Keep a nonblocking reader alive so a finite valid payload survives the
+    // writer's close. Even the unsafe stream reader reaches EOF without hanging.
+    const int keeper = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    ASSERT_GE(keeper, 0);
+    struct CloseReader {
+        int descriptor;
+        ~CloseReader() {
+            ::close(descriptor);
+        }
+    } close_reader{keeper};
+    const int writer = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+    ASSERT_GE(writer, 0);
+    const auto written = ::write(writer, expected.data(), expected.size());
+    const int closed = ::close(writer);
+    ASSERT_EQ(written, static_cast<ssize_t>(expected.size()));
+    ASSERT_EQ(closed, 0);
+    auto loaded = original;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    Luminumbra::WorldStreamingState chunks;
+    errors.clear();
+    EXPECT_FALSE(SS::WorldSaveService{}.load_world(chunks, Directory(), errors));
+    EXPECT_FALSE(errors.empty());
+}
+#endif
 
 TEST(PlantPersistence, EmptyRosterRemovalErrorIsReportedAndCanRetry) {
     namespace SS = ::Luminumbra::Persistence;
