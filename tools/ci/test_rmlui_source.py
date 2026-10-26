@@ -1854,6 +1854,7 @@ class HostedConfigurationContracts(unittest.TestCase):
         expected_argv = [str(executable.resolve()), "-c", "core.autocrlf=false",
                          "-c", "core.safecrlf=false", "-c", "core.hooksPath=" + os.devnull,
                          "-c", "core.fsmonitor=false", "-c", "protocol.file.allow=never",
+                         "-c", "maintenance.auto=false", "-c", "gc.auto=0",
                          "-C", str(source), "fetch", "--depth=1", "https://source.invalid", "revision"]
         output = b"captured-output"
         for proxy_environment in ({}, proxies):
