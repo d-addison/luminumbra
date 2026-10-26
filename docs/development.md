@@ -17,7 +17,8 @@ CMake 3.20.
 
 Linux builds require OpenGL, X11/Wayland development headers, FreeType, and the
 usual compiler and package-configuration tools. The exact Ubuntu package set is in
-`.github/workflows/ci.yml`. Windows CI validates both Visual C++ and MSYS2 UCRT64.
+`.github/workflows/ci.yml`. [Daily Windows](windows-daily-runner.md) validates
+both Visual C++ and MSYS2 UCRT64 through `.github/workflows/windows-build.yml`.
 
 ## Presets
 
@@ -261,17 +262,17 @@ non-C++ routes, preserving their existing rejection and successful path skip,
 respectively. Pushes to main/devel and manual dispatches skip the fast lane and
 retain their existing shard admission and full ASan build/test execution.
 
-The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
-`Linux / GCC ASan` checks are ordinary aggregates. Workflow cancellation stops
-aggregates with valid dependencies; invalid dependencies still reach an explicit
-failure step. They reject drafts, missing draft metadata, cancellations and
-missing or unsuccessful expected producers. GCC and MSVC retain their Python-only
-route; UCRT64 runs on ready native PR routes, every main/devel push, and every manual
-dispatch. Devel pushes seed its trusted compiler cache. The existing draft
-guard and job limit remain in place. Manual native qualification captures use a
-single full-suite producer, explicitly distinguished from two-shard evidence. Their existing
-binary-bound manifests, report bytes and qualification artifact paths remain
-intact. Qualification validation checks both the full producer and its aggregate.
+The required `Linux / GCC` and `Linux / GCC ASan` checks are ordinary aggregates.
+Workflow cancellation stops aggregates with valid dependencies; invalid dependencies
+still reach an explicit failure step. They reject drafts, missing draft metadata,
+cancellations and missing or unsuccessful expected producers. GCC retains its
+Python-only route. Full Windows MSVC and MSYS2 UCRT64 validation, including the
+same shard unions and inventory checks, runs in [Daily Windows](windows-daily-runner.md)
+on the self-hosted runner. It reports failures through one tracking issue and
+gates the v0.3.1 tag, not landings. Manual native qualification captures use a
+single full-suite producer, explicitly distinguished from two-shard evidence.
+Their binary-bound manifests, report bytes and artifact paths remain intact.
+Qualification validation checks both the full producer and its aggregate.
 
 Native shard artifact names include lane, shard, SHA, run and attempt. Reports,
 inventories and partition evidence are retained for 30 days. An aggregate-only
@@ -345,7 +346,7 @@ cancellation stops them. Push, schedule, and manual routing is unchanged.
 Draft pull requests cannot merge. GitHub does not allow draft PRs to merge and
 may report jobs skipped by a condition as successful, so a draft skip alone does
 not block required checks. The guards keep the existing `Linux / GCC`,
-`Linux / GCC ASan`, `Windows / MSVC`, `Windows / MSYS2 UCRT64`, and
+`Linux / GCC ASan`, and
 `Preview frame / software OpenGL` check names and report
 failure on drafts. Their failure prevents a draft head from satisfying all
 required checks, including immediately after marking it ready while the new
@@ -367,8 +368,8 @@ with one routing exception: for non-draft engine PRs, it accepts `SKIPPED`
 heavy checks only when every same-head `Classify changed paths` check succeeded.
 Drafts and push/recovery validation remain `SUCCESS`-only. A routed skip is not
 evidence that native validation ran. No additional job runs on draft pushes
-to enforce this policy; the guards use existing required jobs. Windows/UCRT64
-also runs on devel pushes, and the paired server comparison still runs only for
+to enforce this policy; the guards use existing required jobs. The paired server
+comparison still runs only for
 main-bound ready PRs or eligible main/devel pushes.
 
 Rerunning a draft-era workflow reuses its stored event payload, including
@@ -383,13 +384,13 @@ on the current head rather than an old draft-event rerun. Persistent stale
 merge-ref checks require a fresh pull request event/ref, such as closing and
 reopening the pull request.
 
-The required `Linux / GCC` and `Windows / MSVC` jobs always run on ready PRs.
-When `needs_cpp=false`, each installs only numpy, Pillow and jsonschema for its OS
+The required `Linux / GCC` job always runs on ready PRs.
+When `needs_cpp=false`, it installs only numpy, Pillow and jsonschema
 and runs `ci_paths.py python-tests`, skipping native dependencies, compiler caches,
 configure/build/CTest, native qualification, packaging and native artifacts.
-Both jobs log and summarize `route: python-only (native build skipped by Classify
+The job logs and summarizes `route: python-only (native build skipped by Classify
 changed paths)` and expose a `route` job output of `python-only`. When `needs_cpp`
-is true or missing, they report and expose `native` and retain their full native
+is true or missing, it reports and exposes `native` and retains its full native
 path. Consumers requiring native qualification must check that output alongside
 the job conclusion; a successful Python route provides Python coverage.
 
@@ -397,7 +398,7 @@ The standalone plan also runs whenever `needs_python=true` or its output is
 missing, including mixed Python/native PRs and full push/manual runs, with numpy,
 Pillow and jsonschema installed. It includes `tools/ci/test_ci_paths.py` and cache
 retention regression tests. Python failures block merging through the existing
-required contexts on either route.
+required Linux contexts on either route; daily Windows failures are report-only for landings.
 
 The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
 `tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
@@ -411,7 +412,7 @@ Native integrations such as `qualify_prefab_runtime.py`, its packaged service an
 installed acceptance inputs, `test_render_runner.py`, its native fixture generator
 and imports, and simulation capture tools stay on the build path.
 Extension helpers and viewport fixtures retain standalone and authoring mock
-coverage on Linux and Windows, alongside full native correctness in CI and ASan.
+coverage on Linux and Windows, alongside full native correctness in CI, ASan and Daily Windows.
 Executable authoring test entrypoints also retain native builds.
 Authoring service implementation and native probes require builds.
 The public-tree job also runs SDF documentation lint so doc-only edits retain that
@@ -421,7 +422,7 @@ Required job names and workflow PR triggers remain present for every PR. Native
 lanes depend directly on the always-running classifier. The clang-tidy aggregate
 also depends on the shards and reports their result, including routed skips.
 Workflow cancellation stops aggregates with valid dependencies; invalid
-dependencies reach an explicit failure step. Linux/GCC and Windows/MSVC select their native or Python
+dependencies reach an explicit failure step. Linux/GCC selects its native or Python
 steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
 which GitHub accepts for required checks, rather than leaving a missing status
 pending. Public tree, Format, Doxygen, and runner contracts run independently
@@ -431,7 +432,6 @@ heavy-sensitive changes on ready devel-bound PRs (main-bound PRs require full):
 | Required check | Listed docs-only PR | Python tooling PR | C++ PR | Devel push |
 |---|---|---|---|---|
 | Linux / GCC | success (Python) | success (native) | success | success |
-| Windows / MSVC | success (Python) | success (native) | success | success |
 | Public tree / inventory honesty | success | success | success | success |
 | Format changed files | success | success | success | success |
 | Linux / GCC ASan | skipped | success | success | success |

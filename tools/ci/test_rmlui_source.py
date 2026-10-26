@@ -1151,7 +1151,7 @@ class DeliveryRefusals(unittest.TestCase):
             self.assertIn(refusal, cmake)
         self.assertIn('"tools/ci/test_rmlui_source.py"', (ROOT / "tools/ci/ci_paths.py").read_text(encoding="utf-8", errors="strict"))
         self.assertIn("RmlUiSourceScriptContract", (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8", errors="strict"))
-        for workflow in ("ci.yml", "asan.yml", "performance.yml", "release.yml"):
+        for workflow in ("ci.yml", "windows-build.yml", "asan.yml", "performance.yml", "release.yml"):
             text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8", errors="strict")
             self.assertIn("rmlui_source.py init --root", text)
         self.assertIn("tools/ci/ci_paths.py python-tests", (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8", errors="strict"))
@@ -1666,7 +1666,7 @@ class BootstrapInterpreterBinding(unittest.TestCase):
         return subprocess.run(args, capture_output=True, text=True, check=False)
 
     def test_ucrt_workflow_binds_bootstrap_interpreter_at_real_cmake_boundary(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         marker = "      - name: Prepare fresh RmlUi build root\n        shell: msys2 {0}\n"
         section = workflow.split(marker, 1)[1]
         initializer = section.split("run: ", 1)[1].splitlines()[0].strip("'")
@@ -1791,7 +1791,7 @@ class BootstrapInterpreterBinding(unittest.TestCase):
                 self.assertFalse((build / ".rmlui-ready.json").exists())
 
     def test_all_current_configure_callers_bind_the_bootstrap_interpreter(self):
-        for name in ("ci.yml", "asan.yml", "performance.yml", "release.yml"):
+        for name in ("ci.yml", "windows-build.yml", "asan.yml", "performance.yml", "release.yml"):
             source = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
             calls = [line for line in source.splitlines() if "cmake " in line and (
                 re.search(r"cmake --preset (?:release|perf|debug-asan|profile)\b", line)

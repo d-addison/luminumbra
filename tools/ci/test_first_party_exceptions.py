@@ -207,7 +207,7 @@ luminumbra_configure_first_party_target(warning_checked_test)
                             msvc=False, warnings=True, testing=True)
 
     def test_ci_symbol_flags_preserve_exceptions_for_dependencies_too(self):
-        workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        workflow = (ROOT / '.github/workflows/windows-build.yml').read_text(encoding='utf-8')
         flags = re.search(r"'-DCMAKE_CXX_FLAGS=([^']+)'", workflow)
         self.assertIsNotNone(flags, 'the MSVC cache argument must retain both options')
         self.assertEqual(flags[1].split(), ['/Z7', '/EHsc'])

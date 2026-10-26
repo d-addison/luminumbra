@@ -1,0 +1,70 @@
+name: Daily Windows
+
+on:
+  schedule:
+    # 05:17 Eastern standard time / 06:17 Eastern daylight time. Scheduled
+    # workflows execute on the default branch; the reusable workflow resolves devel.
+    - cron: '17 10 * * *'
+  workflow_dispatch:
+    inputs:
+      qualification_capture:
+        description: 'Capture one full binary-bound qualification per toolchain'
+        type: boolean
+        default: false
+      expected_sha:
+        description: 'Full candidate SHA; required for qualification capture'
+        type: string
+        default: ''
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Unique non-PR groups also protect pending schedules from dispatch replacement.
+  # The single Windows runner serializes jobs, including tracking-issue updates.
+  group: windows-daily-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) }}
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      runner: '["self-hosted", "windows", "x64", "lum-windows"]'
+      qualification_capture: ${{ inputs.qualification_capture == true }}
+      expected_sha: ${{ inputs.expected_sha || '' }}
+
+  report:
+    if: ${{ always() && github.event_name != 'pull_request' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) }}
+    needs: build
+    runs-on: [self-hosted, windows, x64, lum-windows]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      # Enumerate failed jobs; this read permission is confined to reporting.
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          ref: ${{ needs.build.outputs.head_sha || github.sha }}
+      - name: Select Python runtime
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14.8'
+          architecture: x64
+          check-latest: false
+          allow-prereleases: false
+          freethreaded: false
+          update-environment: true
+      - name: Update Daily Windows run issue
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINDOWS_HEAD_SHA: ${{ needs.build.outputs.head_sha || github.sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: python -I -B tools/ci/windows_daily_report.py
