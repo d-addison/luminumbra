@@ -75,7 +75,7 @@ class GlDebugLogTest(unittest.TestCase):
                 self.assertFalse(source.closed)
 
     def test_replaced_input_refuses_for_both_log_and_artifact_readers(self):
-        original_stat = Path.stat
+        original_stat = Path.lstat
         for reader in (checker.bounded_bytes, lambda path: list(checker.read_log(path))):
             with self.subTest(reader=reader):
                 path = self.write_log(MARKER)
@@ -91,7 +91,7 @@ class GlDebugLogTest(unittest.TestCase):
                         path.write_bytes(b'replacement bytes')
                     return info
 
-                with mock.patch.object(Path, 'stat', replace):
+                with mock.patch.object(Path, 'lstat', replace):
                     with self.assertRaises(checker.InputError):
                         reader(path)
                 self.assertEqual(observed, [path])
