@@ -10,6 +10,7 @@
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/game/PhotoMode.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 #include "../support/UniqueTempPath.h"
 
@@ -2348,18 +2349,118 @@ TEST(CaptureArtifacts, UnwritableReportImageInvalidScanAndCompleteOutput) {
     index.close(); // Windows cannot unlink an open file.
 }
 
+// Inject a real GL error at render_frame's final framebuffer unbind. The public
+// stage trace identifies the completed dispatch, without a production test seam.
+class FrameRenderError {
+public:
+    explicit FrameRenderError(const RenderPipeline& pipeline)
+        : original_(glBindFramebuffer)
+        , pipeline_(pipeline) {
+        Active() = this;
+        glad_glBindFramebuffer = BindFramebuffer;
+    }
+    ~FrameRenderError() {
+        glad_glBindFramebuffer = original_;
+        Active() = nullptr;
+    }
+    unsigned failures() const {
+        return failures_;
+    }
+
+private:
+    static FrameRenderError*& Active() {
+        static FrameRenderError* active = nullptr;
+        return active;
+    }
+    static void GLAPIENTRY BindFramebuffer(GLenum target, GLuint framebuffer) {
+        auto& self = *Active();
+        self.original_(target, framebuffer);
+        const auto& stages = self.pipeline_.frame_stage_trace();
+        if (target == GL_FRAMEBUFFER && framebuffer == 0 && !stages.empty() &&
+            stages.back() == "debug_view") {
+            glEnable(GL_TEXTURE_2D); // Invalid capability in the core profile.
+            ++self.failures_;
+        }
+    }
+    PFNGLBINDFRAMEBUFFERPROC original_;
+    const RenderPipeline& pipeline_;
+    unsigned failures_ = 0;
+};
+
 TEST_F(FarWorldWaterGl, CaptureIgnoresPriorErrorsAndRefusesReadbackErrors) {
     RenderPipeline pipeline;
     const std::filesystem::path root(LUMINUMBRA_SOURCE_ROOT);
-    // A scan with no G-buffer reports the back buffer without shader setup.
+    ASSERT_TRUE(pipeline.startup(9, 9, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_taau_enabled(false);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_terrain_coverage_diagnostics_enabled(true);
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({8, 80, 8}, {0, 1, 0}, -90, 0);
+    const auto materials = root / "data/common/materials.json";
+    const Luminumbra::TestSupport::ScopedTempFile scratch("frame-errors-", ".json");
+    const auto directory = scratch.Path().parent_path();
+    // Queue two distinct stale errors before rendering, consuming neither here.
+    glEnable(GL_TEXTURE_2D);
+    glPixelStorei(GL_PACK_ALIGNMENT, 3);
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    ASSERT_FALSE(pipeline.frame_stage_trace().empty());
+    EXPECT_TRUE(ScanFrame(pipeline, 9, 9, materials).ok);
+    EXPECT_TRUE(pipeline.capture_terrain_coverage(directory / "clean"));
+    EXPECT_TRUE(std::filesystem::exists(directory / "clean/manifest.json"));
+
+    // Each reader must independently refuse an error from the rendered frame.
+    enum class Capture {
+        Scan,
+        Coverage,
+        FrameParity,
+        UpscaleParity,
+        SsaoParity
+    };
+    for (const auto capture : {Capture::Scan,
+                               Capture::Coverage,
+                               Capture::FrameParity,
+                               Capture::UpscaleParity,
+                               Capture::SsaoParity}) {
+        SCOPED_TRACE(static_cast<int>(capture));
+        {
+            FrameRenderError failure(pipeline);
+            pipeline.render_frame(
+                registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+            ASSERT_GT(failure.failures(), 0u);
+        }
+        switch (capture) {
+            case Capture::Scan:
+                EXPECT_FALSE(ScanFrame(pipeline, 9, 9, materials).ok);
+                break;
+            case Capture::Coverage:
+                EXPECT_FALSE(pipeline.capture_terrain_coverage(directory / "faulty"));
+                EXPECT_FALSE(std::filesystem::exists(directory / "faulty/manifest.json"));
+                break;
+            case Capture::FrameParity:
+                EXPECT_FALSE(pipeline.capture_frame_parity(camera, directory / "faulty-frame"));
+                EXPECT_FALSE(std::filesystem::exists(directory / "faulty-frame"));
+                break;
+            case Capture::UpscaleParity:
+                EXPECT_FALSE(
+                    pipeline.capture_upscale_seam_parity(camera, directory / "faulty-upscale"));
+                EXPECT_FALSE(std::filesystem::exists(directory / "faulty-upscale"));
+                break;
+            case Capture::SsaoParity:
+                EXPECT_FALSE(pipeline.capture_ssao_parity(directory / "faulty-ssao", camera));
+                EXPECT_FALSE(std::filesystem::exists(directory / "faulty-ssao"));
+                break;
+        }
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+
+    // Preserve the back-buffer luminance and direct readback-error assertions.
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glReadBuffer(GL_BACK);
     glClearColor(0.2f, 0.3f, 0.4f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    // Queue two distinct earlier errors without consuming either one.
-    glEnable(GL_TEXTURE_2D);             // Invalid capability in the core profile.
-    glPixelStorei(GL_PACK_ALIGNMENT, 3); // Invalid alignment.
-    const auto materials = root / "data/common/materials.json";
     const auto captured = ScanFrame(pipeline, 9, 9, materials);
     EXPECT_TRUE(captured.ok);
     EXPECT_GT(captured.mean_frame_luminance, 0.0);
@@ -2368,7 +2469,7 @@ TEST_F(FarWorldWaterGl, CaptureIgnoresPriorErrorsAndRefusesReadbackErrors) {
     // GL_BACK is invalid on this user framebuffer. The capture's own error
     // must still refuse success, even when an earlier error was queued too.
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
-    glEnable(GL_TEXTURE_2D);
+    glReadBuffer(GL_BACK);
     EXPECT_FALSE(ScanFrame(pipeline, 9, 9, materials).ok);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

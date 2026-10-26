@@ -296,12 +296,6 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
                               "for spatial coverage comparisons",
                               "residency and draw submission do not prove per-pixel coverage",
                               "raw readback and file writes are excluded from measured frames"};
-    // OpenGL has at most eight error flags. Drain stale rendering errors
-    // before capture; errors produced by the capture still refuse publication.
-    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
-        if (glGetError() == GL_NO_ERROR)
-            break;
-    }
     {
         ReadbackState state(gbuffer().fbo_id);
         glReadBuffer(GL_BACK);

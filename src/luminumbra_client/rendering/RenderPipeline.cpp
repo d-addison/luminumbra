@@ -453,12 +453,9 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
-    // OpenGL has at most eight error flags. Drain stale rendering errors
-    // before capture; errors produced by the capture still refuse publication.
-    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
-        if (glGetError() == GL_NO_ERROR)
-            break;
-    }
+    // Refuse frame errors before redispatch or target allocation can consume them.
+    if (glGetError() != GL_NO_ERROR)
+        return false;
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
@@ -595,12 +592,9 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
-    // OpenGL has at most eight error flags. Drain stale rendering errors
-    // before capture; errors produced by the capture still refuse publication.
-    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
-        if (glGetError() == GL_NO_ERROR)
-            break;
-    }
+    // Refuse frame errors before redispatch or target allocation can consume them.
+    if (glGetError() != GL_NO_ERROR)
+        return false;
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
@@ -1238,12 +1232,9 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
-    // OpenGL has at most eight error flags. Drain stale rendering errors
-    // before capture; errors produced by the capture still refuse publication.
-    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
-        if (glGetError() == GL_NO_ERROR)
-            break;
-    }
+    // Refuse frame errors before redispatch or target allocation can consume them.
+    if (glGetError() != GL_NO_ERROR)
+        return false;
 
     RenderContext ctx = make_ssao_context(camera);
     // (1) Mapping check: ctx fields must equal the raw pipeline sources.
@@ -2454,6 +2445,12 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   UploadPresentation presentation) {
     if (!m_started) {
         return;
+    }
+    // Clear unrelated errors before preparation or dispatch can produce this
+    // frame's errors. Bound the drain to eight calls, even for a faulty context.
+    for (unsigned frame_error = 0; frame_error < 8; ++frame_error) {
+        if (glGetError() == GL_NO_ERROR)
+            break;
     }
     //   (the  unlock): prepare once (ALL per-frame CPU mutation),
     // dispatch once (the pure GPU stage sequence over the prepared state), then the

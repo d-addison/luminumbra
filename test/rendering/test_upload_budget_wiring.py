@@ -888,18 +888,9 @@ class UploadBudgetWiring(unittest.TestCase):
              'void UpdatePhotoCapture(', 'glReadBuffer(GL_BACK)', 1),
             (ROOT / 'src/luminumbra_client/main_client.cpp',
              None, 'glReadBuffer(GL_BACK)', 4),
-            (RENDERING / 'FrameScan.cpp', 'FrameScanReport ScanFrame(',
-             'glReadBuffer(GL_BACK)', 1),
-            (RENDERING / 'SceneSurvey.cpp', None, 'glReadBuffer(GL_BACK)', 1),
-            (RENDERING / 'TerrainCoverageCapture.cpp',
-             'bool RenderPipeline::capture_terrain_coverage(', 'ReadbackState state(', 1),
             (RENDERING / 'static_preview/StaticRenderer.cpp',
              'StaticFrame StaticRenderer::Render(', 'impl.Resize(', 1),
         ]
-        for name in ('capture_frame_parity', 'capture_upscale_seam_parity',
-                     'capture_ssao_parity'):
-            scopes.append((RENDERING / 'RenderPipeline.cpp',
-                           'bool RenderPipeline::' + name + '(', None, 1))
         for path, signature, first_call, expected in scopes:
             with self.subTest(path=path.name, signature=signature):
                 source = read(path)
@@ -922,6 +913,54 @@ class UploadBudgetWiring(unittest.TestCase):
                                  r'glGetError\(\)\s*(?:==|!=)\s*GL_NO_ERROR')
         native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
         self.assertIn('CaptureIgnoresPriorErrorsAndRefusesReadbackErrors', native)
+
+    def test_frame_errors_survive_every_post_render_capture(self):
+        render = body(self.pipeline, 'void RenderPipeline::render_frame(')
+        drain = re.search(
+            r'for \(unsigned frame_error = 0; frame_error < 8;\s*'
+            r'\+\+frame_error\) \{\s*if \(glGetError\(\) == GL_NO_ERROR\)'
+            r'\s*break;\s*\}', render)
+        self.assertIsNotNone(drain)
+        self.assertLess(render.index('if (!m_started)'), drain.start())
+        self.assertLess(drain.end(), render.index('select_frame_far_world('))
+        self.assertLess(drain.end(), render.index('prepare_frame('))
+        self.assertLess(drain.end(), render.index('dispatch_stages('))
+        self.assertEqual(render.count('glGetError()'), 1)
+        scopes = [
+            (RENDERING / 'FrameScan.cpp', 'FrameScanReport ScanFrame('),
+            (RENDERING / 'SceneSurvey.cpp', 'bool RunSceneSurvey('),
+            (RENDERING / 'TerrainCoverageCapture.cpp',
+             'bool RenderPipeline::capture_terrain_coverage('),
+        ]
+        for name in ('capture_frame_parity', 'capture_upscale_seam_parity',
+                     'capture_ssao_parity'):
+            scopes.append((RENDERING / 'RenderPipeline.cpp',
+                           'bool RenderPipeline::' + name + '('))
+        for path, signature in scopes:
+            with self.subTest(path=path.name, signature=signature):
+                scope = body(read(path), signature)
+                self.assertNotIn('capture_error', scope)
+                # Every GL error query must contribute to a refusal verdict;
+                # a replacement drain with another name cannot pass this check.
+                queries = list(re.finditer(r'glGetError\(\)', scope))
+                self.assertTrue(queries)
+                for query in queries:
+                    self.assertRegex(scope[query.end():], r'^\s*(?:==|!=)\s*GL_NO_ERROR')
+                self.assertNotRegex(scope, r'glGetError\(\)[\s\S]{0,40}\bbreak;')
+                if 'parity' in signature:
+                    self.assertIn('if (glGetError() != GL_NO_ERROR) return false;', compact(scope))
+                    first_gl_call = re.search(r'\bgl[A-Z]\w*\(', scope)
+                    self.assertEqual(first_gl_call.group(), 'glGetError(')
+        native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
+        regression = body(native, 'TEST_F(FarWorldWaterGl, CaptureIgnoresPriorErrorsAndRefusesReadbackErrors)')
+        self.assertLess(regression.index('glEnable(GL_TEXTURE_2D)'),
+                        regression.index('pipeline.render_frame('))
+        self.assertIn('FrameRenderError failure(pipeline)', regression)
+        self.assertIn('ASSERT_GT(failure.failures(), 0u)', regression)
+        self.assertIn('EXPECT_FALSE(ScanFrame(pipeline, 9, 9, materials).ok)', regression)
+        self.assertIn('EXPECT_FALSE(pipeline.capture_terrain_coverage(', regression)
+        for name in ('capture_frame_parity', 'capture_upscale_seam_parity', 'capture_ssao_parity'):
+            self.assertRegex(compact(regression), r'EXPECT_FALSE\(\s*pipeline\.' + name + r'\(')
 
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))

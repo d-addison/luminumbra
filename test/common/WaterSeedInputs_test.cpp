@@ -541,6 +541,40 @@ TEST(WaterSeedInputs, MigrationKeepsInt32ExtremesInBothDirections) {
                 continue;
             }
             SCOPED_TRACE(::testing::Message() << old_res << " -> " << new_res);
+            for (const auto bed : {kMin, kMax}) {
+                SCOPED_TRACE(bed);
+                SeedFixture fixture;
+                fixture.water().SetSimResolution(old_res);
+                fixture.tick();
+                auto& chunk = *fixture.chunks().begin()->second;
+                const auto old_cells = static_cast<std::size_t>(old_res * old_res);
+                ASSERT_EQ(chunk.water_bed_mm.size(), old_cells);
+                ASSERT_EQ(chunk.water_depth_mm.size(), old_cells);
+                chunk.water_bed_mm.assign(old_cells, bed);
+                chunk.water_depth_mm.assign(old_cells, kMax);
+                fixture.water().SetSimResolution(new_res);
+                ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+                const auto new_cells = static_cast<std::size_t>(new_res * new_res);
+                // In all six resolution pairs, bilinear weights sum to 65536.
+                // A constant grid stays constant, even at either signed extreme;
+                // only depths have a nonnegative contract. Mirrors use a wide sum.
+                EXPECT_EQ(chunk.water_bed_mm, std::vector<std::int32_t>(new_cells, bed));
+                EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(new_cells, kMax));
+                const float surface =
+                    static_cast<float>(static_cast<std::int64_t>(bed) + kMax) / 1000.0f;
+                EXPECT_EQ(chunk.water_level_data, std::vector<float>(new_cells, surface));
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, NegativeLegacyDepthMigratesToZero) {
+    for (const int old_res : {2, 8, 16}) {
+        for (const int new_res : {2, 8, 16}) {
+            if (old_res == new_res) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << old_res << " -> " << new_res);
             SeedFixture fixture;
             fixture.water().SetSimResolution(old_res);
             fixture.tick();
@@ -548,13 +582,14 @@ TEST(WaterSeedInputs, MigrationKeepsInt32ExtremesInBothDirections) {
             const auto old_cells = static_cast<std::size_t>(old_res * old_res);
             ASSERT_EQ(chunk.water_bed_mm.size(), old_cells);
             ASSERT_EQ(chunk.water_depth_mm.size(), old_cells);
-            chunk.water_bed_mm.assign(old_cells, kMax);
-            chunk.water_depth_mm.assign(old_cells, kMin);
+            chunk.water_bed_mm.assign(old_cells, -1000);
+            chunk.water_depth_mm.assign(old_cells, std::numeric_limits<std::int32_t>::min());
             fixture.water().SetSimResolution(new_res);
             ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
             const auto new_cells = static_cast<std::size_t>(new_res * new_res);
-            EXPECT_EQ(chunk.water_bed_mm, std::vector<std::int32_t>(new_cells, kMax));
-            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(new_cells, kMin));
+            EXPECT_EQ(chunk.water_bed_mm, std::vector<std::int32_t>(new_cells, -1000));
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(new_cells, 0));
+            EXPECT_EQ(chunk.water_level_data, std::vector<float>(new_cells, -1.0f));
         }
     }
 }
