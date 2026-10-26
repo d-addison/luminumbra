@@ -13,6 +13,7 @@ import perf
 SCHEMA = 'luminumbra.render_benchmark.v3'
 WORKLOAD_SCHEMA = 'luminumbra.render_benchmark.v4'
 SCHEMAS = (SCHEMA, WORKLOAD_SCHEMA)
+MAX_FRAMES = 18_000  # Measurement::kMaxFrames in RenderMeasurement.h.
 WORKLOADS = ('cave', 'edit', 'region_crossing', 'save_load', 'menu_entry')
 ACTION_SEQUENCES = {
     'edit': ['dig', 'fill'], 'region_crossing': [], 'save_load': ['save', 'reload'],
@@ -32,7 +33,7 @@ def number(value, label, minimum=0):
     return value
 
 
-def integer(value, label, minimum=0, maximum=18000):
+def integer(value, label, minimum=0, maximum=MAX_FRAMES):
     if type(value) is not int or not minimum <= value <= maximum:
         raise ValueError(f'{label}: invalid integer')
     return value

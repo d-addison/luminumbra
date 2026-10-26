@@ -2039,7 +2039,7 @@ if(BUILD_TESTING)
         NAME RmlUiSourceCommandContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
                 DeliveryRefusals PairedWorkflowInitialization HostedConfigurationContracts BootstrapInterpreterBinding
-                OwnedCommandLifetime WindowsContainmentRefusal OwnershipFieldDiagnostics RootMismatchObservations
+                OwnedCommandLifetime CommandCancellationContract WindowsContainmentRefusal OwnershipFieldDiagnostics RootMismatchObservations
                 ConfigureCallerBoundaries Utf8SourceReads FixtureCleanupCustody)
     set_tests_properties(RmlUiSourceCommandContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)

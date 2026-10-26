@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import perf
 import render_contract as contract
 import validate_render_capture as capture

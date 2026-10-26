@@ -1405,6 +1405,140 @@ class FrameAttributionWiring(unittest.TestCase):
                         changed.index("poll_foliage_readback();"))
         self.assertLess(changed.index("m_gpu_generated_count.reset();"),
                         changed.index("poll_foliage_readback();"))
+    def test_sampler_availability_is_in_both_signatures_before_cache_reuse(self):
+        rebuild = block(self.foliage, "void FoliagePass::rebuild_instances(")
+        reuse = rebuild.index("if (m_scatter_built && sig == m_last_scatter_sig")
+        # Evaluate the actual availability predicate in each signature for both
+        # transitions, rather than relying on a phase/configuration change.
+        for mixer in ("mix", "config_mix"):
+            match = re.search(r"\b" + mixer + r"\((query != nullptr) \? (\d+)ull : (\d+)ull\);",
+                              rebuild[:reuse])
+            self.assertIsNotNone(match, mixer + " must include sampler availability")
+            values = [int(match.group(2)) if cpp_expression(match.group(1),
+                      query=1 if present else None, nullptr=None) else int(match.group(3))
+                      for present in (False, True)]
+            self.assertNotEqual(values[0], values[1])
+        self.assertGreater(rebuild.index("query == nullptr"), reuse)
+        native = read(ROOT / "test/rendering/foliage_invalidation_test.cpp")
+        for name, initial in (("SamplerLossInvalidatesCompletedScatter", "true"),
+                              ("SamplerRestorationInvalidatesInactiveScatter", "false")):
+            test = block(native, "TEST_F(FoliageInvalidationTest, " + name + ")")
+            self.assertIn("ExpectSamplerTransition(" + initial + ")", test)
+        transition = block(native, "static void ExpectSamplerTransition(")
+        for fragment in ("for (const bool gpu : {false, true})",
+                         "for (const bool rendered_ground : {false, true})",
+                         "EXPECT_EQ(pass.build_generation(), generation + 1);",
+                         "EXPECT_EQ(pass.build_generation(), generation + 2);",
+                         "EXPECT_EQ(changed.uploaded_bytes, 0u);",
+                         "ExpectSame(before, Records(pass, gpu));"):
+            self.assertIn(fragment, transition)
+        self.assertIn("rendering/foliage_invalidation_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
+    def test_froxel_publishes_programs_and_volumes_only_after_complete_initialization(self):
+        source = read(CLIENT / "rendering/passes/FroxelPass.cpp")
+        inject = block(source, "bool FroxelPass::execute_inject(")
+        self.assertIn("if (m_initialization_state == InitializationState::Uninitialized)", inject)
+        attempt = block(inject, "if (m_initialization_state == InitializationState::Uninitialized)")
+        shader_guard = "if (pending.inject == 0 || pending.integrate == 0)"
+        volume_guard = 'if (!make_volume(pending.scatter, "froxel.scatter")'
+        self.assertIn("return false;", block(attempt, shader_guard))
+        self.assertIn("return false;", block(attempt, volume_guard))
+        self.assertLess(attempt.index(shader_guard), attempt.index(volume_guard))
+        self.assertIn('!make_volume(pending.integrated, "froxel.integrated")', attempt)
+        self.assertIn("if (!ValidateLayout(pending.inject, inject_layout))", attempt)
+        self.assertLess(attempt.index("if (!ValidateLayout("), attempt.index(volume_guard))
+        members = (("m_inject_program", "inject", "AttributedGl::Program{}"),
+                   ("m_integrate_program", "integrate", "AttributedGl::Program{}"),
+                   ("m_scatter_tex", "scatter", "0"), ("m_integrated_tex", "integrated", "0"))
+        ready = attempt.index("m_initialization_state = InitializationState::Ready;")
+        for member, pending, empty in members:
+            assignment = f"{member} = std::exchange(pending.{pending}, {empty});"
+            self.assertEqual(inject.count(member + " ="), 1)
+            self.assertLess(attempt.index(volume_guard), attempt.index(assignment))
+            self.assertLess(attempt.index(assignment), ready)
+        cleanup = compact(block(source, "~PendingFroxelResources()"))
+        for member in ("inject", "integrate"):
+            self.assertIn(f"if ({member}) AttributedGl::DeleteProgram(glDeleteProgram, {member});", cleanup)
+        for member in ("scatter", "integrated"):
+            self.assertIn(f"if ({member}) glDeleteTextures(1, &{member});", cleanup)
+        make_volume = compact(block(attempt, "auto make_volume ="))
+        self.assertIn("[](GLuint& t, const char* label) -> bool", attempt)
+        self.assertIn("if (t == 0) return false;", make_volume)
+        self.assertIn("glGetTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);", make_volume)
+        self.assertTrue(make_volume.endswith("return immutable == GL_TRUE;"))
+        self.assertIn("if (file.bad() || source.fail()) return {};", compact(attempt))
+
+    def test_froxel_failure_is_latched_until_explicit_destroy_and_retry_is_registered(self):
+        source = read(CLIENT / "rendering/passes/FroxelPass.cpp")
+        inject = compact(block(source, "bool FroxelPass::execute_inject("))
+        failed = "if (m_initialization_state == InitializationState::Failed) return false;"
+        attempt = "m_initialization_state = InitializationState::Failed;"
+        self.assertIn(failed, inject)
+        self.assertLess(inject.index(failed), inject.index(attempt))
+        self.assertLess(inject.index("if (ctx.frozen_replay) return false;"), inject.index(attempt))
+        self.assertLess(inject.index(attempt), inject.index("PendingFroxelResources pending;"))
+        integrate = compact(block(source, "void FroxelPass::execute_integrate("))
+        self.assertIn("m_initialization_state != InitializationState::Ready", integrate)
+        destroy = compact(block(source, "void FroxelPass::destroy()"))
+        self.assertTrue(destroy.endswith("m_initialization_state = InitializationState::Uninitialized;"))
+        native = read(ROOT / "test/rendering/pass_context_test.cpp")
+        regression = block(native, "TEST(PassContext, FroxelInitializationFailureCleansUpAndRequiresExplicitRetry)")
+        for fragment in ("failure < 9", "calls.failed_shader =", "calls.failed_texture =",
+                         "calls.failed_storage =", "calls.invalid_layout =", "failure == 7",
+                         "EXPECT_THROW(pass.execute_inject(ctx, root), std::runtime_error);",
+                         "EXPECT_EQ(calls.live_programs, 0);", "EXPECT_EQ(calls.live_textures, 0);",
+                         "EXPECT_FALSE(pass.execute_inject(ctx, root));", "pass.destroy();",
+                         "ASSERT_TRUE(pass.execute_inject(ctx, root));",
+                         "EXPECT_EQ(calls.texture_calls, textures + 2);",
+                         "EXPECT_EQ(calls.dispatches, 2);"):
+            self.assertIn(fragment, regression)
+        self.assertIn("TEST(PassContext, FroxelOffAndUninitializedFrozenReplayDoNotAllocateOrLatchFailure)", native)
+        self.assertIn("rendering/pass_context_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
+    def test_job_callback_state_outlives_shutdown_on_returns_and_dispatch_exceptions(self):
+        source = read(ROOT / "test/common/JobSystem_test.cpp")
+        # Declaration order protects fatal assertion returns and partial dispatch
+        # exceptions; a successful wait alone cannot establish that contract.
+        sites = (
+            ("DispatchRunsThousandsOfIndependentJobs", "RunningJobSystem system;",
+             ("std::atomic<int> completed{0};", "std::mutex mutex;", "std::condition_variable completed_cv;")),
+            ("BatchDispatchCompletesManyIndependentBatches", "RunningJobSystem system;",
+             ("std::array<std::atomic<int>, kBatchCount> batch_counts;", "std::atomic<int> completed{0};",
+              "std::mutex mutex;", "std::condition_variable completed_cv;")),
+            ("BoundedDispatchRetainsPayloadUntilExecutionThenReleasesStorage", "GatedSingleWorker system;",
+             ("std::atomic<int> completed{0};",)),
+            *[(name, "GatedSingleWorker gated;", ("std::mutex order_mutex;", "std::vector<int> completion_order;"))
+              for name in ("HighJobsCompleteBeforeQueuedNormalBacklog", "NormalJobsAreNotStarvedByHighBacklog",
+                           "RuntimeStatsReportPerLaneQueueDepths")],
+            ("BatchCountersCanBeReusedAcrossSequentialBatches", "RunningJobSystem system;",
+             ("std::atomic<int> completed{0};",)),
+            ("RingGrowsAndRecyclesAcrossManyCycles", "RunningJobSystem system;",
+             ("std::atomic<long long> grand_total{0};", "std::atomic<int> ran{0};")),
+            ("NestedDispatchCompletesFully", "RunningJobSystem system;",
+             ("std::atomic<int> inner_ran{0};", "std::mutex handles_mutex;",
+              "std::vector<Luminumbra::JobHandle> inner_handles;")),
+            ("ThrowingJobsStillDrainTheBarrier", "RunningJobSystem system;",
+             ("std::atomic<int> survived{0};", "std::atomic<int> after{0};")),
+        )
+        for name, owner, declarations in sites:
+            with self.subTest(site=name):
+                test = block(source, ", " + name + ")")
+                for declaration in declarations:
+                    self.assertLess(test.index(declaration), test.index(owner))
+        completion = block(source, "void CheckCaptureCompletion(")
+        self.assertLess(completion.index("std::atomic<int> reused{0};"),
+                        completion.index("Luminumbra::JobSystem job_system;"))
+        throughput = read(ROOT / "test/common/jobsystem_throughput_test.cpp")
+        self.assertLess(throughput.index("std::atomic<int> completed{0};"),
+                        throughput.index("Luminumbra::JobSystem job_system;"))
+        # Shared payloads own their captures; the explicit close/reject test
+        # cannot run callbacks after its already-completed shutdown.
+        bounded = block(source, ", BoundedDispatchChecksBothLanesAndDrainsAcceptedPayloadsOnClose)")
+        self.assertIn("std::make_shared<std::atomic<int>>(0)", bounded)
+        closed = block(source, ", DispatchAfterShutdownRejectsWithoutHang)")
+        self.assertLess(closed.index("job_system.shutdown();"), closed.index("dispatch_batch("))
+        self.assertIn("common/JobSystem_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
     def test_metadata_replacement_does_not_upload_a_redundant_command(self):
         gpu = block(self.foliage, "bool FoliagePass::rebuild_instances_gpu(")
         self.assertIn("const bool initialize_command = !m_metadata_valid;", gpu)
