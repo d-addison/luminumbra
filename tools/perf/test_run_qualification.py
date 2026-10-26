@@ -737,6 +737,77 @@ class CaptureBindingTests(RunnerTestBase):
 
 
 class ArtifactHandlingTests(RunnerTestBase):
+    def test_capture_readers_refuse_over_capacity_without_truncating(self):
+        path = self.tmp / 'oversized-capture.json'
+        # Sparse input exercises the real capacity without allocating its payload.
+        with path.open('wb') as output:
+            output.write(b'{}')
+            output.truncate(rq.MAX_CAPTURE_BYTES + 1)
+        for reader in (rq.read_capture_bytes, rq.capture_file_sha256,
+                       lambda path: rq.debug_json(path, capture=True)):
+            with self.subTest(reader=reader), self.assertRaisesRegex(
+                    rq.UsageError, f'capture evidence exceeds {rq.MAX_CAPTURE_BYTES} byte cap'):
+                reader(path)
+        self.assertIsNone(rq.read_json_object(path, capture=True))
+        self.assertEqual(path.stat().st_size, rq.MAX_CAPTURE_BYTES + 1)
+
+    def test_capture_byte_boundary_and_growth_are_bounded(self):
+        path = self.tmp / 'growing-capture.json'
+        bound = 128
+        payload = b'{}' + b' ' * (bound - 2)
+        original_fstat = os.fstat
+        with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
+            path.write_bytes(payload)
+            self.assertEqual(rq.read_capture_bytes(path), payload)
+            self.assertEqual(rq.read_json_object(path, capture=True), {})
+            for phase in ('open', 'read'):
+                with self.subTest(phase=phase):
+                    path.write_bytes(payload)
+
+                    def grow(descriptor):
+                        info = original_fstat(descriptor)
+                        with path.open('ab') as output:
+                            output.write(b' ')
+                        return original_fstat(descriptor) if phase == 'open' else info
+
+                    with mock.patch.object(os, 'fstat', side_effect=grow), \
+                            self.assertRaisesRegex(rq.UsageError, 'capture evidence exceeds 128 byte cap'):
+                        rq.read_capture_bytes(path)
+
+    def test_capture_readers_refuse_invalid_and_unreadable_inputs(self):
+        path = self.tmp / 'invalid-capture.json'
+        for payload in (b'', b'{', b'[]', b'\xff', b'{"value":1}\0ignored',
+                        b'[' * 65 + b']' * 65):
+            with self.subTest(payload=payload):
+                path.write_bytes(payload)
+                self.assertIsNone(rq.read_json_object(path, capture=True))
+        path.unlink()
+        self.assertIsNone(rq.read_json_object(path, capture=True))
+        with self.assertRaisesRegex(rq.UsageError, 'cannot read capture evidence'):
+            rq.debug_json(path, capture=True)
+        path.write_bytes(b'{}')
+        with mock.patch.object(os, 'open', side_effect=PermissionError('access denied')):
+            with self.assertRaisesRegex(rq.UsageError, 'cannot read capture evidence.*access denied'):
+                rq.read_capture_bytes(path)
+            self.assertIsNone(rq.read_json_object(path, capture=True))
+        for mode in (stat.S_IFDIR, stat.S_IFLNK, stat.S_IFIFO, stat.S_IFCHR):
+            with self.subTest(mode=mode):
+                info = types.SimpleNamespace(st_mode=mode)
+                with mock.patch.object(Path, 'lstat', return_value=info), \
+                        mock.patch.object(os, 'open') as opening:
+                    with self.assertRaisesRegex(rq.UsageError, 'capture evidence must be a regular file'):
+                        rq.read_capture_bytes(path)
+                    opening.assert_not_called()
+                with mock.patch.object(os, 'fstat', return_value=info):
+                    with self.assertRaisesRegex(rq.UsageError, 'capture evidence must be a regular file'):
+                        rq.read_capture_bytes(path)
+        info = path.lstat()
+        changed = types.SimpleNamespace(st_mode=info.st_mode, st_dev=info.st_dev,
+                                        st_ino=info.st_ino + 1)
+        with mock.patch.object(os, 'fstat', return_value=changed):
+            with self.assertRaisesRegex(rq.UsageError, 'capture evidence changed while opening'):
+                rq.read_capture_bytes(path)
+
     def test_json_object_readers_share_regular_file_byte_and_depth_bounds(self):
         path = self.tmp / 'bounded-evidence.json'
         path.write_bytes(b'\xef\xbb\xbf{"value": 1}')
@@ -1898,7 +1969,8 @@ class BuildManifestTests(RealCheckerTests):
                 self.assertFalse(rq.native_executable(client))
 
     def native_control(self, manifest_mode='match', mutate=False, capture_mode='private',
-                       receipt_defect=None, mutate_checked_capture=False, debug_mode='pass'):
+                       receipt_defect=None, mutate_checked_capture=False, debug_mode='pass',
+                       capture_bytes=None, debug_capture_bytes=None):
         # Copy an existing native binary; never compile or claim GPU performance.
         client = self.tmp / ('native-client.exe' if os.name == 'nt' else 'native-client')
         shutil.copy2(sys.executable, client)
@@ -1976,6 +2048,10 @@ class BuildManifestTests(RealCheckerTests):
                         raise OSError('debug launch refused')
                     if debug_mode == 'exit':
                         return subprocess.CompletedProcess(argv, 3)
+                size = debug_capture_bytes if debug and debug_capture_bytes is not None else capture_bytes
+                if size is not None:
+                    with target.open('ab') as output:
+                        output.write(b' ' * (size - output.tell()))
                 if mutate:
                     with client.open('ab') as output:
                         output.write(b'changed')
@@ -2019,6 +2095,41 @@ class BuildManifestTests(RealCheckerTests):
         document = self.load_qualification()
         receipt = rq.read_json_object(self.out / 'cells' / f'{cell_id}.process.json')
         return code, document['cells'][0], receipt
+
+    def test_measured_and_debug_captures_over_host_cap_are_accepted(self):
+        size = MAX_FILE_BYTES + 1
+        code, cell, _ = self.native_control(capture_bytes=size)
+        self.assertEqual(code, 0)
+        self.assertEqual(cell['state'], 'pass')
+        self.assertEqual(cell['adapter'], dict(adapter(), version='4.5 synthetic fixture'))
+        self.assertTrue(rq.gl_debug_passes(cell['gl_debug'], cell['client']))
+        for suffix in ('.json', '.artifact.json', '.debug.artifact.json'):
+            path = self.out / 'cells' / (cell['id'] + suffix)
+            self.assertEqual(path.stat().st_size, size)
+            with self.assertRaisesRegex(rq.UsageError, f'host evidence exceeds {MAX_FILE_BYTES} byte cap'):
+                rq.read_host_bytes(path)
+            self.assertIsNone(rq.read_json_object(path))
+        self.assertTrue(cell['client']['native_build'])
+        self.assertTrue(cell['client']['sha256_verified'])
+        self.assertTrue(cell['checker_canonical'])
+
+    def test_over_capacity_captures_fail_closed_with_clear_reason(self):
+        bound = 1024 * 1024
+        with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
+            code, cell, _ = self.native_control(capture_bytes=bound + 1)
+            self.assertEqual(code, 1)
+            self.assertEqual(cell['state'], 'process_failed')
+            self.assertIn(f'capture evidence exceeds {bound} byte cap', cell['reason'])
+            self.assertIsNone(cell['artifact'])
+            self.assertFalse((self.out / 'cells' / (cell['id'] + '.json')).exists())
+            retained = self.out / 'cells' / (cell['id'] + '.artifact.json')
+            self.assertEqual(retained.stat().st_size, bound + 1)
+            code, cell, _ = self.native_control(debug_capture_bytes=bound + 1)
+            self.assertEqual(code, 0)
+            self.assertEqual(cell['state'], 'pass')
+            self.assertIn(f'capture evidence exceeds {bound} byte cap', cell['gl_debug']['reason'])
+            self.assertFalse(rq.gl_debug_passes(cell['gl_debug'], cell['client']))
+            self.assertFalse(rq.cell_qualifies(cell))
 
     def test_manifest_bound_native_control_can_qualify(self):
         code, cell, receipt = self.native_control()
