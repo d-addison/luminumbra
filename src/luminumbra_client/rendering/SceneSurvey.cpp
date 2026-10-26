@@ -324,6 +324,12 @@ bool RunSceneSurvey(GLFWwindow* window,
             return false;
 
         std::vector<unsigned char> px(pixel_bytes);
+        // OpenGL has at most eight error flags. Drain stale rendering errors
+        // before capture; errors produced by the capture still refuse publication.
+        for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
+            if (glGetError() == GL_NO_ERROR)
+                break;
+        }
         glReadBuffer(GL_BACK);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, fbw, fbh, GL_RGB, GL_UNSIGNED_BYTE, px.data());

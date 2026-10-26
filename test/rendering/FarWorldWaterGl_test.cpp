@@ -2348,6 +2348,31 @@ TEST(CaptureArtifacts, UnwritableReportImageInvalidScanAndCompleteOutput) {
     index.close(); // Windows cannot unlink an open file.
 }
 
+TEST_F(FarWorldWaterGl, CaptureIgnoresPriorErrorsAndRefusesReadbackErrors) {
+    RenderPipeline pipeline;
+    const std::filesystem::path root(LUMINUMBRA_SOURCE_ROOT);
+    // A scan with no G-buffer reports the back buffer without shader setup.
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+    glClearColor(0.2f, 0.3f, 0.4f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    // Queue two distinct earlier errors without consuming either one.
+    glEnable(GL_TEXTURE_2D);             // Invalid capability in the core profile.
+    glPixelStorei(GL_PACK_ALIGNMENT, 3); // Invalid alignment.
+    const auto materials = root / "data/common/materials.json";
+    const auto captured = ScanFrame(pipeline, 9, 9, materials);
+    EXPECT_TRUE(captured.ok);
+    EXPECT_GT(captured.mean_frame_luminance, 0.0);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+
+    // GL_BACK is invalid on this user framebuffer. The capture's own error
+    // must still refuse success, even when an earlier error was queued too.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glEnable(GL_TEXTURE_2D);
+    EXPECT_FALSE(ScanFrame(pipeline, 9, 9, materials).ok);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 TEST_F(FarWorldWaterGl, WetToDryAdoptsRemovalInBothWaterModes) {
     for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
         RenderPipeline pipeline;

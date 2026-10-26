@@ -4743,7 +4743,8 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return terrain;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    if (!IsBoundedWaterResolution(res) || static_cast<int>(c->water_level_data.size()) != res * res)
+    if (!IsBoundedWaterResolution(res) ||
+        c->water_level_data.size() < static_cast<std::size_t>(res) * static_cast<std::size_t>(res))
         return terrain;
     const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
     const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
@@ -4755,16 +4756,19 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
 }
 
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
-    // Mirrors the injection loop's precondition (has_water_sim + complete FLOAT
-    // grid). EMPIRICAL ground truth (the water-source staging hunt): water grids live on
-    // the 2.5D COLUMN's y=0 chunk regardless of the terrain sign — probe there.
+    // Match source injection: an integer pair plus all three float mirrors.
+    // Probe the 2.5D column's y=0 chunk regardless of terrain sign.
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
     const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return false;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    return IsBoundedWaterResolution(res) &&
-           static_cast<int>(c->water_level_data.size()) == res * res;
+    if (!IsBoundedWaterResolution(res))
+        return false;
+    const auto cells = static_cast<std::size_t>(res) * static_cast<std::size_t>(res);
+    return c->water_bed_mm.size() == cells && c->water_depth_mm.size() == cells &&
+           c->water_level_data.size() >= cells && c->water_flow_data.size() >= cells &&
+           c->water_sim_terrain_height.size() >= cells;
 }
 
 // boot-settle mode passthrough (lifts the live-play water caps during Boot only).

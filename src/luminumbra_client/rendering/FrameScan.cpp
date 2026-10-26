@@ -81,6 +81,12 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
     // The caller renders the frame and reads BEFORE any UI overlay, mirroring the
     // --scene-config / --timelapse capture sites.
     std::vector<unsigned char> color(pixel_count * 3u);
+    // OpenGL has at most eight error flags. Drain stale rendering errors
+    // before capture; errors produced by the capture still refuse publication.
+    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
+        if (glGetError() == GL_NO_ERROR)
+            break;
+    }
     glReadBuffer(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(

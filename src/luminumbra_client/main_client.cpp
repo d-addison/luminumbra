@@ -849,6 +849,12 @@ static bool CaptureTimelapseFrame(ClientAppContext& g_app,
             std::size_t pixel_bytes = 0;
             if (Luminumbra::Rendering::CapturePixelBytes(vw, vh, 3, pixel_bytes)) {
                 std::vector<unsigned char> px(pixel_bytes);
+                // OpenGL has at most eight error flags. Drain stale rendering errors
+                // before capture; errors produced by the capture still refuse publication.
+                for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
+                    if (glGetError() == GL_NO_ERROR)
+                        break;
+                }
                 glReadBuffer(GL_BACK);
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
@@ -5390,6 +5396,13 @@ int main(int argc, char* argv[]) {
                             std::size_t pixel_bytes = 0;
                             if (Luminumbra::Rendering::CapturePixelBytes(vw, vh, 3, pixel_bytes)) {
                                 std::vector<unsigned char> px(pixel_bytes);
+                                // Drain up to eight GL error flags before capture.
+                                // Capture errors still refuse publication.
+                                for (unsigned capture_error = 0; capture_error < 8;
+                                     ++capture_error) {
+                                    if (glGetError() == GL_NO_ERROR)
+                                        break;
+                                }
                                 glReadBuffer(GL_BACK);
                                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
@@ -5542,6 +5555,13 @@ int main(int argc, char* argv[]) {
                                 if (Luminumbra::Rendering::CapturePixelBytes(
                                         vw, vh, 3, pixel_bytes)) {
                                     std::vector<unsigned char> px(pixel_bytes);
+                                    // Drain up to eight GL error flags before capture.
+                                    // Capture errors still refuse publication.
+                                    for (unsigned capture_error = 0; capture_error < 8;
+                                         ++capture_error) {
+                                        if (glGetError() == GL_NO_ERROR)
+                                            break;
+                                    }
                                     glReadBuffer(GL_BACK);
                                     glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                     glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
@@ -5794,6 +5814,12 @@ int main(int argc, char* argv[]) {
             bool screenshot_complete = false;
             std::size_t pixel_bytes = 0;
             if (Luminumbra::Rendering::CapturePixelBytes(width, height, 3, pixel_bytes)) {
+                // OpenGL has at most eight error flags. Drain stale rendering errors
+                // before capture; errors produced by the capture still refuse publication.
+                for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
+                    if (glGetError() == GL_NO_ERROR)
+                        break;
+                }
                 GLint previous_read_fbo = 0, previous_pack_alignment = 0;
                 glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
                 glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);

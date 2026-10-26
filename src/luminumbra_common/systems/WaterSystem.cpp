@@ -163,8 +163,7 @@ bool HasCompleteIntegerWaterGrid(const Chunk& chunk, int resolution) {
         !chunk.has_water_sim.load(std::memory_order_relaxed))
         return false;
     const auto cells = static_cast<std::size_t>(resolution) * resolution;
-    return chunk.water_bed_mm.size() == cells && chunk.water_depth_mm.size() == cells &&
-           chunk.water_edge_flux.size() == 2 * cells;
+    return chunk.water_bed_mm.size() == cells && chunk.water_depth_mm.size() == cells;
 }
 
 constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
@@ -174,7 +173,8 @@ constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
 std::uint64_t WaterActivityScore(const Chunk& chunk) {
     std::uint64_t activity = 0;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_relaxed);
-    if (!HasCompleteIntegerWaterGrid(chunk, resolution)) {
+    if (!HasCompleteIntegerWaterGrid(chunk, resolution) ||
+        chunk.water_edge_flux.size() != 2 * static_cast<std::size_t>(resolution) * resolution) {
         return activity;
     }
 
@@ -275,6 +275,10 @@ void StepChunkWaterFixed(Chunk& c,
     if (!HasCompleteIntegerWaterGrid(c, res))
         return;
     const int n = res * res;
+    // Bed/depth are authoritative. Flux may be absent in adopted grids; restore
+    // the historical zero-momentum initialization, bounded to 2 * 32 * 32 entries.
+    if (c.water_edge_flux.size() != 2 * static_cast<std::size_t>(n))
+        c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0);
 
     std::vector<std::int32_t>& depth = c.water_depth_mm;
     std::vector<std::int32_t>& bed = c.water_bed_mm;
@@ -1698,8 +1702,10 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     const auto old_cell_count = GetWaterCellCount(current_resolution);
     // Empty integer grids are historical float-only saves. Partial integer
     // truth is malformed; refuse it before changing any chunk state.
-    if ((!chunk.water_bed_mm.empty() && chunk.water_bed_mm.size() != old_cell_count) ||
-        (!chunk.water_depth_mm.empty() && chunk.water_depth_mm.size() != old_cell_count)) {
+    const bool legacy_float_only = chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty();
+    const bool complete_integer_pair = chunk.water_bed_mm.size() == old_cell_count &&
+                                       chunk.water_depth_mm.size() == old_cell_count;
+    if (!legacy_float_only && !complete_integer_pair) {
         return false;
     }
 
@@ -1718,10 +1724,6 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     // mirror sat on the sim-truth path). The mirror now regenerates FROM mm.
     const std::vector<std::int32_t> old_depth_mm = std::move(chunk.water_depth_mm);
     const std::vector<std::int32_t> old_bed_mm = std::move(chunk.water_bed_mm);
-    const bool can_interpolate_mm =
-        current_resolution > 1 && old_depth_mm.size() == GetWaterCellCount(current_resolution);
-    const bool can_interpolate_bed =
-        current_resolution > 1 && old_bed_mm.size() == GetWaterCellCount(current_resolution);
     // Endpoint-aligned bilinear sampling with 1/256 weights, all integer.
     // Round ties toward +infinity, including negative beds. Each weighted sum
     // fits int64: weights sum to 65536 and samples are int32.
@@ -1825,10 +1827,10 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
             const std::size_t idx = static_cast<std::size_t>(z * new_resolution + x);
             const float terr = chunk.water_sim_terrain_height[idx];
             chunk.water_bed_mm[idx] =
-                can_interpolate_bed
+                complete_integer_pair
                     ? sample_mm(old_bed_mm, x, z)
                     : static_cast<std::int32_t>(std::lround(terr * static_cast<float>(MM_PER_M)));
-            if (can_interpolate_mm) {
+            if (complete_integer_pair) {
                 chunk.water_depth_mm[idx] =
                     std::max<std::int32_t>(0, sample_mm(old_depth_mm, x, z));
             } else {

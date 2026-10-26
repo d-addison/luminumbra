@@ -779,7 +779,17 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536)", sampler)
         self.assertIn("new_resolution == current_resolution", resize)
         self.assertIn("current_resolution > 32", resize)
+        self.assertIn("chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty()", resize)
+        self.assertIn("chunk.water_bed_mm.size() == old_cell_count && "
+                      "chunk.water_depth_mm.size() == old_cell_count", resize)
+        refusal = "if (!legacy_float_only && !complete_integer_pair) { return false; }"
+        self.assertIn(refusal, resize)
+        self.assertLess(resize.index(refusal), resize.index("std::move(chunk.water_level_data)"))
+        self.assertNotIn("can_interpolate_bed", resize)
+        self.assertNotIn("can_interpolate_mm", resize)
         native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        self.assertIn("CompleteIntegerPairStepsWithAbsentOrWrongSizedFlux", native)
+        self.assertIn("LegacyFloatPairMigratesTogetherAndThenSteps", native)
         self.assertIn("EditedChannelAndDamSurviveMigrationAndSavedContinuation", native)
         self.assertIn("IntegerMigrationDoesNotRequireRenderMirrorsAndRefusesInvalidSourceResolution", native)
         self.assertIn("MigratedWaterOracle(beds, old_res, new_res)", native)
@@ -825,9 +835,15 @@ class UploadBudgetWiring(unittest.TestCase):
         complete = body(source, 'bool HasCompleteIntegerWaterGrid(')
         for condition in ('resolution > 32', '32 % resolution',
                           'chunk.water_bed_mm.size() == cells',
-                          'chunk.water_depth_mm.size() == cells',
-                          'chunk.water_edge_flux.size() == 2 * cells'):
+                          'chunk.water_depth_mm.size() == cells'):
             self.assertIn(condition, complete)
+        self.assertNotIn('water_edge_flux', complete)
+        step = body(source, 'void StepChunkWaterFixed(')
+        self.assertIn('c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0)', step)
+        self.assertLess(step.index('!HasCompleteIntegerWaterGrid(c, res)'),
+                        step.index('c.water_edge_flux.assign('))
+        self.assertLess(step.index('c.water_edge_flux.assign('),
+                        step.index('flux[eidx]'))
         for signature in ('std::uint64_t WaterActivityScore(', 'bool HasCompleteWaterGrid(',
                           'void StepChunkWaterFixed(', 'void WaterSystem::update(',
                           'int WaterSystem::EditTerrainBed('):
@@ -848,6 +864,15 @@ class UploadBudgetWiring(unittest.TestCase):
                            'WorldWaterProbesRefuseUnsupportedResolutionBeforeSizeArithmetic'):
             self.assertIn('TEST(WaterSeedInputs, ' + regression + ')', native)
         world = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.cpp')
+        readiness = body(world, 'bool SHIELD_WorldSystem::debug_water_grid_at(')
+        for condition in ('c->water_bed_mm.size() == cells',
+                          'c->water_depth_mm.size() == cells',
+                          'c->water_level_data.size() >= cells',
+                          'c->water_flow_data.size() >= cells',
+                          'c->water_sim_terrain_height.size() >= cells'):
+            self.assertIn(condition, readiness)
+        self.assertNotIn('water_edge_flux', readiness)
+        self.assertIn('SourceReadinessRequiresTheSameArraysAsInjection', native)
         for signature in ('bool SHIELD_WorldSystem::IsUnderwater(',
                           'std::int64_t SHIELD_WorldSystem::debug_water_volume_near(',
                           'bool SHIELD_WorldSystem::debug_lowest_land_pos(',
@@ -856,6 +881,47 @@ class UploadBudgetWiring(unittest.TestCase):
                           'float SHIELD_WorldSystem::live_water_surface_at(',
                           'bool SHIELD_WorldSystem::debug_water_grid_at('):
             self.assertIn('IsBoundedWaterResolution(res)', body(world, signature))
+
+    def test_capture_error_scopes_drain_stale_errors_before_capture_calls(self):
+        scopes = [
+            (ROOT / 'src/luminumbra_client/app/DebugOverlays.cpp',
+             'void UpdatePhotoCapture(', 'glReadBuffer(GL_BACK)', 1),
+            (ROOT / 'src/luminumbra_client/main_client.cpp',
+             None, 'glReadBuffer(GL_BACK)', 4),
+            (RENDERING / 'FrameScan.cpp', 'FrameScanReport ScanFrame(',
+             'glReadBuffer(GL_BACK)', 1),
+            (RENDERING / 'SceneSurvey.cpp', None, 'glReadBuffer(GL_BACK)', 1),
+            (RENDERING / 'TerrainCoverageCapture.cpp',
+             'bool RenderPipeline::capture_terrain_coverage(', 'ReadbackState state(', 1),
+            (RENDERING / 'static_preview/StaticRenderer.cpp',
+             'StaticFrame StaticRenderer::Render(', 'impl.Resize(', 1),
+        ]
+        for name in ('capture_frame_parity', 'capture_upscale_seam_parity',
+                     'capture_ssao_parity'):
+            scopes.append((RENDERING / 'RenderPipeline.cpp',
+                           'bool RenderPipeline::' + name + '(', None, 1))
+        for path, signature, first_call, expected in scopes:
+            with self.subTest(path=path.name, signature=signature):
+                source = read(path)
+                scope = body(source, signature) if signature else source
+                drains = list(re.finditer(
+                    r'for \(unsigned capture_error = 0; capture_error < 8;\s*'
+                    r'\+\+capture_error\) \{\s*if \(glGetError\(\) == GL_NO_ERROR\)'
+                    r'\s*break;\s*\}', scope))
+                self.assertEqual(len(drains), expected)
+                boundaries = ([match.start() for match in re.finditer(
+                    re.escape(first_call), scope)] if first_call else
+                    [re.search(r'\bgl(?!GetError\b)[A-Z]\w*\(', scope).start()])
+                self.assertEqual(len(boundaries), expected)
+                previous = 0
+                for drain, boundary in zip(drains, boundaries):
+                    self.assertGreaterEqual(drain.start(), previous)
+                    self.assertLess(drain.end(), boundary)
+                    previous = boundary
+                self.assertRegex(scope[drains[-1].end():],
+                                 r'glGetError\(\)\s*(?:==|!=)\s*GL_NO_ERROR')
+        native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
+        self.assertIn('CaptureIgnoresPriorErrorsAndRefusesReadbackErrors', native)
 
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))

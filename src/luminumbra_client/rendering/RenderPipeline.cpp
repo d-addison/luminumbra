@@ -453,6 +453,13 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
+    // OpenGL has at most eight error flags. Drain stale rendering errors
+    // before capture; errors produced by the capture still refuse publication.
+    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
+        if (glGetError() == GL_NO_ERROR)
+            break;
+    }
+
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -587,6 +594,13 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
+
+    // OpenGL has at most eight error flags. Drain stale rendering errors
+    // before capture; errors produced by the capture still refuse publication.
+    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
+        if (glGetError() == GL_NO_ERROR)
+            break;
+    }
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
@@ -1223,6 +1237,13 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
+
+    // OpenGL has at most eight error flags. Drain stale rendering errors
+    // before capture; errors produced by the capture still refuse publication.
+    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
+        if (glGetError() == GL_NO_ERROR)
+            break;
+    }
 
     RenderContext ctx = make_ssao_context(camera);
     // (1) Mapping check: ctx fields must equal the raw pipeline sources.
