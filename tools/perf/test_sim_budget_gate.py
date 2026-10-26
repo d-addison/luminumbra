@@ -15,6 +15,9 @@ from typing import Any
 import unittest
 from unittest import mock
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import capture_sim_budget as capture
 import check_sim_budgets
 import propose_sim_budgets
