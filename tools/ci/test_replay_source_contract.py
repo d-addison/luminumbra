@@ -535,8 +535,8 @@ class ReplaySourceContract(unittest.TestCase):
 
 class SessionUsabilitySourceContract(unittest.TestCase):
     @staticmethod
-    def function(source, name):
-        start = source.index("GameSession::" + name + "(")
+    def function(source, name, prefix="GameSession::"):
+        start = source.index(prefix + name + "(")
         opening = source.index("{", start)
         # Ignore braces inside diagnostics and comments when locating the body.
         tokens = re.finditer(r'"(?:\\.|[^"\\])*"|\{|\}', source[opening:])
@@ -549,6 +549,73 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 if depth == 0:
                     return source[start:opening + token.end()]
         raise AssertionError("unterminated session function")
+
+    def test_every_plant_reader_admits_and_reads_the_same_regular_file_handle(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        reader = self.function(source, "load_plant_entities", "WorldSaveService::")
+        self.assertIn("const PlantInputFile input(path);", reader)
+        self.assertNotIn("std::filesystem::exists(", reader)
+        self.assertNotIn("ifstream", reader)
+        self.assertLess(reader.index("input.read(bytes)"),
+                        reader.index("LoadEntityRegistrySnapshotJson(bytes,"))
+        admission = source.split("class PlantInputFile {", 1)[1].split(
+            "bool ReadAmbientAnchor(", 1)[0]
+        self.assertIn("O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC", admission)
+        self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS", admission)
+        for check in ("::fstat(m_descriptor, &information)", "S_ISREG(information.st_mode)",
+                      "::GetFileType(m_handle) != FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle, &information)",
+                      "FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY",
+                      "::GetFileSizeEx(m_handle, &length)", "size > bytes.max_size()"):
+            self.assertLess(admission.index(check), admission.index("bytes.resize("))
+        self.assertLess(admission.index("bytes.resize("), admission.index("::read(m_descriptor,"))
+        self.assertLess(admission.index("bytes.resize("), admission.index("::ReadFile(m_handle,"))
+        self.assertIn("bytes.size() - offset", admission)
+        self.assertIn("::read(m_descriptor, &trailing, 1) == 0", admission)
+        self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
+                      admission)
+        world = self.function(source, "load_world", "WorldSaveService::")
+        self.assertIn("load_plant_entities(plants, save_dir, &errors)", world)
+        session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
+                                "ReadWorldStateFrom")
+        self.assertIn("WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)",
+                      session)
+
+    def test_plant_admission_bounds_allocation_and_keeps_windows_replacement_possible(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        admission = source.split("class PlantInputFile {", 1)[1].split(
+            "bool ReadAmbientAnchor(", 1)[0]
+        self.assertIn("size > WorldSaveService::kMaxPlantPayloadBytes", admission)
+        self.assertLess(admission.index("size > WorldSaveService::kMaxPlantPayloadBytes"),
+                        admission.index("bytes.resize("))
+        self.assertIn("FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE", admission)
+        self.assertIn("ValidPlantPathSpelling(path)", admission)
+        self.assertIn("error == ERROR_PATH_NOT_FOUND && MissingPlantParent(path)", admission)
+        reader = source.split("bool WorldSaveService::load_plant_entities(", 1)[1].split(
+            "std::filesystem::path WorldSaveService::active_regions_path(", 1)[0]
+        for exception in ("std::bad_alloc", "std::length_error"):
+            self.assertIn("catch (const " + exception + "&", reader)
+        writer = self.function(source, "save_plant_entities", "WorldSaveService::")
+        self.assertLess(writer.index("bytes.size() > kMaxPlantPayloadBytes"),
+                        writer.index("ReclaimAbandonedStaging("))
+        self.assertLess(writer.index("bytes.size() > kMaxPlantPayloadBytes"),
+                        writer.index("WriteFileDurably("))
+        # Include the stream readers as well as explicit attribute/plant handles.
+        windows_stream = source.split("class SharedSaveInputBuffer", 1)[1].split(
+            "bool ValidPlantPathSpelling(", 1)[0]
+        self.assertIn("FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE", windows_stream)
+        self.assertNotRegex(source, r"std::ifstream\s+input\s*\(")
+        self.assertEqual(source.count("SharedSaveInputStream input("), 6)
+        for caller in ("read_clock_metadata", "load_active_regions",
+                       "rename_file_durably", "load_world"):
+            self.assertIn("SharedSaveInputStream input(",
+                          self.function(source, caller, "WorldSaveService::"))
+
+    def test_session_energy_coordinates_use_the_guarded_cell_conversion(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        self.assertNotIn("std::floor(m_metadata.spawnPoint.", source)
+        self.assertEqual(source.count("m_metadata.spawnPoint.x, 0.0f, Systems::kAetherCellSizeM"), 2)
+        self.assertEqual(source.count("m_metadata.spawnPoint.z, 0.0f, Systems::kAetherCellSizeM"), 2)
 
     def test_operation_refusal_cannot_change_current_session_usability(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
@@ -614,25 +681,38 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         readiness = self.function(source, "LoadWorldState")
         self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
         snapshot = self.function(source, "LoadWorldStateFrom")
-        # Every staged refusal reaches the same invalidation before adoption.
+        # Fatal snapshot refusals invalidate; admission refuses before live state changes.
         failure = snapshot.split("if (!ReadWorldStateFrom(save_dir, state))", 1)[1]
         self.assertLess(failure.index("m_worldUsable = false;"),
                         failure.index("m_worldSystem->clear_world("))
         self.assertLess(failure.index("return false;"),
                         failure.index("AdoptWorldStateFrom(save_dir, state);"))
         self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 1)
+        self.assertIn("if (!state.input_refused)", failure)
+        for name in ("LoadWorld", "LoadWorldFrom"):
+            self.assertIn("if (!loaded.input_refused)", self.function(source, name))
         reader = self.function(source, "ReadWorldStateFrom")
-        self.assertEqual(reader.count("return false;"), 5)
-        self.assertEqual(reader.count("m_worldOpenError ="), 5)
+        self.assertEqual(reader.count("return false;"), 6)
+        self.assertEqual(reader.count("m_worldOpenError ="), 6)
         for validation in ("service.load_world(", "WorldSaveService::read_clock_metadata(",
                            "WorldSaveService::load_active_regions(", "m_regionSchedulerOverride",
                            "chunk->sdf_data.size() != kFullSdfLattice"):
             self.assertIn(validation, reader)
+        self.assertLess(reader.index("load_plant_entities(state.plants"),
+                        reader.index("service.load_world("))
+        adoption = self.function(source, "AdoptWorldStateFrom")
+        self.assertNotIn("load_plant_entities(", adoption)
+        self.assertIn("ApplyPlantEntitySnapshot(m_registry, saved.plants)", adoption)
         self.assertNotIn("m_worldUsable", reader)
         self.assertNotIn("m_worldSystem->", reader)
         self.assertNotIn("m_renderCalendar =", reader)
         self.assertNotIn("RestoreWorldClock(", reader)
         self.assertNotIn("m_worldUsable = true;", snapshot)
+        saving = self.function(source, "SaveWorldStateToImpl")
+        self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
+                        saving.index("service.save_world("))
+        self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
+                        saving.index("save_plant_entities(plant_snapshot"))
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
         full_snapshot = runner.split("ServerWorldRunner::SaveFullSnapshot()", 1)[1].split(
             "ServerWorldRunner::StreamedChunkCount()", 1)[0]

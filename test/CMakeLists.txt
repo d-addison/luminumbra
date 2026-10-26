@@ -247,6 +247,7 @@ add_executable(common_tests
     # Snapshot cursor restoration and destination refusal cases are discovered
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    common/GameSessionPlantPersistence_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
@@ -1551,6 +1552,7 @@ add_executable(frontier_gates_test
     fields/energy_field_state_test.cpp
     persistence/world_save_service_test.cpp
     persistence/plant_persistence_test.cpp
+    persistence/plant_allocator_persistence_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
     persistence/water_cursor_hash_test.cpp

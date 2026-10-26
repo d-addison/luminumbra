@@ -40,8 +40,10 @@
 // baseline is unperturbed until water sources are spawned.
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -151,6 +153,17 @@ inline void IrrigationWorldToCell(
     float x, float z, float origin_x, float origin_z, float cell_size, int& cx, int& cz) {
     const float fx = (x - origin_x) / cell_size;
     const float fz = (z - origin_z) / cell_size;
+    // Reject invalid grid parameters and out-of-int cells before conversion.
+    // -1 is outside every grid; double comparisons avoid rounding INT_MAX up.
+    if (!(cell_size > 0.0f) || !std::isfinite(cell_size) || !std::isfinite(fx) ||
+        !std::isfinite(fz) || static_cast<double>(fx) < std::numeric_limits<int>::min() ||
+        static_cast<double>(fx) > std::numeric_limits<int>::max() ||
+        static_cast<double>(fz) < std::numeric_limits<int>::min() ||
+        static_cast<double>(fz) > std::numeric_limits<int>::max()) {
+        cx = -1;
+        cz = -1;
+        return;
+    }
     int ix = static_cast<int>(fx);
     int iz = static_cast<int>(fz);
     if (fx < 0.0f && static_cast<float>(ix) != fx)

@@ -77,6 +77,10 @@ public:
     // projection lives in foliage/PlantPersistence.h. An EMPTY snapshot writes NO file (and removes
     // a stale one) so a no-plant save is byte-identical. The chunk LMR1 path is UNTOUCHED.
     static std::filesystem::path plant_entities_path(const std::filesystem::path& save_dir);
+    // Compatibility limit chosen as 256 MiB, far above a realistic plant roster.
+    // There is no fixed supported plant count or per-plant serialized maximum
+    // (unknown extension components are allowed), so this is a policy decision.
+    static constexpr std::uint64_t kMaxPlantPayloadBytes = 256ull * 1024 * 1024;
     static bool save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);

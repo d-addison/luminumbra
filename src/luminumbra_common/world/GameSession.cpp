@@ -82,13 +82,14 @@
 #include "entt/entity/entity.hpp"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <atomic>
-#include <cmath> // std::floor (energy-layer anchor quantization)
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
 #include <exception>
 #include <functional>
 #include <ios>
+#include <limits>
 #include <map>
 #include <span>
 #include <string>
@@ -178,6 +179,16 @@ void ClampTerrainParams(TerrainGenParams& p) {
 float ScentOriginFor(float anchor) {
     return anchor - (static_cast<float>(kScentFieldCells) * kScentCellSize * 0.5f);
 }
+
+int RoundedScentCell(float position, float anchor) {
+    const float cell = (position - ScentOriginFor(anchor)) / kScentCellSize;
+    // Keep the existing nearest-cell rule, but refuse invalid inputs before
+    // lround (whose long result is only 32 bits on Windows) or narrowing to int.
+    if (!std::isfinite(cell) || static_cast<double>(cell) < std::numeric_limits<int>::min() ||
+        static_cast<double>(cell) > std::numeric_limits<int>::max())
+        return -1;
+    return static_cast<int>(std::lround(cell));
+}
 } // namespace
 
 namespace Luminumbra::world {
@@ -190,6 +201,8 @@ struct GameSession::LoadedWorldState {
     std::optional<WorldCalendar> render_calendar;
     std::optional<ActiveRegionLedger> ledger;
     bool snapshot_present = false;
+    Ecs::EntityRegistrySnapshot plants;
+    bool input_refused = false;
 };
 
 GameSession::GameSession() {
@@ -502,10 +515,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // mirroring the weather slot-order rule above. Neither system present
             // -> the -1 sentinel -> the channel's deterministic neutral 0.
             if (m_energyFieldState) {
-                const int stim_cell_x = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-                const int stim_cell_z = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+                const int stim_cell_x = luminumbra::ai::WorldToCell(
+                    m_metadata.spawnPoint.x, 0.0f, Systems::kAetherCellSizeM);
+                const int stim_cell_z = luminumbra::ai::WorldToCell(
+                    m_metadata.spawnPoint.z, 0.0f, Systems::kAetherCellSizeM);
                 stimulus_context.aether_level =
                     static_cast<float>(m_energyFieldState->at_cell(stim_cell_x, stim_cell_z)) /
                     static_cast<float>(luminumbra::fields::kEnergyRawPerUnit);
@@ -821,10 +834,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // block entirely (byte-identical). Deposits are queued by emitters
         // right below; Tick applies them sorted.
         if (m_energyFieldState) {
-            const int anchor_cx =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-            const int anchor_cz =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+            const int anchor_cx = luminumbra::ai::WorldToCell(
+                m_metadata.spawnPoint.x, 0.0f, Systems::kAetherCellSizeM);
+            const int anchor_cz = luminumbra::ai::WorldToCell(
+                m_metadata.spawnPoint.z, 0.0f, Systems::kAetherCellSizeM);
             m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
             // gather this tick's FieldEmitterComponent deposits
             // (id-sorted, two-phase) into the layer before it ticks.
@@ -1441,9 +1454,19 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
     if (!ReadWorldStateFrom(worldPath, loaded)) {
-        m_worldUsable = false;
-        if (m_worldSystem)
-            m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!loaded.input_refused) {
+            m_worldUsable = false;
+            if (m_worldSystem)
+                m_worldSystem->clear_world(m_physicsSystem.get());
+        }
+        return false;
+    }
+
+    // Full-world adoption replaces every entity. Non-plant owners must be
+    // present for an allocator snapshot, so admit against the actual empty target.
+    const entt::registry empty_registry;
+    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(empty_registry, loaded.plants)) {
+        m_worldOpenError = "Saved-input admission refused: plant entity identity clash.";
         return false;
     }
 
@@ -1572,9 +1595,19 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
     if (!ReadWorldStateFrom(worldPath, loaded)) {
-        m_worldUsable = false;
-        if (m_worldSystem)
-            m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!loaded.input_refused) {
+            m_worldUsable = false;
+            if (m_worldSystem)
+                m_worldSystem->clear_world(m_physicsSystem.get());
+        }
+        return false;
+    }
+
+    // Full-world adoption replaces every entity. Non-plant owners must be
+    // present for an allocator snapshot, so admit against the actual empty target.
+    const entt::registry empty_registry;
+    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(empty_registry, loaded.plants)) {
+        m_worldOpenError = "Saved-input admission refused: plant entity identity clash.";
         return false;
     }
 
@@ -2029,6 +2062,10 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // empty roster writes NO file, so a no-plant save stays byte-identical (the save-less path
     // holds).
     const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot)) {
+        LUMINUMBRA_CORE_ERROR("Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
 
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
@@ -2122,9 +2159,16 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
     LoadedWorldState state;
     if (!ReadWorldStateFrom(save_dir, state)) {
-        m_worldUsable = false;
-        // Refused snapshots invalidate resident chunks, but never publish staged members.
-        m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!state.input_refused) {
+            m_worldUsable = false;
+            // Refused snapshots invalidate resident chunks, but never publish staged members.
+            m_worldSystem->clear_world(m_physicsSystem.get());
+        }
+        return false;
+    }
+    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(
+            m_registry, state.plants, /*replace_plants=*/true)) {
+        m_worldOpenError = "Saved-input admission refused: plant entity identity clash.";
         return false;
     }
     AdoptWorldStateFrom(save_dir, state);
@@ -2134,6 +2178,12 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState& state) {
     const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
+    if (!Persistence::WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)) {
+        state.input_refused = true;
+        m_worldOpenError = errors.empty() ? "Saved-input admission refused: invalid plant snapshot."
+                                          : errors.front();
+        return false;
+    }
     state.snapshot_present = service.load_world(state.chunks, save_dir, errors);
     if (!state.snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
@@ -2189,12 +2239,17 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState&
 }
 
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {
-    // All refusing readers have passed; publish the staged state together.
+    // All readers and roster admission have passed before any live state changes.
+    luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, saved.plants);
     m_renderCalendar = saved.render_calendar;
     if (!saved.snapshot_present && !m_activeRegionsEnabled) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
         return; // legacy fresh world
     }
+    // Adoption inserts by chunk ID. A present snapshot replaces resident chunks
+    // after admission; absent chunk input retains the legacy clean-miss behaviour.
+    if (saved.snapshot_present)
+        m_worldSystem->clear_world(m_physicsSystem.get());
     if (saved.ledger) {
         m_ambientFieldAnchor = saved.ambient_anchor.value_or(m_metadata.spawnPoint);
         // Interrupted pairs may have an older ledger. Rebase without scheduling.
@@ -2260,20 +2315,6 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
                 migrated,
                 m_worldSystem->debug_water_sim_resolution(),
                 m_worldSystem->debug_water_sim_resolution());
-        }
-    }
-
-    //  reload persisted plant entities into the live registry (a missing file is
-    // a clean miss). Geometry rebakes from the reloaded genome+stage on the render bridge.
-    {
-        Luminumbra::Ecs::EntityRegistrySnapshot plant_snapshot;
-        std::vector<std::string> plant_errors;
-        if (Persistence::WorldSaveService::load_plant_entities(
-                plant_snapshot, save_dir, &plant_errors)) {
-            luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, plant_snapshot);
-        } else {
-            for (const std::string& e : plant_errors)
-                LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
         }
     }
 
@@ -2346,12 +2387,10 @@ int GameSession::ScentFieldCells() const {
     return kScentFieldCells;
 }
 int GameSession::ScentWorldToCellX(float world_x) const {
-    return static_cast<int>(
-        std::lround((world_x - ScentOriginFor(m_metadata.spawnPoint.x)) / kScentCellSize));
+    return RoundedScentCell(world_x, m_metadata.spawnPoint.x);
 }
 int GameSession::ScentWorldToCellZ(float world_z) const {
-    return static_cast<int>(
-        std::lround((world_z - ScentOriginFor(m_metadata.spawnPoint.z)) / kScentCellSize));
+    return RoundedScentCell(world_z, m_metadata.spawnPoint.z);
 }
 float GameSession::ScentCellToWorldX(int cell_x) const {
     return ScentOriginFor(m_metadata.spawnPoint.x) + static_cast<float>(cell_x) * kScentCellSize;

@@ -2,6 +2,7 @@
 #include "core/Profiler.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
+#include "PlantPersistence.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "core/FilesystemPath.h"
 #include "luminumbra/core/Types.h"
@@ -33,6 +34,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -44,6 +46,8 @@
 #include <vector>
 
 #if defined(_WIN32)
+#include <array>
+#include <streambuf>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -286,6 +290,252 @@ void AddError(std::vector<std::string>* errors, std::string message) {
         errors->push_back(std::move(message));
     }
 }
+
+#if defined(_WIN32)
+// CRT file streams omit delete sharing on Windows. Every persistence stream
+// reader must allow an atomic replacement while retaining its original handle.
+class SharedSaveInputBuffer : public std::streambuf {
+public:
+    explicit SharedSaveInputBuffer(const std::filesystem::path& path)
+        : m_handle(::CreateFileW(path.c_str(),
+                                 GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr,
+                                 OPEN_EXISTING,
+                                 FILE_ATTRIBUTE_NORMAL,
+                                 nullptr)) {}
+    SharedSaveInputBuffer(const SharedSaveInputBuffer&) = delete;
+    SharedSaveInputBuffer& operator=(const SharedSaveInputBuffer&) = delete;
+    ~SharedSaveInputBuffer() override {
+        if (is_open())
+            ::CloseHandle(m_handle);
+    }
+    [[nodiscard]] bool is_open() const {
+        return m_handle != INVALID_HANDLE_VALUE;
+    }
+
+protected:
+    int_type underflow() override {
+        if (gptr() != egptr())
+            return traits_type::to_int_type(*gptr());
+        DWORD received = 0;
+        if (!::ReadFile(
+                m_handle, m_bytes.data(), static_cast<DWORD>(m_bytes.size()), &received, nullptr))
+            throw std::ios_base::failure("failed to read persistence file");
+        if (received == 0)
+            return traits_type::eof();
+        setg(m_bytes.data(), m_bytes.data(), m_bytes.data() + received);
+        return traits_type::to_int_type(*gptr());
+    }
+
+private:
+    HANDLE m_handle;
+    // A bounded 64 KiB read buffer; file growth never grows retained storage.
+    std::array<char, std::size_t{64} * 1024> m_bytes{};
+};
+
+class SharedSaveInputStream : public std::istream {
+public:
+    explicit SharedSaveInputStream(const std::filesystem::path& path,
+                                   std::ios::openmode = std::ios::in)
+        : std::istream(nullptr)
+        , m_buffer(path) {
+        rdbuf(&m_buffer);
+        if (!is_open())
+            setstate(std::ios::failbit);
+    }
+    [[nodiscard]] bool is_open() const {
+        return m_buffer.is_open();
+    }
+
+private:
+    SharedSaveInputBuffer m_buffer;
+};
+
+bool ValidPlantPathSpelling(const std::filesystem::path& path) {
+    // Bound the component walk as well as Win32's extended path spelling.
+    if (path.native().size() > 32767)
+        return false;
+    // Inspect ordinary components even when the caller uses an extended drive
+    // or UNC spelling; keep the original spelling for the actual open.
+    auto spelling = path;
+    if (path.native().starts_with(LR"(\\?\UNC\)"))
+        spelling = std::filesystem::path(LR"(\\)" + path.native().substr(8));
+    else if (path.native().starts_with(LR"(\\?\)"))
+        spelling = std::filesystem::path(path.native().substr(4));
+    for (const auto& component : spelling.relative_path()) {
+        const auto& name = component.native();
+        if (name.empty() || name == L"." || name == L"..")
+            continue;
+        // Win32 otherwise normalizes these to another entry, or reports a
+        // missing parent for an invalid name. Neither is a clean POSIX ENOENT.
+        if (name.size() > 255 || name.back() == L'.' || name.back() == L' ' ||
+            name.find_first_of(L"<>:\"|?*") != std::wstring::npos ||
+            std::any_of(name.begin(), name.end(), [](wchar_t value) { return value < 32; }))
+            return false;
+        auto stem = name.substr(0, name.find(L'.'));
+        while (!stem.empty() && stem.back() == L' ')
+            stem.pop_back();
+        for (auto& value : stem) {
+            if (value >= L'a' && value <= L'z')
+                value = static_cast<wchar_t>(value - L'a' + L'A');
+        }
+        if (stem == L"CON" || stem == L"PRN" || stem == L"AUX" || stem == L"NUL" ||
+            (stem.size() == 4 && (stem.starts_with(L"COM") || stem.starts_with(L"LPT")) &&
+             ((stem[3] >= L'1' && stem[3] <= L'9') || stem[3] == L'\u00b9' ||
+              stem[3] == L'\u00b2' || stem[3] == L'\u00b3')))
+            return false;
+    }
+    return true;
+}
+
+bool MissingPlantParent(const std::filesystem::path& path) {
+    // ERROR_PATH_NOT_FOUND also covers ENOTDIR-like failures. Walk parents
+    // without lexical normalization, following links just as POSIX open() does.
+    // At least one unambiguous missing component and an existing directory are
+    // required. The 32767-code-unit spelling bound also bounds this walk.
+    auto ancestor = path.parent_path();
+    bool missing_component = false;
+    while (!ancestor.empty()) {
+        const HANDLE directory =
+            ::CreateFileW(ancestor.c_str(),
+                          FILE_READ_ATTRIBUTES,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_BACKUP_SEMANTICS,
+                          nullptr);
+        if (directory != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION information{};
+            const bool is_directory =
+                ::GetFileInformationByHandle(directory, &information) &&
+                (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            const bool closed = ::CloseHandle(directory) != 0;
+            return missing_component && is_directory && closed;
+        }
+        const DWORD error = ::GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+            return false;
+        missing_component = missing_component || error == ERROR_FILE_NOT_FOUND;
+        const auto parent = ancestor.parent_path();
+        if (parent == ancestor)
+            return false;
+        ancestor = parent.empty() ? std::filesystem::path(L".") : parent;
+    }
+    return false;
+}
+#else
+using SharedSaveInputStream = std::ifstream;
+#endif
+
+// Every plant reader uses this handle for both type/size admission and payload
+// reads. A pathname check followed by an ifstream open can race a leaf replacement.
+class PlantInputFile {
+public:
+    explicit PlantInputFile(const std::filesystem::path& path) {
+#if defined(_WIN32)
+        if (!ValidPlantPathSpelling(path))
+            return;
+        m_handle = ::CreateFileW(path.c_str(),
+                                 GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr,
+                                 OPEN_EXISTING,
+                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                                 nullptr);
+        if (m_handle == INVALID_HANDLE_VALUE) {
+            const DWORD error = ::GetLastError();
+            m_missing = error == ERROR_FILE_NOT_FOUND ||
+                        (error == ERROR_PATH_NOT_FOUND && MissingPlantParent(path));
+        }
+#else
+        // NONBLOCK prevents a FIFO open from waiting for a writer; NOFOLLOW
+        // refuses even dangling symlinks rather than mistaking them for absence.
+        m_descriptor = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        m_missing = m_descriptor < 0 && errno == ENOENT;
+#endif
+    }
+
+    PlantInputFile(const PlantInputFile&) = delete;
+    PlantInputFile& operator=(const PlantInputFile&) = delete;
+
+    ~PlantInputFile() {
+#if defined(_WIN32)
+        if (m_handle != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_handle);
+#else
+        if (m_descriptor >= 0)
+            ::close(m_descriptor);
+#endif
+    }
+
+    [[nodiscard]] bool missing() const {
+        return m_missing;
+    }
+
+    [[nodiscard]] bool read(std::string& bytes) const {
+        std::uint64_t size = 0;
+#if defined(_WIN32)
+        BY_HANDLE_FILE_INFORMATION information{};
+        LARGE_INTEGER length{};
+        if (m_handle == INVALID_HANDLE_VALUE || ::GetFileType(m_handle) != FILE_TYPE_DISK ||
+            !::GetFileInformationByHandle(m_handle, &information) ||
+            (information.dwFileAttributes &
+             (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
+            !::GetFileSizeEx(m_handle, &length) || length.QuadPart < 0)
+            return false;
+        size = static_cast<std::uint64_t>(length.QuadPart);
+#else
+        struct stat information {};
+        if (m_descriptor < 0 || ::fstat(m_descriptor, &information) != 0 ||
+            !S_ISREG(information.st_mode) || information.st_size < 0)
+            return false;
+        size = static_cast<std::uint64_t>(information.st_size);
+#endif
+        // Allocate only the verified regular file length, checked before narrowing.
+        // Each read is bounded to 64 KiB; growth after admission cannot extend the allocation.
+        if (size > WorldSaveService::kMaxPlantPayloadBytes)
+            throw std::length_error("plant payload exceeds the 256 MiB compatibility limit");
+        if (size > bytes.max_size())
+            return false;
+        bytes.resize(static_cast<std::size_t>(size));
+        constexpr std::size_t kReadBlockSize = std::size_t{64} * 1024;
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            const auto count = std::min(kReadBlockSize, bytes.size() - offset);
+#if defined(_WIN32)
+            DWORD received = 0;
+            if (!::ReadFile(m_handle,
+                            bytes.data() + offset,
+                            static_cast<DWORD>(count),
+                            &received,
+                            nullptr) ||
+                received == 0)
+                return false;
+#else
+            const auto received = ::read(m_descriptor, bytes.data() + offset, count);
+            if (received <= 0)
+                return false;
+#endif
+            offset += static_cast<std::size_t>(received);
+        }
+        char trailing = 0;
+#if defined(_WIN32)
+        DWORD received = 0;
+        return ::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0;
+#else
+        return ::read(m_descriptor, &trailing, 1) == 0;
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+    int m_descriptor = -1;
+#endif
+    bool m_missing = false;
+};
 
 bool ReadAmbientAnchor(const nlohmann::json& metadata,
                        std::optional<Vec3>& anchor,
@@ -885,7 +1135,7 @@ bool ReadRegionFile(const std::filesystem::path& path,
     LUMIN_PROFILE_ZONE_N("File save read");
     out_records.clear();
 
-    std::ifstream input(path, std::ios::binary);
+    SharedSaveInputStream input(path, std::ios::binary);
     if (!input.is_open()) {
         AddError(errors,
                  "failed to open region file for reading: " +
@@ -1292,7 +1542,7 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         const auto path = save_dir / "world_info.json";
         if (!std::filesystem::exists(path))
             return true;
-        std::ifstream input(path, std::ios::binary);
+        SharedSaveInputStream input(path, std::ios::binary);
         const auto metadata = nlohmann::json::parse(input);
         std::string error;
         std::optional<Vec3> anchor;
@@ -1360,11 +1610,24 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
 
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors) try {
     const SaveGuard guard;
     LUMIN_PROFILE_ZONE_N("File plant entities save");
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot)) {
+        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
     if (!validate_save(save_dir, errors))
         return false;
+    const auto bytes = snapshot.entities.empty()
+                           ? std::string{}
+                           : Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot);
+    if (bytes.size() > kMaxPlantPayloadBytes) {
+        AddError(errors,
+                 "Saved-input admission refused: plant payload exceeds the 256 MiB compatibility "
+                 "limit.");
+        return false;
+    }
     const std::filesystem::path path = plant_entities_path(save_dir);
     // Like ledger staging, abandoned plant copies must live outside the strict
     // region scan. Reclaim them even when the new roster is empty.
@@ -1387,35 +1650,51 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
         AddError(errors, "failed to create plant directory: " + ec.message());
         return false;
     }
-    return WriteFileDurably(
-        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), staging, errors);
+    return WriteFileDurably(path, bytes, staging, errors);
+} catch (const std::bad_alloc&) {
+    AddError(errors, "Saved-input admission refused: insufficient memory for plant payload.");
+    return false;
+} catch (const std::length_error& error) {
+    AddError(errors, std::string("Saved-input admission refused: ") + error.what());
+    return false;
 }
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors) try {
     LUMIN_PROFILE_ZONE_N("File plant entities load");
-    out = Luminumbra::Ecs::EntityRegistrySnapshot{};
     const std::filesystem::path path = plant_entities_path(save_dir);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
+    const PlantInputFile input(path);
+    if (input.missing()) {
+        out = Luminumbra::Ecs::EntityRegistrySnapshot{};
         return true; // clean miss: a fresh / no-plant world
     }
-    const std::ifstream in(path, std::ios::binary);
-    if (!in) {
+    std::string bytes;
+    if (!input.read(bytes)) {
         AddError(errors,
-                 "failed to open plant entities file: " + Filesystem::GenericUtf8PathString(path));
+                 "Saved-input admission refused: unreadable or non-regular plant entities file: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
-    std::ostringstream ss;
-    ss << in.rdbuf();
     std::vector<std::string> load_errors;
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
+    Luminumbra::Ecs::EntityRegistrySnapshot candidate;
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, candidate, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
         return false;
     }
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(candidate)) {
+        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
+    out = std::move(candidate);
     return true;
+} catch (const std::bad_alloc&) {
+    AddError(errors, "Saved-input admission refused: insufficient memory for plant payload.");
+    return false;
+} catch (const std::length_error& error) {
+    AddError(errors, std::string("Saved-input admission refused: ") + error.what());
+    return false;
 }
 
 std::filesystem::path WorldSaveService::active_regions_path(const std::filesystem::path& save_dir) {
@@ -1438,7 +1717,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
             AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
             return false;
         }
-        std::ifstream input(path, std::ios::binary);
+        SharedSaveInputStream input(path, std::ios::binary);
         std::string bytes(static_cast<std::size_t>(length), '\0');
         input.read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
@@ -1863,7 +2142,7 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // Revalidate the parsed source under ownership so another persistence writer
     // cannot change the source between the caller's parse and this transaction.
     {
-        const std::ifstream input(source, std::ios::binary);
+        const SharedSaveInputStream input(source, std::ios::binary);
         std::ostringstream contents;
         contents << input.rdbuf();
         if (!input || input.bad() || contents.bad() || contents.str() != expected_bytes) {
@@ -2029,7 +2308,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             return reject("Saved-world validation cancelled.");
         const auto metadata_path = save_dir / "world_info.json";
         if (std::filesystem::exists(metadata_path)) {
-            std::ifstream input(metadata_path, std::ios::binary);
+            SharedSaveInputStream input(metadata_path, std::ios::binary);
             const auto metadata = nlohmann::json::parse(input);
             if (!metadata.is_object())
                 return reject("corrupt world metadata: expected an object");
@@ -2099,7 +2378,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (!present)
             return false;
         if (std::filesystem::exists(world_manifest_path(save_dir))) {
-            std::ifstream input(world_manifest_path(save_dir), std::ios::binary);
+            SharedSaveInputStream input(world_manifest_path(save_dir), std::ios::binary);
             const auto manifest = nlohmann::json::parse(input);
             if (manifest.is_object() && manifest.contains("schema") &&
                 manifest.at("schema").is_string()) {
