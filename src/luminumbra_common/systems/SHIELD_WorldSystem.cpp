@@ -3,6 +3,7 @@
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../core/WaterSeedInputs.h"
+#include "../persistence/WorldSaveService.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
@@ -3984,16 +3985,16 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
               });
 
     if (m_durable_residency) {
-        // A parked chunk that re-entered range keeps its authoritative data. Restore it before
-        // any generation/headroom gate so byte-limit-resident chunks cannot starve re-entry.
+        // Resident/parked re-entry does no I/O and retains its existing headroom semantics.
+        // Disk-only restores go through the sorted generation budget below.
         to_create.erase(std::remove_if(to_create.begin(),
                                        to_create.end(),
                                        [this](const GenerationCandidate& candidate) {
-                                           return restore_authoritative_chunk(candidate.coords);
+                                           const auto id = Chunk::calculate_id(candidate.coords);
+                                           return m_streaming_state.chunks.contains(id) ||
+                                                  unpark_chunk(id);
                                        }),
                         to_create.end());
-        if (m_durable_read_failed)
-            return false;
     }
 
     m_last_streaming_budget_stats.generation_candidates = to_create.size();
@@ -4033,6 +4034,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     m_deferred_generation_candidates = m_last_streaming_budget_stats.deferred_generation;
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
+        if (m_durable_read_failed)
+            return false;
         for (const ChunkGenerationRequest& request : generate_now) {
             shadow_note_generation_dispatch(::Luminumbra::Chunk::calculate_id(request.coords));
         }
@@ -4212,6 +4215,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                                                 int surface_radius,
                                                 int collision_radius,
                                                 int render_lod0_radius) {
+    const Persistence::WorldSaveService::ChunkReadScope durable_reads;
     // Preserve the direct API's historical negative-to-zero normalization.
     const int radius = std::max(0, surface_radius);
     const int collision_range = std::max(0, collision_radius);
@@ -5064,6 +5068,7 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                          float radius_m,
                                          bool fill,
                                          PhysicsSystem* physics_system) {
+    const Persistence::WorldSaveService::ChunkReadScope durable_reads;
     // The edit must fit its subsequent synchronous remesh before touching SDF.
     constexpr float max_edit_radius =
         static_cast<float>((World::kMaxSurfaceRadius - 2) * CHUNK_SIZE_X);
@@ -5745,6 +5750,7 @@ SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     const std::vector<ChunkGenerationRequest>& chunks_to_generate) {
+    const Persistence::WorldSaveService::ChunkReadScope durable_reads;
     if (m_durable_read_failed)
         return {};
     // dispatch APPENDS a batch to the lane FIFO (the old
@@ -6606,7 +6612,11 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
             throw std::runtime_error("duplicate durable chunk adoption");
         // Water resolution is session configuration. Migrate restored truth on the owner
         // thread before exposing it to seams/edits; matching resolutions do no work.
-        MigrateWaterSimResolution();
+        if (m_water_system && chunk->has_water_sim.load(std::memory_order_relaxed) &&
+            chunk->current_water_resolution.load(std::memory_order_relaxed) !=
+                m_water_system->sim_resolution())
+            m_water_system->ResizeSimulationGrid(
+                *chunk, static_cast<WaterDetailLevel>(m_water_system->sim_resolution()));
         ++m_dirty_generation;
     } catch (const std::exception& error) {
         m_durable_read_failed = true;

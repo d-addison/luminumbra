@@ -65,6 +65,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -382,6 +385,24 @@ INSTANTIATE_TEST_SUITE_P(PersistenceEntryPoints,
 INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
                          WorldOpenRefusal,
                          testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
+
+#if !defined(_WIN32)
+TEST_F(WorldOpenRefusal, CatalogRefusesFifoEmbeddedPresetWithoutWaitingOrWriting) {
+    const auto preset = save / "preset.json";
+    ASSERT_EQ(::mkfifo(preset.c_str(), 0600), 0);
+    jobs.shutdown(); // The refusal probe only reads disk; fork without idle job workers.
+    EXPECT_EXIT(
+        {
+            ::alarm(2);
+            const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+            std::_Exit(inspected.error.empty() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+    EXPECT_EQ(fs::symlink_status(preset).type(), fs::file_type::fifo);
+    EXPECT_FALSE(Persistence::journal_pending(save));
+}
+#endif
 
 TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChangingBytes) {
     ASSERT_TRUE(fs::remove(save / "world_info.json"));
@@ -2644,7 +2665,7 @@ void WorldOpenRefusal::CheckLegacyFullSnapshotRefusalAndRecovery() {
     ASSERT_TRUE(fs::remove(ledger_path));
     ASSERT_EQ(fs::hard_link_count(ledger_owner), 1u);
     ASSERT_TRUE(fs::remove(ledger_owner));
-    ASSERT_TRUE(WorldSaveService::forget_snapshot_index_for_testing(save));
+    ASSERT_TRUE(Luminumbra::TestSupport::ForgetSnapshotIndex(save));
     EXPECT_EQ(DiskBytes(save), before_fault);
     ASSERT_TRUE(runner.Session()->SaveWorld());
     EXPECT_EQ(DiskBytes(save), before_fault);

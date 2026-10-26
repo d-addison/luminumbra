@@ -1,3 +1,4 @@
+#include "../support/CalendarMetadataCases.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -380,7 +381,7 @@ TEST_P(WorldStateCommit, RefusedLoadsClearResidentChunksWithoutPublishingStagedM
     ASSERT_TRUE(source.CreateWorld("Refused candidate", "1337", "default"));
     const auto save = source.GetWorldSaveDir();
     const auto id = source.GetMetadata().worldId;
-    ASSERT_TRUE(WorldSaveService::forget_snapshot_index_for_testing(save));
+    ASSERT_TRUE(Luminumbra::TestSupport::ForgetSnapshotIndex(save));
     auto metadata = Metadata(save);
     metadata.erase("calendar");
     metadata.erase("simulationTick");

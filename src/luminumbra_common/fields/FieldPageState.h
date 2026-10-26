@@ -128,6 +128,13 @@ public:
     // Same admissions as set_scent, committed together. Keys must be strictly ordered by
     // (z, x), as in the near-domain capture. Only newly admitted cells allocate map nodes.
     bool update_scent(std::span<const std::pair<ScentCellKey, ScentCell>> updates);
+    // Column-major near window, at most 128 x 128 cells. Updates only changed cells,
+    // preserves outside authority, and reports the same per-owner work as sparse admissions.
+    // Invalid input/capacity refusal leaves authority and work unchanged.
+    bool capture_scent_window(ScentCellKey origin,
+                              int side,
+                              std::span<const ScentCell> cells,
+                              std::map<RegionKey, std::uint64_t>& work);
     [[nodiscard]] static RegionKey region_of_scent_cell(ScentCellKey key);
     [[nodiscard]] bool owns_evolution_state(RegionKey key) const;
 

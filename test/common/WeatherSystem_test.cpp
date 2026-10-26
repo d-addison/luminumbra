@@ -274,8 +274,9 @@ TEST(WeatherSystem, OutOfRegionCategoryClampsToClear) {
     weather.Update(kTicks, kAnchor, &wind);
     // Far outside the centred 64-cell (1536 m) extent the category clamps to the
     // control-phase default (clear) and base precip is 0 (no storm reaches there).
-    const float far = 1.0e6f;
-    EXPECT_EQ(weather.CategoryAt(Vec3(far, 5.0f, far)), WeatherCategory::Clear);
+    const float distant_coordinate = 1.0e6f;
+    EXPECT_EQ(weather.CategoryAt(Vec3(distant_coordinate, 5.0f, distant_coordinate)),
+              WeatherCategory::Clear);
 }
 
 TEST(WeatherSystem, AdvectionIsDeterministicAndStormsMove) {

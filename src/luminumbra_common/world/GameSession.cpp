@@ -2679,15 +2679,18 @@ bool GameSession::ReconcileWorldStateMetadataTo(const fs::path& save_dir) {
     // The water cursor belongs to chunk evolution even without a calendar.
     const auto path = save_dir / "world_info.json";
     const auto cursor = m_worldSystem->GetWaterSimWindowCursor();
-    const bool metadata_exists = fs::exists(path);
+    std::string metadata_bytes;
+    bool metadata_exists = false;
+    if (!Persistence::read_snapshot_bytes(
+            path, Persistence::kMaxSnapshotIndexBytes, metadata_bytes, metadata_exists, nullptr))
+        return false;
     // Absent metadata already loads cursor zero; retain the legacy file layout.
     if (cursor == 0 && !metadata_exists)
         return true;
     nlohmann::json metadata = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion}};
     if (metadata_exists) {
-        std::ifstream input(path, std::ios::binary);
-        metadata = nlohmann::json::parse(input, nullptr, false);
+        metadata = nlohmann::json::parse(metadata_bytes, nullptr, false);
         if (!metadata.is_object())
             return false;
         // Missing cursors load as zero. Preserve legacy extensions and formatting when the
@@ -2710,11 +2713,23 @@ bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
     const auto& canonical = m_savedPresetJson;
     try {
         const auto preset_path = save_dir / "preset.json";
-        const bool has_preset = fs::exists(preset_path);
+        std::string preset_bytes, metadata_bytes;
+        bool has_preset = false, has_metadata = false;
+        if (!Persistence::read_snapshot_bytes(preset_path,
+                                              Persistence::kMaxSnapshotIndexBytes,
+                                              preset_bytes,
+                                              has_preset,
+                                              nullptr))
+            return false;
         const auto metadata_path = save_dir / "world_info.json";
-        if (fs::exists(metadata_path)) {
-            std::ifstream input(metadata_path);
-            const auto metadata = nlohmann::json::parse(input);
+        if (!Persistence::read_snapshot_bytes(metadata_path,
+                                              Persistence::kMaxSnapshotIndexBytes,
+                                              metadata_bytes,
+                                              has_metadata,
+                                              nullptr))
+            return false;
+        if (has_metadata) {
+            const auto metadata = nlohmann::json::parse(metadata_bytes);
             if (!metadata.is_object())
                 return false;
             if (metadata.contains("presetFormat") &&
@@ -2729,8 +2744,7 @@ bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
                 return false;
         }
         if (has_preset) {
-            std::ifstream input(preset_path);
-            return !canonical.empty() && nlohmann::json::parse(input).dump() == canonical;
+            return !canonical.empty() && nlohmann::json::parse(preset_bytes).dump() == canonical;
         }
         // Unmarked legacy saves and new destinations may embed the session's preset later.
         return true;
@@ -2745,10 +2759,13 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
         return false;
     try {
         const auto path = save_dir / "preset.json";
-        if (fs::exists(path)) {
-            std::ifstream input(path);
-            return nlohmann::json::parse(input).dump() == canonical;
-        }
+        std::string bytes;
+        bool present = false;
+        if (!Persistence::read_snapshot_bytes(
+                path, Persistence::kMaxSnapshotIndexBytes, bytes, present, nullptr))
+            return false;
+        if (present)
+            return nlohmann::json::parse(bytes).dump() == canonical;
         return Persistence::WorldSaveService::write_file_durably(path, canonical + "\n");
     } catch (const std::exception&) {
         return false;
@@ -3186,29 +3203,28 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState&
             return false;
         }
 
-        std::error_code energy_ec;
         const auto energy_path = save_dir / "aether_state.efs";
-        const bool has_energy = fs::exists(energy_path, energy_ec);
-        if (energy_ec ||
+        std::string energy_bytes;
+        bool has_energy = false;
+        const bool readable_energy = Persistence::read_snapshot_bytes(
+            energy_path,
+            luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes,
+            energy_bytes,
+            has_energy,
+            nullptr);
+        if (!readable_energy ||
             ((has_energy || !state.ledger->energy_ages().empty()) && !m_aetherStateEnabled)) {
-            m_worldOpenError = energy_ec ? "Unreadable regional energy record."
-                                         : "Incompatible configuration: regional energy state "
-                                           "requires sim.aether_state.";
+            m_worldOpenError = !readable_energy
+                                   ? "Unreadable regional energy record."
+                                   : "Incompatible configuration: regional energy state "
+                                     "requires sim.aether_state.";
             return false;
         }
         if (m_aetherStateEnabled) {
             state.energy.emplace(2);
             bool valid = true;
-            if (has_energy) {
-                const auto length = fs::file_size(energy_path, energy_ec);
-                valid = !energy_ec &&
-                        length <= luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes;
-                if (valid) {
-                    std::ifstream input(energy_path, std::ios::binary);
-                    const std::string bytes(std::istreambuf_iterator<char>{input}, {});
-                    valid = input.good() && state.energy->DeserializeRegionalRecord(bytes);
-                }
-            }
+            if (has_energy)
+                valid = state.energy->DeserializeRegionalRecord(energy_bytes);
             valid = valid && state.energy->ValidateRegionalOwners(state.ledger->records(),
                                                                   state.ledger->energy_ages());
             if (!valid) {
@@ -3245,12 +3261,16 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     if (m_energyFieldState && !m_activeRegionsEnabled) {
         m_energyFieldState->ResetEmptyAtTick(GetSimulationTickCount());
         const fs::path recordPath = save_dir / "aether_state.efs";
-        std::ifstream recordFile(recordPath, std::ios::binary);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
+        std::string record_bytes;
+        bool record_present = false;
+        const bool record_readable = Persistence::read_snapshot_bytes(
+            recordPath,
+            luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes,
+            record_bytes,
+            record_present,
+            nullptr);
+        if (record_readable && record_present) {
+            if (m_energyFieldState->DeserializeRecord(record_bytes, GetSimulationTickCount())) {
                 LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
                                      m_energyFieldState->page_count());
             } else {
@@ -3456,39 +3476,37 @@ bool GameSession::ScentEdgeOpen(int x, int z, int nx, int nz) const {
 void GameSession::RestoreRegionalScent() {
     if (!m_activeRegionsEnabled || !m_scentField)
         return;
-    for (int z = 0; z < kScentFieldCells; ++z)
-        for (int x = 0; x < kScentFieldCells; ++x) {
-            const ScentCellKey key{static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
-                                   static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
-            const auto found = m_fieldPages.scent_cells().find(key);
+    const auto origin_x = static_cast<std::int32_t>(ScentDomainOrigin(true));
+    const auto origin_z = static_cast<std::int32_t>(ScentDomainOrigin(false));
+    const auto& cells = m_fieldPages.scent_cells();
+    for (int x = 0; x < kScentFieldCells; ++x) {
+        auto found = cells.lower_bound({origin_x + x, origin_z});
+        for (int z = 0; z < kScentFieldCells; ++z) {
+            const ScentCellKey key{origin_x + x, origin_z + z};
+            const bool present = found != cells.end() && found->first == key;
             for (int channel = 0; channel < kScentFieldChannels; ++channel)
-                m_scentField->RestoreCell(channel,
-                                          x,
-                                          z,
-                                          found == m_fieldPages.scent_cells().end()
-                                              ? 0.0
-                                              : std::bit_cast<double>(found->second[channel]));
+                m_scentField->RestoreCell(
+                    channel, x, z, present ? std::bit_cast<double>(found->second[channel]) : 0.0);
+            if (present)
+                ++found;
         }
+    }
 }
 void GameSession::CaptureRegionalScent() {
-    std::vector<std::pair<ScentCellKey, ScentCell>> changed;
-    std::map<RegionKey, std::uint64_t> work;
-    for (int z = 0; z < kScentFieldCells; ++z)
-        for (int x = 0; x < kScentFieldCells; ++x) {
-            const ScentCellKey key{static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
-                                   static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
-            ScentCell values{};
+    // The fixed near grid is exported once; column traversal resolves at most one sparse
+    // lookup per x, rather than several tree lookups per cell on every simulation tick.
+    std::vector<ScentCell> cells(std::size_t{kScentFieldCells} * kScentFieldCells);
+    for (int x = 0; x < kScentFieldCells; ++x)
+        for (int z = 0; z < kScentFieldCells; ++z)
             for (int channel = 0; channel < kScentFieldChannels; ++channel)
-                values[channel] = std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
-            const auto found = m_fieldPages.scent_cells().find(key);
-            const ScentCell old =
-                found == m_fieldPages.scent_cells().end() ? ScentCell{} : found->second;
-            if (values == old)
-                continue;
-            changed.emplace_back(key, values);
-            ++work[FieldPageState::region_of_scent_cell(key)];
-        }
-    if (!m_fieldPages.update_scent(changed))
+                cells[std::size_t(x) * kScentFieldCells + z][channel] =
+                    std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
+    std::map<RegionKey, std::uint64_t> work;
+    if (!m_fieldPages.capture_scent_window({static_cast<std::int32_t>(ScentDomainOrigin(true)),
+                                            static_cast<std::int32_t>(ScentDomainOrigin(false))},
+                                           kScentFieldCells,
+                                           cells,
+                                           work))
         throw std::runtime_error("Regional scent admission failed");
     for (const auto& [owner, updates] : work)
         RecordActiveRegionWork({owner, 0, 0, 0, updates});

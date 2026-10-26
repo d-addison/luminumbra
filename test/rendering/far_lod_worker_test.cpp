@@ -1295,15 +1295,15 @@ void main() { color = vec4(1); }
     JobSystem jobs;
     jobs.startup(1);
     SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
-    FarLodSystem far;
-    far.attach_job_system(&jobs);
+    FarLodSystem far_system;
+    far_system.attach_job_system(&jobs);
     const glm::vec3 camera(256, 1200, 256);
     for (int frame = 0; frame < 12; ++frame) {
-        far.update(world, camera);
+        far_system.update(world, camera);
         jobs.wait(jobs.dispatch_batch({[] {
         }}));
     }
-    ASSERT_GT(far.stats().regions_resident, 0u);
+    ASSERT_GT(far_system.stats().regions_resident, 0u);
     shader.use();
     const auto view = glm::lookAt(camera, camera - glm::vec3(0, 1, 0), glm::vec3(0, 0, -1));
     shader.setMat4("view", view);
@@ -1318,7 +1318,7 @@ void main() { color = vec4(1); }
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     std::size_t draws = 0, indices = 0;
-    far.draw_gbuffer(shader, view, planes, draws, indices);
+    far_system.draw_gbuffer(shader, view, planes, draws, indices);
     std::array<unsigned char, 64 * 64 * 4> pixels{};
     glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     // This entire narrow view lies in the camera's 512 m region. Other
@@ -1327,7 +1327,7 @@ void main() { color = vec4(1); }
         for (int x : {16, 32, 48})
             EXPECT_EQ(pixels[(y * 64 + x) * 4], 255) << "missing ground at " << x << "," << y;
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
-    far.shutdown();
+    far_system.shutdown();
     jobs.shutdown();
 }
 
@@ -1466,9 +1466,9 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
         auto params = FlatParams();
         params.height_offset = surface_height;
         SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
-        FarLodSystem far;
-        far.attach_job_system(&jobs);
-        far.set_coverage_diagnostics_enabled(true);
+        FarLodSystem far_system;
+        far_system.attach_job_system(&jobs);
+        far_system.set_coverage_diagnostics_enabled(true);
         const glm::mat4 projection =
             ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);
         struct Pose {
@@ -1497,19 +1497,19 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
                                               glm::vec3(0, std::sin(pitch), 0),
                                           glm::vec3(0, 1, 0));
             for (int frame = 0; frame < 12; ++frame) {
-                far.update(world, pose.camera);
+                far_system.update(world, pose.camera);
                 jobs.wait(jobs.dispatch_batch({[] {
                 }}));
             }
             const int rx = static_cast<int>(std::floor(pose.camera.x / 512.0f));
             const int rz = static_cast<int>(std::floor(pose.camera.z / 512.0f));
             const auto camera_row = [&]() -> const FarLodSystem::RegionCoverage* {
-                for (const auto& r : far.coverage_diagnostics().neighbourhood)
+                for (const auto& r : far_system.coverage_diagnostics().neighbourhood)
                     if (r.rx == rx && r.rz == rz)
                         return &r;
                 return nullptr;
             };
-            const auto& coverage = far.coverage_diagnostics();
+            const auto& coverage = far_system.coverage_diagnostics();
             EXPECT_EQ(coverage.wanted, coverage.resident + coverage.missing);
             EXPECT_LE(coverage.stale, coverage.resident);
             EXPECT_EQ(coverage.neighbourhood.size(), 9u);
@@ -1534,7 +1534,7 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
                 return depth;
             };
             const auto draw = [&](bool bypass, bool live_ready = true) {
-                far.set_coverage_camera_region_guard_bypass(bypass);
+                far_system.set_coverage_camera_region_guard_bypass(bypass);
                 glBindFramebuffer(GL_FRAMEBUFFER, gl.fbo);
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
                 shader.use();
@@ -1551,13 +1551,13 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
                 const glm::vec4
                     planes[6]{}; // actual hardware clip, without a synthetic frustum veto
                 std::size_t draws = 0, indices = 0;
-                far.draw_gbuffer(shader, view, planes, draws, indices);
+                far_system.draw_gbuffer(shader, view, planes, draws, indices);
                 return std::array<float, 2>{sample(100), sample(300)};
             };
             const auto ordinary = draw(false);
-            ASSERT_TRUE(far.coverage_diagnostics().draw_observed);
+            ASSERT_TRUE(far_system.coverage_diagnostics().draw_observed);
             EXPECT_STREQ(camera_row()->terrain_decision, "submitted");
-            EXPECT_FALSE(far.coverage_diagnostics().camera_region_guard_bypassed);
+            EXPECT_FALSE(far_system.coverage_diagnostics().camera_region_guard_bypassed);
             EXPECT_GT(ordinary[0], 0.0f) << "live near patch missing";
             EXPECT_GT(ordinary[1], 0.0f)
                 << "camera-region far point must be covered without bypass";
@@ -1581,13 +1581,13 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
             EXPECT_EQ(bypassed, ordinary) << "historical bypass must not change fragment ownership";
             EXPECT_EQ(glGetError(), GL_NO_ERROR);
             // A bypass request cannot modify ordinary rendering without diagnostics.
-            far.set_coverage_diagnostics_enabled(false);
+            far_system.set_coverage_diagnostics_enabled(false);
             const auto disabled = draw(true);
             EXPECT_EQ(disabled, ordinary);
-            EXPECT_FALSE(far.coverage_diagnostics().enabled);
-            far.set_coverage_diagnostics_enabled(true);
+            EXPECT_FALSE(far_system.coverage_diagnostics().enabled);
+            far_system.set_coverage_diagnostics_enabled(true);
         }
-        far.shutdown();
+        far_system.shutdown();
     }
     jobs.shutdown();
 }

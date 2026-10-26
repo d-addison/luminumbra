@@ -307,8 +307,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     const bool over = result.work > m_config.work_limit;
     for (const auto& row : rows) {
         auto& r = *row.record;
-        const bool near = r.visited && r.last_proximity == clock.tick();
-        if (near || r.wake_pending) {
+        const bool nearby = r.visited && r.last_proximity == clock.tick();
+        if (nearby || r.wake_pending) {
             r.over_hold = r.under_hold = 0;
         } else if (over) {
             r.over_hold = std::min(r.over_hold, m_config.hold_ticks - 1) + 1;

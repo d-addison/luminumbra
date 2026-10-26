@@ -79,7 +79,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         rename = service[service.index("boolWorldSaveService::rename_file_durably("):]
         rename = rename[:rename.index("boolWorldSaveService::remove_file_and_staging(")]
         self.assertIn("{constSaveGuardguard;", rename)
-        self.assertLess(rename.index("contents.str()!=expected_bytes"),
+        self.assertLess(rename.index("contents!=expected_bytes"),
                         rename.index("ReclaimAbandonedStaging(destination)"))
         self.assertLess(rename.index("std::filesystem::equivalent(source,destination,error)"),
                         rename.index("WriteFileDurably(destination,bytes,destination,errors,&published_identity)"))
@@ -484,10 +484,12 @@ class PersistenceAndFieldSourceContract(unittest.TestCase):
         self.assertNotIn("fs::exists(", hashing)
         self.assertIn("if(in.missing())returntrue;", hashing)
         self.assertLess(hashing.index("if(!in.valid())"), hashing.index("in.read("))
-        self.assertIn("if(!in.read(block.data(),block.size(),count))", hashing)
-        self.assertIn("if(count==0)returntrue;", hashing)
+        self.assertIn("if(!in.read(block.data(),request,count)||count==0)", hashing)
+        self.assertLess(hashing.index("in.size()>kMaxSnapshotPayloadBytes"), hashing.index("std::vector<char>block("))
+        self.assertIn("while(bytes<in.size())", hashing)
+        self.assertIn("!in.read(&extra,1,count)||count!=0", hashing)
         self.assertIn("Fnv1aUpdate(fnv64,block.data(),count)", hashing)
-        native = source[source.index("classSnapshotInput{"):source.index("boolReadBoundedBytes(")]
+        native = source[source.index("classSnapshotInput{"):source.index("boolReadInputBytes(")]
         for guard in ("O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW", "::fstat(m_descriptor,&information)",
                       "S_ISREG(information.st_mode)", "::GetFileType(m_handle)==FILE_TYPE_DISK",
                       "::GetFileInformationByHandle(m_handle,&information)",
@@ -560,30 +562,29 @@ class PersistenceAndFieldSourceContract(unittest.TestCase):
         self.assertIn("m_protected_paths.contains(rel)", protect)
         self.assertIn("m_protected_paths.insert(rel);", protect)
         self.assertLess(protect.index("m_entries.size()>=kMaxJournalEntries"),
-                        protect.index("ReadAllBytes(destination,previous,errors)"))
+                        protect.index("read_snapshot_bytes(destination,kMaxSnapshotPayloadBytes,previous,exists,errors)"))
         self.assertLess(protect.index("m_entries.size()>=kMaxJournalEntries"),
                         protect.index("m_protected_paths.insert(rel)"))
         self.assertNotIn(":m_entries)", protect)
         self.assertNotIn("hash_file(", protect)
-        self.assertEqual(protect.count("ReadAllBytes(destination,previous,errors)"), 1)
-        self.assertIn("fs::exists(destination,exists_error)", protect)
-        self.assertIn("if(exists_error){AddError(", protect)
+        self.assertEqual(protect.count("read_snapshot_bytes(destination,kMaxSnapshotPayloadBytes,previous,exists,errors)"), 1)
+        self.assertNotIn("fs::exists(", protect)
         self.assertIn("entry.prev_fnv64=fnv1a64_bytes(previous.data(),previous.size());", protect)
         self.assertLess(protect.index("durable_write_file("), protect.index("write_journal(errors)"))
-        read = source[source.index("boolReadAllBytes("):source.index("classSnapshotInput{")]
+        read = source[source.index("boolReadInputBytes("):source.index("boolReadUndoBytes(")]
         self.assertNotIn("istreambuf_iterator", read)
-        self.assertIn("std::array<char,std::size_t{64}*1024>block{};", read)
-        self.assertIn("in.read(block.data(),static_cast<std::streamsize>(block.size()))", read)
-        self.assertLess(read.index("count>out.max_size()-out.size()"),
-                        read.index("out.append(block.data(),count)"))
-        self.assertIn("if(!in.eof()||in.bad())", read)
+        self.assertLess(read.index("in.size()>limit||in.size()>out.max_size()"),
+                        read.index("out.resize("))
+        self.assertIn("std::min(out.size()-offset,std::size_t{64}*1024)", read)
+        self.assertIn("!in.read(out.data()+offset,request,count)||count==0", read)
+        self.assertIn("!in.read(&extra,1,count)||count!=0", read)
 
     def test_rollback_checks_the_same_undo_bytes_it_restores(self):
         source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
         rollback = source[source.index("boolRollbackEntries("):
                           source.index("voidFinishJournal(")]
         self.assertNotIn("hash_file(undo_path,", rollback)
-        read = rollback.index("ReadAllBytes(undo_path,restored,errors)")
+        read = rollback.index("ReadUndoBytes(undo_path,entry.prev_bytes,restored,errors)")
         check = rollback.index("restored.size()!=entry.prev_bytes||"
                                "fnv1a64_bytes(restored.data(),restored.size())!=entry.prev_fnv64")
         write = rollback.index("durable_write_file(destination,restored,errors)")
@@ -623,7 +624,7 @@ class PersistenceAndFieldSourceContract(unittest.TestCase):
         source = self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         read = source[source.index("WorldSaveService::ChunkReadResultWorldSaveService::read_chunk("):
                       source.index("WorldSaveService::chunk_save_acknowledgement(")]
-        self.assertEqual(read.count("VerifyRegionMembership(path,records,&errors)"), 1)
+        self.assertEqual(read.count("VerifyRegionMembership(path,owned_records,&errors)"), 1)
         self.assertNotIn("read_snapshot_index(", read)
         self.assertNotIn("Lod0Fingerprint(", read)
         self.assertIn("if(require_index&&!indexed)", read)
@@ -634,20 +635,24 @@ class PersistenceAndFieldSourceContract(unittest.TestCase):
                       "member->present!=digest.present", "member->bytes!=digest.bytes",
                       "member->fnv64!=digest.fnv64"):
             self.assertIn(check, verify)
+        activation = self.source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        self.assertIn("dispatch_generation_jobs(generate_now);if(m_durable_read_failed)returnfalse;", activation)
+        self.assertIn("DiskRestorationFailureStopsActivationBeforeUnloading",
+                      self.source("test/common/DeterministicWorkBudget_test.cpp"))
 
     def test_journal_and_index_reads_stop_at_their_byte_budgets(self):
         source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
-        read = source[source.index("boolReadBoundedBytes("):source.index("boolSamePath(")]
-        self.assertIn("constautoremaining=limit-out.size();", read)
-        self.assertIn("remaining<block.size()?remaining+1:block.size()", read)
-        self.assertIn("if(!in.read(block.data(),request,count))", read)
-        self.assertIn("out.append(block.data(),count);", read)
-        self.assertIn("if(out.size()>limit)", read)
-        self.assertIn("if(count==0)returntrue;", read)
-        self.assertIn("ReadBoundedBytes(txn_path,kMaxJournalBytes,bytes,errors)", source)
-        self.assertIn("ReadBoundedBytes(path,kMaxSnapshotIndexBytes,bytes,errors)", source)
-        self.assertNotIn("ReadAllBytes(txn_path,", source)
-        native = source[source.index("classSnapshotInput{"):source.index("boolReadBoundedBytes(")]
+        read = source[source.index("boolReadInputBytes("):source.index("boolReadUndoBytes(")]
+        self.assertLess(read.index("in.size()>limit||in.size()>out.max_size()"),
+                        read.index("out.resize("))
+        self.assertIn("while(offset<out.size())", read)
+        self.assertIn("!in.read(out.data()+offset,request,count)||count==0", read)
+        self.assertIn("!in.read(&extra,1,count)||count!=0", read)
+        self.assertIn("read_snapshot_bytes(txn_path,kMaxJournalBytes,bytes,txn_exists,errors)", source)
+        self.assertIn("read_snapshot_bytes(path,kMaxSnapshotIndexBytes,bytes,exists,errors)", source)
+        self.assertNotIn("ifstream", source)
+
+        native = source[source.index("classSnapshotInput{"):source.index("boolReadInputBytes(")]
         for guard in ("O_NONBLOCK", "O_NOFOLLOW", "::fstat(m_descriptor,&information)",
                       "S_ISREG(information.st_mode)", "::GetFileType(m_handle)==FILE_TYPE_DISK",
                       "::GetFileInformationByHandle(m_handle,&information)",
@@ -747,6 +752,47 @@ class PersistenceAndFieldSourceContract(unittest.TestCase):
             for case in cases:
                 self.assertIn("," + case + "){", fixture)
 
+    def test_undo_read_refuses_declared_size_and_nonregular_handles_before_allocating(self):
+        source = self.source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        read = source[source.index("boolReadUndoBytes("):source.index("boolSamePath(")]
+        self.assertIn("SnapshotInputin(file);", read)
+        self.assertIn("!in.valid()||declared>kMaxSnapshotPayloadBytes||in.size()!=declared", read)
+        self.assertLess(read.index("in.size()!=declared"), read.index("ReadInputBytes("))
+        parse = source[source.index("boolParseJournal("):source.index("std::stringEncodeJournal(")]
+        self.assertIn("entry.prev_bytes>kMaxSnapshotPayloadBytes", parse)
+        for case in ("RecoveryChecksUndoDeclaredAndActualSizesBeforeReading",
+                     "UndoFifosAndInfiniteOrHugeSymlinksRefuseWithoutReadingOrWriting",
+                     "LockedUndoRefusesWithoutChangingInstalledMembers"):
+            self.assertIn("," + case + "){", self.source("test/persistence/SaveTransaction_test.cpp"))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/SaveTransaction_test.cpp", cmake)
+
+    def test_snapshot_consumers_parse_only_bounded_handle_bytes(self):
+        service = self.source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        catalog = self.source("src/luminumbra_common/persistence/SavedWorldCatalog.cpp")
+        for source in (service, catalog):
+            for forbidden in ("std::ifstream", "istreambuf_iterator", ".rdbuf()"):
+                self.assertNotIn(forbidden, source)
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        for start, end in (("boolGameSession::ReconcileWorldStateMetadataTo(", "boolGameSession::SaveWorldMetadataTo("),
+                           ("boolGameSession::ReadWorldStateFrom(", "voidGameSession::RestoreRegionalScent(")):
+            readers = session[session.index(start):session.index(end)]
+            self.assertNotIn("std::ifstream", readers)
+            self.assertNotIn("istreambuf_iterator", readers)
+        self.assertIn("LoadTerrainPresetFromJson(document,runtime_root/", catalog)
+
+    def test_changed_identifiers_avoid_windows_macro_names(self):
+        for path in ("src/luminumbra_common/world/ActiveRegionLedger.cpp",
+                     "test/common/ActiveRegionLedger_test.cpp",
+                     "test/common/GameSessionHeadlessWorld_test.cpp",
+                     "test/common/WeatherSystem_test.cpp",
+                     "test/rendering/far_lod_worker_test.cpp",
+                     "test/persistence/verified_snapshot_region_test.cpp"):
+            source = (ROOT / path).read_text(encoding="utf-8")
+            source = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', "", source, flags=re.DOTALL)
+            self.assertNotRegex(source, r"\b(?:near|far|small|interface)\b", path)
+
+
 
 class SaveWorkSourceContract(unittest.TestCase):
     def source(self, path):
@@ -769,6 +815,55 @@ class SaveWorkSourceContract(unittest.TestCase):
         self.assertLess(load.index("GetInitialChunkLoadList(saved.metadata.spawnPoint)"),
                         load.index("ReadWorldStateFrom(worldPath,loaded)"))
         self.assertIn("m_worldSystem=std::move(staged_world);", load)
+
+    def test_exact_restores_cache_verified_containers_only_within_a_bounded_operation(self):
+        source = self.service()
+        read = source[source.index("WorldSaveService::ChunkReadResultWorldSaveService::read_chunk("):
+                      source.index("WorldSaveService::chunk_save_acknowledgement(")]
+        self.assertLess(read.index("cache->regions.find(path)"), read.index("ReadRegionFile("))
+        self.assertIn("if(cache&&indexed)", read)
+        for bound in ("cache->regions.size()>=128", "kMaxSnapshotPayloadBytes-cache->bytes"):
+            self.assertIn(bound, read)
+        self.assertIn("cached->second.positions.find(id)", read)
+        self.assertIn("ChunkReadCaches().erase(this);", source)
+        world = self.source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        activation = world[world.index("if(m_durable_residency){"):
+                           world.index("//5.Unloadchunks") if "//5.Unloadchunks" in world else world.index("constintUNLOAD_DISTANCE_XZ")]
+        self.assertNotIn("restore_authoritative_chunk(candidate.coords)", activation)
+        self.assertIn("unpark_chunk(id)", activation)
+        self.assertIn("static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget)", activation)
+        self.assertGreaterEqual(world.count("constPersistence::WorldSaveService::ChunkReadScopedurable_reads;"), 3)
+        restore = world[world.index("boolSHIELD_WorldSystem::restore_authoritative_chunk("):
+                        world.index("voidSHIELD_WorldSystem::release_clean_parked_chunks(")]
+        self.assertNotIn("MigrateWaterSimResolution()", restore)
+        self.assertIn("m_water_system->ResizeSimulationGrid(*chunk,", restore)
+        self.assertIn(",DiskOnlyRestorationSharesTheActivationGenerationBudget){",
+                      self.source("test/common/DeterministicWorkBudget_test.cpp"))
+        header = self.source("src/luminumbra_common/persistence/WorldSaveService.h")
+        self.assertNotIn("forget_snapshot_index_for_testing", header)
+
+    def test_scent_transfer_uses_columns_and_keeps_exact_sparse_oracle(self):
+        session = self.source("src/luminumbra_common/world/GameSession.cpp")
+        restore = session[session.index("voidGameSession::RestoreRegionalScent("):
+                          session.index("voidGameSession::CaptureRegionalScent(")]
+        self.assertIn("cells.lower_bound({origin_x+x,origin_z})", restore)
+        self.assertNotIn(".find(", restore)
+        capture = session[session.index("voidGameSession::CaptureRegionalScent("):
+                          session.index("voidGameSession::AdvanceNearScent(")]
+        self.assertIn("m_fieldPages.capture_scent_window(", capture)
+        self.assertNotIn(".find(", capture)
+        self.assertNotIn("update_scent(", capture)
+        self.assertIn("ColumnWindowMatchesSparseCaptureAndPreservesOutsideAuthority",
+                      self.source("test/common/FieldPageState_test.cpp"))
+        self.assertIn("ColumnWindowPreservesEmptyWorldEdgesAndRefusesCoordinateOverflow",
+                      self.source("test/common/FieldPageState_test.cpp"))
+        pages = self.source("src/luminumbra_common/fields/FieldPageState.cpp")
+        window = pages[pages.index("boolFieldPageState::capture_scent_window("):
+                       pages.index("RegionKeyFieldPageState::region_of_scent_cell(")]
+        self.assertNotIn("16777216", window)
+        self.assertIn("origin.x>std::numeric_limits<std::int32_t>::max()-(side-1)", window)
+        self.assertIn("origin.z>std::numeric_limits<std::int32_t>::max()-(side-1)", window)
+
 
     def test_all_benchmark_versions_share_refusal_persistence_policy(self):
         client = self.source("src/luminumbra_client/main_client.cpp")
@@ -793,7 +888,8 @@ class SaveWorkSourceContract(unittest.TestCase):
         self.assertIn("previous=cache->chunks.erase(previous)", cache)
         self.assertLess(cache.index("cache->chunks.erase(previous)"), cache.index("kMaxPayloadBytes"))
         self.assertIn("RememberValidatedChunk(record,*chunks.front());", source)
-        self.assertIn("RecordValidationCaches().erase(this);ActiveFacts()=m_previous;", source)
+        self.assertIn("RetainedRecordValidationCache()=std::move(found->second);", source)
+        self.assertIn("caches.erase(found);", source)
         # Commit still reads installed bytes and checks region identity and unknown far tiers.
         for check in ("ReadRegionFile(path,records,&diagnostics,{},true)",
                       "chunk_rx!=rx||chunk_rz!=rz", "FarLodStore::decode_payload("):
@@ -939,7 +1035,7 @@ class SaveWorkSourceContract(unittest.TestCase):
             self.assertIn(check, native)
         reader = source[source.index("boolReadRegionFile("):source.index("boolWriteRegionFile(")]
         self.assertIn("if(input.missing()&&allow_missing)returntrue;", reader)
-        self.assertIn("if(!input.valid())", reader)
+        self.assertIn("if(!input.valid()||input.size()>kMaxSnapshotPayloadBytes)", reader)
         self.assertIn("stop.stop_requested()", reader)
         self.assertIn("std::min(size,std::size_t{64}*1024)", reader)
         for bound in ("compressed_size>remaining", "compressed_size>kMaxRecordBytes",

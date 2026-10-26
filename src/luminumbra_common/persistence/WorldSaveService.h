@@ -242,6 +242,23 @@ public:
         std::shared_ptr<Chunk> chunk;
         std::string error;
     };
+    // Owner-thread batch with sealed input files. Verified compressed records are shared by
+    // all exact reads in this operation (256 MiB payload/record budget, 128 containers).
+    // End the scope before any save or external modification of its source directory.
+    class ChunkReadScope {
+    public:
+        ChunkReadScope();
+        ~ChunkReadScope();
+        ChunkReadScope(const ChunkReadScope&) = delete;
+        ChunkReadScope& operator=(const ChunkReadScope&) = delete;
+        // Observational count of region containers read by this operation.
+        [[nodiscard]] std::size_t region_reads() const;
+
+    private:
+        ChunkReadScope* m_previous = nullptr;
+    };
+    // Observational count of chunk payload decodes; validation cache hits do not increment it.
+    static std::uint64_t chunk_decode_count();
     // Reads the exact lod-0 identity only. Indexed membership is checked before decoding;
     // missing records are distinct from corrupt/unreadable expected authority.
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
@@ -373,10 +390,6 @@ public:
     static bool remove_member(const std::filesystem::path& save_dir,
                               std::string_view relative_path,
                               std::vector<std::string>* errors = nullptr);
-    // Test-only: deletes snapshot.json and strips "snapshotFormat" from world_info.json so a test
-    // can express legacy (pre-index) semantics for a directory a flag-on session created.
-    static bool forget_snapshot_index_for_testing(const std::filesystem::path& save_dir);
-
     // Thread-local per-save facts. While live for a directory, validate_save / has_world_save /
     // has_chunk_snapshot reuse the first load_world result instead of decoding the world again, and
     // post-commit actions (dirty-flag clearing) are deferred until the owning transaction commits.

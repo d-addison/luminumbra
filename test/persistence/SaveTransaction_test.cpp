@@ -794,6 +794,132 @@ TEST(SaveTransaction, MissingPartialCorruptAndNonregularUndoCannotBeRestored) {
     }
 }
 
+TEST(SaveTransaction, CheckedPayloadReadsBoundAllocationAndSeparateMissingFromInvalid) {
+    const TempSave save;
+    const auto path = save.path() / "payload";
+    std::string bytes;
+    bool present = true;
+    ASSERT_TRUE(read_snapshot_bytes(path, 0, bytes, present, nullptr));
+    EXPECT_FALSE(present);
+    Put(path, "");
+    ASSERT_TRUE(read_snapshot_bytes(path, 0, bytes, present, nullptr));
+    EXPECT_TRUE(present);
+    EXPECT_TRUE(bytes.empty());
+    Put(path, "abc");
+    EXPECT_FALSE(read_snapshot_bytes(path, 2, bytes, present, nullptr));
+    EXPECT_TRUE(present);
+    EXPECT_TRUE(bytes.empty());
+    ASSERT_TRUE(read_snapshot_bytes(path, 3, bytes, present, nullptr));
+    EXPECT_EQ(bytes, "abc");
+    fs::resize_file(path, kMaxSnapshotPayloadBytes + 1);
+    EXPECT_FALSE(read_snapshot_bytes(path, kMaxSnapshotPayloadBytes + 1, bytes, present, nullptr));
+    EXPECT_TRUE(bytes.empty());
+    fs::remove(path);
+    fs::create_directory(path);
+    EXPECT_FALSE(read_snapshot_bytes(path, kMaxSnapshotPayloadBytes, bytes, present, nullptr));
+    EXPECT_TRUE(present);
+}
+
+TEST(SaveTransaction, RecoveryChecksUndoDeclaredAndActualSizesBeforeReading) {
+    for (const auto declared : {std::uint64_t{0}, std::uint64_t{2}, kMaxSnapshotPayloadBytes + 1}) {
+        const TempSave save;
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        const auto journal = journal_directory(save.path()) / "txn.json";
+        Put(member, "changed");
+        Put(undo, "x");
+        const auto document =
+            kJournalPrefix +
+            "{\"path\":\"world_info.json\",\"action\":\"replace\",\"prev_bytes\":" +
+            std::to_string(declared) +
+            ",\"prev_fnv64\":\"0000000000000000\",\"undo\":\"undo/0\"}]}";
+        Put(journal, document);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            EXPECT_EQ(Get(member), "changed");
+            EXPECT_EQ(Get(journal), document);
+            EXPECT_EQ(Get(undo), "x");
+        }
+    }
+}
+
+#ifndef _WIN32
+TEST(SaveTransaction, UndoFifosAndInfiniteOrHugeSymlinksRefuseWithoutReadingOrWriting) {
+    for (const int damage : {0, 1, 2, 3}) {
+        const TempSave save;
+        const TempSave outside;
+        const auto member = save.path() / "world_info.json";
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        Put(member, "changed");
+        fs::create_directories(undo.parent_path());
+        if (damage == 0) {
+            ASSERT_EQ(::mkfifo(undo.c_str(), 0600), 0);
+        } else if (damage == 1) {
+            fs::create_symlink("/dev/zero", undo);
+        } else {
+            const auto huge = outside.path() / "huge";
+            Put(huge, "x");
+            fs::resize_file(huge, kMaxSnapshotPayloadBytes + 1);
+            if (damage == 2)
+                fs::create_symlink(huge, undo);
+            else
+                fs::rename(huge, undo);
+        }
+        const auto journal = journal_directory(save.path()) / "txn.json";
+        const auto document =
+            kJournalPrefix +
+            "{\"path\":\"world_info.json\",\"action\":\"replace\",\"prev_bytes\":1,"
+            "\"prev_fnv64\":\"0000000000000000\",\"undo\":\"undo/0\"}]}";
+        Put(journal, document);
+        const auto type = fs::symlink_status(undo).type();
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            EXPECT_EXIT(
+                {
+                    ::alarm(2);
+                    const bool refused =
+                        recover_pending_journal(save.path(), nullptr) == RecoveryOutcome::Failed;
+                    std::_Exit(refused ? 0 : 1);
+                },
+                ::testing::ExitedWithCode(0),
+                "");
+            EXPECT_EQ(Get(member), "changed");
+            EXPECT_EQ(Get(journal), document);
+            EXPECT_EQ(fs::symlink_status(undo).type(), type);
+        }
+    }
+}
+#else
+TEST(SaveTransaction, LockedUndoRefusesWithoutChangingInstalledMembers) {
+    const TempSave save;
+    const auto undo = journal_directory(save.path()) / "undo/0";
+    const auto member = save.path() / "world_info.json";
+    Put(member, "changed");
+    Put(undo, "x");
+    const auto document = kJournalPrefix +
+                          "{\"path\":\"world_info.json\",\"action\":\"replace\",\"prev_bytes\":1,"
+                          "\"prev_fnv64\":\"0000000000000000\",\"undo\":\"undo/0\"}]}";
+    Put(journal_directory(save.path()) / "txn.json", document);
+    const HANDLE handle = ::CreateFileW(undo.c_str(),
+                                        GENERIC_READ,
+                                        FILE_SHARE_READ,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+    OVERLAPPED range{};
+    const bool locked =
+        ::LockFileEx(
+            handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &range) != 0;
+    if (locked)
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    EXPECT_NE(::CloseHandle(handle), 0);
+    ASSERT_TRUE(locked);
+    EXPECT_EQ(Get(member), "changed");
+    EXPECT_EQ(Get(journal_directory(save.path()) / "txn.json"), document);
+}
+#endif
+
 TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));

@@ -177,10 +177,10 @@ TEST_F(VerifiedSnapshotRegion, SnapshotRestoresRegionalQueriesAndDiskOnlyAuthori
     const auto initial =
         owner.GetWorldSystem()->GetInitialChunkLoadList(owner.GetMetadata().spawnPoint);
     ASSERT_FALSE(initial.empty());
-    auto near = std::make_shared<Luminumbra::Chunk>(initial.front());
-    near->sdf_data.assign(17 * 17 * 17, -3.0f);
-    near->mark_voxel_data_dirty();
-    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(near));
+    auto nearby_chunk = std::make_shared<Luminumbra::Chunk>(initial.front());
+    nearby_chunk->sdf_data.assign(17 * 17 * 17, -3.0f);
+    nearby_chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(nearby_chunk));
     owner.GetWorldSystem()->SetWaterSimWindowCursor(19);
     ASSERT_TRUE(owner.SaveWorld());
     const auto id = owner.GetMetadata().worldId;
@@ -191,9 +191,10 @@ TEST_F(VerifiedSnapshotRegion, SnapshotRestoresRegionalQueriesAndDiskOnlyAuthori
     EXPECT_EQ(loaded.GetWorldClock().canonical_bytes(),
               canonical.GetWorldClock().canonical_bytes());
     EXPECT_EQ(loaded.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
-    const auto restored_near = loaded.GetWorldSystem()->find_streamed_chunk(initial.front());
-    ASSERT_NE(restored_near, nullptr);
-    EXPECT_EQ(restored_near->sdf_data, near->sdf_data);
+    const auto restored_nearby_chunk =
+        loaded.GetWorldSystem()->find_streamed_chunk(initial.front());
+    ASSERT_NE(restored_nearby_chunk, nullptr);
+    EXPECT_EQ(restored_nearby_chunk->sdf_data, nearby_chunk->sdf_data);
     EXPECT_FALSE(loaded.GetWorldSystem()->find_streamed_chunk(distant));
     EXPECT_EQ(loaded.GetWorldSystem()->durable_chunk_inventory(),
               canonical.GetWorldSystem()->durable_chunk_inventory());
@@ -237,7 +238,21 @@ TEST_F(VerifiedSnapshotRegion, PendingSnapshotRefusesBeforeParsingAndPreservesLi
             session.GetWorldSaveDir(),
             Measurement::saved_world_digest(session.GetWorldSaveDir()),
             id);
-        const auto directory = snapshot.root() / "worlds/saves" / id;
+        const auto writable_root = root / "pending-copy";
+        const auto directory = writable_root / "worlds/saves" / id;
+        const auto source = snapshot.root() / "worlds/saves" / id;
+        fs::create_directories(directory);
+        // Recursive copy inherits read-only directory modes before copying children.
+        // Create writable directories ourselves and restore each copied file's permissions.
+        for (const auto& entry : fs::recursive_directory_iterator(source)) {
+            const auto target = directory / entry.path().lexically_relative(source);
+            if (entry.is_directory()) {
+                fs::create_directories(target);
+            } else {
+                fs::copy_file(entry.path(), target);
+                fs::permissions(target, fs::perms::owner_all, fs::perm_options::add);
+            }
+        }
         const auto path = directory / "world_info.json";
         if (metadata) {
             std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -266,7 +281,7 @@ TEST_F(VerifiedSnapshotRegion, PendingSnapshotRefusesBeforeParsingAndPreservesLi
         };
         const auto before = contents();
         bool loaded = true;
-        EXPECT_NO_THROW(loaded = session.LoadWorldFrom(id, snapshot.root()));
+        EXPECT_NO_THROW(loaded = session.LoadWorldFrom(id, writable_root));
         EXPECT_FALSE(loaded);
         EXPECT_NE(session.GetWorldOpenError().find("pending recovery"), std::string::npos);
         EXPECT_EQ(contents(), before);
@@ -274,6 +289,7 @@ TEST_F(VerifiedSnapshotRegion, PendingSnapshotRefusesBeforeParsingAndPreservesLi
         EXPECT_EQ(session.GetFieldPages().canonical_bytes(), live_fields);
         EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), live_ledger);
         EXPECT_TRUE(session.SaveWorld());
+        fs::remove_all(writable_root);
     }
 }
 } // namespace

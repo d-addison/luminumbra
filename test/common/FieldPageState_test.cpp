@@ -918,3 +918,86 @@ TEST(FieldPageStateTest, WeatherOwnerIndicesSurviveParseCopyRefusalReplacementAn
     EXPECT_FALSE(parsed.owns_evolution_state(strike.owner));
     EXPECT_TRUE(parsed.region_bytes(strike.owner).empty());
 }
+
+TEST(FieldPageStateTest, ColumnWindowMatchesSparseCaptureAndPreservesOutsideAuthority) {
+    FieldPageState store, oracle;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    ASSERT_TRUE(store.set_scent({900, 900}, one));
+    ASSERT_TRUE(oracle.set_scent({900, 900}, one));
+    constexpr int side = 128;
+    for (const ScentCellKey origin : {ScentCellKey{-64, -64}, {448, 448}}) {
+        for (int pass = 0; pass < 3; ++pass) {
+            std::vector<ScentCell> cells(std::size_t{side} * side);
+            std::map<RegionKey, std::uint64_t> expected;
+            for (int x = 0; x < side; ++x)
+                for (int z = 0; z < side; ++z) {
+                    const ScentCellKey key{origin.x + x, origin.z + z};
+                    auto& values = cells[std::size_t(x) * side + z];
+                    if (pass != 2 && (pass == 1 || (x + z) % 3 == 0))
+                        values = one;
+                    const auto found = oracle.scent_cells().find(key);
+                    const auto old =
+                        found == oracle.scent_cells().end() ? ScentCell{} : found->second;
+                    if (old != values)
+                        ++expected[FieldPageState::region_of_scent_cell(key)];
+                    ASSERT_TRUE(oracle.set_scent(key, values));
+                }
+            std::map<RegionKey, std::uint64_t> work;
+            ASSERT_TRUE(store.capture_scent_window(origin, side, cells, work));
+            EXPECT_EQ(work, expected);
+            EXPECT_EQ(store.serialize(), oracle.serialize());
+            ASSERT_TRUE(store.capture_scent_window(origin, side, cells, work));
+            EXPECT_TRUE(work.empty());
+        }
+    }
+    const auto before = store.serialize();
+    std::map<RegionKey, std::uint64_t> work{{{0, 0}, 71}};
+    const auto previous_work = work;
+    std::vector<ScentCell> cells(std::size_t{side} * side, one);
+    cells.back()[0] = std::bit_cast<std::uint64_t>(-0.0);
+    EXPECT_FALSE(store.capture_scent_window({0, 0}, side, cells, work));
+    EXPECT_FALSE(store.capture_scent_window({0, 0}, 0, {}, work));
+    EXPECT_FALSE(store.capture_scent_window({0, 0}, 129, cells, work));
+    EXPECT_FALSE(store.capture_scent_window({16777215, 0}, side, cells, work));
+    EXPECT_FALSE(store.capture_scent_window({0, 0}, side, {}, work));
+    EXPECT_EQ(store.serialize(), before);
+    EXPECT_EQ(work, previous_work);
+    for (std::size_t index = store.scent_cells().size(); index < FieldPageState::kMaxScentCells;
+         ++index)
+        ASSERT_TRUE(store.set_scent({900, static_cast<std::int32_t>(1000 + index)}, one));
+    const auto full = store.serialize();
+    cells.assign(std::size_t{side} * side, one);
+    EXPECT_FALSE(store.capture_scent_window({0, 0}, side, cells, work));
+    EXPECT_EQ(store.serialize(), full);
+    EXPECT_EQ(work, previous_work);
+}
+
+TEST(FieldPageStateTest, ColumnWindowPreservesEmptyWorldEdgesAndRefusesCoordinateOverflow) {
+    constexpr int side = 128;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    for (const ScentCellKey origin : {ScentCellKey{-16777280, -64}, {16777152, -64}}) {
+        FieldPageState store, oracle;
+        std::vector<ScentCell> cells(std::size_t{side} * side);
+        const int valid_column = origin.x < 0 ? 64 : 0;
+        cells[std::size_t(valid_column) * side] = one;
+        const ScentCellKey key{origin.x + valid_column, origin.z};
+        ASSERT_TRUE(oracle.set_scent(key, one));
+        std::map<RegionKey, std::uint64_t> work;
+        ASSERT_TRUE(store.capture_scent_window(origin, side, cells, work));
+        EXPECT_EQ(store.serialize(), oracle.serialize());
+        EXPECT_EQ(
+            work,
+            (std::map<RegionKey, std::uint64_t>{{FieldPageState::region_of_scent_cell(key), 1}}));
+        const auto before = store.serialize();
+        const auto previous_work = work;
+        const int invalid_column = origin.x < 0 ? 0 : 127;
+        cells[std::size_t(invalid_column) * side] = one;
+        EXPECT_FALSE(store.capture_scent_window(origin, side, cells, work));
+        EXPECT_FALSE(store.capture_scent_window(
+            {std::numeric_limits<std::int32_t>::max(), 0}, side, cells, work));
+        EXPECT_FALSE(store.capture_scent_window(
+            {0, std::numeric_limits<std::int32_t>::max()}, side, cells, work));
+        EXPECT_EQ(store.serialize(), before);
+        EXPECT_EQ(work, previous_work);
+    }
+}

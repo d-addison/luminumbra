@@ -258,9 +258,9 @@ TEST(ActiveRegionLedgerTest, NearbyRegionsStayFullCadenceAndWakeInPriorityOrder)
     }
     EXPECT_EQ(schedule.due, priority);
     for (std::uint64_t tick = 21; tick < 25; ++tick) {
-        const auto near = ledger.schedule(WorldClock(tick), {}, work);
-        EXPECT_TRUE(near.transitions.empty());
-        EXPECT_EQ(near.due, priority);
+        const auto nearby_schedule = ledger.schedule(WorldClock(tick), {}, work);
+        EXPECT_TRUE(nearby_schedule.transitions.empty());
+        EXPECT_EQ(nearby_schedule.due, priority);
         for (const auto& [key, record] : ledger.records()) {
             (void)key;
             EXPECT_EQ(record.state, RegionState::Active);

@@ -3,6 +3,7 @@
 #include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
+#include "core/FilesystemPath.h"
 #include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
 
@@ -45,7 +46,12 @@ bool ResolveSavedPreset(const fs::path& runtime_root,
         return false;
     }
     const auto embedded = save / "preset.json";
-    const bool has_embedded = fs::exists(embedded);
+    std::string bytes;
+    bool has_embedded = false;
+    if (!read_snapshot_bytes(embedded, kMaxSnapshotIndexBytes, bytes, has_embedded, nullptr)) {
+        result.error = "World preset is unreadable or exceeds its byte limit.";
+        return false;
+    }
     if (requires_embedded && !has_embedded) {
         result.error = "World preset is unavailable: required embedded preset.json is missing.";
         return false;
@@ -59,14 +65,24 @@ bool ResolveSavedPreset(const fs::path& runtime_root,
                                                                     : "worlds/atlas/presets";
     result.preset_path =
         has_embedded ? embedded : runtime_root / presets / (result.metadata.worldType + ".json");
-    const auto preset = world::LoadTerrainPreset(result.preset_path, runtime_root / "data");
+    bool present = has_embedded;
+    if (!has_embedded &&
+        (!read_snapshot_bytes(
+             result.preset_path, kMaxSnapshotIndexBytes, bytes, present, nullptr) ||
+         !present)) {
+        result.error =
+            "failed to open world preset: " + Filesystem::GenericUtf8PathString(result.preset_path);
+        return false;
+    }
+    const auto document = nlohmann::json::parse(bytes);
+    const auto preset = world::LoadTerrainPresetFromJson(
+        document, runtime_root / "data", Filesystem::GenericUtf8PathString(result.preset_path));
     if (!preset.ok) {
         result.error =
             preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
         return false;
     }
-    std::ifstream input(result.preset_path);
-    result.preset_json = nlohmann::json::parse(input).dump();
+    result.preset_json = document.dump();
     if (metadata.contains("presetIdentity") &&
         (!metadata.at("presetIdentity").is_string() ||
          metadata.at("presetIdentity").get<std::string>() != StableChecksum(result.preset_json))) {
@@ -110,11 +126,12 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             result.pending_recovery = true;
             result.error.clear();
             try {
-                std::error_code size_ec;
-                if (fs::is_regular_file(metadata_path) &&
-                    fs::file_size(metadata_path, size_ec) <= 1024 * 1024 && !size_ec) {
-                    std::ifstream pending_input(metadata_path);
-                    const auto pending_json = nlohmann::json::parse(pending_input);
+                std::string pending_bytes;
+                bool pending_present = false;
+                if (read_snapshot_bytes(
+                        metadata_path, 1024u * 1024u, pending_bytes, pending_present, nullptr) &&
+                    pending_present) {
+                    const auto pending_json = nlohmann::json::parse(pending_bytes);
                     if (pending_json.is_object()) {
                         if (pending_json.contains("name") && pending_json.at("name").is_string())
                             result.metadata.name = pending_json.at("name").get<std::string>();
@@ -127,18 +144,17 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             }
             return result;
         }
-        if (!fs::is_regular_file(metadata_path))
-            return result;
-        // Bound metadata to 1 MiB before parsing.
-        constexpr std::uintmax_t kMaxMetadataBytes = 1'048'576;
-        if (fs::file_size(metadata_path) > kMaxMetadataBytes) {
-            result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
+        // Bound metadata to 1 MiB on its validated regular handle before parsing.
+        std::string metadata_bytes;
+        bool metadata_present = false;
+        if (!read_snapshot_bytes(
+                metadata_path, 1024u * 1024u, metadata_bytes, metadata_present, nullptr)) {
+            result.error = "Corrupt world metadata: unreadable or exceeds the 1 MiB limit.";
             return result;
         }
-        std::ifstream input(metadata_path);
-        if (!input)
+        if (!metadata_present)
             return result;
-        const auto json = nlohmann::json::parse(input);
+        const auto json = nlohmann::json::parse(metadata_bytes);
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.

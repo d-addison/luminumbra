@@ -1,3 +1,4 @@
+#include "../support/CalendarMetadataCases.h"
 // asset-manifest split. The engine-side GameSession validates
 // SIMULATION requirements only (preset and worldgen dependencies); renderer/UI
 // asset requirements are caller-supplied by the client. Worldgen dependencies
@@ -4359,7 +4360,7 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
     ASSERT_TRUE(original.CreateWorld("Region resume", "1337", "default"));
     ASSERT_TRUE(uninterrupted.CreateTransientWorld("Uninterrupted", "1337", "default"));
     ASSERT_TRUE(render_only.CreateWorld("Render variant", "1337", "default"));
-    const Luminumbra::world::RegionKey far{40, -40};
+    const Luminumbra::world::RegionKey distant_region{40, -40};
     const Luminumbra::IVec3 coords(1280, 0, -1280);
     for (auto* session : {&original, &uninterrupted, &render_only}) {
         auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
@@ -4377,7 +4378,7 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
         ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
     }
     for (auto* session : {&original, &uninterrupted, &render_only})
-        session->PinActiveRegion(far, true);
+        session->PinActiveRegion(distant_region, true);
     const auto dt = original.GetSimulationClock().fixed_dt();
     for (std::uint64_t tick = 1; tick <= 20; ++tick) {
         SCOPED_TRACE(tick);
@@ -4397,7 +4398,7 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
             }
         }
         for (auto* session : {&original, &uninterrupted, &render_only}) {
-            session->RecordActiveRegionWork({far, tick <= 9 ? 11u : 10u, 0, 0, 0});
+            session->RecordActiveRegionWork({distant_region, tick <= 9 ? 11u : 10u, 0, 0, 0});
             ASSERT_EQ(session->TickSimulation(dt), 1u);
         }
         EXPECT_EQ(original.GetRegionSchedule(), uninterrupted.GetRegionSchedule());
@@ -4407,13 +4408,14 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
                   render_only.GetActiveRegionLedger().canonical_bytes());
         EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(render_only));
         if (tick == 7) {
-            ASSERT_EQ(original.GetActiveRegionLedger().records().at(far).state,
+            ASSERT_EQ(original.GetActiveRegionLedger().records().at(distant_region).state,
                       Luminumbra::world::RegionState::Frozen);
-            EXPECT_EQ(original.GetActiveRegionLedger().records().at(far).frozen_digest,
-                      uninterrupted.GetActiveRegionLedger().records().at(far).frozen_digest);
+            EXPECT_EQ(
+                original.GetActiveRegionLedger().records().at(distant_region).frozen_digest,
+                uninterrupted.GetActiveRegionLedger().records().at(distant_region).frozen_digest);
         }
         if (tick >= 4) {
-            loaded.RecordActiveRegionWork({far, tick <= 9 ? 11u : 10u, 0, 0, 0});
+            loaded.RecordActiveRegionWork({distant_region, tick <= 9 ? 11u : 10u, 0, 0, 0});
             ASSERT_EQ(loaded.TickSimulation(dt), 1u);
             EXPECT_EQ(loaded.GetRegionSchedule(), original.GetRegionSchedule());
             EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(),
@@ -4707,18 +4709,18 @@ TEST(GameSessionHeadlessWorldTest, QueuedRegionWorkRefusesSaveUntilTickCompletes
         s->SetRegionSchedulerConfig({0, 2, 1});
     }
     ASSERT_TRUE(session.CreateWorld("Queued work", "1337", "default"));
-    const Luminumbra::world::RegionKey far{40, -40};
-    session.PinActiveRegion(far, true);
+    const Luminumbra::world::RegionKey distant_region{40, -40};
+    session.PinActiveRegion(distant_region, true);
     const auto dt = session.GetSimulationClock().fixed_dt();
     ASSERT_EQ(session.TickSimulation(dt), 1u); // consume pin wake
-    session.RecordActiveRegionWork({far, 1, 0, 0, 0});
+    session.RecordActiveRegionWork({distant_region, 1, 0, 0, 0});
     ASSERT_EQ(session.TickSimulation(dt), 1u);
-    ASSERT_EQ(session.GetActiveRegionLedger().records().at(far).over_hold, 1u);
+    ASSERT_EQ(session.GetActiveRegionLedger().records().at(distant_region).over_hold, 1u);
     ASSERT_TRUE(session.SaveWorldState());
     const auto save = session.GetWorldSaveDir();
     const auto metadata = ReadClockTestFile(save / "world_info.json");
     const auto ledger = ReadClockTestFile(P::WorldSaveService::active_regions_path(save));
-    session.RecordActiveRegionWork({far, 1, 0, 0, 0});
+    session.RecordActiveRegionWork({distant_region, 1, 0, 0, 0});
     EXPECT_FALSE(session.IsSimulationTickBoundary());
     EXPECT_EQ(session.TickSimulation(0.0), 0u);
     EXPECT_FALSE(session.IsSimulationTickBoundary());
@@ -4731,13 +4733,13 @@ TEST(GameSessionHeadlessWorldTest, QueuedRegionWorkRefusesSaveUntilTickCompletes
     EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), ledger);
     ASSERT_EQ(session.TickSimulation(dt), 1u);
     EXPECT_TRUE(session.IsSimulationTickBoundary());
-    EXPECT_EQ(session.GetActiveRegionLedger().records().at(far).state,
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(distant_region).state,
               Luminumbra::world::RegionState::Reduced);
     ASSERT_TRUE(session.SaveWorldState());
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
     for (auto* s : {&session, &loaded}) {
-        s->RecordActiveRegionWork({far, 1, 0, 0, 0});
+        s->RecordActiveRegionWork({distant_region, 1, 0, 0, 0});
         ASSERT_EQ(s->TickSimulation(dt), 1u);
     }
     EXPECT_EQ(loaded.GetRegionSchedule(), session.GetRegionSchedule());
@@ -5507,7 +5509,7 @@ TEST(GameSessionHeadlessWorldTest, SnapshotTamperedMemberIsRefused) {
     EnableSnapshotSession(refused, root, jobs);
     EXPECT_FALSE(refused.LoadWorld(worldId));
     EXPECT_NE(refused.GetWorldOpenError().find("inconsistent snapshot"), std::string::npos);
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
+    ASSERT_TRUE(Luminumbra::TestSupport::ForgetSnapshotIndex(save));
     GameSession legacy;
     EnableSnapshotSession(legacy, root, jobs);
     (void)legacy.LoadWorld(worldId);
@@ -7424,7 +7426,7 @@ TEST(GameSessionHeadlessWorldTest,
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession base, near, outside, reopened;
+    GameSession base, nearby, outside, reopened;
     CreateGroundWorld(base, root, jobs, "Integrated common scent border");
     const RegionKey left{-1, -1}, right{0, -1}, historical_owner{0, 0};
     auto ledger = FixtureLedger(1006,
@@ -7440,7 +7442,7 @@ TEST(GameSessionHeadlessWorldTest,
     const ScentCell historical{0, std::bit_cast<std::uint64_t>(7.0), 0, 0};
     ASSERT_TRUE(fields.set_scent({200, 0}, historical));
     CommitRegionalFixture(base, ledger, fields);
-    for (auto* session : {&near, &outside}) {
+    for (auto* session : {&nearby, &outside}) {
         EnableSnapshotSession(*session, root, jobs);
         ASSERT_TRUE(session->LoadWorld(base.GetMetadata().worldId)) << session->GetWorldOpenError();
         session->SetReplicatedSimulationAnchors({});
@@ -7451,11 +7453,11 @@ TEST(GameSessionHeadlessWorldTest,
         session.GetRegistry().emplace<ScentSenseComponent>(entity).channel = 0;
         return entity;
     };
-    const auto near_sensor = add_sensor(near, {-0.5f, 0, -9.5f});
+    const auto near_sensor = add_sensor(nearby, {-0.5f, 0, -9.5f});
     const auto outside_sensor = add_sensor(outside, {200, 0, 0});
-    const auto before_hash = near.ComputeScentSubHash();
+    const auto before_hash = nearby.ComputeScentSubHash();
     ASSERT_FALSE(before_hash.empty());
-    for (auto* session : {&near, &outside}) {
+    for (auto* session : {&nearby, &outside}) {
         TickOnce(*session); // 1007: neither owner due, and no common border.
         EXPECT_FALSE(RegionDue(*session, left));
         EXPECT_FALSE(RegionDue(*session, right));
@@ -7466,22 +7468,22 @@ TEST(GameSessionHeadlessWorldTest,
         EXPECT_FALSE(RegionDue(*session, right));
     }
     EXPECT_EQ(outside.GetFieldPages().scent_cells(), fields.scent_cells());
-    ASSERT_TRUE(near.GetFieldPages().scent_cells().contains({0, -10}));
-    EXPECT_GT(std::bit_cast<double>(near.GetFieldPages().scent_cells().at({0, -10})[0]), 0.0);
-    EXPECT_LT(std::bit_cast<double>(near.GetFieldPages().scent_cells().at({-1, -10})[0]), 20.0);
+    ASSERT_TRUE(nearby.GetFieldPages().scent_cells().contains({0, -10}));
+    EXPECT_GT(std::bit_cast<double>(nearby.GetFieldPages().scent_cells().at({0, -10})[0]), 0.0);
+    EXPECT_LT(std::bit_cast<double>(nearby.GetFieldPages().scent_cells().at({-1, -10})[0]), 20.0);
     double sum = 0;
-    for (const auto& [key, values] : near.GetFieldPages().scent_cells()) {
+    for (const auto& [key, values] : nearby.GetFieldPages().scent_cells()) {
         (void)key;
         sum += std::bit_cast<double>(values[0]);
     }
     EXPECT_DOUBLE_EQ(sum, 20.0); // no advection, smoothing, evaporation or clamp without interiors
-    EXPECT_EQ(near.GetFieldPages().scent_cells().at({200, 0}), historical);
-    EXPECT_NE(near.ComputeScentSubHash(), before_hash);
-    near.GetRegistry().destroy(near_sensor);
+    EXPECT_EQ(nearby.GetFieldPages().scent_cells().at({200, 0}), historical);
+    EXPECT_NE(nearby.ComputeScentSubHash(), before_hash);
+    nearby.GetRegistry().destroy(near_sensor);
     outside.GetRegistry().destroy(outside_sensor);
-    const auto history = near.GetFieldPages().scent_cells();
-    const auto history_hash = near.ComputeScentSubHash();
-    ASSERT_TRUE(near.SaveWorld());
+    const auto history = nearby.GetFieldPages().scent_cells();
+    const auto history_hash = nearby.ComputeScentSubHash();
+    ASSERT_TRUE(nearby.SaveWorld());
     EnableSnapshotSession(reopened, root, jobs);
     ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
     reopened.SetReplicatedSimulationAnchors({});
@@ -7490,14 +7492,14 @@ TEST(GameSessionHeadlessWorldTest,
     EXPECT_DOUBLE_EQ(reopened.GetScentField()->Sample(
                          0, reopened.ScentWorldToCellX(0), reopened.ScentWorldToCellZ(-10)),
                      std::bit_cast<double>(history.at({0, -10})[0]));
-    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(near));
+    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(nearby));
     for (int tick = 0; tick < 8; ++tick) {
-        TickOnce(near);
+        TickOnce(nearby);
         TickOnce(reopened);
-        EXPECT_EQ(near.GetFieldPages().scent_cells(), history);
+        EXPECT_EQ(nearby.GetFieldPages().scent_cells(), history);
         EXPECT_EQ(reopened.GetFieldPages().scent_cells(), history);
         EXPECT_EQ(reopened.ComputeScentSubHash(), history_hash);
-        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(near));
+        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(nearby));
     }
 }
 

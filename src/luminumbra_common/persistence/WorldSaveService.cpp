@@ -47,6 +47,7 @@
 #include <string_view>
 #include <system_error>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -845,6 +846,10 @@ struct RecordValidationCache {
     std::size_t payload_bytes = 0;
     std::map<RecordValidationKey, ValidatedChunkRecord, RecordValidationLess> chunks;
 };
+RecordValidationCache& RetainedRecordValidationCache() {
+    static thread_local RecordValidationCache cache;
+    return cache;
+}
 auto& RecordValidationCaches() {
     static thread_local std::map<const WorldSaveService::SaveFactsScope*, RecordValidationCache>
         caches;
@@ -852,7 +857,13 @@ auto& RecordValidationCaches() {
 }
 RecordValidationCache* ActiveRecordValidationCache() {
     const auto* facts = ActiveFacts();
-    return facts ? &RecordValidationCaches()[facts] : nullptr;
+    if (!facts)
+        return nullptr;
+    auto& caches = RecordValidationCaches();
+    auto found = caches.find(facts);
+    if (found == caches.end())
+        found = caches.emplace(facts, std::exchange(RetainedRecordValidationCache(), {})).first;
+    return &found->second;
 }
 void RememberValidatedChunk(const RegionRecord& record, const Chunk& chunk) {
     auto* cache = ActiveRecordValidationCache();
@@ -1033,9 +1044,10 @@ bool ReadRegionFile(const std::filesystem::path& path,
     RegionInput input(path);
     if (input.missing() && allow_missing)
         return true;
-    if (!input.valid()) {
+    if (!input.valid() || input.size() > kMaxSnapshotPayloadBytes) {
         AddError(errors,
-                 "failed to open regular region file: " + Filesystem::GenericUtf8PathString(path));
+                 "failed to open bounded regular region file: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
     const auto exact = [&input, &stop, errors](char* data, std::size_t size) {
@@ -1157,7 +1169,9 @@ bool WriteRegionFile(const std::filesystem::path& path,
     for (const RegionRecord& record : records) {
         if (record.compressed_payload.size() > std::numeric_limits<std::uint32_t>::max() ||
             total_bytes > bytes.max_size() ||
-            record.compressed_payload.size() > bytes.max_size() - total_bytes) {
+            record.compressed_payload.size() > bytes.max_size() - total_bytes ||
+            total_bytes > kMaxSnapshotPayloadBytes ||
+            record.compressed_payload.size() > kMaxSnapshotPayloadBytes - total_bytes) {
             AddError(errors, "region file exceeds addressable payload size");
             return false;
         }
@@ -1211,9 +1225,15 @@ std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk,
     return SerializeWorldStreamingStateSnapshotJson(single, finite_values);
 }
 
+std::atomic<std::uint64_t>& ChunkDecodeCounter() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
+
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
                                          std::vector<std::string>* errors) {
+    ChunkDecodeCounter().fetch_add(1, std::memory_order_relaxed);
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -1307,13 +1327,8 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
 // Metadata gate shared by load_world and member_digest. Returns an empty string when the file is
 // absent or valid, else the rejection message. Malformed JSON throws like before.
-std::string CheckMetadataFile(const std::filesystem::path& save_dir,
-                              std::int64_t* snapshot_format = nullptr) {
-    const auto metadata_path = save_dir / "world_info.json";
-    if (!std::filesystem::exists(metadata_path))
-        return {};
-    std::ifstream input(metadata_path, std::ios::binary);
-    const auto metadata = nlohmann::json::parse(input);
+std::string CheckMetadataBytes(const std::string& bytes, std::int64_t* snapshot_format = nullptr) {
+    const auto metadata = nlohmann::json::parse(bytes);
     if (!metadata.is_object())
         return "corrupt world metadata: expected an object";
     // Old worlds can contain only metadata: no chunk container exists yet
@@ -1348,12 +1363,21 @@ std::string CheckMetadataFile(const std::filesystem::path& save_dir,
     return {};
 }
 
-// Manifest gate shared by load_world and member_digest (same contract as CheckMetadataFile).
-std::string CheckManifestFile(const std::filesystem::path& manifest_path) {
-    if (!std::filesystem::exists(manifest_path))
+std::string CheckMetadataFile(const std::filesystem::path& save_dir,
+                              std::int64_t* snapshot_format = nullptr) {
+    const auto metadata_path = save_dir / "world_info.json";
+    std::string bytes;
+    bool present = false;
+    if (!read_snapshot_bytes(metadata_path, kMaxSnapshotIndexBytes, bytes, present, nullptr))
+        return "corrupt or unreadable world metadata";
+    if (!present)
         return {};
-    std::ifstream input(manifest_path, std::ios::binary);
-    const auto manifest = nlohmann::json::parse(input);
+    return CheckMetadataBytes(bytes, snapshot_format);
+}
+
+// Manifest gate shared by load_world and member_digest (same contract as CheckMetadataFile).
+std::string CheckManifestBytes(const std::string& bytes) {
+    const auto manifest = nlohmann::json::parse(bytes);
     if (manifest.is_object() && manifest.contains("schema") && manifest.at("schema").is_string()) {
         const auto schema = manifest.at("schema").get<std::string>();
         const std::string prefix = "luminumbra.persistence.world_manifest.v";
@@ -1383,6 +1407,16 @@ std::string CheckManifestFile(const std::filesystem::path& manifest_path) {
         return "corrupt world manifest container version";
     }
     return {};
+}
+
+std::string CheckManifestFile(const std::filesystem::path& manifest_path) {
+    std::string bytes;
+    bool present = false;
+    if (!read_snapshot_bytes(manifest_path, kMaxSnapshotIndexBytes, bytes, present, nullptr))
+        return "corrupt or unreadable world manifest";
+    if (!present)
+        return {};
+    return CheckManifestBytes(bytes);
 }
 
 // Fingerprint of a region file's lod-0 record stream: records by ascending id, each as
@@ -1533,6 +1567,10 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
         if (is_region) {
             if (region != region_digests.end())
                 actual = region->second;
+        } else if (member.path == "aether_state.efs") {
+            std::string error;
+            if (!WorldSaveService::member_digest(save_dir, member.path, actual, error))
+                return member.path + ": " + error;
         } else {
             std::uint64_t bytes = 0;
             std::uint64_t fnv64 = 0;
@@ -1542,11 +1580,6 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             actual.present = exists;
             actual.bytes = bytes;
             actual.fnv64 = fnv64;
-            if (member.path == "aether_state.efs" && actual.present) {
-                std::string error;
-                if (!WorldSaveService::member_digest(save_dir, member.path, actual, error))
-                    return member.path + ": " + error;
-            }
         }
         if (member.present != actual.present)
             return member.path;
@@ -1627,6 +1660,24 @@ bool VerifyRegionMembership(const std::filesystem::path& region_file,
         return false;
     }
     return true;
+}
+
+struct CachedChunkRegion {
+    std::vector<RegionRecord> records;
+    std::unordered_map<ChunkID, std::size_t> positions;
+};
+struct ChunkReadCache {
+    std::size_t bytes = 0;
+    std::size_t reads = 0;
+    std::map<std::filesystem::path, CachedChunkRegion> regions;
+};
+WorldSaveService::ChunkReadScope*& ActiveChunkReads() {
+    static thread_local WorldSaveService::ChunkReadScope* active = nullptr;
+    return active;
+}
+auto& ChunkReadCaches() {
+    static thread_local std::map<const WorldSaveService::ChunkReadScope*, ChunkReadCache> caches;
+    return caches;
 }
 
 } // namespace
@@ -1795,10 +1846,13 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         // Root-level .tmp.* siblings are uncommitted staging, never authority.
         requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
         const auto path = save_dir / "world_info.json";
-        if (!std::filesystem::exists(path))
+        std::string bytes;
+        bool present = false;
+        if (!read_snapshot_bytes(path, kMaxSnapshotIndexBytes, bytes, present, errors))
+            return false;
+        if (!present)
             return true;
-        std::ifstream input(path, std::ios::binary);
-        const auto metadata = nlohmann::json::parse(input);
+        const auto metadata = nlohmann::json::parse(bytes);
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
@@ -1923,20 +1977,14 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     LUMIN_PROFILE_ZONE_N("File plant entities load");
     out = Luminumbra::Ecs::EntityRegistrySnapshot{};
     const std::filesystem::path path = plant_entities_path(save_dir);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
-        return true; // clean miss: a fresh / no-plant world
-    }
-    const std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors,
-                 "failed to open plant entities file: " + Filesystem::GenericUtf8PathString(path));
+    std::string bytes;
+    bool present = false;
+    if (!read_snapshot_bytes(path, kMaxSnapshotPayloadBytes, bytes, present, errors))
         return false;
-    }
-    std::ostringstream ss;
-    ss << in.rdbuf();
+    if (!present)
+        return true;
     std::vector<std::string> load_errors;
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, out, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
         return false;
@@ -1994,12 +2042,10 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
                                            std::uint64_t next_id,
                                            std::vector<std::string>* errors) {
     const std::filesystem::path path = ground_objects_path(save_dir);
-    std::error_code ec;
-    const bool present = std::filesystem::exists(path, ec);
-    if (ec) {
-        AddError(errors, "failed to inspect ground objects file: " + ec.message());
+    std::string bytes;
+    bool present = false;
+    if (!read_snapshot_bytes(path, world::GroundObjectStore::kMaxFileBytes, bytes, present, errors))
         return false;
-    }
     if (!SaveTransaction::active_for(save_dir)) {
         if (snapshot_index_exists(save_dir)) {
             SnapshotIndex index;
@@ -2009,14 +2055,12 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
                 index.members.begin(), index.members.end(), [](const SnapshotMember& value) {
                     return value.path == "chunks/region/ground-objects.json";
                 });
-            std::uint64_t bytes = 0, fnv = 0;
-            bool exists = false;
-            if (!hash_file(path, bytes, fnv, exists, errors))
-                return false;
+            const auto fnv = fnv1a64_bytes(bytes.data(), bytes.size());
+            const bool exists = present;
             if ((member == index.members.end() && exists) ||
                 (member != index.members.end() &&
                  (member->present != exists ||
-                  (exists && (member->bytes != bytes || member->fnv64 != fnv))))) {
+                  (exists && (member->bytes != bytes.size() || member->fnv64 != fnv))))) {
                 AddError(errors, "inconsistent snapshot: chunks/region/ground-objects.json");
                 return false;
             }
@@ -2041,21 +2085,6 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
         out.clear();
         return true; // A verified absent member is a clean miss.
     }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors,
-                 "failed to open ground objects file: " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    // One byte past the cap so an oversized file is refused by parse rather than truncated.
-    std::string bytes(world::GroundObjectStore::kMaxFileBytes + 1, '\0');
-    in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    if (in.bad()) {
-        AddError(errors,
-                 "failed to read ground objects file: " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    bytes.resize(static_cast<std::size_t>(in.gcount()));
     world::GroundObjectStore parsed;
     std::string error;
     if (!world::GroundObjectStore::parse(bytes, next_id, parsed, error)) {
@@ -2167,40 +2196,14 @@ bool WorldSaveService::load_field_pages(world::FieldPageState& out,
                                         const std::filesystem::path& save_dir,
                                         std::vector<std::string>* errors) {
     const std::filesystem::path path = field_pages_path(save_dir);
-    std::error_code ec;
-    const bool present = std::filesystem::exists(path, ec);
-    if (ec) {
-        AddError(errors, "failed to inspect field pages file: " + ec.message());
+    std::string bytes;
+    bool present = false;
+    if (!read_snapshot_bytes(path, world::FieldPageState::kMaxFileBytes, bytes, present, errors))
         return false;
-    }
     if (!present) {
         out.clear();
-        return true; // clean miss: a world without field pages
+        return true;
     }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors,
-                 "failed to open field pages file: " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    const std::uintmax_t length = std::filesystem::file_size(path, ec);
-    if (ec) {
-        AddError(errors, "failed to inspect field pages file: " + ec.message());
-        return false;
-    }
-    if (length > world::FieldPageState::kMaxFileBytes) {
-        AddError(errors, "Field pages load failed: file exceeds size cap");
-        return false;
-    }
-    // One spare byte so a file that grew since the stat is parsed whole and refused as malformed.
-    std::string bytes(static_cast<std::size_t>(length) + 1, '\0');
-    in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    if (in.bad()) {
-        AddError(errors,
-                 "failed to read field pages file: " + Filesystem::GenericUtf8PathString(path));
-        return false;
-    }
-    bytes.resize(static_cast<std::size_t>(in.gcount()));
     world::FieldPageState parsed;
     std::string error;
     if (!world::FieldPageState::parse(bytes, parsed, error)) {
@@ -2336,21 +2339,17 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
     LUMIN_PROFILE_ZONE_N("File active regions load");
     try {
         const auto path = active_regions_path(save_dir);
-        if (!std::filesystem::exists(path)) {
+        std::string bytes;
+        bool present = false;
+        if (!read_snapshot_bytes(
+                path, world::ActiveRegionLedger::kMaxFileBytes, bytes, present, errors))
+            return false;
+        if (!present) {
             ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
         }
-        const auto length = std::filesystem::file_size(path);
-        if (length > world::ActiveRegionLedger::kMaxFileBytes) {
-            AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
-            return false;
-        }
-        std::ifstream input(path, std::ios::binary);
-        std::string bytes(static_cast<std::size_t>(length), '\0');
-        input.read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
-        if (!input || input.peek() != std::char_traits<char>::eof() || input.bad() ||
-            !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+        if (!world::ActiveRegionLedger::decode(bytes, ledger, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
             return false;
         }
@@ -2541,7 +2540,12 @@ WorldSaveService::SaveFactsScope::SaveFactsScope(const std::filesystem::path& sa
 }
 
 WorldSaveService::SaveFactsScope::~SaveFactsScope() {
-    RecordValidationCaches().erase(this);
+    auto& caches = RecordValidationCaches();
+    const auto found = caches.find(this);
+    if (found != caches.end()) {
+        RetainedRecordValidationCache() = std::move(found->second);
+        caches.erase(found);
+    }
     ActiveFacts() = m_previous;
 }
 
@@ -2962,6 +2966,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                         }
                         validated = {.coords = chunk->get_coords(),
                                      .sdf_size = chunk->sdf_data.size()};
+                        RememberValidatedChunk(record, *chunk);
                     }
                     constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                                      (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
@@ -2996,12 +3001,27 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             return true;
         }
 
-        std::error_code ec;
-        if (!std::filesystem::exists(path, ec))
-            return !ec; // absent (not an error)
+        const auto limit = (relative == "aether_state.efs" || relative == "world_info.json" ||
+                            relative == "chunks/region/world-manifest.json")
+                               ? std::uint64_t{16u * 1024u * 1024u}
+                           : relative == "chunks/region/field-pages.fpg"
+                               ? world::FieldPageState::kMaxFileBytes
+                           : relative == "chunks/region/ground-objects.json"
+                               ? world::GroundObjectStore::kMaxFileBytes
+                           : relative == "chunks/region/active-regions.arl"
+                               ? world::ActiveRegionLedger::kMaxFileBytes
+                               : kMaxSnapshotPayloadBytes;
+        std::string bytes;
+        bool present = false;
+        if (!read_snapshot_bytes(path, limit, bytes, present, &diagnostics)) {
+            error = first_error("unreadable snapshot member");
+            return false;
+        }
+        if (!present)
+            return true;
 
         if (relative == "world_info.json") {
-            const std::string message = CheckMetadataFile(save_dir);
+            const std::string message = CheckMetadataBytes(bytes);
             if (!message.empty()) {
                 error = message;
                 return false;
@@ -3011,9 +3031,8 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             if (std::filesystem::exists(active_regions_path(save_dir))) {
                 world::ActiveRegionLedger ledger;
                 world::WorldClock clock;
-                bool required = false;
                 if (!load_active_regions(ledger, save_dir, &diagnostics) ||
-                    !read_clock_metadata(save_dir, clock, required, &diagnostics)) {
+                    !world::WorldClock::from_metadata(nlohmann::json::parse(bytes), clock, error)) {
                     error = first_error(world::ActiveRegionLedger::kCorruptMessage);
                     return false;
                 }
@@ -3023,44 +3042,37 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 }
             }
         } else if (relative == "chunks/region/world-manifest.json") {
-            const std::string message = CheckManifestFile(path);
+            const std::string message = CheckManifestBytes(bytes);
             if (!message.empty()) {
                 error = message;
                 return false;
             }
         } else if (relative == "chunks/region/plant-entities.json") {
             Ecs::EntityRegistrySnapshot plants;
-            if (!load_plant_entities(plants, save_dir, &diagnostics)) {
+            if (!Ecs::LoadEntityRegistrySnapshotJson(bytes, plants, diagnostics)) {
                 error = first_error("corrupt plant entities");
                 return false;
             }
         } else if (relative == "chunks/region/ground-objects.json") {
             world::GroundObjectStore objects;
             const std::uint64_t no_id_limit = std::numeric_limits<std::uint64_t>::max();
-            if (!load_ground_objects(objects, save_dir, no_id_limit, &diagnostics)) {
+            if (!world::GroundObjectStore::parse(bytes, no_id_limit, objects, error)) {
                 error = first_error("corrupt ground objects");
                 return false;
             }
         } else if (relative == "chunks/region/field-pages.fpg") {
             world::FieldPageState pages;
-            if (!load_field_pages(pages, save_dir, &diagnostics)) {
+            if (!world::FieldPageState::parse(bytes, pages, error)) {
                 error = first_error("corrupt field pages");
                 return false;
             }
         } else if (relative == "aether_state.efs") {
-            constexpr std::uintmax_t kMaxEnergyBytes = 16u * 1024u * 1024u;
-            if (std::filesystem::file_size(path) > kMaxEnergyBytes) {
-                error = "corrupt energy field record: size limit";
-                return false;
-            }
-            std::ifstream input(path, std::ios::binary);
-            const std::string bytes(std::istreambuf_iterator<char>{input}, {});
             std::istringstream header(bytes);
             std::string magic;
             int channels = 0;
             // Bound channel allocation before invoking the legacy decoder. Indexed writers
             // emit canonical EFS1; re-encoding also refuses duplicate pages/cells and junk.
-            if (!input || !(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
+            if (!(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
                 channels > 64) {
                 error = "corrupt energy field record";
                 return false;
@@ -3103,7 +3115,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
         } else if (relative == "chunks/region/active-regions.arl") {
             world::ActiveRegionLedger ledger;
-            if (!load_active_regions(ledger, save_dir, &diagnostics)) {
+            if (!world::ActiveRegionLedger::decode(bytes, ledger, error)) {
                 error = first_error(world::ActiveRegionLedger::kCorruptMessage);
                 return false;
             }
@@ -3126,13 +3138,9 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
         }
 
-        std::vector<std::string> hash_errors;
-        bool exists = false;
-        if (!hash_file(path, out.bytes, out.fnv64, exists, &hash_errors)) {
-            error = hash_errors.empty() ? std::string("unreadable member") : hash_errors.front();
-            return false;
-        }
-        out.present = exists;
+        out = {.present = true,
+               .bytes = bytes.size(),
+               .fnv64 = fnv1a64_bytes(bytes.data(), bytes.size())};
         return true;
     } catch (const std::exception& e) {
         out = MemberDigest{};
@@ -3173,30 +3181,6 @@ bool WorldSaveService::remove_member(const std::filesystem::path& save_dir,
     if (!scope.ok())
         return false;
     return durable_remove(save_dir / relative, errors) && scope.commit(errors);
-}
-
-bool WorldSaveService::forget_snapshot_index_for_testing(const std::filesystem::path& save_dir) {
-    std::error_code ec;
-    std::filesystem::remove(snapshot_index_path(save_dir), ec);
-    std::filesystem::remove_all(journal_directory(save_dir), ec);
-    const auto metadata_path = save_dir / "world_info.json";
-    if (!std::filesystem::exists(metadata_path, ec))
-        return true;
-    try {
-        nlohmann::json metadata;
-        {
-            std::ifstream input(metadata_path, std::ios::binary);
-            metadata = nlohmann::json::parse(input);
-        }
-        if (!metadata.is_object() || !metadata.contains("snapshotFormat"))
-            return true;
-        metadata.erase("snapshotFormat");
-        std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
-        output << metadata.dump(2) << "\n";
-        return output.good();
-    } catch (const std::exception&) {
-        return false;
-    }
 }
 
 void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enabled) {
@@ -3291,10 +3275,10 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // Revalidate the parsed source under ownership so another persistence writer
     // cannot change the source between the caller's parse and this transaction.
     {
-        const std::ifstream input(source, std::ios::binary);
-        std::ostringstream contents;
-        contents << input.rdbuf();
-        if (!input || input.bad() || contents.bad() || contents.str() != expected_bytes) {
+        std::string contents;
+        bool present = false;
+        if (!read_snapshot_bytes(source, expected_bytes.size(), contents, present, errors) ||
+            !present || contents != expected_bytes) {
             AddError(errors, "rename source changed or cannot be read");
             return false;
         }
@@ -3548,6 +3532,22 @@ bool WorldSaveService::copy_authoritative_chunks(const std::filesystem::path& so
     }
 }
 
+WorldSaveService::ChunkReadScope::ChunkReadScope()
+    : m_previous(ActiveChunkReads()) {
+    ActiveChunkReads() = this;
+}
+WorldSaveService::ChunkReadScope::~ChunkReadScope() {
+    ChunkReadCaches().erase(this);
+    ActiveChunkReads() = m_previous;
+}
+std::size_t WorldSaveService::ChunkReadScope::region_reads() const {
+    const auto found = ChunkReadCaches().find(this);
+    return found == ChunkReadCaches().end() ? 0 : found->second.reads;
+}
+std::uint64_t WorldSaveService::chunk_decode_count() {
+    return ChunkDecodeCounter().load(std::memory_order_relaxed);
+}
+
 WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
     const std::filesystem::path& save_dir, const IVec3& coords, bool require_index) {
     ChunkReadResult result;
@@ -3562,19 +3562,55 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         region_coords_for_chunk(coords, rx, rz);
         const auto path = region_file_path(save_dir, rx, rz);
         std::vector<std::string> errors;
-        const bool indexed = snapshot_index_exists(save_dir);
-        if (require_index && !indexed)
-            return fail("inconsistent snapshot: index missing");
-        std::vector<RegionRecord> records;
-        if (!ReadRegionFile(path, records, &errors, {}, true))
-            return fail(errors.empty() ? "unreadable chunk region" : errors.front());
-        if (!VerifyRegionMembership(path, records, &errors))
-            return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
+        std::vector<RegionRecord> owned_records;
+        const RegionRecord* requested_record = nullptr;
         const auto id = Chunk::calculate_id(coords);
-        for (const auto& record : records) {
-            if (record.lod_level != 0 || record.id != id)
-                continue;
-            result.chunk = DecodeChunkRecord(record, path, &errors);
+        auto* cache = ActiveChunkReads() ? &ChunkReadCaches()[ActiveChunkReads()] : nullptr;
+        const auto cached =
+            cache ? cache->regions.find(path) : decltype(cache->regions)::iterator{};
+        if (cache && cached != cache->regions.end()) {
+            const auto position = cached->second.positions.find(id);
+            if (position != cached->second.positions.end())
+                requested_record = &cached->second.records[position->second];
+        } else {
+            const bool indexed = snapshot_index_exists(save_dir);
+            if (require_index && !indexed)
+                return fail("inconsistent snapshot: index missing");
+            if (!ReadRegionFile(path, owned_records, &errors, {}, true))
+                return fail(errors.empty() ? "unreadable chunk region" : errors.front());
+            if (!VerifyRegionMembership(path, owned_records, &errors))
+                return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
+            if (cache && indexed) {
+                // Bound accounted payload/record storage to 256 MiB and 128 containers.
+                // Each lookup index has at most 65535 entries; node overhead is bounded too.
+                std::size_t bytes =
+                    owned_records.size() * (sizeof(RegionRecord) + sizeof(ChunkID) +
+                                            sizeof(std::size_t) + 4 * sizeof(void*));
+                for (const auto& record : owned_records)
+                    bytes += record.compressed_payload.size();
+                if (cache->regions.size() >= 128 || bytes > kMaxSnapshotPayloadBytes - cache->bytes)
+                    return fail("durable read batch exceeds byte or region limit");
+                cache->bytes += bytes;
+                ++cache->reads;
+                auto& region = cache->regions[path];
+                region.records = std::move(owned_records);
+                for (std::size_t i = 0; i < region.records.size(); ++i)
+                    if (region.records[i].lod_level == 0)
+                        region.positions.emplace(region.records[i].id, i);
+                const auto position = region.positions.find(id);
+                if (position != region.positions.end())
+                    requested_record = &region.records[position->second];
+            } else {
+                const auto record = std::find_if(
+                    owned_records.begin(), owned_records.end(), [id](const RegionRecord& value) {
+                        return value.lod_level == 0 && value.id == id;
+                    });
+                if (record != owned_records.end())
+                    requested_record = &*record;
+            }
+        }
+        if (requested_record) {
+            result.chunk = DecodeChunkRecord(*requested_record, path, &errors);
             constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                              (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
             if (!result.chunk || result.chunk->get_coords() != coords ||
@@ -3770,6 +3806,7 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                             return reject("");
                         validated = {.coords = chunk->get_coords(),
                                      .sdf_size = chunk->sdf_data.size()};
+                        RememberValidatedChunk(record, *chunk);
                     }
                     constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                                      (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);

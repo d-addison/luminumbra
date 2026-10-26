@@ -657,6 +657,107 @@ TEST(WorldSaveRegionFormat, ExactIndexedReadDistinguishesAbsentFromLostOrCorrupt
               WorldSaveService::ChunkReadStatus::Error);
 }
 
+TEST(WorldSaveRegionFormat, ExactReadBatchVerifiesEachRegionOnceAndExpiresAtOperationEnd) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("batch_exact");
+    WorldStreamingState state;
+    for (const IVec3 coords : {IVec3(0, 0, 0), IVec3(1, 0, 0), IVec3(40, 0, 0)}) {
+        auto chunk = state.get_or_create_chunk(coords);
+        chunk->sdf_data.assign(17 * 17 * 17, -2.0f);
+        chunk->mark_voxel_data_dirty();
+    }
+    {
+        P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    {
+        const WorldSaveService::ChunkReadScope batch;
+        EXPECT_EQ(batch.region_reads(), 0u);
+        for (const IVec3 coords : {IVec3(0, 0, 0), IVec3(40, 0, 0), IVec3(1, 0, 0)}) {
+            const auto found = WorldSaveService::read_chunk(save.path, coords, true);
+            ASSERT_EQ(found.status, WorldSaveService::ChunkReadStatus::Found);
+            EXPECT_EQ(found.chunk->sdf_data,
+                      state.find_chunk(Chunk::calculate_id(coords))->sdf_data);
+        }
+        EXPECT_EQ(WorldSaveService::read_chunk(save.path, {2, 0, 0}, true).status,
+                  WorldSaveService::ChunkReadStatus::Absent);
+        EXPECT_EQ(batch.region_reads(), 2u);
+    }
+    std::ofstream(WorldSaveService::region_file_path(save.path, 0, 0),
+                  std::ios::binary | std::ios::trunc)
+        << "broken";
+    const WorldSaveService::ChunkReadScope next;
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {0, 0, 0}, true).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    EXPECT_EQ(next.region_reads(), 0u);
+    std::filesystem::resize_file(WorldSaveService::region_file_path(save.path, 0, 0),
+                                 P::kMaxSnapshotPayloadBytes + 1);
+    const auto oversized = WorldSaveService::read_chunk(save.path, {0, 0, 0}, true);
+    EXPECT_EQ(oversized.status, WorldSaveService::ChunkReadStatus::Error);
+    EXPECT_NE(oversized.error.find("bounded regular region file"), std::string::npos);
+    EXPECT_EQ(next.region_reads(), 0u);
+}
+
+TEST(WorldSaveRegionFormat, ExactReadBatchBoundsRegionsAndRejectsUnknownMetadata) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("bounded_read_batch");
+    WorldStreamingState state;
+    for (int region = 0; region < 129; ++region)
+        state.get_or_create_chunk({region * 32, 0, 0})->mark_voxel_data_dirty();
+    {
+        P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    {
+        const WorldSaveService::ChunkReadScope batch;
+        EXPECT_EQ(batch.region_reads(), 0u);
+        for (int region = 0; region < 128; ++region)
+            ASSERT_EQ(WorldSaveService::read_chunk(save.path, {region * 32, 0, 0}, true).status,
+                      WorldSaveService::ChunkReadStatus::Found);
+        EXPECT_EQ(WorldSaveService::read_chunk(save.path, {128 * 32, 0, 0}, true).status,
+                  WorldSaveService::ChunkReadStatus::Error);
+        EXPECT_EQ(batch.region_reads(), 128u);
+    }
+    std::ofstream(save.path / "world_info.json") << R"({"container_version":99})";
+    const WorldSaveService::ChunkReadScope batch;
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {0, 0, 0}, true).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    EXPECT_EQ(batch.region_reads(), 0u);
+}
+
+TEST(WorldSaveRegionFormat, ExactValidationProofsSurviveSavesButNeverChangedPayloads) {
+    TempSaveDir save("retained_proofs");
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, -7.0f);
+    chunk->mark_voxel_data_dirty();
+    {
+        const WorldSaveService::SaveFactsScope facts(save.path);
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    }
+    const auto before = WorldSaveService::chunk_decode_count();
+    for (int pass = 0; pass < 3; ++pass) {
+        WorldSaveService::SaveFactsScope facts(save.path);
+        ASSERT_TRUE(facts.validate(nullptr));
+        ASSERT_TRUE(facts.validate(nullptr, true));
+    }
+    EXPECT_EQ(WorldSaveService::chunk_decode_count(), before);
+    // Replacement with different valid bytes must be decoded, even with the same identity.
+    auto changed = chunk;
+    changed->sdf_data.front() = -9.0f;
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    const auto replaced = WorldSaveService::chunk_decode_count();
+    {
+        WorldSaveService::SaveFactsScope facts(save.path);
+        ASSERT_TRUE(facts.validate(nullptr));
+    }
+    EXPECT_GT(WorldSaveService::chunk_decode_count(), replaced);
+}
+
 TEST(WorldSaveRegionFormat, IndexedCommitRefusesMalformedLatticeWithoutAcknowledgement) {
     namespace P = Luminumbra::Persistence;
     TempSaveDir save("indexed_lattice");

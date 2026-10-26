@@ -4,6 +4,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
@@ -135,32 +136,6 @@ const nlohmann::json* Field(const nlohmann::json& object, const char* key) {
     return it == object.end() ? nullptr : &(*it);
 }
 
-bool ReadAllBytes(const fs::path& file, std::string& out, std::vector<std::string>* errors) {
-    out.clear();
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        AddError(errors, "cannot open for reading: " + file.string());
-        return false;
-    }
-    // Undo payloads can span large region files. Copy in bounded 64 KiB blocks rather than
-    // invoking stream iterators for every byte; the returned bytes also supply the undo hash.
-    std::array<char, std::size_t{64} * 1024> block{};
-    while (in) {
-        in.read(block.data(), static_cast<std::streamsize>(block.size()));
-        const auto count = static_cast<std::size_t>(in.gcount());
-        if (count > out.max_size() - out.size()) {
-            AddError(errors, "snapshot payload exceeds string capacity");
-            return false;
-        }
-        out.append(block.data(), count);
-    }
-    if (!in.eof() || in.bad()) {
-        AddError(errors, "cannot read: " + file.string());
-        return false;
-    }
-    return true;
-}
-
 // Validate and read the same open file. Nonblocking POSIX opens refuse FIFOs without waiting
 // for a writer; Windows refuses directories, reparse points and non-disk handles before reading.
 class SnapshotInput {
@@ -182,12 +157,17 @@ public:
                   ::GetFileInformationByHandle(m_handle, &information) != 0 &&
                   (information.dwFileAttributes &
                    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+        if (m_valid)
+            m_bytes = (static_cast<std::uint64_t>(information.nFileSizeHigh) << 32) |
+                      information.nFileSizeLow;
 #else
         m_descriptor = ::open(file.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         m_missing = m_descriptor < 0 && errno == ENOENT;
         struct stat information {};
         m_valid = m_descriptor >= 0 && ::fstat(m_descriptor, &information) == 0 &&
-                  S_ISREG(information.st_mode);
+                  S_ISREG(information.st_mode) && information.st_size >= 0;
+        if (m_valid)
+            m_bytes = static_cast<std::uint64_t>(information.st_size);
 #endif
     }
     ~SnapshotInput() {
@@ -206,6 +186,9 @@ public:
     }
     [[nodiscard]] bool missing() const {
         return m_missing;
+    }
+    [[nodiscard]] std::uint64_t size() const {
+        return m_bytes;
     }
     bool read(char* data, std::size_t request, std::size_t& count) {
 #ifdef _WIN32
@@ -231,38 +214,56 @@ private:
 #else
     int m_descriptor = -1;
 #endif
+    std::uint64_t m_bytes = 0;
     bool m_valid = false;
     bool m_missing = false;
 };
 
-bool ReadBoundedBytes(const fs::path& file,
-                      std::size_t limit,
-                      std::string& out,
-                      std::vector<std::string>* errors) {
+bool ReadInputBytes(SnapshotInput& in,
+                    std::uint64_t limit,
+                    std::string& out,
+                    std::vector<std::string>* errors) {
     out.clear();
-    SnapshotInput in(file);
     if (!in.valid()) {
         AddError(errors, "cannot open bounded snapshot input");
         return false;
     }
-    // Read at most limit + 1 bytes from this handle, including when a file grows during reading.
-    std::array<char, 4096> block{};
-    for (;;) {
-        const auto remaining = limit - out.size();
-        const auto request = remaining < block.size() ? remaining + 1 : block.size();
-        std::size_t count = 0;
-        if (!in.read(block.data(), request, count)) {
-            AddError(errors, "cannot read bounded snapshot input");
-            return false;
-        }
-        out.append(block.data(), count);
-        if (out.size() > limit) {
-            AddError(errors, "snapshot input exceeds byte limit");
-            return false;
-        }
-        if (count == 0)
-            return true;
+    if (in.size() > limit || in.size() > out.max_size()) {
+        AddError(errors, "snapshot input exceeds byte limit");
+        return false;
     }
+    // Allocate only the checked handle size (at most limit), then read exactly that
+    // many bytes in 64 KiB blocks. A final byte detects growth without unbounded work.
+    out.resize(static_cast<std::size_t>(in.size()));
+    std::size_t offset = 0;
+    while (offset < out.size()) {
+        const auto request = std::min(out.size() - offset, std::size_t{64} * 1024);
+        std::size_t count = 0;
+        if (!in.read(out.data() + offset, request, count) || count == 0) {
+            AddError(errors, "cannot read bounded snapshot input: truncated or unreadable");
+            return false;
+        }
+        offset += count;
+    }
+    char extra = 0;
+    std::size_t count = 0;
+    if (!in.read(&extra, 1, count) || count != 0) {
+        AddError(errors, "snapshot input changed size during reading");
+        return false;
+    }
+    return true;
+}
+
+bool ReadUndoBytes(const fs::path& file,
+                   std::uint64_t declared,
+                   std::string& out,
+                   std::vector<std::string>* errors) {
+    SnapshotInput in(file);
+    if (!in.valid() || declared > kMaxSnapshotPayloadBytes || in.size() != declared) {
+        AddError(errors, "journal undo copy missing, nonregular or size mismatch");
+        return false;
+    }
+    return ReadInputBytes(in, kMaxSnapshotPayloadBytes, out, errors);
 }
 
 bool SamePath(const fs::path& lhs, const fs::path& rhs) {
@@ -417,7 +418,9 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
             error = "journal entry digest invalid";
             return false;
         }
-        if (!IsUndoName(entry.undo)) {
+        if (!IsUndoName(entry.undo) || entry.prev_bytes > kMaxSnapshotPayloadBytes ||
+            (entry.action == "replace" && entry.undo.empty()) ||
+            (entry.action == "create" && (!entry.undo.empty() || entry.prev_bytes != 0))) {
             error = "journal undo name invalid";
             return false;
         }
@@ -483,7 +486,7 @@ bool RollbackEntries(const fs::path& save_dir,
             if (!matches) {
                 const fs::path undo_path = journal_directory(save_dir) / entry.undo;
                 std::string restored;
-                if (!ReadAllBytes(undo_path, restored, errors)) {
+                if (!ReadUndoBytes(undo_path, entry.prev_bytes, restored, errors)) {
                     return false;
                 }
                 if (restored.size() != entry.prev_bytes ||
@@ -717,33 +720,30 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
     return true;
 }
 
+bool read_snapshot_bytes(const fs::path& path,
+                         std::uint64_t limit,
+                         std::string& out,
+                         bool& exists,
+                         std::vector<std::string>* errors) {
+    out.clear();
+    SnapshotInput input(path);
+    exists = !input.missing();
+    if (!exists)
+        return true;
+    return ReadInputBytes(input, std::min(limit, kMaxSnapshotPayloadBytes), out, errors);
+}
+
 bool read_snapshot_index(const fs::path& save_dir,
                          SnapshotIndex& out,
                          std::vector<std::string>* errors) {
     out = SnapshotIndex{};
     const fs::path path = snapshot_index_path(save_dir);
-    std::error_code ec;
-    const bool exists = fs::exists(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat snapshot index: " + path.string());
-        return false;
-    }
-    if (!exists) {
-        return true;
-    }
-    const std::uintmax_t size = fs::file_size(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat snapshot index: " + path.string());
-        return false;
-    }
-    if (size > kMaxSnapshotIndexBytes) {
-        AddError(errors, "snapshot index too large");
-        return false;
-    }
     std::string bytes;
-    if (!ReadBoundedBytes(path, kMaxSnapshotIndexBytes, bytes, errors)) {
+    bool exists = false;
+    if (!read_snapshot_bytes(path, kMaxSnapshotIndexBytes, bytes, exists, errors))
         return false;
-    }
+    if (!exists)
+        return true;
     std::string error;
     if (!decode_snapshot_index(bytes, out, error)) {
         out = SnapshotIndex{};
@@ -755,7 +755,7 @@ bool read_snapshot_index(const fs::path& save_dir,
 
 bool snapshot_index_exists(const fs::path& save_dir) {
     std::error_code ec;
-    const bool exists = fs::exists(snapshot_index_path(save_dir), ec);
+    const bool exists = fs::exists(fs::symlink_status(snapshot_index_path(save_dir), ec));
     return !ec && exists;
 }
 
@@ -778,26 +778,38 @@ bool hash_file(const fs::path& path,
         AddError(errors, "cannot open for hashing: " + path.string());
         return false;
     }
+    if (in.size() > kMaxSnapshotPayloadBytes) {
+        AddError(errors, "snapshot input exceeds byte limit");
+        return false;
+    }
     exists = true;
     fnv64 = kFnvOffset;
-    // Hash one regular-file handle in bounded 1 MiB blocks, including short final reads.
-    std::vector<char> block(kHashBlockBytes);
-    for (;;) {
+    // One regular handle, at most 256 MiB, with a reusable 1 MiB block.
+    std::vector<char> block(
+        static_cast<std::size_t>(std::min(in.size(), std::uint64_t{kHashBlockBytes})));
+    while (bytes < in.size()) {
+        const auto request =
+            static_cast<std::size_t>(std::min(in.size() - bytes, std::uint64_t{block.size()}));
         std::size_t count = 0;
-        if (!in.read(block.data(), block.size(), count)) {
+        if (!in.read(block.data(), request, count) || count == 0) {
             AddError(errors, "cannot read for hashing: " + path.string());
             return false;
         }
-        if (count == 0)
-            return true;
         fnv64 = Fnv1aUpdate(fnv64, block.data(), count);
-        bytes += static_cast<std::uint64_t>(count);
+        bytes += count;
     }
+    char extra = 0;
+    std::size_t count = 0;
+    if (!in.read(&extra, 1, count) || count != 0) {
+        AddError(errors, "snapshot input changed size during hashing");
+        return false;
+    }
+    return true;
 }
 
 bool journal_pending(const fs::path& save_dir) {
     std::error_code ec;
-    const bool exists = fs::exists(journal_directory(save_dir), ec);
+    const bool exists = fs::exists(fs::symlink_status(journal_directory(save_dir), ec));
     return !ec && exists;
 }
 
@@ -822,11 +834,10 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             return RecoveryOutcome::NothingToDo;
         }
         const fs::path txn_path = journal / "txn.json";
-        const bool txn_exists = fs::exists(txn_path, ec);
-        if (ec) {
-            AddError(errors, "cannot stat snapshot journal: " + txn_path.string());
+        std::string bytes;
+        bool txn_exists = false;
+        if (!read_snapshot_bytes(txn_path, kMaxJournalBytes, bytes, txn_exists, errors))
             return RecoveryOutcome::Failed;
-        }
         if (!txn_exists) {
             // Debris from a journal that was never published.
             fs::remove_all(journal, ec);
@@ -836,10 +847,6 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             }
             SweepTemporaries(save_dir);
             return RecoveryOutcome::DiscardedStale;
-        }
-        std::string bytes;
-        if (!ReadBoundedBytes(txn_path, kMaxJournalBytes, bytes, errors)) {
-            return RecoveryOutcome::Failed;
         }
         JournalDocument document;
         std::string error;
@@ -972,19 +979,14 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
                 return false;
             }
             const fs::path destination = m_save_dir / rel;
-            std::error_code exists_error;
-            const bool exists = fs::exists(destination, exists_error);
-            if (exists_error) {
-                AddError(errors, "cannot inspect snapshot member: " + exists_error.message());
+            std::string previous;
+            bool exists = false;
+            if (!read_snapshot_bytes(
+                    destination, kMaxSnapshotPayloadBytes, previous, exists, errors))
                 return false;
-            }
             Entry entry;
             entry.path = rel;
             if (exists) {
-                std::string previous;
-                if (!ReadAllBytes(destination, previous, errors)) {
-                    return false;
-                }
                 const std::string undo_name = std::to_string(m_next_undo);
                 if (!WorldSaveService::durable_write_file(
                         undo_directory / undo_name, previous, errors)) {

@@ -88,15 +88,18 @@ bool OnlySettleChanged(const GroundObject& before, const GroundObject& after) {
            GroundObjectStore::valid(after);
 }
 
-// Reads an unsigned JSON integer no larger than `max`. Negative, fractional and oversized values
-// fail.
-bool ReadUnsigned(const Json& object, const char* key, std::uint64_t max, std::uint64_t& value) {
+// Reads an unsigned JSON integer no larger than `maximum`. Negative, fractional and oversized
+// values fail.
+bool ReadUnsigned(const Json& object,
+                  const char* key,
+                  std::uint64_t maximum,
+                  std::uint64_t& value) {
     const Json& field = object.at(key);
     if (!field.is_number_unsigned()) {
         return false;
     }
     value = field.get<std::uint64_t>();
-    return value <= max;
+    return value <= maximum;
 }
 
 // Reads a signed JSON integer. Fractional values and values above INT64_MAX fail.

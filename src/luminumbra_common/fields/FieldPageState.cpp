@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -781,6 +782,61 @@ bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentC
         else
             m_scent.insert(admitted.extract(key));
     }
+    return true;
+}
+bool FieldPageState::capture_scent_window(ScentCellKey origin,
+                                          int side,
+                                          std::span<const ScentCell> cells,
+                                          std::map<RegionKey, std::uint64_t>& work) {
+    if (side < 1 || side > 128 || cells.size() != static_cast<std::size_t>(side) * side ||
+        origin.x > std::numeric_limits<std::int32_t>::max() - (side - 1) ||
+        origin.z > std::numeric_limits<std::int32_t>::max() - (side - 1))
+        return false;
+    using Iterator = decltype(m_scent)::iterator;
+    struct Change {
+        Iterator position;
+        const ScentCell* values;
+        bool remove;
+    };
+    // At most 16384 changes/nodes. Allocate and validate every admission before mutation;
+    // map iterators stay valid until their own erasure in the final commit pass.
+    std::vector<Change> changes;
+    changes.reserve(cells.size());
+    std::map<ScentCellKey, ScentCell> admitted;
+    std::map<RegionKey, std::uint64_t> completed;
+    std::size_t removed = 0;
+    for (int x = 0; x < side; ++x) {
+        auto found = m_scent.lower_bound({origin.x + x, origin.z});
+        for (int z = 0; z < side; ++z) {
+            const ScentCellKey key{origin.x + x, origin.z + z};
+            const auto& values = cells[static_cast<std::size_t>(x) * side + z];
+            const bool exists = found != m_scent.end() && found->first == key;
+            const auto current = exists ? found++ : m_scent.end();
+            const bool zero =
+                std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+            if ((exists && current->second == values) || (!exists && zero))
+                continue;
+            if (!ValidScent(key, values))
+                return false;
+            ++completed[region_of_scent_cell(key)];
+            if (exists) {
+                changes.push_back({current, &values, zero});
+                removed += static_cast<std::size_t>(zero);
+            } else {
+                admitted.emplace_hint(admitted.end(), key, values);
+            }
+        }
+    }
+    if (admitted.size() > kMaxScentCells - (m_scent.size() - removed))
+        return false;
+    for (const auto& change : changes) {
+        if (change.remove)
+            m_scent.erase(change.position);
+        else
+            change.position->second = *change.values;
+    }
+    m_scent.merge(admitted);
+    work.swap(completed);
     return true;
 }
 RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
