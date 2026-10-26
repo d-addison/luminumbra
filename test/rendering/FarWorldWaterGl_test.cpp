@@ -8,6 +8,7 @@
 #include "luminumbra_client/rendering/UploadBudget.h"
 #include "luminumbra_client/rendering/passes/ChunkGeometryPool.h"
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/game/PhotoMode.h"
 
 #include "../support/UniqueTempPath.h"
@@ -2105,10 +2106,10 @@ TEST(CaptureArtifacts, PhotoDirectoriesCompletionAndUnrelatedFilesArePreserved) 
     std::filesystem::create_directories(root / "photos/photo-1");
     ASSERT_TRUE(WriteCaptureText(root / "photos/photo-1/keep", "unrelated"));
     std::filesystem::create_directories(root / "data/ui/captures/cap_2");
-    EXPECT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 0);
-    EXPECT_TRUE(std::filesystem::exists(root / "photos/photo-1/keep"));
-    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 2, stars));
     EXPECT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 3);
+    EXPECT_TRUE(std::filesystem::exists(root / "photos/photo-1/keep"));
+    EXPECT_FALSE(std::filesystem::exists(root / "photos/photo-2"));
+    EXPECT_FALSE(ReadCompletedPhotoCapture(root, 2, stars));
     EXPECT_TRUE(ReadCompletedPhotoCapture(root, 3, stars));
     EXPECT_EQ(stars, 4);
     // Removing the publication marker hides complete-looking payloads.
@@ -2185,6 +2186,139 @@ TEST(CaptureArtifacts, PhotoDirectoriesCompletionAndUnrelatedFilesArePreserved) 
     EXPECT_FALSE(WritePixelBufferThumbnailTga(root / "bad.tga", 1, 1, {1, 2, 3}, 65536));
     EXPECT_FALSE(WritePixelBufferThumbnailTga(root / "bad.tga", 1, 1, {1, 2}, 512));
     EXPECT_FALSE(std::filesystem::exists(root / "bad.tga"));
+}
+
+TEST(CaptureArtifacts, EveryLegacyAndDirectoryReservationBlocksIdReuse) {
+    for (const auto* reservation : {"photos/photo-1.ppm",
+                                    "photos/photo-1.photo.json",
+                                    "data/ui/captures/cap_1.tga",
+                                    "photos/photo-1",
+                                    "data/ui/captures/cap_1"}) {
+        const Luminumbra::TestSupport::ScopedTempFile scratch("photo-reservation-", ".json");
+        const auto root = scratch.Path().parent_path();
+        const auto occupied = root / reservation;
+        ASSERT_TRUE(WriteCaptureText(occupied, "historical"));
+        const luminumbra::game::PhotoSidecar side;
+        EXPECT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 2) << reservation;
+        std::ifstream input(occupied, std::ios::binary);
+        EXPECT_EQ((std::string{std::istreambuf_iterator<char>(input), {}}), "historical");
+    }
+}
+
+TEST(CaptureArtifacts, AllocationCursorStartsBeyondHistoryAndSurvivesSessionRestarts) {
+    const Luminumbra::TestSupport::ScopedTempFile scratch("photo-cursor-", ".json");
+    const auto root = scratch.Path().parent_path();
+    std::filesystem::create_directories(root / "photos");
+    for (int id = 1; id <= 2048; ++id)
+        ASSERT_TRUE(
+            std::filesystem::create_directory(root / "photos" / ("photo-" + std::to_string(id))));
+    const luminumbra::game::PhotoSidecar side;
+    PhotoCaptureAllocator first_session;
+    EXPECT_EQ(first_session.Persist(root, 1, 1, {1, 2, 3}, side), 2049);
+    EXPECT_EQ(first_session.Persist(root, 1, 1, {1, 2, 3}, side), 2050);
+    PhotoCaptureAllocator next_session;
+    EXPECT_EQ(next_session.Persist(root, 1, 1, {1, 2, 3}, side), 2051);
+    // A collision arriving after initialization is handled by the bounded retry.
+    ASSERT_TRUE(WriteCaptureText(root / "photos/photo-2052.ppm", "historical"));
+    EXPECT_EQ(next_session.Persist(root, 1, 1, {1, 2, 3}, side), 2053);
+    int stars = -1;
+    EXPECT_TRUE(ReadCompletedPhotoCapture(root, 2053, stars));
+}
+
+TEST(CaptureArtifacts, AllocationUsesEveryHistoricalFormatAndRefusesUnreadableRoots) {
+    const luminumbra::game::PhotoSidecar side;
+    for (const auto* reservation : {"photos/photo-100.ppm",
+                                    "photos/photo-100.photo.json",
+                                    "data/ui/captures/cap_100.tga",
+                                    "photos/photo-100",
+                                    "data/ui/captures/cap_100"}) {
+        const Luminumbra::TestSupport::ScopedTempFile scratch("photo-history-", ".json");
+        const auto root = scratch.Path().parent_path();
+        ASSERT_TRUE(WriteCaptureText(root / reservation, "historical"));
+        PhotoCaptureAllocator allocator;
+        EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 101) << reservation;
+        EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 102);
+    }
+    const Luminumbra::TestSupport::ScopedTempFile scratch("photo-refusal-", ".json");
+    const auto root = scratch.Path().parent_path();
+    PhotoCaptureAllocator allocator;
+    EXPECT_EQ(allocator.Persist(root, 0, 1, {}, side), 0);
+    EXPECT_FALSE(std::filesystem::exists(root / "photos"));
+    ASSERT_TRUE(WriteCaptureText(root / "photos", "wrong type"));
+    EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 0);
+    ASSERT_TRUE(std::filesystem::remove(root / "photos"));
+    ASSERT_TRUE(WriteCaptureText(root / "data", "wrong type"));
+    EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 0);
+    ASSERT_TRUE(std::filesystem::remove(root / "data"));
+    // Malformed/unrelated names are ignored, never parsed as partial numbers.
+    for (const auto* name : {"photo-", "photo-2147483648", "photo-99junk", "unrelated"})
+        ASSERT_TRUE(WriteCaptureText(root / "photos" / name, "historical"));
+    ASSERT_TRUE(WriteCaptureText(
+        root / "photos" / Filesystem::PathFromUtf8("unrelated-\xE6\xB0\xB4"), "historical"));
+    EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 1);
+    const Luminumbra::TestSupport::ScopedTempFile other("photo-root-", ".json");
+    EXPECT_EQ(allocator.Persist(other.Path().parent_path(), 1, 1, {1, 2, 3}, side), 1);
+    ASSERT_TRUE(WriteCaptureText(root / "photos/photo-2147483647.ppm", "historical"));
+    EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 0);
+}
+
+TEST(CaptureArtifacts, CollisionBudgetRefusalRescansBeforeRetry) {
+    const Luminumbra::TestSupport::ScopedTempFile scratch("photo-retry-", ".json");
+    const auto root = scratch.Path().parent_path();
+    const luminumbra::game::PhotoSidecar side;
+    PhotoCaptureAllocator allocator;
+    ASSERT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 1);
+    // Arrivals after initialization fill exactly the bounded 1024-id retry.
+    for (int id = 2; id < 1026; ++id)
+        ASSERT_TRUE(WriteCaptureText(root / "photos" / ("photo-" + std::to_string(id) + ".ppm"),
+                                     "historical"));
+    EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 0);
+    EXPECT_FALSE(std::filesystem::exists(root / "photos/photo-1026"));
+    EXPECT_EQ(allocator.Persist(root, 1, 1, {1, 2, 3}, side), 1026);
+}
+
+TEST(CaptureArtifacts, AllocationScanAcceptsItsExactBoundAndRefusesIncompleteHistory) {
+    const Luminumbra::TestSupport::ScopedTempFile scratch("photo-scan-", ".json");
+    const auto root = scratch.Path().parent_path();
+    std::filesystem::create_directory(root / "photos");
+    // 65534 unrelated entries plus the two directories from the first capture
+    // reach the 65536-entry initialization bound exactly, without payload copies.
+    for (int entry = 0; entry < 65534; ++entry) {
+        std::ofstream output(root / "photos" / ("unrelated-" + std::to_string(entry)));
+        ASSERT_TRUE(CloseCaptureFile(output));
+    }
+    const luminumbra::game::PhotoSidecar side;
+    PhotoCaptureAllocator initial;
+    ASSERT_EQ(initial.Persist(root, 1, 1, {1, 2, 3}, side), 1);
+    PhotoCaptureAllocator exact_bound;
+    EXPECT_EQ(exact_bound.Persist(root, 1, 1, {1, 2, 3}, side), 2);
+    PhotoCaptureAllocator incomplete_scan;
+    EXPECT_EQ(incomplete_scan.Persist(root, 1, 1, {1, 2, 3}, side), 0);
+    EXPECT_FALSE(std::filesystem::exists(root / "photos/photo-3"));
+}
+
+TEST(CaptureArtifacts, EveryTruncatedHeaderPrefixRefusesBothCaptureFormats) {
+    const Luminumbra::TestSupport::ScopedTempFile scratch("photo-header-", ".json");
+    const auto root = scratch.Path().parent_path();
+    const luminumbra::game::PhotoSidecar side;
+    ASSERT_EQ(PersistPhotoCapture(root, 1, 1, 1, {1, 2, 3}, side), 1);
+    std::filesystem::copy_file(root / "photos/photo-1/verdict.photo.json",
+                               root / "photos/photo-1.photo.json");
+    std::filesystem::copy_file(root / "data/ui/captures/cap_1/thumbnail.tga",
+                               root / "data/ui/captures/cap_1.tga");
+    const std::string header = "P6\n1 1\n255\n";
+    for (const bool legacy : {false, true}) {
+        const auto image = legacy ? root / "photos/photo-1.ppm" : root / "photos/photo-1/image.ppm";
+        for (std::size_t length = 0; length <= header.size(); ++length) {
+            ASSERT_TRUE(WriteCaptureText(image, std::string_view(header).substr(0, length)));
+            int stars = 17;
+            EXPECT_FALSE(ReadCompletedPhotoCapture(root, 1, stars, legacy)) << length;
+            EXPECT_EQ(stars, 17);
+        }
+        ASSERT_TRUE(WritePixelBufferPpm(image, 1, 1, {1, 2, 3}));
+        int stars = 17;
+        EXPECT_TRUE(ReadCompletedPhotoCapture(root, 1, stars, legacy));
+    }
 }
 
 TEST(CaptureArtifacts, UnwritableReportImageInvalidScanAndCompleteOutput) {

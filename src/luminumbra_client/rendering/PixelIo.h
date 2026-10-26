@@ -114,6 +114,22 @@ int PersistPhotoCapture(const std::filesystem::path& root,
                         int height,
                         const std::vector<unsigned char>& pixels,
                         const luminumbra::game::PhotoSidecar& side);
+
+// Render-thread owner. Scan historical reservations once per output root, then
+// advance independently of the session's score/capture count, including restarts.
+class PhotoCaptureAllocator {
+public:
+    int Persist(const std::filesystem::path& root,
+                int width,
+                int height,
+                const std::vector<unsigned char>& pixels,
+                const luminumbra::game::PhotoSidecar& side);
+
+private:
+    std::filesystem::path m_root;
+    int m_next_id = 0;
+    bool m_initialized = false;
+};
 // Legacy flat files are admitted only when every required artifact is complete.
 bool ReadCompletedPhotoCapture(const std::filesystem::path& root,
                                int id,

@@ -1190,7 +1190,8 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
         if (fixture_source && path.extension() != ".tga")
             continue;
         const bool legacy = path.extension() == ".tga";
-        const std::string stem = legacy ? path.stem().string() : path.filename().string();
+        const std::string stem =
+            Filesystem::GenericUtf8PathString(legacy ? path.stem() : path.filename());
         if (stem.rfind("cap_", 0) != 0)
             continue;
         int id = 0;
@@ -1200,9 +1201,11 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
             stem != "cap_" + std::to_string(id))
             continue;
         int stars = 0;
-        if (!fixture_source &&
-            !Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, stars, legacy))
-            continue;
+        if (!Filesystem::capture_content_paths().active()) {
+            if (!fixture_source &&
+                !Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, stars, legacy))
+                continue;
+        }
         // Only the newest page is retained; insertion moves at most 12 entries.
         const auto position =
             std::lower_bound(ids.begin(), ids.end(), id, [](const GalleryPhoto& photo, int value) {

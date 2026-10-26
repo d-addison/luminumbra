@@ -1784,6 +1784,23 @@ void CheckCaptureGalleryContentPolicy() {
     side.verdict.stars = 5;
     ASSERT_EQ(Luminumbra::Rendering::PersistPhotoCapture(root.path(), 7, 1, 1, {1, 2, 3}, side), 7);
     inspect(2, 2);
+    // A restarted session must place its shutter result ahead of historical ids.
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-100.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-100.photo.json",
+                                                        "{\"stamp\":\"photo-100\",\"stars\":5}"));
+    fs::copy_file(thumbs / "cap_1.tga", thumbs / "cap_100.tga");
+    Luminumbra::Rendering::PhotoCaptureAllocator restarted_session;
+    ASSERT_EQ(restarted_session.Persist(root.path(), 1, 1, {1, 2, 3}, side), 101);
+    inspect(4, 4);
+    auto* ordered_gallery = FindDocumentByElementId(ui.GetContext(), "gallery");
+    ASSERT_NE(ordered_gallery, nullptr);
+    Rml::ElementList ordered_thumbnails;
+    ordered_gallery->GetElementsByClassName(ordered_thumbnails, "photo-thumb");
+    ASSERT_EQ(ordered_thumbnails.size(), 4u);
+    EXPECT_EQ(ordered_thumbnails.front()->GetAttribute<Rml::String>("src", ""),
+              "captures/cap_101/thumbnail.tga");
+    ASSERT_TRUE(fs::remove(thumbs / "cap_100.tga"));
     auto& policy = Luminumbra::Filesystem::capture_content_paths();
     policy.enable(root.path());
     inspect(6, 0);

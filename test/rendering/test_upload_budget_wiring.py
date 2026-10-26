@@ -769,11 +769,11 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_water_migration_preserves_both_integer_grids_without_float_feedback(self):
         source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
-        resize = compact(body(source, "void WaterSystem::ResizeSimulationGrid("))
+        resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
         self.assertIn("old_bed_mm = std::move(chunk.water_bed_mm)", resize)
         self.assertIn("sample_mm(old_bed_mm, x, z)", resize)
         self.assertIn("sample_mm(old_depth_mm, x, z)", resize)
-        sampler = re.sub(r"//[^\n]*", "", body(body(source, "void WaterSystem::ResizeSimulationGrid("), "const auto sample_mm ="))
+        sampler = re.sub(r"//[^\n]*", "", body(body(source, "bool WaterSystem::ResizeSimulationGrid("), "const auto sample_mm ="))
         for forbidden in ("float", "floor", "lround"):
             self.assertNotIn(forbidden, sampler)
         self.assertIn("sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536)", sampler)
@@ -789,6 +789,73 @@ class UploadBudgetWiring(unittest.TestCase):
         registration = read(ROOT / "test/CMakeLists.txt")
         self.assertIn("common/WaterSeedInputs_test.cpp", registration)
         self.assertIn("rendering/FarWorldWaterGl_test.cpp", registration)
+
+    def test_photo_allocation_covers_history_and_bounds_header_ranges(self):
+        pixels = read(RENDERING / "PixelIo.cpp")
+        occupied = body(pixels, "bool PhotoIdOccupied(")
+        for reservation in ('photos / stamp', 'stamp + ".ppm"', 'stamp + ".photo.json"',
+                            'thumbnails / cap', 'cap + ".tga"'):
+            self.assertIn(reservation, occupied)
+        self.assertIn('symlink_status(path, error)', occupied)
+        initializer = body(pixels, "bool FindNextPhotoId(")
+        self.assertIn('for (const bool thumbnail : {false, true})', initializer)
+        self.assertIn('entries == kMaxReservationEntries', initializer)
+        self.assertIn('if (error)', initializer)
+        allocator = body(pixels, "int PhotoCaptureAllocator::Persist(")
+        self.assertIn('!m_initialized || m_root != root', allocator)
+        self.assertIn('FindNextPhotoId(root, next)', allocator)
+        self.assertIn('saved + 1', allocator)
+        overlay = body(read(ROOT / "src/luminumbra_client/app/DebugOverlays.cpp"),
+                       "void UpdatePhotoCapture(")
+        self.assertIn('photo_allocator.Persist(root_path_str, cap_w, cap_h, px, side)', compact(overlay))
+        self.assertNotIn('root_path_str, app.hud.photoMode.captures', compact(overlay))
+        reader = body(pixels, "bool ReadCompletedPhotoCapture(")
+        self.assertIn('header.size() < 11', reader)
+        self.assertLess(reader.index('header.size() < 11'), reader.index('std::from_chars('))
+        self.assertIn('parsed_width.ptr == header.data() + header.size()', reader)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for regression in ('EveryLegacyAndDirectoryReservationBlocksIdReuse',
+                           'AllocationCursorStartsBeyondHistoryAndSurvivesSessionRestarts',
+                           'AllocationUsesEveryHistoricalFormatAndRefusesUnreadableRoots',
+                           'EveryTruncatedHeaderPrefixRefusesBothCaptureFormats'):
+            self.assertIn('TEST(CaptureArtifacts, ' + regression + ')', native)
+
+    def test_rejected_water_grids_are_excluded_at_every_consumer(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        complete = body(source, 'bool HasCompleteIntegerWaterGrid(')
+        for condition in ('resolution > 32', '32 % resolution',
+                          'chunk.water_bed_mm.size() == cells',
+                          'chunk.water_depth_mm.size() == cells',
+                          'chunk.water_edge_flux.size() == 2 * cells'):
+            self.assertIn(condition, complete)
+        for signature in ('std::uint64_t WaterActivityScore(', 'bool HasCompleteWaterGrid(',
+                          'void StepChunkWaterFixed(', 'void WaterSystem::update(',
+                          'int WaterSystem::EditTerrainBed('):
+            self.assertIn('HasCompleteIntegerWaterGrid(', body(source, signature))
+        update = body(source, 'void WaterSystem::update(')
+        self.assertIn('!HasCompleteIntegerWaterGrid(*chunk_ptr, GetWaterResolution(*chunk_ptr))', update)
+        self.assertLess(update.index('!HasCompleteIntegerWaterGrid(*chunk_ptr'),
+                        update.index('const bool sleeping_pre'))
+        self.assertIn('!HasCompleteIntegerWaterGrid(*A, res)', update)
+        self.assertIn('!HasCompleteIntegerWaterGrid(*B, res)', update)
+        for signature in ('f32 WaterSystem::get_water_level_at(',
+                          'Vec2 WaterSystem::get_water_flow_at(',
+                          'void WaterSystem::apply_displacement('):
+            self.assertIn('HasCompleteWaterGrid(', body(source, signature))
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for regression in ('RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits',
+                           'InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep',
+                           'WorldWaterProbesRefuseUnsupportedResolutionBeforeSizeArithmetic'):
+            self.assertIn('TEST(WaterSeedInputs, ' + regression + ')', native)
+        world = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.cpp')
+        for signature in ('bool SHIELD_WorldSystem::IsUnderwater(',
+                          'std::int64_t SHIELD_WorldSystem::debug_water_volume_near(',
+                          'bool SHIELD_WorldSystem::debug_lowest_land_pos(',
+                          'bool SHIELD_WorldSystem::debug_find_shoreline(',
+                          'Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(',
+                          'float SHIELD_WorldSystem::live_water_surface_at(',
+                          'bool SHIELD_WorldSystem::debug_water_grid_at('):
+            self.assertIn('IsBoundedWaterResolution(res)', body(world, signature))
 
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))

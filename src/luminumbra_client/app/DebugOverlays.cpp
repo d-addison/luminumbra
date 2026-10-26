@@ -564,10 +564,10 @@ void UpdatePhotoCapture(ClientAppContext& app,
             side.species_id = shot.main_species_id;
             side.lens = app.hud.photoMode.lens;
             side.observation = shot.observation; // behaviour/time/light context
+            // This render-thread cursor survives world/session counter resets.
+            static Luminumbra::Rendering::PhotoCaptureAllocator photo_allocator;
             const int saved_id =
-                readback_ok ? Luminumbra::Rendering::PersistPhotoCapture(
-                                  root_path_str, app.hud.photoMode.captures, cap_w, cap_h, px, side)
-                            : 0;
+                readback_ok ? photo_allocator.Persist(root_path_str, cap_w, cap_h, px, side) : 0;
             if (saved_id > 0) {
                 LUMINUMBRA_CORE_INFO("Photo captured: {} stars (total {}), saved photo-{}",
                                      verdict.stars,

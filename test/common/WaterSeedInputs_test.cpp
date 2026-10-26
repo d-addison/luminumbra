@@ -1,7 +1,9 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "luminumbra/core/Types.h"
+#include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/WaterAttribution.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/core/WaterSeedInputs.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -662,6 +664,128 @@ TEST(WaterSeedInputs,
         EXPECT_EQ(chunk.water_bed_mm, before_beds);
         EXPECT_EQ(chunk.water_depth_mm, before_depths);
     }
+}
+
+TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits) {
+    for (const int target : {8, 16}) {
+        for (const std::size_t partial : {1u, 255u, 257u}) {
+            for (const bool partial_bed : {false, true}) {
+                SeedFixture fixture(2);
+                fixture.tick();
+                fixture.water().SetSimResolution(target);
+                fixture.water().SetHydrology(true, 3, 1);
+                entt::registry sources;
+                for (const auto& [id, chunk] : fixture.chunks()) {
+                    (void)id;
+                    auto& malformed = partial_bed ? chunk->water_bed_mm : chunk->water_depth_mm;
+                    malformed.resize(partial, 700);
+                    chunk->is_water_sleeping.store(false);
+                    chunk->ticks_below_threshold = 7;
+                    const auto entity = sources.create();
+                    sources.emplace<Components::TransformComponent>(entity).position =
+                        Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
+                        Vec3(8.0f, 0.0f, 8.0f);
+                    sources.emplace<Components::WaterSourceComponent>(entity).flow_rate = 1.0f;
+                    EXPECT_FALSE(fixture.water().ResizeSimulationGrid(
+                        *chunk, static_cast<Systems::WaterDetailLevel>(target)));
+                }
+                EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 0u);
+                std::unordered_map<ChunkID, std::vector<std::int32_t>> beds, depths, fluxes;
+                std::unordered_map<ChunkID, std::vector<float>> levels;
+                for (const auto& [id, chunk] : fixture.chunks()) {
+                    beds.emplace(id, chunk->water_bed_mm);
+                    depths.emplace(id, chunk->water_depth_mm);
+                    fluxes.emplace(id, chunk->water_edge_flux);
+                    levels.emplace(id, chunk->water_level_data);
+                }
+                // Multiple ticks cover both rotating resize candidates and refusal retries.
+                for (int tick = 0; tick < 3; ++tick) {
+                    fixture.water().update(sources, fixture.chunks());
+                    EXPECT_EQ(fixture.water().cells_stepped_last_update(), 0u);
+                    EXPECT_EQ(fixture.water().dbg_awake_water_chunks(), 0u);
+                    EXPECT_EQ(fixture.water().dbg_seam_wet_pairs(), 0);
+                    for (const auto& [id, chunk] : fixture.chunks()) {
+                        const Vec3 position =
+                            Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
+                            Vec3(8.0f, 0.0f, 8.0f);
+                        fixture.water().apply_displacement(position, 1.0f);
+                        EXPECT_EQ(fixture.water().EditTerrainBed(position, -100, 4.0f), 0);
+                        EXPECT_EQ(chunk->current_water_resolution.load(), 16);
+                        EXPECT_EQ(chunk->water_bed_mm, beds.at(id));
+                        EXPECT_EQ(chunk->water_depth_mm, depths.at(id));
+                        EXPECT_EQ(chunk->water_edge_flux, fluxes.at(id));
+                        EXPECT_EQ(chunk->water_level_data, levels.at(id));
+                        EXPECT_FALSE(chunk->is_water_sleeping.load());
+                        EXPECT_EQ(chunk->ticks_below_threshold, 7);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep) {
+    for (const int resolution : {0, 1, 3, 33, std::numeric_limits<int>::max()}) {
+        SeedFixture fixture(2);
+        fixture.tick();
+        for (const auto& [id, chunk] : fixture.chunks()) {
+            (void)id;
+            chunk->current_water_resolution.store(resolution);
+            chunk->is_water_sleeping.store(true);
+        }
+        fixture.water().SetHydrology(true, 3, 1);
+        fixture.tick();
+        EXPECT_EQ(fixture.water().cells_stepped_last_update(), 0u);
+        for (const auto& [id, chunk] : fixture.chunks()) {
+            (void)id;
+            EXPECT_TRUE(chunk->is_water_sleeping.load());
+        }
+    }
+    for (const int missing : {0, 1, 2}) {
+        SeedFixture fixture(2);
+        fixture.tick();
+        auto& malformed = *fixture.chunks().begin()->second;
+        if (missing == 0)
+            malformed.water_bed_mm.clear();
+        else if (missing == 1)
+            malformed.water_depth_mm.clear();
+        else
+            malformed.water_edge_flux.clear();
+        malformed.is_water_sleeping.store(false);
+        for (const auto& [id, chunk] : fixture.chunks()) {
+            (void)id;
+            if (chunk.get() != &malformed)
+                chunk->is_water_sleeping.store(true);
+        }
+        fixture.tick();
+        EXPECT_EQ(fixture.water().cells_stepped_last_update(), 0u);
+        EXPECT_EQ(fixture.water().dbg_seam_wet_pairs(), 0);
+        for (const auto& [id, chunk] : fixture.chunks()) {
+            (void)id;
+            if (chunk.get() != &malformed)
+                EXPECT_TRUE(chunk->is_water_sleeping.load());
+        }
+    }
+}
+
+TEST(WaterSeedInputs, WorldWaterProbesRefuseUnsupportedResolutionBeforeSizeArithmetic) {
+    SeedFixture fixture;
+    fixture.tick();
+    auto& chunk = *fixture.chunks().begin()->second;
+    const auto coords = chunk.get_coords();
+    const float x = static_cast<float>(coords.x * CHUNK_SIZE_X) + 8.0f;
+    const float z = static_cast<float>(coords.z * CHUNK_SIZE_Z) + 8.0f;
+    // A complete-looking 33x33 mirror is still outside the saved-grid contract.
+    chunk.current_water_resolution.store(33);
+    chunk.water_level_data.assign(33u * 33u, 10000.0f);
+    EXPECT_FALSE(fixture.world().debug_water_grid_at(x, z));
+    EXPECT_EQ(fixture.world().live_water_surface_at(x, z),
+              fixture.world().GetTerrainHeightAt(x, z));
+    // Extreme saved resolutions must refuse before res*res can overflow int.
+    chunk.current_water_resolution.store(std::numeric_limits<int>::max());
+    EXPECT_FALSE(fixture.world().debug_water_grid_at(x, z));
+    EXPECT_EQ(fixture.world().live_water_surface_at(x, z),
+              fixture.world().GetTerrainHeightAt(x, z));
 }
 
 TEST(WaterSeedInputs, NotReadyFallbackAndLateCompletionAreIdentical) {

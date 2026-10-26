@@ -113,6 +113,77 @@ private:
     FreshCaptureBuffer m_buffer;
 };
 
+// Reservation checks never authorize a subsequent read or overwrite. Both
+// platforms still reserve fresh directories and exclusively create payloads.
+bool PhotoIdOccupied(const std::filesystem::path& photos,
+                     const std::filesystem::path& thumbnails,
+                     int id,
+                     bool& occupied) {
+    const auto stamp = "photo-" + std::to_string(id);
+    const auto cap = "cap_" + std::to_string(id);
+    occupied = false;
+    for (const auto& path : {photos / stamp,
+                             photos / (stamp + ".ppm"),
+                             photos / (stamp + ".photo.json"),
+                             thumbnails / cap,
+                             thumbnails / (cap + ".tga")}) {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(path, error);
+        if (error == std::errc::no_such_file_or_directory)
+            continue;
+        if (error)
+            return false;
+        // Dangling links, wrong types and partial captures also reserve the id.
+        occupied = occupied || status.type() != std::filesystem::file_type::not_found;
+    }
+    return true;
+}
+
+int PhotoReservationId(std::string_view name, bool thumbnail) {
+    const std::string_view prefix = thumbnail ? "cap_" : "photo-";
+    if (!name.starts_with(prefix))
+        return 0;
+    name.remove_prefix(prefix.size());
+    for (const auto suffix :
+         {std::string_view(".photo.json"), std::string_view(".ppm"), std::string_view(".tga")}) {
+        if ((thumbnail == (suffix == ".tga")) && name.ends_with(suffix)) {
+            name.remove_suffix(suffix.size());
+            break;
+        }
+    }
+    int id = 0;
+    const auto parsed = std::from_chars(name.data(), name.data() + name.size(), id);
+    return parsed.ec == std::errc{} && parsed.ptr == name.data() + name.size() && id > 0 ? id : 0;
+}
+
+bool FindNextPhotoId(const std::filesystem::path& root, int& next) {
+    int highest = 0;
+    // One initialization scan, bounded to 65536 directory entries total. Refuse
+    // an incomplete scan rather than allocate behind an unseen historical id.
+    constexpr std::size_t kMaxReservationEntries = 65536;
+    std::size_t entries = 0;
+    for (const bool thumbnail : {false, true}) {
+        const auto directory = thumbnail ? root / "data" / "ui" / "captures" : root / "photos";
+        std::error_code error;
+        std::filesystem::directory_iterator entry(directory, error), end;
+        if (error == std::errc::no_such_file_or_directory)
+            continue;
+        if (error)
+            return false;
+        for (; entry != end; entry.increment(error)) {
+            if (error || entries == kMaxReservationEntries)
+                return false;
+            ++entries;
+            const auto name = Filesystem::GenericUtf8PathString(entry->path().filename());
+            highest = std::max(highest, PhotoReservationId(name, thumbnail));
+        }
+        if (error)
+            return false;
+    }
+    next = highest == std::numeric_limits<int>::max() ? 0 : highest + 1;
+    return true;
+}
+
 } // namespace
 
 bool WritePixelBufferPpm(const std::filesystem::path& path,
@@ -269,6 +340,11 @@ int PersistPhotoCapture(const std::filesystem::path& root,
     for (int attempt = 0; attempt < 1024 && first_id <= std::numeric_limits<int>::max() - attempt;
          ++attempt) {
         const int id = first_id + attempt;
+        bool occupied = false;
+        if (!PhotoIdOccupied(photos, thumbnails, id, occupied))
+            return 0;
+        if (occupied)
+            continue;
         const std::string stamp = "photo-" + std::to_string(id);
         const auto photo_dir = photos / stamp;
         if (!std::filesystem::create_directory(photo_dir, error)) {
@@ -299,6 +375,32 @@ int PersistPhotoCapture(const std::filesystem::path& root,
         return id;
     }
     return 0;
+}
+
+int PhotoCaptureAllocator::Persist(const std::filesystem::path& root,
+                                   int width,
+                                   int height,
+                                   const std::vector<unsigned char>& pixels,
+                                   const luminumbra::game::PhotoSidecar& side) {
+    std::size_t bytes = 0;
+    if (!CapturePixelBytes(width, height, 3, bytes) || pixels.size() != bytes)
+        return 0;
+    if (!m_initialized || m_root != root) {
+        int next = 0;
+        if (!FindNextPhotoId(root, next))
+            return 0;
+        m_root = root;
+        m_next_id = next;
+        m_initialized = true;
+    }
+    const int saved = PersistPhotoCapture(root, m_next_id, width, height, pixels, side);
+    if (saved > 0)
+        m_next_id = saved == std::numeric_limits<int>::max() ? 0 : saved + 1;
+    else if (m_next_id > 0)
+        // A failed writer may have reserved an unpublished directory. Re-scan
+        // on retry so that allocation also advances beyond failed publications.
+        m_initialized = false;
+    return saved;
 }
 
 bool ReadCompletedPhotoCapture(const std::filesystem::path& root, int id, int& stars, bool legacy) {
@@ -339,7 +441,9 @@ bool ReadCompletedPhotoCapture(const std::filesystem::path& root, int id, int& s
             return false;
         const auto image_count = image.read(buffer);
         const std::string_view header(buffer.data(), image_count);
-        if (header.substr(0, 3) != "P6\n")
+        // Smallest canonical header is "P6\n1 1\n255\n" (11 bytes).
+        // Check the whole minimum before constructing either numeric range.
+        if (header.size() < 11 || header.substr(0, 3) != "P6\n")
             return false;
         int width = 0;
         int height = 0;

@@ -156,6 +156,17 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 
 namespace {
 
+// Saved grids are at most 32 by 32. Check before any size multiplication
+// or bed/depth indexing, including grids whose migration was refused.
+bool HasCompleteIntegerWaterGrid(const Chunk& chunk, int resolution) {
+    if (resolution <= 1 || resolution > 32 || 32 % resolution != 0 ||
+        !chunk.has_water_sim.load(std::memory_order_relaxed))
+        return false;
+    const auto cells = static_cast<std::size_t>(resolution) * resolution;
+    return chunk.water_bed_mm.size() == cells && chunk.water_depth_mm.size() == cells &&
+           chunk.water_edge_flux.size() == 2 * cells;
+}
+
 constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
     return std::max<std::size_t>(std::size_t{1}, MAX_WATER_CELLS_PER_TICK / cells_per_chunk);
 }
@@ -163,10 +174,7 @@ constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
 std::uint64_t WaterActivityScore(const Chunk& chunk) {
     std::uint64_t activity = 0;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_relaxed);
-    const std::size_t cells =
-        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    if (resolution <= 1 || chunk.water_depth_mm.size() != cells ||
-        chunk.water_bed_mm.size() != cells || chunk.water_edge_flux.size() != 2 * cells) {
+    if (!HasCompleteIntegerWaterGrid(chunk, resolution)) {
         return activity;
     }
 
@@ -211,7 +219,7 @@ size_t GetWaterCellCount(int resolution) {
 }
 
 bool HasCompleteWaterGrid(const Chunk& chunk, int resolution) {
-    if (!chunk.has_water_sim.load(std::memory_order_relaxed) || resolution <= 1) {
+    if (!HasCompleteIntegerWaterGrid(chunk, resolution)) {
         return false;
     }
 
@@ -264,14 +272,9 @@ void StepChunkWaterFixed(Chunk& c,
                          const WeatherSystem* weather_rain = nullptr,
                          std::int32_t weather_scale_mm = 0) {
     const int res = GetWaterResolution(c);
-    if (res <= 1)
+    if (!HasCompleteIntegerWaterGrid(c, res))
         return;
     const int n = res * res;
-    if (static_cast<int>(c.water_depth_mm.size()) != n ||
-        static_cast<int>(c.water_bed_mm.size()) != n)
-        return;
-    if (static_cast<int>(c.water_edge_flux.size()) != 2 * n)
-        c.water_edge_flux.assign(static_cast<std::size_t>(2 * n), 0);
 
     std::vector<std::int32_t>& depth = c.water_depth_mm;
     std::vector<std::int32_t>& bed = c.water_bed_mm;
@@ -1074,7 +1077,8 @@ void WaterSystem::update(entt::registry& registry,
     chunks_to_sim.reserve(m_active_chunks->size());
     for (const auto& active_chunk : *m_active_chunks) {
         const auto& chunk_ptr = active_chunk.second;
-        if (!chunk_ptr) {
+        if (!chunk_ptr ||
+            !HasCompleteIntegerWaterGrid(*chunk_ptr, GetWaterResolution(*chunk_ptr))) {
             continue;
         }
 
@@ -1087,6 +1091,7 @@ void WaterSystem::update(entt::registry& registry,
                 IVec3 neighbor_coords = self_coords + offset;
                 auto it = m_active_chunks->find(Chunk::calculate_id(neighbor_coords));
                 if (it != m_active_chunks->end() && it->second &&
+                    HasCompleteIntegerWaterGrid(*it->second, GetWaterResolution(*it->second)) &&
                     !it->second->is_water_sleeping.load(std::memory_order_relaxed)) {
                     // WAKE UP (deferred): a neighbor is active per the pre-pass state.
                     chunks_to_wake.push_back(chunk_ptr.get());
@@ -1263,12 +1268,9 @@ void WaterSystem::update(entt::registry& registry,
         0; // CONTINUITY proof: seam cell-pairs with water on BOTH sides of the border
     for (Chunk* A : chunks_to_sim) {
         const int res = GetWaterResolution(*A);
-        if (res <= 1)
+        if (!HasCompleteIntegerWaterGrid(*A, res))
             continue;
         const int nA = res * res;
-        if (static_cast<int>(A->water_depth_mm.size()) != nA ||
-            static_cast<int>(A->water_edge_flux.size()) != 2 * nA)
-            continue;
         const IVec3 ac = A->get_coords();
         const bool have_mirror_A = (static_cast<int>(A->water_level_data.size()) == nA);
         // Seam edges use the same resolution-scaled constants as internal edges (the seam
@@ -1279,7 +1281,7 @@ void WaterSystem::update(entt::registry& registry,
         auto step_face = [&](Chunk* B, bool isX) {
             if (GetWaterResolution(*B) != res)
                 return; // uniform-res only -> cells align cell-for-cell
-            if (static_cast<int>(B->water_depth_mm.size()) != nA)
+            if (!HasCompleteIntegerWaterGrid(*B, res))
                 return;
             const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
             for (int t = 0; t < res; ++t) {
@@ -1579,7 +1581,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
             continue;
         Chunk& c = *cptr;
         const int res = GetWaterResolution(c);
-        if (res <= 1 || static_cast<int>(c.water_bed_mm.size()) != res * res)
+        if (!HasCompleteIntegerWaterGrid(c, res))
             continue;
         const IVec3 cc = c.get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -1659,19 +1661,18 @@ std::size_t WaterSystem::MigrateChunksToSimResolution(
         if (cp->current_water_resolution.load(std::memory_order_relaxed) == m_sim_resolution) {
             continue;
         }
-        ResizeSimulationGrid(*cp, target_level);
-        if (cp->current_water_resolution.load(std::memory_order_relaxed) == m_sim_resolution)
+        if (ResizeSimulationGrid(*cp, target_level))
             ++migrated;
     }
     return migrated;
 }
 
-void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level) {
+bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level) {
     int new_resolution = static_cast<int>(new_level);
     int current_resolution = chunk.current_water_resolution.load();
 
     if (new_resolution == current_resolution) {
-        return; // No change needed
+        return HasCompleteIntegerWaterGrid(chunk, current_resolution);
     }
 
     if (new_resolution <= 0) { // Disable simulation
@@ -1683,7 +1684,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_mesh_generated.store(false);
         chunk.water_mesh_dirty_ticks = 0;
         chunk.current_water_resolution.store(0);
-        return;
+        return true;
     }
 
     // Session grids divide the chunk; historical saved grids are bounded to 32.
@@ -1691,7 +1692,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     if (new_resolution <= 1 || new_resolution > CHUNK_SIZE_X ||
         CHUNK_SIZE_X % new_resolution != 0 || CHUNK_SIZE_Z % new_resolution != 0 ||
         current_resolution <= 1 || current_resolution > 32 || 32 % current_resolution != 0) {
-        return;
+        return false;
     }
 
     const auto old_cell_count = GetWaterCellCount(current_resolution);
@@ -1699,7 +1700,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     // truth is malformed; refuse it before changing any chunk state.
     if ((!chunk.water_bed_mm.empty() && chunk.water_bed_mm.size() != old_cell_count) ||
         (!chunk.water_depth_mm.empty() && chunk.water_depth_mm.size() != old_cell_count)) {
-        return;
+        return false;
     }
 
     m_water_activity_cache.erase(chunk.get_id());
@@ -1849,6 +1850,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;
     chunk.current_water_resolution.store(new_resolution);
+    return true;
 }
 
 } // namespace Luminumbra::Systems
