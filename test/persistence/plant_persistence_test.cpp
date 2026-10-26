@@ -81,6 +81,17 @@ entt::entity barePlant(entt::registry& r, float x, std::uint8_t stage, std::uint
     return e;
 }
 
+// Exercise the pre-extension v1 contract explicitly, including mixed legacy IDs
+// and joining a disjoint resident roster without an allocator descriptor.
+E::EntityRegistrySnapshot LegacyPlantSnapshot(const entt::registry& registry) {
+    auto snapshot = F::BuildPlantEntitySnapshot(registry);
+    for (auto& record : snapshot.entities) {
+        std::erase_if(record.components,
+                      [](const auto& component) { return component.type == "PlantAllocator"; });
+    }
+    return snapshot;
+}
+
 TEST(PlantPersistence, SavedIdsPreservePollinationAndGerminationAfterDeletion) {
     namespace P = ::Luminumbra::Persistence;
     const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("plant-identity-");
@@ -202,7 +213,8 @@ TEST(PlantPersistence, SavedIdsCanJoinADisjointResidentRoster) {
     source.destroy(unused);
     entt::registry target;
     const auto resident = target.create();
-    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, F::BuildPlantEntitySnapshot(source)));
+    ASSERT_TRUE(
+        F::ApplyPlantEntitySnapshot(target, LegacyPlantSnapshot(source), /*replace_plants=*/false));
     EXPECT_TRUE(target.valid(resident));
     ASSERT_TRUE(target.valid(plant));
     EXPECT_EQ(target.get<C::PlantGrowthComponent>(plant).growth_points, 100u);
@@ -212,8 +224,8 @@ TEST(PlantPersistence, LegacyMissingIdsAndGrazingFieldsKeepFreshIdAndOptOutBehav
     entt::registry source;
     barePlant(source, 1.0f, 3, 100);
     barePlant(source, 2.0f, 3, 200);
-    auto json = nlohmann::json::parse(
-        E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(source)));
+    auto json =
+        nlohmann::json::parse(E::SerializeEntityRegistrySnapshotJson(LegacyPlantSnapshot(source)));
     for (auto& record : json["entities"])
         record.erase("entity_id");
     E::EntityRegistrySnapshot loaded;
@@ -236,7 +248,7 @@ TEST(PlantPersistence, LegacyUnusableIdsAndMixedRostersDoNotConsumeSavedSlots) {
     entt::registry source;
     barePlant(source, 1.0f, 3, 100);
     barePlant(source, 2.0f, 3, 200);
-    const auto original = F::BuildPlantEntitySnapshot(source);
+    const auto original = LegacyPlantSnapshot(source);
     for (const auto unusable :
          {entt::to_integral(static_cast<entt::entity>(entt::null)),
           entt::to_integral(entt::entt_traits<entt::entity>::construct(
@@ -697,7 +709,7 @@ TEST(PlantPersistence, PositionsMustFitThePackedChunkDomainBeforeAndAfterFloatRo
     const auto plant = barePlant(source, 1.0f, 3, 500);
     source.destroy(unused);
     source.emplace<C::SoilFeederComponent>(plant);
-    const auto original = F::BuildPlantEntitySnapshot(source);
+    const auto original = LegacyPlantSnapshot(source);
     for (const auto* axis : {"x", "y", "z"}) {
         const float limit = axis == std::string("y") ? 33554432.0f : 16777216.0f;
         for (const double coordinate :
@@ -723,7 +735,8 @@ TEST(PlantPersistence, PositionsMustFitThePackedChunkDomainBeforeAndAfterFloatRo
             target.emplace<C::SoilFeederComponent>(existing);
             const auto expected =
                 E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target));
-            EXPECT_EQ(F::ApplyPlantEntitySnapshot(target, snapshot), supported);
+            EXPECT_EQ(F::ApplyPlantEntitySnapshot(target, snapshot, /*replace_plants=*/false),
+                      supported);
             if (!supported) {
                 EXPECT_EQ(
                     E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target)),

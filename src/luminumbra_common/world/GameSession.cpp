@@ -1462,6 +1462,14 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         return false;
     }
 
+    // Full-world adoption replaces every entity. Non-plant owners must be
+    // present for an allocator snapshot, so admit against the actual empty target.
+    const entt::registry empty_registry;
+    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(empty_registry, loaded.plants)) {
+        m_worldOpenError = "Saved-input admission refused: plant entity identity clash.";
+        return false;
+    }
+
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = saved.preset_json;
@@ -1592,6 +1600,14 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
             if (m_worldSystem)
                 m_worldSystem->clear_world(m_physicsSystem.get());
         }
+        return false;
+    }
+
+    // Full-world adoption replaces every entity. Non-plant owners must be
+    // present for an allocator snapshot, so admit against the actual empty target.
+    const entt::registry empty_registry;
+    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(empty_registry, loaded.plants)) {
+        m_worldOpenError = "Saved-input admission refused: plant entity identity clash.";
         return false;
     }
 
@@ -2150,7 +2166,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
         return false;
     }
-    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(m_registry, state.plants)) {
+    if (!luminumbra::foliage::CanApplyPlantEntitySnapshot(
+            m_registry, state.plants, /*replace_plants=*/true)) {
         m_worldOpenError = "Saved-input admission refused: plant entity identity clash.";
         return false;
     }
@@ -2222,12 +2239,17 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir, LoadedWorldState&
 }
 
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {
-    // All refusing readers have passed; publish the staged state together.
+    // All readers and roster admission have passed before any live state changes.
+    luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, saved.plants);
     m_renderCalendar = saved.render_calendar;
     if (!saved.snapshot_present && !m_activeRegionsEnabled) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
         return; // legacy fresh world
     }
+    // Adoption inserts by chunk ID. A present snapshot replaces resident chunks
+    // after admission; absent chunk input retains the legacy clean-miss behaviour.
+    if (saved.snapshot_present)
+        m_worldSystem->clear_world(m_physicsSystem.get());
     if (saved.ledger) {
         m_ambientFieldAnchor = saved.ambient_anchor.value_or(m_metadata.spawnPoint);
         // Interrupted pairs may have an older ledger. Rebase without scheduling.
@@ -2295,9 +2317,6 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
                 m_worldSystem->debug_water_sim_resolution());
         }
     }
-
-    // Plant numeric projection was admitted before any live state changed.
-    luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, saved.plants);
 
     // restore the stateful energy layer's record (a
     // missing file is a clean miss == all zeros by contract). Epoch-rebased

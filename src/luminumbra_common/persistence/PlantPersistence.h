@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -162,6 +163,126 @@ SavedPlantEntity(const ::Luminumbra::Ecs::EntitySnapshotRecord& record) {
         return std::nullopt;
     return entity;
 }
+
+// V1 components have free-form payloads and unknown types are ignored by older
+// readers. Keep allocator history on the first plant, without changing the ECS
+// schema or the empty-roster/no-file contract. Legacy rosters omit this component.
+inline constexpr std::string_view kAllocatorComponent = "PlantAllocator";
+struct PlantAllocator {
+    std::vector<entt::entity> packed;
+    std::size_t live = 0;
+    entt::entity next = entt::entity{};
+};
+
+inline const nlohmann::json*
+FindAllocator(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snapshot) {
+    for (const auto& record : snapshot.entities) {
+        if (record.name == "plant") {
+            for (const auto& component : record.components) {
+                if (component.type == kAllocatorComponent)
+                    return &component.data;
+            }
+        }
+    }
+    return nullptr;
+}
+
+inline bool ReadAllocator(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
+                          PlantAllocator& allocator) {
+    const nlohmann::json* data = nullptr;
+    for (const auto& record : snapshot.entities) {
+        if (record.name != "plant")
+            continue;
+        for (const auto& component : record.components) {
+            if (component.type != kAllocatorComponent)
+                continue;
+            if (data)
+                return false;
+            data = &component.data;
+        }
+    }
+    if (!data)
+        return true;
+    using Traits = entt::entt_traits<entt::entity>;
+    const auto& packed = data->at("packed");
+    // EnTT has at most entity_mask usable slots. Allocate only from the actual
+    // bounded array, never from a declared count or an entity's numeric value.
+    if (!packed.is_array() || packed.size() > Traits::entity_mask ||
+        !::Luminumbra::Ecs::snapshot_detail::ReadUnsignedInteger(data->at("live"),
+                                                                 allocator.live) ||
+        allocator.live > packed.size())
+        return false;
+    std::vector<entt::id_type> slots;
+    for (const auto& value : packed) {
+        entt::id_type id = 0;
+        if (!::Luminumbra::Ecs::snapshot_detail::ReadUnsignedInteger(value, id))
+            return false;
+        const auto entity = static_cast<entt::entity>(id);
+        if (entity == entt::null || entity == entt::tombstone)
+            return false;
+        allocator.packed.push_back(entity);
+        slots.push_back(entt::to_entity(entity));
+    }
+    std::sort(slots.begin(), slots.end());
+    if (std::adjacent_find(slots.begin(), slots.end()) != slots.end())
+        return false;
+    entt::id_type next_slot = 0;
+    for (const auto slot : slots) {
+        if (slot != next_slot)
+            break;
+        ++next_slot;
+    }
+    allocator.next = Traits::construct(next_slot, 0);
+    std::vector<entt::entity> live(allocator.packed.begin(),
+                                   allocator.packed.begin() +
+                                       static_cast<std::ptrdiff_t>(allocator.live));
+    std::sort(live.begin(), live.end());
+    // Every plant must have an exact live ID when allocator metadata is present.
+    for (const auto& record : snapshot.entities) {
+        if (record.name == "plant") {
+            const auto entity = SavedPlantEntity(record);
+            if (!entity || !std::binary_search(live.begin(), live.end(), *entity))
+                return false;
+        }
+    }
+    return true;
+}
+
+inline bool AllocatorResidentsMatch(const entt::registry& registry,
+                                    const ::Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
+                                    const PlantAllocator& allocator,
+                                    bool replace_plants) {
+    using C = ::Luminumbra::Components::PlantTag;
+    std::vector<entt::entity> plants;
+    for (const auto& record : snapshot.entities) {
+        if (record.name == "plant") {
+            if (const auto entity = SavedPlantEntity(record))
+                plants.push_back(*entity);
+        }
+    }
+    std::sort(plants.begin(), plants.end());
+    std::vector<entt::entity> expected;
+    for (std::size_t index = 0; index < allocator.live; ++index) {
+        const auto entity = allocator.packed[index];
+        if (!std::binary_search(plants.begin(), plants.end(), entity))
+            expected.push_back(entity);
+    }
+    std::sort(expected.begin(), expected.end());
+    std::size_t residents = 0;
+    for (const auto [entity] : registry.storage<entt::entity>()->each()) {
+        if (registry.all_of<C>(entity)) {
+            if (!replace_plants)
+                return false;
+        } else {
+            if (!std::binary_search(expected.begin(), expected.end(), entity))
+                return false;
+            ++residents;
+        }
+    }
+    // Non-plants are not serialized here. Refuse missing/extra generations rather
+    // than inventing live placeholders or destroying another subsystem's entities.
+    return residents == expected.size();
+}
 } // namespace pp_detail
 
 // Project all plant entities into a deterministic snapshot. Plants need (at minimum) PlantTag +
@@ -233,6 +354,15 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
         }
         snap.entities.push_back(std::move(rec));
     }
+    if (!snap.entities.empty()) {
+        const auto* storage = reg.storage<entt::entity>();
+        nlohmann::json packed = nlohmann::json::array();
+        for (std::size_t index = 0; index < storage->size(); ++index)
+            packed.push_back(entt::to_integral(storage->data()[index]));
+        snap.entities.front().components.push_back(
+            {std::string(pp_detail::kAllocatorComponent),
+             {{"packed", std::move(packed)}, {"live", storage->free_list()}}});
+    }
     ::Luminumbra::Ecs::SortEntityRegistrySnapshot(snap);
     return snap;
 }
@@ -275,16 +405,20 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
         }
         // Different generations of the same slot cannot coexist either.
         std::sort(slots.begin(), slots.end());
-        return std::adjacent_find(slots.begin(), slots.end()) == slots.end();
+        pp_detail::PlantAllocator allocator;
+        return std::adjacent_find(slots.begin(), slots.end()) == slots.end() &&
+               pp_detail::ReadAllocator(snap, allocator);
     } catch (const nlohmann::json::exception&) {
         return false;
     }
 }
 
-// Admission against a populated registry must compare slots, including other live
-// generations. EnTT's create(hint) silently falls back to a fresh ID on collision.
+// A roster application replaces plants by default. Explicit append admission must
+// compare all live slots; replacement admission exempts only current PlantTags.
+// EnTT's create(hint) silently falls back to a fresh ID on collision.
 inline bool CanApplyPlantEntitySnapshot(const entt::registry& reg,
-                                        const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
+                                        const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
+                                        bool replace_plants = true) {
     if (!ValidatePlantEntitySnapshot(snap))
         return false;
     for (const auto& record : snap.entities) {
@@ -293,21 +427,53 @@ inline bool CanApplyPlantEntitySnapshot(const entt::registry& reg,
         if (const auto entity = pp_detail::SavedPlantEntity(record)) {
             const auto current = entt::entt_traits<entt::entity>::construct(
                 entt::to_entity(*entity), reg.current(*entity));
-            if (reg.valid(current))
+            if (reg.valid(current) &&
+                !(replace_plants && reg.all_of<::Luminumbra::Components::PlantTag>(current)))
                 return false;
         }
+    }
+    if (pp_detail::FindAllocator(snap)) {
+        pp_detail::PlantAllocator allocator;
+        return pp_detail::ReadAllocator(snap, allocator) &&
+               pp_detail::AllocatorResidentsMatch(reg, snap, allocator, replace_plants);
     }
     return true;
 }
 
-// Reconstruct plant entities with their saved IDs (legacy records get fresh IDs). Unknown component
-// types are skipped. Returns false without registry mutation for invalid input.
-// Deterministic (snapshot is id-ordered).
+// Replace the plant roster with saved IDs (legacy records get fresh IDs). Pass
+// replace_plants=false to append instead. Foreign entities are preserved; unknown
+// components are skipped. Invalid input refuses before any registry mutation.
 inline bool ApplyPlantEntitySnapshot(entt::registry& reg,
-                                     const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
-    if (!CanApplyPlantEntitySnapshot(reg, snap))
+                                     const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
+                                     bool replace_plants = true) {
+    if (!CanApplyPlantEntitySnapshot(reg, snap, replace_plants))
         return false;
     namespace C = ::Luminumbra::Components;
+    pp_detail::PlantAllocator allocator;
+    const bool restore_allocator = pp_detail::FindAllocator(snap) != nullptr;
+    if (restore_allocator && !pp_detail::ReadAllocator(snap, allocator))
+        return false;
+    if (replace_plants) {
+        const auto plants = reg.view<C::PlantTag>();
+        // One destruction per current plant; no front erasure or foreign teardown.
+        const std::vector<entt::entity> removed(plants.begin(), plants.end());
+        for (const auto entity : removed)
+            reg.destroy(entity);
+    }
+    if (restore_allocator) {
+        // Rebuild entity storage only: foreign component pools keep their exact
+        // live IDs. EnTT 3.15's swap-only storage keeps dead generations in its
+        // packed tail, and free_list() is the live-prefix boundary.
+        auto& storage = reg.storage<entt::entity>();
+        storage.clear();
+        storage.reserve(allocator.packed.size());
+        for (const auto entity : allocator.packed)
+            storage.generate(entity);
+        storage.free_list(allocator.live);
+        // Registry create() never discards allocated slots, so the first absent
+        // slot is the same next fresh ID as continuing (no start_from callers).
+        storage.start_from(allocator.next);
+    }
     // Reserve saved slots first so fresh legacy IDs cannot consume a later hint.
     for (const bool restore_ids : {true, false}) {
         for (const auto& rec : snap.entities) {
@@ -316,7 +482,9 @@ inline bool ApplyPlantEntitySnapshot(entt::registry& reg,
             const auto saved_entity = pp_detail::SavedPlantEntity(rec);
             if (saved_entity.has_value() != restore_ids)
                 continue;
-            const auto e = saved_entity ? reg.create(*saved_entity) : reg.create();
+            const auto e = restore_allocator && saved_entity
+                               ? *saved_entity
+                               : (saved_entity ? reg.create(*saved_entity) : reg.create());
             reg.emplace<C::PlantTag>(e);
             for (const auto& comp : rec.components) {
                 const nlohmann::json& d = comp.data;
