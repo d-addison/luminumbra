@@ -63,6 +63,13 @@ constexpr std::size_t MAX_WATER_RESIZES_PER_TICK = 1;
 // and flux are in MILLIMETRES (per unit cell area -> flux and depth share mm units). The whole
 // hashed path is integer: no float/libm/RNG/wall-clock. Mass is exact (one shared int32 flux
 // subtracted from one cell, added to its neighbour).
+// Integer-grid policy: arithmetic widens to int64 before operating. Beds saturate to [INT32_MIN,
+// INT32_MAX], depths to [0, INT32_MAX], and evolved flux to [-2000000000, 2000000000]. Load
+// saturates wider JSON integers to int32 and refuses noninteger cells; loaded int32 bits
+// round-trip unchanged. Migration and every depth edit normalize negative depths before applying
+// deltas. Sources count accepted depth plus normalization; internal transfer saturation counts
+// as a sink, while seams limit transfer to receiver capacity. Surface = int64(bed) + depth stays
+// wide and is not an int32 grid; the float render mirrors regenerate from it.
 constexpr std::int64_t MM_PER_M = 1000;
 constexpr std::int32_t MIN_FLOW_MM =
     2; // sub-2mm surface diffs produce no flux (kills limit-cycle jitter)
