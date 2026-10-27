@@ -208,9 +208,15 @@ def git(source: Path, *args: str, input_bytes: bytes | None = None,
     require(all(entry and Path(entry).is_absolute() for entry in path_entries), "empty or relative executable search path")
     executable = shutil.which("git", path=environment.get("PATH", ""))
     require(executable is not None and Path(executable).is_absolute(), "Git executable unavailable")
+    # Git 2.46+ ends fetch (and merge, commit, am) by spawning a detached
+    # `git maintenance run --auto`; the grandchild holds the inherited output
+    # pipe for a moment after the owned process exits, which the retained-output
+    # check below refuses. Disabling auto maintenance and auto gc keeps every
+    # descendant foreground, so the pipe closes exactly when Git exits.
     argv = [str(Path(executable).resolve()), "-c", "core.autocrlf=false", "-c", "core.safecrlf=false",
             "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
-            "-c", "protocol.file.allow=never", "-C", str(source), *args]
+            "-c", "protocol.file.allow=never", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+            "-C", str(source), *args]
     return run_command(source, argv, environment, input_bytes, cancellation=cancellation)
 
 
