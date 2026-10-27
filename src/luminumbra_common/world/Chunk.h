@@ -201,8 +201,14 @@ public:
     std::vector<f32> water_rest_level;
     // ---: fixed-point FLOWING-water state (HASHED; millimetres, deterministic) ---
     // The virtual-pipes (Mei) solver runs on integers so host==peer is bit-exact (the hash
-    // FNV-1a's the raw bits). Surface height = water_bed_mm + water_depth_mm. The float arrays
-    // above become  mirrors (water_level_data regenerated from mm for the mesher).
+    // FNV-1a's the raw bits). Arithmetic widens to int64 before operating: beds saturate to
+    // [INT32_MIN, INT32_MAX], depths to [0, INT32_MAX], and evolved flux to [-2000000000,
+    // 2000000000]. Load saturates wider JSON integers to int32 and refuses noninteger cells.
+    // Loaded int32 bits round-trip unchanged; migration and every depth edit normalize negative
+    // depths before applying deltas. Sources count accepted depth plus normalization; internal
+    // transfer saturation counts as a sink, while seams limit transfer to receiver capacity.
+    // Surface = int64(bed) + depth stays wide; it is not an int32 grid. Float render mirrors
+    // regenerate from that surface.
     std::vector<std::int32_t>
         water_depth_mm;                     // water depth above bed (mm, >= 0). size = resolution^2
     std::vector<std::int32_t> water_bed_mm; // terrain bed height (mm). re-sampled on edit ()

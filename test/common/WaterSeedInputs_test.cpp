@@ -9,6 +9,7 @@
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include <entt/entity/registry.hpp>
@@ -25,7 +26,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -563,9 +566,481 @@ TEST(WaterSeedInputs, MigrationKeepsInt32ExtremesInBothDirections) {
                 const float surface =
                     static_cast<float>(static_cast<std::int64_t>(bed) + kMax) / 1000.0f;
                 EXPECT_EQ(chunk.water_level_data, std::vector<float>(new_cells, surface));
+                // Exercise the migrated bed through the real sink and mirror passes,
+                // including 0 - INT32_MIN (one beyond the representable depth range).
+                fixture.water().SetHydrology(true, 0, 0);
+                chunk.is_water_sleeping.store(false);
+                fixture.tick();
+                EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(new_cells, kMax));
+                EXPECT_EQ(chunk.water_level_data, std::vector<float>(new_cells, surface));
+                EXPECT_EQ(fixture.water().dbg_last_sink_mm(), 0);
+                EXPECT_TRUE(fixture.water().dbg_mass_ok());
             }
         }
     }
+}
+
+TEST(WaterSeedInputs, SolverBoundsSourcesNegativeDepthsAndActivityDelta) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    constexpr auto kMin = std::numeric_limits<std::int32_t>::min();
+    for (const int resolution : {2, 8, 16}) {
+        SeedFixture fixture;
+        fixture.water().SetSimResolution(resolution);
+        fixture.tick();
+        auto& chunk = *fixture.chunks().begin()->second;
+        const auto cells = chunk.water_depth_mm.size();
+        for (const auto initial : {kMin, -1, 0, kMax - 1, kMax}) {
+            chunk.water_bed_mm.assign(cells, kMax);
+            chunk.water_depth_mm.assign(cells, initial);
+            chunk.water_edge_flux.assign(2 * cells, 0);
+            fixture.water().SetHydrology(true, kMax, 0);
+            chunk.is_water_sleeping.store(false);
+            fixture.tick();
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, kMax));
+            EXPECT_FLOAT_EQ(chunk.max_water_delta_last_tick,
+                            static_cast<float>(static_cast<std::int64_t>(kMax) - initial) /
+                                1000.0f);
+            EXPECT_TRUE(fixture.water().dbg_mass_ok());
+            EXPECT_EQ(fixture.water().dbg_last_source_mm(),
+                      (static_cast<std::int64_t>(kMax) - initial) *
+                          static_cast<std::int64_t>(cells));
+        }
+        for (const auto initial : {kMax - 24, kMax - 23, kMax}) {
+            chunk.water_depth_mm.assign(cells, initial);
+            chunk.water_src_mm.assign(cells, 24);
+            fixture.water().SetHydrology(false, 0, 0);
+            chunk.is_water_sleeping.store(false);
+            fixture.tick();
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, kMax));
+            EXPECT_EQ(fixture.water().dbg_last_source_mm(),
+                      static_cast<std::int64_t>(kMax - initial) * static_cast<std::int64_t>(cells));
+            EXPECT_TRUE(fixture.water().dbg_mass_ok());
+        }
+        chunk.water_src_mm.assign(cells, kMin);
+        chunk.is_water_sleeping.store(false);
+        fixture.tick();
+        EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, kMax));
+        EXPECT_EQ(fixture.water().dbg_last_source_mm(), 0);
+        for (const auto bed : {kMin, kMin + 1, -1, 0, kMax}) {
+            chunk.water_bed_mm.assign(cells, bed);
+            chunk.water_depth_mm.assign(cells, kMax);
+            fixture.water().SetHydrology(true, 0, kMax);
+            chunk.is_water_sleeping.store(false);
+            fixture.tick();
+            const auto expected = bed <= kMin + 1 ? kMax : (bed == -1 ? 1 : 0);
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, expected));
+            EXPECT_TRUE(fixture.water().dbg_mass_ok());
+        }
+    }
+}
+
+TEST(WaterSeedInputs, InternalAccumulationSaturatesOnceAndCountsExcessAsSink) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    for (const int resolution : {2, 8, 16}) {
+        // These surface differences produce one mm on each of the corner's two incoming edges.
+        const int bed_step = resolution == 2 ? 512 : (resolution == 8 ? 32 : 8);
+        for (const int room : {2, 1}) {
+            SeedFixture fixture;
+            fixture.water().SetSimResolution(resolution);
+            fixture.water().SetHydrology(true, 0, 0);
+            fixture.tick();
+            auto& chunk = *fixture.chunks().begin()->second;
+            chunk.water_bed_mm.assign(chunk.water_bed_mm.size(), 1 + bed_step);
+            chunk.water_bed_mm.back() = 1;
+            chunk.water_depth_mm.assign(chunk.water_depth_mm.size(), kMax - room);
+            chunk.water_edge_flux.assign(chunk.water_edge_flux.size(), 0);
+            chunk.is_water_sleeping.store(false);
+            fixture.tick();
+            EXPECT_EQ(chunk.water_depth_mm.back(), kMax);
+            EXPECT_EQ(fixture.water().dbg_last_sink_mm(), room == 2 ? 0 : 1);
+            EXPECT_TRUE(fixture.water().dbg_mass_ok());
+        }
+        for (const auto momentum : {std::numeric_limits<std::int32_t>::min(), 0, kMax}) {
+            SeedFixture fixture;
+            fixture.water().SetSimResolution(resolution);
+            fixture.water().SetHydrology(true, 0, 0);
+            fixture.tick();
+            auto& chunk = *fixture.chunks().begin()->second;
+            chunk.water_bed_mm.assign(chunk.water_bed_mm.size(), kMax);
+            chunk.water_depth_mm.assign(chunk.water_depth_mm.size(), kMax);
+            chunk.water_edge_flux.assign(chunk.water_edge_flux.size(), momentum);
+            chunk.water_bed_mm[0] = 0;
+            chunk.is_water_sleeping.store(false);
+            fixture.tick();
+            EXPECT_EQ(chunk.water_depth_mm[0], 0); // sea sink follows the saturation sink
+            EXPECT_GE(fixture.water().dbg_last_sink_mm(), kMax);
+            EXPECT_TRUE(fixture.water().dbg_mass_ok());
+            for (const auto depth : chunk.water_depth_mm)
+                EXPECT_GE(depth, 0);
+            for (const auto flux : chunk.water_edge_flux) {
+                EXPECT_GE(flux, -2000000000);
+                EXPECT_LE(flux, 2000000000);
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, SeamTransferRespectsReceiverLimitInBothDirectionsAndMapOrders) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    for (const int resolution : {2, 8, 16}) {
+        for (const bool reverse_flow : {false, true}) {
+            for (const int room : {0, 1}) {
+                SeedFixture a(2);
+                SeedFixture b(2);
+                for (auto* fixture : {&a, &b}) {
+                    fixture->water().SetSimResolution(resolution);
+                    fixture->water().SetHydrology(true, 0, 0);
+                    fixture->tick();
+                    for (const auto& [id, chunk] : fixture->chunks()) {
+                        (void)id;
+                        const bool donor = (chunk->get_coords().x == -4) != reverse_flow;
+                        chunk->water_bed_mm.assign(chunk->water_bed_mm.size(), donor ? kMax : 1);
+                        chunk->water_depth_mm.assign(chunk->water_depth_mm.size(),
+                                                     donor ? kMax : kMax - room);
+                        chunk->water_edge_flux.assign(chunk->water_edge_flux.size(), 0);
+                        chunk->is_water_sleeping.store(false);
+                    }
+                }
+                std::unordered_map<ChunkID, std::shared_ptr<Chunk>> reverse_chunks;
+                std::vector<ChunkID> ids;
+                for (const auto& [id, chunk] : b.chunks()) {
+                    (void)chunk;
+                    ids.push_back(id);
+                }
+                for (auto it = ids.rbegin(); it != ids.rend(); ++it)
+                    reverse_chunks.emplace(*it, b.chunks().at(*it));
+                entt::registry registry;
+                a.tick();
+                b.water().update(registry, reverse_chunks);
+                ExpectSameWater(a, b);
+                for (const auto& [id, chunk] : a.chunks()) {
+                    (void)id;
+                    const bool donor = (chunk->get_coords().x == -4) != reverse_flow;
+                    const bool east = chunk->get_coords().x == -4;
+                    for (int z = 0; z < resolution; ++z) {
+                        const auto index =
+                            static_cast<std::size_t>(z * resolution + (east ? resolution - 1 : 0));
+                        EXPECT_EQ(chunk->water_depth_mm[index], donor ? kMax - room : kMax);
+                    }
+                }
+                EXPECT_TRUE(a.water().dbg_mass_ok());
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, BedEditsSaturateAtBothSignedLimits) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    constexpr auto kMin = std::numeric_limits<std::int32_t>::min();
+    for (const int resolution : {2, 8, 16}) {
+        SeedFixture fixture;
+        fixture.water().SetSimResolution(resolution);
+        fixture.tick();
+        auto& chunk = *fixture.chunks().begin()->second;
+        const auto cells = chunk.water_bed_mm.size();
+        const Vec3 center = Vec3(chunk.get_coords() * IVec3(16, 0, 16)) + Vec3(8, 0, 8);
+        for (const bool lower : {false, true}) {
+            chunk.water_bed_mm.assign(cells, lower ? kMin + 1 : kMax - 1);
+            for (int edit = 0; edit < 2; ++edit) {
+                EXPECT_EQ(fixture.water().EditTerrainBed(center, lower ? -1 : 1, 16.0f),
+                          resolution * resolution);
+                EXPECT_EQ(chunk.water_bed_mm,
+                          std::vector<std::int32_t>(cells, lower ? kMin : kMax));
+            }
+            // A full-range command must also widen before adding.
+            fixture.water().EditTerrainBed(center, lower ? kMin : kMax, 16.0f);
+            EXPECT_EQ(chunk.water_bed_mm, std::vector<std::int32_t>(cells, lower ? kMin : kMax));
+        }
+    }
+}
+
+TEST(WaterSeedInputs, ExternalSourcesAndDisplacementsBoundQuantizationAndMirrors) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    constexpr auto kMin = std::numeric_limits<std::int32_t>::min();
+    SeedFixture fixture;
+    fixture.water().SetSimResolution(8);
+    fixture.water().SetHydrology(true, 0, 0);
+    fixture.tick();
+    auto& chunk = *fixture.chunks().begin()->second;
+    const auto cells = chunk.water_depth_mm.size();
+    const Vec3 base = Vec3(chunk.get_coords() * IVec3(16, 0, 16));
+    const Vec3 center = base + Vec3(7, 0, 7);
+    const auto center_index = std::size_t{3 * 8 + 3};
+    chunk.water_bed_mm.assign(cells, kMax);
+    // At the center, 0.1 m^3 / (4 m^2 * 25 cells) is exactly one rounded mm.
+    for (const auto initial : {kMax - 1, kMax}) {
+        chunk.water_depth_mm.assign(cells, initial);
+        fixture.water().apply_displacement(center, 0.1f);
+        EXPECT_EQ(chunk.water_depth_mm[center_index], kMax);
+        EXPECT_FLOAT_EQ(chunk.water_level_data[center_index],
+                        static_cast<float>(std::int64_t{2} * kMax) / 1000.0f);
+    }
+    for (const auto volume : {std::numeric_limits<float>::max(),
+                              std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::max(),
+                              -std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+        chunk.water_depth_mm.assign(cells, kMax);
+        fixture.water().apply_displacement(center, volume);
+        const auto expected = volume < 0 ? 0 : kMax;
+        EXPECT_EQ(chunk.water_depth_mm[center_index], expected);
+    }
+    for (const auto rate : {std::numeric_limits<float>::max(),
+                            std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()}) {
+        entt::registry registry;
+        for (int z = 0; z < 8; ++z) {
+            for (int x = 0; x < 8; ++x) {
+                const auto entity = registry.create();
+                registry.emplace<Components::TransformComponent>(entity).position =
+                    base + Vec3(2 * x + 1, 0, 2 * z + 1);
+                registry.emplace<Components::WaterSourceComponent>(entity).flow_rate = rate;
+            }
+        }
+        chunk.water_depth_mm.assign(cells, kMax - 1);
+        chunk.is_water_sleeping.store(false);
+        const auto injected_before = fixture.water().debug_source_injected_mm();
+        fixture.water().update(registry, fixture.chunks());
+        const auto expected = rate > 0 ? kMax : kMax - 1;
+        EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, expected));
+        EXPECT_EQ(fixture.water().debug_source_injected_mm() - injected_before,
+                  rate > 0 ? static_cast<std::int64_t>(cells) : 0);
+    }
+    // Normalization and a negative displacement must not overflow on d + INT32_MIN.
+    chunk.water_depth_mm.assign(cells, kMin);
+    fixture.water().apply_displacement(center, -std::numeric_limits<float>::max());
+    EXPECT_EQ(chunk.water_depth_mm[center_index], 0);
+}
+
+TEST(WaterSeedInputs, NegativeSavedDepthSourcesIgnoreEntityInsertionOrder) {
+    constexpr auto kMin = std::numeric_limits<std::int32_t>::min();
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    SeedFixture first;
+    SeedFixture second;
+    const std::array<SeedFixture*, 2> fixtures{&first, &second};
+    for (std::size_t order = 0; order < fixtures.size(); ++order) {
+        auto& fixture = *fixtures[order];
+        fixture.water().SetSimResolution(8);
+        fixture.water().SetHydrology(true, 0, 0);
+        fixture.tick();
+        auto& chunk = *fixture.chunks().begin()->second;
+        const auto cells = chunk.water_depth_mm.size();
+        chunk.water_bed_mm.assign(cells, kMax);
+        chunk.water_depth_mm.assign(cells, kMin);
+        chunk.water_edge_flux.assign(2 * cells, 0);
+        chunk.is_water_sleeping.store(false);
+        const Vec3 base = Vec3(chunk.get_coords() * IVec3(16, 0, 16));
+        entt::registry registry;
+        // Two positive sources per cell must sum to three mm even on a negative saved depth.
+        for (int z = 0; z < 8; ++z) {
+            for (int x = 0; x < 8; ++x) {
+                for (int source = 0; source < 2; ++source) {
+                    const auto entity = registry.create();
+                    registry.emplace<Components::TransformComponent>(entity).position =
+                        base + Vec3(2 * x + 1, 0, 2 * z + 1);
+                    const int millimetres = order == 0 ? source + 1 : 2 - source;
+                    registry.emplace<Components::WaterSourceComponent>(entity).flow_rate =
+                        static_cast<float>(millimetres) * 4.0f / (SECONDS_PER_TICK * 1000.0f);
+                }
+            }
+        }
+        fixture.water().update(registry, fixture.chunks());
+        EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, 3));
+        EXPECT_EQ(fixture.water().debug_source_injected_mm(),
+                  static_cast<std::int64_t>(cells) * (std::int64_t{3} - kMin));
+    }
+    ExpectSameWater(first, second);
+}
+
+TEST(WaterSeedInputs, SeedAndLegacyQuantizationBoundExtremeSurfaces) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    constexpr auto kMin = std::numeric_limits<std::int32_t>::min();
+    for (const auto height : {2147483.0f,
+                              2147484.0f,
+                              -2147483.0f,
+                              -2147484.0f,
+                              std::numeric_limits<float>::max(),
+                              -std::numeric_limits<float>::max(),
+                              std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+        SeedFixture fixture;
+        auto& chunk = *fixture.chunks().begin()->second;
+        auto inputs = std::make_shared<HighWaterSeedInputs>();
+        inputs->generation = {fixture.world().water_seed_terrain_generation(),
+                              chunk.water_seed_edit_generation()};
+        ComputeHighWaterSeedInputs(*inputs, chunk.get_coords(), fixture.world());
+        inputs->terrain.fill(height);
+        inputs->rest.fill(0.0f);
+        chunk.stage_water_seed_inputs(std::move(inputs));
+        fixture.tick();
+        const auto bed = height > 2147483.0f    ? kMax
+                         : height < -2147483.0f ? kMin
+                         : std::isnan(height)
+                             ? 0
+                             : static_cast<std::int32_t>(std::round(height * 1000));
+        EXPECT_EQ(chunk.water_bed_mm, std::vector<std::int32_t>(256, bed));
+        for (const auto depth : chunk.water_depth_mm)
+            EXPECT_GE(depth, 0);
+        // Legacy seeding uses the same bounded conversion, independently of the bed.
+        chunk.water_bed_mm.clear();
+        chunk.water_depth_mm.clear();
+        chunk.water_level_data.assign(256, height);
+        chunk.water_flow_data.assign(256, Vec2(0));
+        ASSERT_TRUE(fixture.water().ResizeSimulationGrid(chunk, Systems::WaterDetailLevel::Medium));
+        for (const auto depth : chunk.water_depth_mm) {
+            EXPECT_GE(depth, 0);
+            if (std::isfinite(height) && height > 2147484.0f)
+                EXPECT_EQ(depth, kMax);
+            if (height < -2147484.0f || std::isnan(height))
+                EXPECT_EQ(depth, 0);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, MaximumWeatherRainSaturatesAtTheDepthLimit) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    SeedFixture fixture;
+    fixture.water().SetSimResolution(2);
+    fixture.tick();
+    auto& chunk = *fixture.chunks().begin()->second;
+    const Vec3 base = Vec3(chunk.get_coords() * IVec3(16, 0, 16));
+    // This seed places two overlapping storms near the anchor by tick 270.
+    Systems::WeatherSystem weather(719);
+    bool saturated_rain = false;
+    // A bounded schedule search uses only production weather, with no mutable test seam.
+    for (std::uint64_t tick = 1; tick <= 512 && !saturated_rain; ++tick) {
+        weather.Update(tick, base + Vec3(8, 0, 8), nullptr);
+        for (int z = 0; z < 2; ++z)
+            for (int x = 0; x < 2; ++x)
+                saturated_rain |=
+                    weather.PrecipitationAt(base + Vec3(8 * x + 4, 0, 8 * z + 4)) == 1.0f;
+    }
+    ASSERT_TRUE(saturated_rain);
+    fixture.water().SetWeatherRain(&weather, kMax);
+    fixture.water().SetHydrology(true, 0, 0);
+    for (const auto initial : {kMax - 1, kMax}) {
+        chunk.water_bed_mm.assign(4, kMax);
+        chunk.water_depth_mm.assign(4, initial);
+        chunk.water_edge_flux.assign(8, 0);
+        chunk.is_water_sleeping.store(false);
+        fixture.tick();
+        EXPECT_TRUE(fixture.water().dbg_mass_ok());
+        for (const auto depth : chunk.water_depth_mm)
+            EXPECT_GE(depth, initial);
+        EXPECT_LE(fixture.water().dbg_last_source_mm(), 4);
+        if (initial == kMax - 1)
+            EXPECT_GE(fixture.water().dbg_last_source_mm(), 1);
+    }
+}
+
+TEST(WaterSeedInputs, WorldSurfaceProbesAndPersistenceKeepWideSurface) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    SeedFixture fixture;
+    fixture.tick();
+    auto& chunk = *fixture.chunks().begin()->second;
+    chunk.water_bed_mm.assign(256, kMax);
+    chunk.water_depth_mm.assign(256, kMax);
+    chunk.water_edge_flux.assign(512, std::numeric_limits<std::int32_t>::min());
+    chunk.sdf_data.resize(17u * 17u * 17u);
+    const float surface = static_cast<float>(std::int64_t{2} * kMax) / 1000.0f;
+    EXPECT_FLOAT_EQ(fixture.world().debug_deepest_water_pos(nullptr).y, surface);
+    Vec3 water_pos(0);
+    float land_x = 0, land_z = 0, water_surface = 0, bank_height = 0;
+    EXPECT_FALSE(fixture.world().debug_find_shoreline(
+        water_pos, land_x, land_z, water_surface, bank_height));
+    chunk.water_bed_mm.assign(256, std::numeric_limits<std::int32_t>::min());
+    WorldStreamingState saved;
+    ASSERT_TRUE(saved.insert_chunk(fixture.chunks().begin()->second));
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+        Persistence::SerializeWorldStreamingStateSnapshotJson(saved), restored, errors));
+    const auto loaded = restored.snapshot_chunks();
+    ASSERT_EQ(loaded.size(), 1u);
+    EXPECT_EQ(loaded.front()->water_bed_mm, chunk.water_bed_mm);
+    EXPECT_EQ(loaded.front()->water_depth_mm, chunk.water_depth_mm);
+    EXPECT_EQ(loaded.front()->water_edge_flux, chunk.water_edge_flux);
+    SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
+    WaterSystem water(nullptr, &world);
+    ASSERT_TRUE(world.adopt_streamed_chunk(loaded.front()));
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks{
+        {loaded.front()->get_id(), loaded.front()}};
+    water.SetHydrology(true, 0, 0);
+    entt::registry registry;
+    loaded.front()->is_water_sleeping.store(false);
+    water.update(registry, chunks);
+    EXPECT_EQ(loaded.front()->water_depth_mm, chunk.water_depth_mm);
+    EXPECT_EQ(water.dbg_last_sink_mm(), 0);
+    EXPECT_TRUE(water.dbg_mass_ok());
+}
+
+TEST(WaterSeedInputs, SavedIntegerCellsSaturateBeforeNarrowingAndRefuseNonintegers) {
+    constexpr auto kMax = std::numeric_limits<std::int32_t>::max();
+    constexpr auto kMin = std::numeric_limits<std::int32_t>::min();
+    WorldStreamingState saved;
+    ASSERT_TRUE(saved.get_or_create_chunk(IVec3(0)));
+    const auto original =
+        nlohmann::json::parse(Persistence::SerializeWorldStreamingStateSnapshotJson(saved));
+    for (const auto* field : {"water_bed_mm", "water_depth_mm", "water_edge_flux"}) {
+        auto snapshot = original;
+        snapshot["chunks"][0][field] = {kMin,
+                                        kMax,
+                                        std::int64_t{kMin} - 1,
+                                        std::int64_t{kMax} + 1,
+                                        std::numeric_limits<std::int64_t>::min(),
+                                        std::numeric_limits<std::uint64_t>::max()};
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        EXPECT_TRUE(Persistence::ValidateWorldStreamingChunkFormatJson(snapshot["chunks"][0].dump(),
+                                                                       errors));
+        ASSERT_TRUE(
+            Persistence::LoadWorldStreamingStateSnapshotJson(snapshot.dump(), loaded, errors));
+        const auto restored = loaded.find_chunk(IVec3(0));
+        if (!restored) {
+            FAIL() << "Loaded water chunk is absent";
+            return;
+        }
+        const auto& grid = std::string_view(field) == "water_bed_mm" ? restored->water_bed_mm
+                           : std::string_view(field) == "water_depth_mm"
+                               ? restored->water_depth_mm
+                               : restored->water_edge_flux;
+        EXPECT_EQ(grid, (std::vector<std::int32_t>{kMin, kMax, kMin, kMax, kMin, kMax}));
+        for (const auto& invalid : {nlohmann::json{1e38},
+                                    nlohmann::json{"bad"},
+                                    nlohmann::json{nullptr},
+                                    nlohmann::json{true},
+                                    nlohmann::json(1),
+                                    nlohmann::json(nullptr),
+                                    nlohmann::json::object()}) {
+            snapshot["chunks"][0][field] = invalid;
+            errors.clear();
+            EXPECT_FALSE(
+                Persistence::LoadWorldStreamingStateSnapshotJson(snapshot.dump(), loaded, errors));
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_FALSE(errors.empty());
+            errors.clear();
+            EXPECT_FALSE(Persistence::ValidateWorldStreamingChunkFormatJson(
+                snapshot["chunks"][0].dump(), errors));
+        }
+        snapshot["chunks"][0][field] = nlohmann::json::array();
+        errors.clear();
+        EXPECT_TRUE(
+            Persistence::LoadWorldStreamingStateSnapshotJson(snapshot.dump(), loaded, errors));
+    }
+    auto no_flux = original;
+    no_flux["chunks"][0].erase("water_edge_flux");
+    no_flux["chunks"][0]["water_depth_mm"] = {kMax, 0};
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(no_flux.dump(), loaded, errors));
+    const auto restored = loaded.find_chunk(IVec3(0));
+    if (!restored) {
+        FAIL() << "Loaded water chunk is absent";
+        return;
+    }
+    EXPECT_EQ(restored->water_edge_flux, std::vector<std::int32_t>(4, 0));
 }
 
 TEST(WaterSeedInputs, NegativeLegacyDepthMigratesToZero) {

@@ -4605,7 +4605,8 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float surf =
-                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] +
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
                                        c->water_depth_mm[static_cast<std::size_t>(z * res + x)]) /
                     1000.0f;
                 for (int a = 0; a < 8; ++a) {
@@ -4675,7 +4676,9 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float surf_y =
-                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] + d) /
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
+                                       d) /
                     1000.0f;
                 best_pos = Vec3(wx, surf_y, wz);
             }
