@@ -715,7 +715,8 @@ jobs:
           # Developer-shell setup can change PATH; retain the selected runtime.
           Set-Alias -Name python -Value $pythonExecutable
           # Preserve Release optimization and retain embedded compiler symbols
-          # plus the linked PDB for render-child failure evidence.
+          # plus the linked PDB for render-child failure evidence. Dependency
+          # precompiled headers and Jolt's /Zi are disabled so ccache can cache them.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
@@ -724,6 +725,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
             -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `
             '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
@@ -986,6 +988,7 @@ jobs:
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1
+          -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true

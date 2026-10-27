@@ -928,9 +928,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin the selected Python, partitioned local checks, render failure symbols,
             # shard-2-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "d6164af56312ee3cff2821ee21ebc4b5cb487a9b86ea1722f29ee9f3df9f75c8",
-            # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
-            "windows-ucrt64": "475b35c1d8356efbdbf991f97bafdb7476e06013816aec49b01fcfc7e79dcef2",
+            "windows-msvc": "24aecc163c8c0c25d30de33d3524b33c1fe397a07f5a46066460a754125f306a",
+            # Pin UCRT64 opt-in routing, native evidence, minimal debug information and cacheable dependency compiles.
+            "windows-ucrt64": "8497f160ece5bbbd9209db99e86bc7aafb774b1c356648b455da1b80c42e05ef",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
             "windows-ucrt64-result": "e58190335cc5128211dd96e2622415097d44861c42e63a3bedc25075d0f418d6",
@@ -2592,7 +2592,22 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          'cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache '
                          '"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE" '
                          '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache '
-                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1')
+                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1 '
+                         '-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF')
+
+    def test_windows_configures_keep_dependency_compiles_cacheable(self):
+        # ccache cannot cache precompiled-header or /Zi compiles; the lanes already
+        # embed symbols through their own global flags.
+        ci = jobs(self.workflows["ci.yml"])
+        msvc, = [step for step in steps(ci["windows-msvc"]) if step.startswith("      - name: Configure, build, and test\n")]
+        run = value(msvc, "run", 8)
+        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n", run)
+        self.assertIn("-DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `\n", run)
+        self.assertIn("'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF'", run)
+        ucrt, = [step for step in steps(ci["windows-ucrt64"]) if step.startswith("      - name: Configure\n")]
+        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF", value(ucrt, "run", 8))
+        for name in ("linux", "tidy-shard", "fast-compile"):
+            self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
 
     def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
         job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
