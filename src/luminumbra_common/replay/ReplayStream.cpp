@@ -453,10 +453,14 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
     // Exclusive directory creation avoids collisions between concurrent sessions,
     // including processes using the same default dump destination.
     static std::atomic<std::uint64_t> next_directory{0};
-    const std::uint64_t first_ordinal = next_directory.load();
-    std::uint64_t ordinal = first_ordinal;
+    // Concurrent opens interleave on the counter, so the refusal names only the
+    // first and last candidates this call itself reserved, never a continuous range.
+    std::uint64_t first_ordinal = 0;
+    std::uint64_t ordinal = 0;
     for (std::size_t attempt = 0; attempt < kSegmentTicks; ++attempt) {
         ordinal = next_directory.fetch_add(1);
+        if (attempt == 0)
+            first_ordinal = ordinal;
         const auto candidate =
             (out_path.parent_path() / ("lockstep-recording-" + std::to_string(ordinal))).string();
         if (fs::create_directory(candidate, ec)) {
@@ -498,8 +502,8 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
                           destination);
     return Refused(std::snprintf(m_open_refusal.data(),
                                  kOpenRefusalBytes,
-                                 "exhausted: %llu candidates lockstep-recording-%llu..%llu beside "
-                                 "'%s%.*s' already exist",
+                                 "exhausted: %llu candidates tried (first lockstep-recording-%llu, "
+                                 "last lockstep-recording-%llu) beside '%s%.*s' already exist",
                                  static_cast<unsigned long long>(kSegmentTicks),
                                  static_cast<unsigned long long>(first_ordinal),
                                  static_cast<unsigned long long>(ordinal),

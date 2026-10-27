@@ -441,8 +441,8 @@ TEST_F(ReplayStreamTest, OccupiedRecorderCandidateRefusesWithoutDeletingTheOther
 }
 
 // Every candidate directory in one attempt window is already taken: the refusal
-// reports the window size and the exact candidate range it tried.
-TEST_F(ReplayStreamTest, ExhaustedRecorderCandidatesRefuseWithTheTriedRange) {
+// reports the attempt count and the first and last candidate it tried.
+TEST_F(ReplayStreamTest, ExhaustedRecorderCandidatesRefuseWithTheTriedEnds) {
     constexpr auto kCandidates = replay::BoundedReplayRecorder::kSegmentTicks;
     const auto directory = fs::path(m_path + ".exhausted");
     ASSERT_TRUE(fs::create_directory(directory));
@@ -470,9 +470,10 @@ TEST_F(ReplayStreamTest, ExhaustedRecorderCandidatesRefuseWithTheTriedRange) {
     EXPECT_EQ(recorder.SegmentCount(), 0u);
     const std::string refusal(recorder.OpenRefusal());
     EXPECT_LT(refusal.size(), replay::BoundedReplayRecorder::kOpenRefusalBytes);
-    EXPECT_TRUE(refusal.starts_with("exhausted: " + std::to_string(kCandidates) + " candidates " +
-                                    prefix + std::to_string(first) + ".." +
-                                    std::to_string(first + kCandidates - 1) + " beside '"))
+    EXPECT_TRUE(refusal.starts_with("exhausted: " + std::to_string(kCandidates) +
+                                    " candidates tried (first " + prefix + std::to_string(first) +
+                                    ", last " + prefix + std::to_string(first + kCandidates - 1) +
+                                    ") beside '"))
         << refusal;
     EXPECT_TRUE(refusal.ends_with("' already exist")) << refusal;
     std::error_code cleanup;
