@@ -52,11 +52,7 @@ check file and Git refusals; `RmlUiSourceCommandContract` checks workspace and
 command refusals. Offline authors may
 provide an immutable pristine archive extraction directly under their private
 `TMPDIR` through `LUMINUMBRA_RMLUI_TEST_SOURCE`; this is a test input only. The
-tests temporarily move that input and restore it afterward. The hosted Linux GCC
-and ASan lanes provide this input themselves: after the build they extract the
-committed revision of the delivered `_deps` source through a private Git index
-into a fresh directory under the runner's temporary root and export both
-variables for CTest, so the registered suites never fetch. Otherwise the suite
+tests temporarily move that input and restore it afterward. Otherwise the suite
 fetches the exact revision into its own temporary workspace. No alternate
 revision or cache fallback exists.
 
