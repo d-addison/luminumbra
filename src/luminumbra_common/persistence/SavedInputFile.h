@@ -29,6 +29,13 @@ class SavedInputFile {
 public:
     explicit SavedInputFile(const std::filesystem::path& path) {
 #if defined(_WIN32)
+        // Win32 can report PATH_NOT_FOUND for an overlong component beneath a
+        // missing directory. Such an invalid path must never become a clean miss.
+        // Win32 file-name components are bounded to 255 UTF-16 code units.
+        for (const auto& component : path) {
+            if (component.native().size() > 255)
+                return;
+        }
         m_handle = ::CreateFileW(path.c_str(),
                                  GENERIC_READ,
                                  FILE_SHARE_READ,
@@ -38,7 +45,8 @@ public:
                                  nullptr);
         if (m_handle == INVALID_HANDLE_VALUE) {
             const DWORD error = ::GetLastError();
-            m_missing = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+            m_missing = error == ERROR_FILE_NOT_FOUND ||
+                        (error == ERROR_PATH_NOT_FOUND && MissingAncestorsAreDirectories(path));
         }
 #else
         // NONBLOCK prevents a FIFO open from waiting for a writer; NOFOLLOW
@@ -144,6 +152,26 @@ public:
     }
 
 private:
+#if defined(_WIN32)
+    static bool MissingAncestorsAreDirectories(const std::filesystem::path& path) {
+        auto parent = path.parent_path();
+        // Only a failed open reaches this walk. No file is subsequently opened
+        // based on these attributes; a present non-directory ancestor is invalid.
+        while (!parent.empty()) {
+            const auto attributes = ::GetFileAttributesW(parent.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES)
+                return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            const auto error = ::GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+                return false;
+            const auto next = parent.parent_path();
+            if (next == parent)
+                return false;
+            parent = next;
+        }
+        return true;
+    }
+#endif
 #if defined(_WIN32)
     HANDLE m_handle = INVALID_HANDLE_VALUE;
 #else

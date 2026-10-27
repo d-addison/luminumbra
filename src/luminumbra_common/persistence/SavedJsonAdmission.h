@@ -2,6 +2,7 @@
 
 #include "SavedInputFile.h"
 #include "SavedInputLimits.h"
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -48,10 +49,63 @@ private:
     std::string m_bytes;
 };
 
+// Iterative traversal bounds stack use before the JSON library recursively
+// serializes or copies a value. The fixed buffer holds at most 64 iterator ranges.
+inline bool AdmitJsonValueDepth(const nlohmann::json& value,
+                                std::size_t maximum = SavedInputLimits::kJsonNestingDepth,
+                                std::size_t maximum_nodes = SavedInputLimits::kPlantFileBytes) {
+    if (maximum_nodes == 0 || maximum > SavedInputLimits::kJsonNestingDepth || value.is_discarded())
+        return false;
+    // Binary JSON encodes an object containing a bytes array and a subtype.
+    // Count those two container levels and all encoded values without copying.
+    if (value.is_binary())
+        return maximum >= 2 && maximum_nodes >= 3 && value.get_binary().size() <= maximum_nodes - 3;
+    if (!value.is_structured())
+        return true;
+    if (maximum == 0)
+        return false;
+    using Range = std::pair<nlohmann::json::const_iterator, nlohmann::json::const_iterator>;
+    std::array<Range, SavedInputLimits::kJsonNestingDepth> stack;
+    std::size_t depth = 1;
+    std::size_t nodes = 1;
+    stack[0] = {value.begin(), value.end()};
+    while (depth != 0) {
+        auto& [current, end] = stack[depth - 1];
+        if (current == end) {
+            --depth;
+            continue;
+        }
+        // Every JSON value occupies at least one encoded byte, so this also
+        // bounds pre-serialization work by the caller's output byte budget.
+        if (nodes == maximum_nodes)
+            return false;
+        ++nodes;
+        const auto& child = *current++;
+        if (child.is_discarded())
+            return false;
+        if (child.is_binary()) {
+            if (maximum - depth < 2 || maximum_nodes - nodes < 2 ||
+                child.get_binary().size() > maximum_nodes - nodes - 2)
+                return false;
+            nodes += child.get_binary().size() + 2;
+            continue;
+        }
+        if (!child.is_structured())
+            continue;
+        if (depth == maximum)
+            return false;
+        stack[depth++] = {child.begin(), child.end()};
+    }
+    return true;
+}
+
 inline bool BoundedJsonDump(const nlohmann::json& value,
                             std::size_t maximum,
                             std::string& bytes,
-                            int indent = -1) {
+                            int indent = -1,
+                            bool trailing_newline = true) {
+    if (!AdmitJsonValueDepth(value, SavedInputLimits::kJsonNestingDepth, maximum))
+        return false;
     LimitedJsonBuffer buffer(maximum);
     std::ostream stream(&buffer);
     stream.exceptions(std::ios::badbit | std::ios::failbit);
@@ -59,7 +113,7 @@ inline bool BoundedJsonDump(const nlohmann::json& value,
         if (indent >= 0)
             stream << std::setw(indent);
         stream << value;
-        if (indent >= 0)
+        if (indent >= 0 && trailing_newline)
             stream << '\n';
     } catch (const std::exception&) {
         return false;
@@ -82,6 +136,8 @@ inline bool AdmitMetadata(const nlohmann::json& metadata) {
 // Root name/seed admission precedes DOM construction. A JSON escape uses at
 // most six source bytes per decoded byte; only that bounded token is decoded.
 inline bool AdmitMetadataText(std::string_view bytes) {
+    if (!SavedInputLimits::JsonDepthAllowed(bytes))
+        return false;
     std::size_t depth = 0;
     for (std::size_t pos = 0; pos < bytes.size(); ++pos) {
         const char ch = bytes[pos];
@@ -136,25 +192,52 @@ inline bool AdmitMetadataText(std::string_view bytes) {
     return true;
 }
 
+enum class SavedJsonFailure {
+    None,
+    Unreadable,
+    Limit,
+    Malformed
+};
+
 inline bool ReadSavedJson(const std::filesystem::path& path,
                           std::size_t maximum,
                           nlohmann::json& value,
                           bool& missing,
                           bool metadata_input = true,
-                          bool* malformed_json = nullptr) {
-    if (malformed_json)
-        *malformed_json = false;
+                          SavedJsonFailure* failure = nullptr) {
+    if (failure)
+        *failure = SavedJsonFailure::None;
     const SavedInputFile input(path);
     missing = input.missing();
     if (missing)
         return true;
     std::string bytes;
-    if (!input.read(bytes, maximum) || (metadata_input && !AdmitMetadataText(bytes)))
+    std::uint64_t length = 0;
+    if (!input.length(length)) {
+        if (failure)
+            *failure = SavedJsonFailure::Unreadable;
         return false;
+    }
+    if (length > maximum) {
+        if (failure)
+            *failure = SavedJsonFailure::Limit;
+        return false;
+    }
+    if (!input.read(bytes, maximum)) {
+        if (failure)
+            *failure = SavedJsonFailure::Unreadable;
+        return false;
+    }
+    if (!SavedInputLimits::JsonDepthAllowed(bytes) ||
+        (metadata_input && !AdmitMetadataText(bytes))) {
+        if (failure)
+            *failure = SavedJsonFailure::Limit;
+        return false;
+    }
     auto candidate = nlohmann::json::parse(bytes, nullptr, false);
     if (candidate.is_discarded()) {
-        if (malformed_json)
-            *malformed_json = true;
+        if (failure)
+            *failure = SavedJsonFailure::Malformed;
         return false;
     }
     value = std::move(candidate);
@@ -164,10 +247,11 @@ inline bool ReadSavedJson(const std::filesystem::path& path,
 // Lexical preflight before DOM allocation. Only component data values at the
 // snapshot's component depth are counted. Whitespace outside strings is free,
 // matching the compact writer encoding; escaped quotes never terminate strings.
-// Each byte is visited at most twice, bounded by kPlantFileBytes. JSON syntax
+// Each byte is visited at most three times, bounded by kPlantFileBytes. JSON syntax
 // and the plant numeric domains are still checked by the existing parsers.
 inline bool AdmitPlantComponentBytes(std::string_view bytes) {
-    if (bytes.size() > SavedInputLimits::kPlantFileBytes)
+    if (bytes.size() > SavedInputLimits::kPlantFileBytes ||
+        !SavedInputLimits::JsonDepthAllowed(bytes))
         return false;
     std::size_t depth = 0;
     std::size_t aggregate = 0;

@@ -4838,6 +4838,37 @@ TEST(GameSessionHeadlessWorldTest, VoxelGroundObjectAndPinInputsActivateOnlyThei
     EXPECT_EQ(session.GetActiveRegionLedger().records().size(), 3u);
 }
 
+TEST(RegionScheduleTrace, FreshDestinationAndInvalidInputsPreserveTheOutput) {
+    using namespace Luminumbra::Replay;
+    const auto root = Luminumbra::TestSupport::CreateUniqueTempDirectory("region-trace-input-");
+    const auto replay = root / "fresh" / "capture.replay";
+    auto path = replay;
+    path += ".regions.json";
+    const RegionScheduleTrace original{{1, "0123456789abcdef"}};
+    std::string error;
+    ASSERT_TRUE(WriteRegionScheduleTrace(replay, original, error)) << error;
+    RegionScheduleTrace loaded;
+    ASSERT_TRUE(ReadRegionScheduleTrace(replay, 1, loaded, error)) << error;
+    EXPECT_EQ(loaded, original);
+    fs::remove(path);
+    fs::create_directory(path);
+    EXPECT_FALSE(ReadRegionScheduleTrace(replay, 1, loaded, error));
+    EXPECT_EQ(loaded, original);
+    fs::remove(path);
+    {
+        std::ofstream output(path);
+        output << "{";
+    }
+    EXPECT_FALSE(ReadRegionScheduleTrace(replay, 1, loaded, error));
+    EXPECT_EQ(loaded, original);
+    fs::remove(path);
+    EXPECT_FALSE(ReadRegionScheduleTrace(replay, 1, loaded, error));
+    EXPECT_EQ(error, "Missing region schedule trace.");
+    EXPECT_EQ(loaded, original);
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
 TEST(GameSessionHeadlessWorldTest, ReplayScheduleCompanionRoundTripsAndRefusesInvalidTraces) {
     const HeadlessRoot root;
     const auto path = root.path() / "recording.lrec";

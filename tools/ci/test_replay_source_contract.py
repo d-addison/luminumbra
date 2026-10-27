@@ -170,9 +170,11 @@ class ReplaySourceContract(unittest.TestCase):
         creation = read_source("src/luminumbra_common/world/GameSession.cpp").split(
             "bool GameSession::CreateWorldInternal(", 1)[1].split(
                 "bool GameSession::LoadWorld(", 1)[0]
-        self.assertIn("std::string saved_preset_json = resolved.dump();", creation)
-        self.assertRegex(creation, r'std::string saved_preset_json = resolved.dump\(\);\s*'
-                         r'if \(!transient\) \{')
+        self.assertIn("std::string saved_preset_json;", creation)
+        self.assertRegex(creation, r'BoundedJsonDump\(\s*resolved,\s*'
+                         r'Persistence::SavedInputLimits::kPresetBytes - 1,\s*saved_preset_json\)')
+        self.assertLess(creation.index("BoundedJsonDump("),
+                        creation.index("fs::create_directories(worldPath)"))
         self.assertLess(creation.index("requiredPresetContentHash"),
                         creation.index("fs::create_directories(worldPath)"))
         self.assertLess(creation.index("LoadTerrainPresetFromJson(resolved"),
@@ -602,8 +604,13 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         session = read_source("src/luminumbra_common/world/GameSession.cpp")
         save = self.function(session, "SaveWorldStateToImpl")
         for admission in ("PrepareWorldMetadataTo(", "prepare_plant_entities(",
-                          "admit_world_write(", "energy_snapshot.SerializeRecord(" ):
-            self.assertLess(save.index(admission), save.index("service.save_world("))
+                          "prepared_chunks.prepare(", "energy_snapshot.SerializeRecord(" ):
+            self.assertLess(save.index(admission), save.index("prepared_chunks.publish("))
+        self.assertRegex(save, r"write_chunks\s*&&\s*!prepared_chunks\.prepare\(")
+        self.assertIn("!full_snapshot && has_snapshot", save)
+        self.assertNotIn("admit_world_write(", save)
+        self.assertNotIn("service.save_world(", save)
+        self.assertNotIn("save_dirty_chunks(", save)
         metadata = self.function(session, "SaveWorldMetadataTo")
         self.assertLess(metadata.index("PrepareWorldMetadataTo("), metadata.index("PersistSavedPreset("))
         reader = self.function(session, "ReadWorldStateFrom")
@@ -614,6 +621,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         metadata_admission.index("BoundedJsonDump("))
         pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
         self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
+
+    def test_saved_json_depth_is_admitted_before_parsing_and_component_copying(self):
+        admission = read_source("src/luminumbra_common/persistence/SavedJsonAdmission.h")
+        traversal = admission.split("inline bool AdmitJsonValueDepth(", 1)[1].split("inline bool BoundedJsonDump(", 1)[0]
+        for guard in ("value.is_binary()", "child.is_binary()", "value.is_discarded()", "child.is_discarded()"):
+            self.assertIn(guard, traversal)
+        reader = admission.split("inline bool ReadSavedJson(", 1)[1].split("// Lexical preflight", 1)[0]
+        self.assertLess(reader.index("JsonDepthAllowed(bytes)"),
+                        reader.index("nlohmann::json::parse(bytes,"))
+        plant = admission.split("inline bool AdmitPlantComponentBytes(", 1)[1]
+        self.assertIn("JsonDepthAllowed(bytes)", plant)
+        entity = read_source("src/luminumbra_common/ecs/EntitySnapshot.h")
+        loader = entity.split("inline bool LoadEntityRegistrySnapshotJson(", 1)[1]
+        self.assertLess(loader.index("JsonDepthAllowed(json_text)"),
+                        loader.index("nlohmann::json::parse(json_text)"))
+        self.assertLess(loader.index("JsonDepthAllowed(json_text)"),
+                        loader.index("entity.components.push_back("))
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        writer = self.function(source, "prepare_plant_entities", "WorldSaveService::")
+        self.assertLess(writer.index("AdmitJsonValueDepth(component.data,"),
+                        writer.index('values.push_back({{"type", component.type}'))
 
     def test_operation_refusal_cannot_change_current_session_usability(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
@@ -712,7 +740,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertNotIn("m_worldUsable = true;", snapshot)
         saving = self.function(source, "SaveWorldStateToImpl")
         self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
-                        saving.index("service.save_world("))
+                        saving.index("prepared_chunks.publish("))
         self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
                         saving.index("save_plant_entities(plant_snapshot"))
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
@@ -731,7 +759,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                            "if (!preset.ok)",
                            "preset.preset_content_hash != requiredPresetContentHash"):
             self.assertLess(creation.index(validation), directory)
-        self.assertIn('saved_preset_json = resolved.dump();', creation)
+        self.assertIn('BoundedJsonDump(', creation)
         self.assertIn('saved_preset_json + "\\n"', creation)
         adoption = creation.split("ResetWorldSystems();", 1)[1]
         self.assertIn("m_presetContentHash = preset.preset_content_hash;", adoption)

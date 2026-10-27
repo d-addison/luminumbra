@@ -3,6 +3,7 @@
 #include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
+#include "core/FilesystemPath.h"
 #include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
 
@@ -12,7 +13,6 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <stop_token>
@@ -45,7 +45,14 @@ bool ResolveSavedPreset(const fs::path& runtime_root,
         return false;
     }
     const auto embedded = save / "preset.json";
-    const bool has_embedded = fs::exists(embedded);
+    nlohmann::json embedded_json;
+    bool embedded_missing = false;
+    if (!ReadSavedJson(
+            embedded, SavedInputLimits::kPresetBytes, embedded_json, embedded_missing, false)) {
+        result.error = "Saved-input admission refused: invalid embedded world preset.";
+        return false;
+    }
+    const bool has_embedded = !embedded_missing;
     if (requires_embedded && !has_embedded) {
         result.error = "World preset is unavailable: required embedded preset.json is missing.";
         return false;
@@ -59,14 +66,34 @@ bool ResolveSavedPreset(const fs::path& runtime_root,
                                                                     : "worlds/atlas/presets";
     result.preset_path =
         has_embedded ? embedded : runtime_root / presets / (result.metadata.worldType + ".json");
-    const auto preset = world::LoadTerrainPreset(result.preset_path, runtime_root / "data");
+    if (!has_embedded) {
+        bool missing = false;
+        SavedJsonFailure failure = SavedJsonFailure::None;
+        if (!ReadSavedJson(result.preset_path,
+                           SavedInputLimits::kPresetBytes,
+                           embedded_json,
+                           missing,
+                           false,
+                           &failure) ||
+            missing) {
+            const bool unavailable = missing || failure == SavedJsonFailure::Unreadable;
+            result.error = (unavailable ? "failed to open world preset: "
+                                        : "failed to parse world preset JSON: ") +
+                           Filesystem::GenericUtf8PathString(result.preset_path);
+            return false;
+        }
+    }
+    // Validate, hash and later boot from the same admitted bytes.
+    const auto preset =
+        world::LoadTerrainPresetFromJson(embedded_json,
+                                         runtime_root / "data",
+                                         Filesystem::GenericUtf8PathString(result.preset_path));
     if (!preset.ok) {
         result.error =
             preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
         return false;
     }
-    std::ifstream input(result.preset_path);
-    result.preset_json = nlohmann::json::parse(input).dump();
+    result.preset_json = embedded_json.dump();
     if (metadata.contains("presetIdentity") &&
         (!metadata.at("presetIdentity").is_string() ||
          metadata.at("presetIdentity").get<std::string>() != StableChecksum(result.preset_json))) {

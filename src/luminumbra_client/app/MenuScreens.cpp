@@ -9,6 +9,7 @@
 
 #include "core/Log.h"
 #include "core/RuntimeScenarioConfig.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "nlohmann/json.hpp"
@@ -24,7 +25,6 @@
 #include <cstddef>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -34,6 +34,13 @@ using namespace Luminumbra::Client::ScenarioHarness;
 
 namespace {
 using Luminumbra::Rendering::WritePixelBufferPpm;
+
+bool ReadPreviewPreset(const std::filesystem::path& path, nlohmann::json& preset) {
+    bool missing = false;
+    return Persistence::ReadSavedJson(
+               path, Persistence::SavedInputLimits::kPresetBytes, preset, missing, false) &&
+           !missing;
+}
 
 MenuCameraRevision::State MenuCameraState(const Luminumbra::Rendering::Camera& camera) {
     return {camera.Position.x,
@@ -427,10 +434,8 @@ void RenderMenuScreens(ClientAppContext& app,
                         const std::filesystem::path base_path =
                             std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets" /
                             (pv.worldType + ".json");
-                        std::ifstream in(base_path);
-                        if (in) {
-                            nlohmann::json base;
-                            in >> base;
+                        nlohmann::json base;
+                        if (ReadPreviewPreset(base_path, base)) {
                             //  resolve the live diorama through
                             // the engine KnobLayer when the form carries knobs
                             // (knobs -> response curves + overlay overrides), so

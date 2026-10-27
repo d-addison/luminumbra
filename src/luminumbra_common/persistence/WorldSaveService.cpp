@@ -31,7 +31,6 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <initializer_list>
 #include <ios>
 #include <limits>
@@ -916,10 +915,12 @@ bool ReadRegionFile(const std::filesystem::path& path,
         return refuse("region file is missing the LMR1 magic");
     const auto* control = reinterpret_cast<const unsigned char*>(header.data());
     const auto version = ReadU16(control + 4);
-    if (version != kRegionVersion)
-        return refuse(version < kRegionVersion
-                          ? WorldSaveService::kObsoleteWorldMessage
-                          : "unsupported future LMR1 container version " + std::to_string(version));
+    if (version < kRegionVersion) {
+        AddError(errors, WorldSaveService::kObsoleteWorldMessage);
+        return false;
+    }
+    if (version > kRegionVersion)
+        return refuse("unsupported future LMR1 container version " + std::to_string(version));
     const auto count = ReadU16(control + 6);
     const std::size_t manifest_bytes = static_cast<std::size_t>(count) * kRecordHeaderSize;
     if (file_size < kRegionFileHeaderSize + manifest_bytes)
@@ -959,7 +960,10 @@ bool ReadRegionFile(const std::filesystem::path& path,
                           "compatibility limit");
         payload_bytes += compressed_size; // u16 * bounded u32 fits u64.
     }
-    if (payload_bytes != file_size - kRegionFileHeaderSize - manifest_bytes)
+    const auto available_payload_bytes = file_size - kRegionFileHeaderSize - manifest_bytes;
+    if (payload_bytes > available_payload_bytes)
+        return refuse("region record payload is truncated: payload lengths do not match file size");
+    if (payload_bytes != available_payload_bytes)
         return refuse("region file payload lengths do not match file size");
     // All declared sizes and aggregate decompression work pass before any payload allocation.
     for (std::size_t index = 0; index < count; ++index) {
@@ -1198,6 +1202,11 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
                  "Saved-input admission refused: metadata exceeds 2 MiB compatibility limit.");
         return false;
     }
+    if (!SavedInputLimits::JsonDepthAllowed(bytes)) {
+        AddError(errors,
+                 "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
+        return false;
+    }
     if (!AdmitMetadataText(bytes)) {
         AddError(
             errors,
@@ -1288,6 +1297,12 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         (has_clock || has_render_calendar) ? metadata.dump(4) + "\n" : bytes;
     if (!admit_metadata_bytes(output_bytes, errors))
         return false;
+    std::error_code directory_error;
+    std::filesystem::create_directories(save_dir, directory_error);
+    if (directory_error) {
+        AddError(errors, "failed to create metadata directory: " + directory_error.message());
+        return false;
+    }
     const auto destination = save_dir / "world_info.json";
     ReclaimAbandonedStaging(destination);
     std::filesystem::path temp;
@@ -1370,14 +1385,17 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         const auto path = save_dir / "world_info.json";
         nlohmann::json metadata;
         bool missing = false;
-        bool malformed_json = false;
+        SavedJsonFailure json_failure = SavedJsonFailure::None;
         if (!ReadSavedJson(
-                path, SavedInputLimits::kMetadataBytes, metadata, missing, true, &malformed_json) ||
+                path, SavedInputLimits::kMetadataBytes, metadata, missing, true, &json_failure) ||
             (!missing && !AdmitMetadata(metadata))) {
             AddError(
                 errors,
-                malformed_json
-                    ? "Corrupt world metadata: invalid JSON."
+                json_failure == SavedJsonFailure::Malformed ||
+                        json_failure == SavedJsonFailure::Unreadable
+                    ? (json_failure == SavedJsonFailure::Malformed
+                           ? "Corrupt world metadata: invalid JSON."
+                           : "Corrupt world metadata: unreadable or non-regular input.")
                     : "Saved-input admission refused: unreadable or oversized world metadata.");
             return false;
         }
@@ -1458,7 +1476,11 @@ bool WorldSaveService::prepare_plant_entities(const Ecs::EntityRegistrySnapshot&
     for (const auto& entity : snapshot.entities) {
         for (const auto& component : entity.components) {
             std::string encoded;
-            if (!BoundedJsonDump(component.data, SavedInputLimits::kPlantComponentBytes, encoded) ||
+            // The envelope adds five object/array levels before component data.
+            if (!AdmitJsonValueDepth(component.data,
+                                     SavedInputLimits::kJsonNestingDepth - 5,
+                                     SavedInputLimits::kPlantComponentBytes) ||
+                !BoundedJsonDump(component.data, SavedInputLimits::kPlantComponentBytes, encoded) ||
                 encoded.size() > SavedInputLimits::kPlantComponentAggregateBytes - aggregate) {
                 AddError(errors,
                          "Saved-input admission refused: plant component JSON compatibility limit "
@@ -1592,20 +1614,18 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
     LUMIN_PROFILE_ZONE_N("File active regions load");
     try {
         const auto path = active_regions_path(save_dir);
-        if (!std::filesystem::exists(path)) {
+        const SavedInputFile input(path);
+        if (input.missing()) {
             ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
         }
-        const auto length = std::filesystem::file_size(path);
-        if (length > world::ActiveRegionLedger::kMaxFileBytes) {
+        std::string bytes;
+        if (!input.read(bytes, world::ActiveRegionLedger::kMaxFileBytes)) {
             AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
             return false;
         }
-        std::ifstream input(path, std::ios::binary);
-        std::string bytes(static_cast<std::size_t>(length), '\0');
-        input.read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
-        if (!input || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+        if (!world::ActiveRegionLedger::decode(bytes, ledger, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
             return false;
         }
@@ -1995,10 +2015,9 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // Revalidate the parsed source under ownership so another persistence writer
     // cannot change the source between the caller's parse and this transaction.
     {
-        const std::ifstream input(source, std::ios::binary);
-        std::ostringstream contents;
-        contents << input.rdbuf();
-        if (!input || input.bad() || contents.bad() || contents.str() != expected_bytes) {
+        const SavedInputFile input(source);
+        std::string contents;
+        if (!input.read(contents, expected_bytes.size()) || contents != expected_bytes) {
             AddError(errors, "rename source changed or cannot be read");
             return false;
         }
@@ -2138,16 +2157,11 @@ void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook
     BeforeActiveRegionsReplaceForTesting() = hook;
 }
 
-bool WorldSaveService::admit_world_write(const WorldStreamingState& state,
-                                         const std::filesystem::path& save_dir,
-                                         std::vector<std::string>* errors) const {
-    return write_snapshot(state.snapshot_chunks(), save_dir, errors, nullptr, true);
-}
-
 bool WorldSaveService::save_world(const WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>* errors) const {
-    return write_snapshot(state.snapshot_chunks(), save_dir, errors);
+    PreparedWorldWrite prepared;
+    return prepared.prepare(state, save_dir, false, errors) && prepared.publish(errors);
 }
 
 bool WorldSaveService::load_world(WorldStreamingState& state,
@@ -2168,17 +2182,20 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         const auto metadata_path = save_dir / "world_info.json";
         nlohmann::json metadata;
         bool metadata_missing = false;
-        bool malformed_json = false;
+        SavedJsonFailure json_failure = SavedJsonFailure::None;
         if (!ReadSavedJson(metadata_path,
                            SavedInputLimits::kMetadataBytes,
                            metadata,
                            metadata_missing,
                            true,
-                           &malformed_json) ||
+                           &json_failure) ||
             (!metadata_missing && !AdmitMetadata(metadata)))
             return reject(
-                malformed_json
-                    ? "corrupt world metadata: invalid JSON"
+                json_failure == SavedJsonFailure::Malformed ||
+                        json_failure == SavedJsonFailure::Unreadable
+                    ? (json_failure == SavedJsonFailure::Malformed
+                           ? "corrupt world metadata: invalid JSON"
+                           : "corrupt world metadata: unreadable or non-regular input")
                     : "Saved-input admission refused: unreadable or oversized world metadata.");
         if (!metadata_missing) {
             if (!metadata.is_object())
@@ -2255,10 +2272,13 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                            manifest,
                            manifest_missing,
                            false,
-                           &malformed_json))
+                           &json_failure))
             return reject(
-                malformed_json
-                    ? "corrupt world manifest: invalid JSON"
+                json_failure == SavedJsonFailure::Malformed ||
+                        json_failure == SavedJsonFailure::Unreadable
+                    ? (json_failure == SavedJsonFailure::Malformed
+                           ? "corrupt world manifest: invalid JSON"
+                           : "corrupt world manifest: unreadable or non-regular input")
                     : "Saved-input admission refused: unreadable or oversized world manifest.");
         if (!manifest_missing) {
             if (manifest.is_object() && manifest.contains("schema") &&
@@ -2368,34 +2388,10 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
         return report;
     }
 
-    // O(edited regions): rewrite only region files containing dirty chunks,
-    // refreshing the records of every in-memory chunk in those regions.
-    std::map<std::pair<int, int>, bool> dirty_regions;
-    for (const ChunkID id : dirty_ids) {
-        if (const auto chunk = state.find_chunk(id)) {
-            int rx = 0;
-            int rz = 0;
-            region_coords_for_chunk(chunk->get_coords(), rx, rz);
-            dirty_regions[{rx, rz}] = true;
-        }
-    }
-
-    std::vector<std::shared_ptr<Chunk>> chunks_to_write;
-    for (const auto& chunk : state.snapshot_chunks()) {
-        if (!chunk) {
-            continue;
-        }
-        int rx = 0;
-        int rz = 0;
-        region_coords_for_chunk(chunk->get_coords(), rx, rz);
-        if (dirty_regions.count({rx, rz}) != 0) {
-            chunks_to_write.push_back(chunk);
-        }
-    }
-
-    if (!write_snapshot(chunks_to_write, save_dir, errors, &report.regions_written)) {
+    PreparedWorldWrite prepared;
+    if (!prepared.prepare(state, save_dir, true, errors) ||
+        !prepared.publish(errors, &report.regions_written))
         return report;
-    }
 
     if (acknowledge_dirty) {
         for (const ChunkID id : dirty_ids) {
@@ -2408,32 +2404,53 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
     return report;
 }
 
-bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
-                                      const std::filesystem::path& save_dir,
-                                      std::vector<std::string>* errors,
-                                      std::size_t* regions_written,
-                                      bool validate_only) const {
-    const SaveGuard guard;
-    LUMIN_PROFILE_ZONE_N("File world save");
+struct WorldSaveService::PreparedWorldWrite::Data {
+    SaveOwnership ownership;
+    std::filesystem::path save_dir;
+    std::map<std::filesystem::path, std::vector<RegionRecord>> regions;
+    bool write_manifest = false;
+};
+
+WorldSaveService::PreparedWorldWrite::PreparedWorldWrite() = default;
+WorldSaveService::PreparedWorldWrite::~PreparedWorldWrite() = default;
+
+bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& state,
+                                                   const std::filesystem::path& save_dir,
+                                                   bool dirty_only,
+                                                   std::vector<std::string>* errors) {
+    m_data.reset();
+    auto candidate = std::make_unique<Data>();
+    candidate->save_dir = save_dir;
     try {
         if (!validate_save(save_dir, errors))
             return false;
-        const std::filesystem::path region_dir = region_directory(save_dir);
-
+        std::set<std::pair<int, int>> dirty_regions;
+        if (dirty_only) {
+            for (const auto id : state.dirty_chunk_ids()) {
+                if (const auto chunk = state.find_chunk(id)) {
+                    int rx = 0, rz = 0;
+                    region_coords_for_chunk(chunk->get_coords(), rx, rz);
+                    dirty_regions.emplace(rx, rz);
+                }
+            }
+        }
+        if (dirty_only && dirty_regions.empty()) {
+            m_data = std::move(candidate);
+            return true;
+        }
         // Group the chunks to persist by region (deterministic order).
         std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;
-        for (const auto& chunk : chunks) {
+        for (const auto& chunk : state.snapshot_chunks()) {
             if (!chunk) {
                 continue;
             }
             int rx = 0;
             int rz = 0;
             region_coords_for_chunk(chunk->get_coords(), rx, rz);
-            regions[{rx, rz}].push_back(chunk);
+            if (!dirty_only || dirty_regions.contains({rx, rz}))
+                regions[{rx, rz}].push_back(chunk);
         }
 
-        std::map<std::filesystem::path, std::vector<RegionRecord>> prepared;
-        std::size_t written = 0;
         for (auto& [region_coords, region_chunks] : regions) {
             const std::filesystem::path path =
                 region_file_path(save_dir, region_coords.first, region_coords.second);
@@ -2475,28 +2492,39 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
 
             if (!AdmitRegionWrite(records, errors))
                 return false;
-            prepared.emplace(path, std::move(records));
+            candidate->regions.emplace(path, std::move(records));
         }
-        if (validate_only)
-            return true;
-        std::filesystem::create_directories(region_dir);
-        for (auto& [path, records] : prepared) {
-            if (!WriteRegionFile(path, records, errors)) {
-                return false;
-            }
-            ++written;
-        }
-
-        if (!WriteWorldManifest(world_manifest_path(save_dir), errors)) {
-            return false;
-        }
-
-        if (regions_written) {
-            *regions_written = written;
-        }
+        candidate->write_manifest = !dirty_only || !regions.empty();
+        m_data = std::move(candidate);
         return true;
-    } catch (const std::exception& e) {
-        AddError(errors, std::string("failed to write world region files: ") + e.what());
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("failed to prepare world region files: ") + error.what());
+        return false;
+    }
+}
+
+bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* errors,
+                                                   std::size_t* regions_written) {
+    auto prepared = std::move(m_data);
+    if (!prepared)
+        return false;
+    if (regions_written)
+        *regions_written = 0;
+    if (!prepared->write_manifest)
+        return true;
+    try {
+        std::filesystem::create_directories(region_directory(prepared->save_dir));
+        for (auto& [path, records] : prepared->regions) {
+            if (!WriteRegionFile(path, records, errors))
+                return false;
+        }
+        if (!WriteWorldManifest(world_manifest_path(prepared->save_dir), errors))
+            return false;
+        if (regions_written)
+            *regions_written = prepared->regions.size();
+        return true;
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("failed to write world region files: ") + error.what());
         return false;
     }
 }

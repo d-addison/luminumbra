@@ -22,7 +22,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
-#include "support/UniqueTempPath.h"
+#include "../support/UniqueTempPath.h"
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -598,9 +598,21 @@ TEST_F(PlantSaveRecovery, MissingIsCleanButInvalidPathsAndPayloadsPreserveTheOut
     ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
     EXPECT_TRUE(loaded.entities.empty());
     EXPECT_TRUE(errors.empty());
+    errors.clear();
+    loaded = original;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(
+        loaded, Directory() / "absent" / "nested", &errors));
+    EXPECT_TRUE(loaded.entities.empty());
+    EXPECT_TRUE(errors.empty());
     loaded = original;
     EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(
         loaded, Directory() / std::string(512, 'x'), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
+    const auto obstruction = Directory() / "not-a-directory";
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(obstruction, "occupied"));
+    errors.clear();
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, obstruction, &errors));
     EXPECT_FALSE(errors.empty());
     EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), expected);
     const auto path = SS::WorldSaveService::plant_entities_path(Directory());
@@ -748,6 +760,77 @@ TEST(PlantPersistence, EmptyRosterRemovalErrorIsReportedAndCanRetry) {
     EXPECT_TRUE(errors.empty());
     EXPECT_FALSE(fs::exists(path));
     fs::remove_all(dir);
+}
+
+TEST_F(PlantSaveRecovery, ComponentDepthBoundaryRefusesBeforeCopyingAndPreservesOutput) {
+    namespace SS = Luminumbra::Persistence;
+    E::EntityRegistrySnapshot snapshot;
+    snapshot.entities.push_back(
+        {.entity_id = 1, .name = "extension", .components = {{"Future", 0}}});
+    auto& data = snapshot.entities.front().components.front().data;
+    // Five envelope containers precede the component's value.
+    for (std::size_t depth = 0; depth < SS::SavedInputLimits::kJsonNestingDepth - 5; ++depth)
+        data = nlohmann::json::array({std::move(data)});
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    const auto read = [&path]() {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const auto accepted = read();
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), accepted);
+    data = nlohmann::json::array({std::move(data)});
+    EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    EXPECT_EQ(read(), accepted);
+    const auto excessive = E::SerializeEntityRegistrySnapshotJson(snapshot);
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, excessive));
+    std::vector<std::string> errors;
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory(), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), accepted);
+    errors.clear();
+    EXPECT_FALSE(E::LoadEntityRegistrySnapshotJson(excessive, loaded, errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), accepted);
+    EXPECT_EQ(read(), excessive);
+}
+
+TEST_F(PlantSaveRecovery, BinaryComponentDepthBoundaryMatchesTheEncodedJson) {
+    namespace SS = Luminumbra::Persistence;
+    E::EntityRegistrySnapshot snapshot;
+    snapshot.entities.push_back({.entity_id = 1,
+                                 .name = "extension",
+                                 .components = {{"Future", nlohmann::json::binary({1})}}});
+    auto& data = snapshot.entities.front().components.front().data;
+    // Five envelope containers and two binary-encoding containers leave 57 arrays.
+    for (std::size_t depth = 0; depth < SS::SavedInputLimits::kJsonNestingDepth - 7; ++depth)
+        data = nlohmann::json::array({std::move(data)});
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    const auto read = [&path]() {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const auto accepted = read();
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(nlohmann::json::parse(E::SerializeEntityRegistrySnapshotJson(loaded)),
+              nlohmann::json::parse(accepted));
+    data = nlohmann::json::array({std::move(data)});
+    EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    EXPECT_EQ(read(), accepted);
+    const auto excessive = E::SerializeEntityRegistrySnapshotJson(snapshot);
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, excessive));
+    EXPECT_FALSE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(nlohmann::json::parse(E::SerializeEntityRegistrySnapshotJson(loaded)),
+              nlohmann::json::parse(accepted));
+    EXPECT_EQ(read(), excessive);
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(path, accepted));
+    data = nlohmann::json(nlohmann::json::value_t::discarded);
+    EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
+    EXPECT_EQ(read(), accepted);
 }
 
 TEST_F(PlantSaveRecovery, ComponentJsonAcceptsExactLimitAndRefusesOneMoreWithoutWriting) {

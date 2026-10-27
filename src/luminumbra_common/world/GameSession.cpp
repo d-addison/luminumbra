@@ -1258,14 +1258,35 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     nlohmann::json resolved;
     try {
         if (customPresetJson) {
+            if (customPresetJson->size() > Persistence::SavedInputLimits::kPresetBytes ||
+                !Persistence::SavedInputLimits::JsonDepthAllowed(*customPresetJson)) {
+                m_worldOpenError = "Saved-input admission refused: preset compatibility limit.";
+                return false;
+            }
             resolved = nlohmann::json::parse(*customPresetJson);
         } else {
-            std::ifstream input(validation.preset_path);
-            resolved = nlohmann::json::parse(input);
+            bool missing = false;
+            if (!Persistence::ReadSavedJson(validation.preset_path,
+                                            Persistence::SavedInputLimits::kPresetBytes,
+                                            resolved,
+                                            missing,
+                                            false) ||
+                missing) {
+                m_worldOpenError = "Could not read this world's preset.";
+                return false;
+            }
         }
         resolved = ResolveEffectivePreset(resolved, presetUse);
     } catch (const nlohmann::json::exception& error) {
         m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
+        return false;
+    }
+    // Admit the exact compact encoding plus its trailing newline before any
+    // directory creation, recursive preset validation or live-world replacement.
+    std::string saved_preset_json;
+    if (!Persistence::BoundedJsonDump(
+            resolved, Persistence::SavedInputLimits::kPresetBytes - 1, saved_preset_json)) {
+        m_worldOpenError = "Saved-input admission refused: preset compatibility limit.";
         return false;
     }
     // Both persisted and transient worlds adopt the parameters and identity of
@@ -1297,7 +1318,6 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     }
     // Keep the same effective preset for persistent worlds and explicit transient snapshots.
     // Save inspection uses compact UTF-8 JSON; identity uses ASCII escapes of these choices.
-    std::string saved_preset_json = resolved.dump();
     if (!transient) {
         if (!Persistence::WorldSaveService::write_file_durably(worldPath / "preset.json",
                                                                saved_preset_json + "\n")) {
@@ -1813,9 +1833,20 @@ bool GameSession::ReconcileWorldStateMetadataTo(const fs::path& save_dir) {
 
 bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
     const auto& canonical = m_savedPresetJson;
+    if (canonical.size() >= Persistence::SavedInputLimits::kPresetBytes ||
+        !Persistence::SavedInputLimits::JsonDepthAllowed(canonical))
+        return false;
     try {
         const auto preset_path = save_dir / "preset.json";
-        const bool has_preset = fs::exists(preset_path);
+        nlohmann::json preset;
+        bool preset_missing = false;
+        if (!Persistence::ReadSavedJson(preset_path,
+                                        Persistence::SavedInputLimits::kPresetBytes,
+                                        preset,
+                                        preset_missing,
+                                        false))
+            return false;
+        const bool has_preset = !preset_missing;
         const auto metadata_path = save_dir / "world_info.json";
         nlohmann::json metadata;
         bool missing = false;
@@ -1837,10 +1868,8 @@ bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
                      Persistence::StableChecksum(canonical)))
                 return false;
         }
-        if (has_preset) {
-            std::ifstream input(preset_path);
-            return !canonical.empty() && nlohmann::json::parse(input).dump() == canonical;
-        }
+        if (has_preset)
+            return !canonical.empty() && preset.dump() == canonical;
         // Unmarked legacy saves and new destinations may embed the session's preset later.
         return true;
     } catch (const std::exception&) {
@@ -1854,10 +1883,16 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
         return false;
     try {
         const auto path = save_dir / "preset.json";
-        if (fs::exists(path)) {
-            std::ifstream input(path);
-            return nlohmann::json::parse(input).dump() == canonical;
-        }
+        nlohmann::json preset;
+        bool missing = false;
+        if (!Persistence::ReadSavedJson(
+                path, Persistence::SavedInputLimits::kPresetBytes, preset, missing, false))
+            return false;
+        if (!missing)
+            return preset.dump() == canonical;
+        if (canonical.size() >= Persistence::SavedInputLimits::kPresetBytes ||
+            !Persistence::SavedInputLimits::JsonDepthAllowed(canonical))
+            return false;
         return Persistence::WorldSaveService::write_file_durably(path, canonical + "\n");
     } catch (const std::exception&) {
         return false;
@@ -1875,14 +1910,12 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
     std::string bytes;
     if (!PrepareWorldMetadataTo(save_dir, true, bytes))
         return false;
-    if (m_activeRegionsEnabled) {
-        if (!Persistence::WorldSaveService::validate_save(save_dir))
-            return false;
-        std::error_code error;
-        fs::create_directories(save_dir, error);
-        if (error)
-            return false;
-    }
+    if (!Persistence::WorldSaveService::validate_save(save_dir))
+        return false;
+    std::error_code directory_error;
+    fs::create_directories(save_dir, directory_error);
+    if (directory_error)
+        return false;
     if (!PersistSavedPreset(save_dir, m_savedPresetJson))
         return false;
     if (m_activeRegionsEnabled) {
@@ -2047,13 +2080,22 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         return false;
 
     std::vector<std::string> errors;
-    const Persistence::WorldSaveService service;
+    const bool write_chunks = full_snapshot || !dirty_ids.empty();
+    // A first chunk snapshot includes all residents. Later incremental saves
+    // replace only dirty regions, even when unrelated residents exceed writer caps.
+    const bool has_snapshot =
+        !write_chunks || full_snapshot
+            ? false
+            : (m_activeRegionsEnabled ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
+                                      : Persistence::WorldSaveService::has_world_save(save_dir));
+    Persistence::WorldSaveService::PreparedWorldWrite prepared_chunks;
     std::string metadata_bytes;
     std::string plant_bytes;
     if (!PrepareWorldMetadataTo(save_dir, write_metadata && !m_transientWorld, metadata_bytes) ||
         !Persistence::WorldSaveService::prepare_plant_entities(
             plant_snapshot, plant_bytes, &errors) ||
-        !service.admit_world_write(state, save_dir, &errors)) {
+        (write_chunks &&
+         !prepared_chunks.prepare(state, save_dir, !full_snapshot && has_snapshot, &errors))) {
         for (const auto& error : errors)
             LUMINUMBRA_CORE_ERROR("World state admission refused: {}", error);
         return false;
@@ -2068,23 +2110,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         }
     }
     bool ok = true;
-    const bool write_chunks = full_snapshot || !dirty_ids.empty();
-    if (write_chunks) {
-        // Legacy plant-only saves already count as containers: their next save
-        // writes only dirty regions, preserving the regions-disabled byte contract.
-        const bool has_snapshot = m_activeRegionsEnabled
-                                      ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
-                                      : Persistence::WorldSaveService::has_world_save(save_dir);
-        if (full_snapshot || !has_snapshot)
-            ok = service.save_world(state, save_dir, &errors);
-        else
-            ok = service
-                     .save_dirty_chunks(state,
-                                        save_dir,
-                                        &errors,
-                                        /*acknowledge_dirty=*/false)
-                     .saved;
-    }
+    if (write_chunks)
+        ok = prepared_chunks.publish(&errors);
     // A region replacement can succeed before a later writer fails. Invalidate
     // derived authority after every chunk attempt, including partial failures,
     // so an older worker result cannot integrate against newly persisted chunks.

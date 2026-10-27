@@ -1,5 +1,6 @@
 #include "SyntheticSaveFixture.h"
 
+#include "SavedJsonAdmission.h"
 #include "SavedWorldCatalog.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
@@ -11,7 +12,6 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -168,6 +168,18 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
         if (spec.preset_source.empty())
             return Fail(std::move(report), "preset_source is required for a new save.");
 
+        std::string preset_bytes;
+        {
+            const SavedInputFile input(spec.preset_source);
+            if (!input.read(preset_bytes, SavedInputLimits::kPresetBytes) ||
+                !SavedInputLimits::JsonDepthAllowed(preset_bytes))
+                return Fail(std::move(report), "cannot read preset within compatibility limits");
+        }
+        const auto preset_json = json::parse(preset_bytes, nullptr, false);
+        if (preset_json.is_discarded())
+            return Fail(std::move(report), "cannot parse preset JSON");
+        const auto preset_identity = StableChecksum(preset_json.dump());
+
         std::error_code ec;
         static_cast<void>(fs::create_directories(report.save_dir.parent_path(), ec));
         if (ec)
@@ -181,15 +193,8 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
             return Fail(std::move(report), "save already exists; refusing to overwrite it.");
         cleanup.MarkCreated();
 
-        if (!fs::copy_file(spec.preset_source, report.save_dir / "preset.json", ec))
-            return Fail(std::move(report),
-                        "cannot copy preset: " + spec.preset_source.generic_string() + " (" +
-                            ec.message() + ")");
-        std::string preset_identity;
-        {
-            std::ifstream input(report.save_dir / "preset.json");
-            preset_identity = StableChecksum(json::parse(input).dump());
-        }
+        if (!WorldSaveService::write_file_durably(report.save_dir / "preset.json", preset_bytes))
+            return Fail(std::move(report), "cannot persist preset");
         const json metadata = {
             {"container_version", WorldSaveService::kContainerVersion},
             {"presetFormat", kSavedPresetFormat},

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace Luminumbra::Persistence::SavedInputLimits {
 // Named compatibility limits for issue #584 and issue #586. Unbounded historical
@@ -9,6 +10,38 @@ namespace Luminumbra::Persistence::SavedInputLimits {
 // Policy decision: metadata extensions and manifests may occupy at most 2 MiB.
 inline constexpr std::size_t kMetadataBytes = 2u * 1024u * 1024u;
 inline constexpr std::size_t kManifestBytes = 2u * 1024u * 1024u;
+// Embedded presets share the 2 MiB document budget.
+inline constexpr std::size_t kPresetBytes = 2u * 1024u * 1024u;
+// Count object/array containers, including the root. Check text before parsing
+// and component values before recursive copying or serialization.
+inline constexpr std::size_t kJsonNestingDepth = 64u;
+
+inline bool JsonDepthAllowed(std::string_view bytes) {
+    std::size_t depth = 0;
+    bool quoted = false;
+    bool escaped = false;
+    // One pass with constant storage; callers bound the encoded input bytes.
+    for (const char ch : bytes) {
+        if (quoted) {
+            if (escaped)
+                escaped = false;
+            else if (ch == '\\')
+                escaped = true;
+            else if (ch == '"')
+                quoted = false;
+        } else if (ch == '"') {
+            quoted = true;
+        } else if (ch == '{' || ch == '[') {
+            if (depth == kJsonNestingDepth)
+                return false;
+            ++depth;
+        } else if ((ch == '}' || ch == ']') && depth > 0) {
+            --depth;
+        }
+    }
+    // Syntax validation belongs to the parser, after depth admission.
+    return true;
+}
 // Historical catalog policy remains 1 MiB, independent of direct service admission.
 inline constexpr std::size_t kCatalogMetadataBytes = 1024u * 1024u;
 // Policy decision for previously unbounded UTF-8 world name and seed text.

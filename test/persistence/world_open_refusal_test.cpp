@@ -45,6 +45,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -2769,6 +2770,152 @@ TEST_F(WorldOpenRefusal, EnergyWriterCapRefusesBeforeAnySiblingWriterOrDirtyAckn
     for (const bool full : {false, true}) {
         EXPECT_FALSE(session->SaveWorldStateTo(session->GetWorldSaveDir(), nullptr, full));
         pending.ExpectUnchanged(*session, *chunk);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, CleanOversizedRegionDoesNotBlockIndependentPayloadSaves) {
+    for (const bool active_regions : {false, true}) {
+        const auto config = SnapshotRunnerConfig(RootString(), active_regions);
+        Server::ServerWorldRunner runner(config);
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, active_regions));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        chunk->clear_voxel_data_dirty();
+        // Each maximum finite float needs more than 20 encoded bytes, even
+        // before indentation. This one resident chunk exceeds the 64 MiB cap.
+        chunk->heightmap_data.assign(Persistence::SavedInputLimits::kRegionRecordBytes / 20 + 1,
+                                     std::numeric_limits<float>::max());
+        const auto region = WorldSaveService::region_file_path(session->GetWorldSaveDir(), 0, 0);
+        const auto region_before = Read(region);
+        const auto manifest = WorldSaveService::world_manifest_path(session->GetWorldSaveDir());
+        const auto manifest_before = Read(manifest);
+        const auto plant_path = WorldSaveService::plant_entities_path(session->GetWorldSaveDir());
+        const auto energy_path = session->GetWorldSaveDir() / "aether_state.efs";
+        const auto plants_before = Read(plant_path);
+        const auto energy_before = Read(energy_path);
+        // Restore energy so only the plant payload changes in this save.
+        ASSERT_TRUE(session->GetEnergyFieldState()->DeserializeRecord(
+            energy_before, session->GetSimulationTickCount()));
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_NE(Read(plant_path), plants_before);
+        EXPECT_EQ(Read(energy_path), energy_before);
+        const auto plants_after = Read(plant_path);
+        session->GetEnergyFieldState()->QueueDeposit(2, 0, 0, 0, 1000);
+        session->GetEnergyFieldState()->Tick(session->GetSimulationTickCount());
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_EQ(Read(plant_path), plants_after);
+        EXPECT_NE(Read(energy_path), energy_before);
+        EXPECT_EQ(Read(region), region_before);
+        EXPECT_EQ(Read(manifest), manifest_before);
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        // A dirty region elsewhere does not pull the oversized clean region
+        // into the incremental write set.
+        auto other = std::make_shared<Chunk>(IVec3(32, 0, 0));
+        other->set_state(ChunkState::Idle);
+        other->heightmap_data = {8.0f};
+        other->mark_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(other));
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_EQ(Read(region), region_before);
+        EXPECT_FALSE(other->is_voxel_data_dirty());
+        const auto before = DiskBytes(root);
+        chunk->mark_voxel_data_dirty();
+        EXPECT_FALSE(session->SaveWorldState());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(DiskBytes(root), before);
+        // A clean chunk in the SAME region must still be admitted when that
+        // region is replaced, and full snapshots must admit all residents.
+        chunk->clear_voxel_data_dirty();
+        auto neighbour = std::make_shared<Chunk>(IVec3(1, 0, 0));
+        neighbour->set_state(ChunkState::Idle);
+        neighbour->mark_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(neighbour));
+        EXPECT_FALSE(session->SaveWorldState());
+        EXPECT_TRUE(neighbour->is_voxel_data_dirty());
+        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_FALSE(session->SaveWorldStateTo(session->GetWorldSaveDir(), nullptr, true));
+        EXPECT_EQ(DiskBytes(root), before);
+        // Release the large fixture before shutdown, which autosaves.
+        chunk->heightmap_data = {42.0f};
+        runner.Shutdown();
+    }
+}
+
+TEST_F(WorldOpenRefusal, EmbeddedPresetDepthBoundaryPrecedesCatalogAndSessionParsing) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Preset depth", "1337", "default"));
+    const auto destination = session.GetWorldSaveDir();
+    const auto id = session.GetMetadata().worldId;
+    const auto preset_path = destination / "preset.json";
+    auto preset = nlohmann::json::parse(Read(preset_path));
+    nlohmann::json extension = 0;
+    for (std::size_t depth = 1; depth < Persistence::SavedInputLimits::kJsonNestingDepth; ++depth)
+        extension = nlohmann::json::array({std::move(extension)});
+    preset["extension"] = extension;
+    auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+    metadata["presetIdentity"] = Persistence::StableChecksum(preset.dump());
+    Write(preset_path, preset.dump());
+    Write(destination / "world_info.json", metadata.dump());
+    EXPECT_TRUE(Persistence::InspectSavedWorld(root, id).error.empty());
+    preset["extension"] = nlohmann::json::array({std::move(extension)});
+    Write(preset_path, preset.dump());
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(Persistence::InspectSavedWorld(root, id).error.empty());
+    EXPECT_FALSE(session.LoadWorld(id));
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, EmbeddedPresetByteLimitIsInclusiveAndRefusesWithoutWrites) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Preset bytes", "1337", "default"));
+    const auto destination = session.GetWorldSaveDir();
+    const auto id = session.GetMetadata().worldId;
+    const auto preset_path = destination / "preset.json";
+    auto bytes = Read(preset_path);
+    bytes.resize(Persistence::SavedInputLimits::kPresetBytes, ' ');
+    Write(preset_path, bytes);
+    ASSERT_TRUE(Persistence::InspectSavedWorld(root, id).error.empty());
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(Read(preset_path), bytes);
+    bytes += ' ';
+    Write(preset_path, bytes);
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(Persistence::InspectSavedWorld(root, id).error.empty());
+    EXPECT_FALSE(session.LoadWorld(id));
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, PresetAdmissionRefusesCreationBeforeDirectoryOrLiveStateChanges) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Existing world", "1337", "default"));
+    const auto* previous_system = session.GetWorldSystem();
+    const auto previous_id = session.GetMetadata().worldId;
+    const auto preset = nlohmann::json::parse(Read(session.GetWorldSaveDir() / "preset.json"));
+    nlohmann::json extension = 0;
+    for (std::size_t depth = 0; depth < Persistence::SavedInputLimits::kJsonNestingDepth; ++depth)
+        extension = nlohmann::json::array({std::move(extension)});
+    auto deep = preset;
+    deep["extension"] = std::move(extension);
+    auto large = preset;
+    large["extension"] = std::string(Persistence::SavedInputLimits::kPresetBytes, 'x');
+    for (const auto& bytes : {deep.dump(), large.dump(), std::string("{")}) {
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(session.CreateWorld("Refused", "1337", "default", &bytes));
+        EXPECT_EQ(session.GetWorldSystem(), previous_system);
+        EXPECT_EQ(session.GetMetadata().worldId, previous_id);
         EXPECT_EQ(DiskBytes(root), before);
     }
 }

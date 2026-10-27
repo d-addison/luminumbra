@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
@@ -269,10 +270,27 @@ public:
     // The hook runs while save ownership is held; nullptr disables it.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
-    // Read-only writer preflight, including merged records and aggregate limits.
-    bool admit_world_write(const WorldStreamingState& state,
-                           const std::filesystem::path& save_dir,
-                           std::vector<std::string>* errors = nullptr) const;
+    // Preparation retains process save ownership through publication or destruction.
+    // Inputs must remain stable while preparing; publication reuses compressed records.
+    // Publication consumes the preparation, including on failure.
+    // dirty_only selects every resident chunk in a dirty region, and no others.
+    class PreparedWorldWrite {
+    public:
+        PreparedWorldWrite();
+        ~PreparedWorldWrite();
+        PreparedWorldWrite(const PreparedWorldWrite&) = delete;
+        PreparedWorldWrite& operator=(const PreparedWorldWrite&) = delete;
+        bool prepare(const WorldStreamingState& state,
+                     const std::filesystem::path& save_dir,
+                     bool dirty_only,
+                     std::vector<std::string>* errors = nullptr);
+        bool publish(std::vector<std::string>* errors = nullptr,
+                     std::size_t* regions_written = nullptr);
+
+    private:
+        struct Data;
+        std::unique_ptr<Data> m_data;
+    };
     static bool admit_metadata_bytes(const std::string& bytes,
                                      std::vector<std::string>* errors = nullptr);
     static bool prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
@@ -315,17 +333,6 @@ public:
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors = nullptr,
                                            bool acknowledge_dirty = true) const;
-
-private:
-    // The single v2 write seam: serializes the given chunks into LMR1 region
-    // files, merging with on-disk records, and refreshes the world manifest.
-    // regions_written receives the
-    // number of region files rewritten when provided.
-    bool write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
-                        const std::filesystem::path& save_dir,
-                        std::vector<std::string>* errors,
-                        std::size_t* regions_written = nullptr,
-                        bool validate_only = false) const;
 };
 
 } // namespace Luminumbra::Persistence

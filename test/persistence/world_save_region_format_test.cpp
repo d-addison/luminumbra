@@ -519,31 +519,28 @@ TEST(WorldSaveRegionFormat, MaximalCompressedSizeIsRefusedAsTruncated) {
     const auto path = WorldSaveService::region_file_path(save_dir.path, 0, 0);
     std::filesystem::create_directories(path.parent_path());
 
-    // One valid v2 manifest entry, no payload, declaring a UINT32_MAX
-    // compressed size. With 64-bit size_t this checks the truncated-payload
-    // refusal; the offset + size wraparound it also guards against (26 +
-    // UINT32_MAX wrapping to 25) is only reachable where size_t is 32-bit.
-    std::string bytes("LMR1\x02\x00\x01\x00", 8);
-    bytes.append(18, '\0');
-    bytes[8 + 10] = 1; // raw size
-    const auto compressed_size = std::numeric_limits<std::uint32_t>::max();
-    for (int i = 0; i < 4; ++i)
-        bytes[8 + 14 + i] = static_cast<char>(compressed_size >> (8 * i));
-    {
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
-        ASSERT_TRUE(output.is_open());
-        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        output.close();
-        ASSERT_TRUE(output.good());
+    // Oversized declarations fail admission before any payload allocation.
+    // An admitted declaration still reaches the truncated-file diagnostic.
+    // UINT32_MAX also guards against offset + size wrapping on 32-bit hosts.
+    for (const auto compressed_size :
+         {std::numeric_limits<std::uint32_t>::max(), std::uint32_t{1}}) {
+        SCOPED_TRACE(compressed_size);
+        std::string bytes("LMR1\x02\x00\x01\x00", 8);
+        bytes.append(18, '\0');
+        bytes[8 + 10] = 1;
+        for (int i = 0; i < 4; ++i)
+            bytes[8 + 14 + i] = static_cast<char>(compressed_size >> (8 * i));
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+        std::vector<WorldSaveService::ContainerRecord> records;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::read_container_records(path, records, &errors));
+        EXPECT_TRUE(records.empty());
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors.front().find(compressed_size == 1 ? "record payload is truncated"
+                                                           : "compatibility limit"),
+                  std::string::npos);
+        EXPECT_EQ(ReadFileBytes(path), bytes);
     }
-
-    std::vector<WorldSaveService::ContainerRecord> records;
-    std::vector<std::string> errors;
-    EXPECT_FALSE(WorldSaveService::read_container_records(path, records, &errors));
-    EXPECT_TRUE(records.empty());
-    ASSERT_EQ(errors.size(), 1u);
-    EXPECT_NE(errors.front().find("record payload is truncated"), std::string::npos);
-    EXPECT_EQ(ReadFileBytes(path), bytes);
 }
 
 TEST(WorldSaveRegionFormat, HasWorldSaveRecognizesOnlySupportedContainers) {
@@ -659,19 +656,19 @@ TEST(WorldSaveRegionFormat, JsonAdmissionDistinguishesLimitsFromMalformedSavedDa
     nlohmann::json output = {{"unchanged", true}};
     const auto original = output;
     bool missing = false;
-    bool malformed = true;
+    SavedJsonFailure failure = SavedJsonFailure::Malformed;
     EXPECT_TRUE(
-        ReadSavedJson(path, SavedInputLimits::kMetadataBytes, output, missing, true, &malformed));
+        ReadSavedJson(path, SavedInputLimits::kMetadataBytes, output, missing, true, &failure));
     EXPECT_TRUE(missing);
-    EXPECT_FALSE(malformed);
+    EXPECT_EQ(failure, SavedJsonFailure::None);
     EXPECT_EQ(output, original);
     for (const bool oversized : {false, true}) {
         auto bytes = oversized ? std::string(SavedInputLimits::kMetadataBytes + 1, ' ') : "{";
         ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
-        EXPECT_FALSE(ReadSavedJson(
-            path, SavedInputLimits::kMetadataBytes, output, missing, true, &malformed));
+        EXPECT_FALSE(
+            ReadSavedJson(path, SavedInputLimits::kMetadataBytes, output, missing, true, &failure));
         EXPECT_FALSE(missing);
-        EXPECT_EQ(malformed, !oversized);
+        EXPECT_EQ(failure, oversized ? SavedJsonFailure::Limit : SavedJsonFailure::Malformed);
         EXPECT_EQ(output, original);
     }
 }
@@ -903,4 +900,183 @@ TEST(WorldSaveRegionFormat, CompressedRecordAndAggregateLengthsAreAdmittedBefore
                       std::string::npos);
         }
     }
+}
+
+TEST(WorldSaveRegionFormat, SavedJsonDepthBoundaryCoversMetadataManifestAndPreset) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("json_depth");
+    // Root object plus nested arrays. Brackets and escaped quotes inside a
+    // string do not contribute to depth; both object and array roots count.
+    const auto nested = [](std::size_t count) {
+        return std::string(count, '[') + R"("brackets [ { \" ] }")" + std::string(count, ']');
+    };
+    for (const bool over : {false, true}) {
+        const auto depth = SavedInputLimits::kJsonNestingDepth - 1 + (over ? 1u : 0u);
+        const auto extension = nested(depth);
+        const auto metadata = R"({"container_version":2,"extension":)" + extension + "}";
+        const auto manifest =
+            R"({"schema":"luminumbra.persistence.world_manifest.v1","container":"LMR1","container_version":2,"extension":)" +
+            extension + "}";
+        for (const auto& name : {"world_info.json", "manifest.json", "preset.json"}) {
+            const auto path = directory.path / name;
+            const bool is_metadata = std::string(name) == "world_info.json";
+            ASSERT_TRUE(
+                WorldSaveService::write_file_durably(path, is_metadata ? metadata : manifest));
+            nlohmann::json loaded = {{"unchanged", true}};
+            const auto original = loaded;
+            bool missing = true;
+            SavedJsonFailure failure = SavedJsonFailure::None;
+            EXPECT_EQ(
+                ReadSavedJson(
+                    path, SavedInputLimits::kMetadataBytes, loaded, missing, is_metadata, &failure),
+                !over);
+            EXPECT_FALSE(missing);
+            EXPECT_EQ(failure, over ? SavedJsonFailure::Limit : SavedJsonFailure::None);
+            if (over)
+                EXPECT_EQ(loaded, original);
+        }
+        // Exercise the real service consumers as well as their shared reader.
+        for (const bool metadata_input : {false, true}) {
+            const auto world =
+                directory.path / (std::string(metadata_input ? "metadata-" : "manifest-") +
+                                  (over ? "refused" : "accepted"));
+            WorldStreamingState empty;
+            ASSERT_TRUE(WorldSaveService{}.save_world(empty, world));
+            const auto path = metadata_input ? world / "world_info.json"
+                                             : WorldSaveService::world_manifest_path(world);
+            ASSERT_TRUE(
+                WorldSaveService::write_file_durably(path, metadata_input ? metadata : manifest));
+            WorldStreamingState loaded;
+            std::vector<std::string> errors;
+            EXPECT_EQ(WorldSaveService{}.load_world(loaded, world, errors), !over);
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_EQ(errors.empty(), !over);
+            if (over) {
+                ASSERT_EQ(errors.size(), 1u);
+                EXPECT_NE(errors.front().find("Saved-input admission refused"), std::string::npos);
+            }
+        }
+        // Writer admission uses the same boundary, before creating a directory.
+        const auto destination = directory.path / (over ? "refused" : "accepted");
+        EXPECT_EQ(WorldSaveService::save_metadata(metadata, destination), !over);
+        EXPECT_EQ(std::filesystem::exists(destination), !over);
+    }
+    EXPECT_TRUE(SavedInputLimits::JsonDepthAllowed(nested(SavedInputLimits::kJsonNestingDepth)));
+    EXPECT_FALSE(
+        SavedInputLimits::JsonDepthAllowed(nested(SavedInputLimits::kJsonNestingDepth + 1)));
+}
+
+TEST(WorldSaveRegionFormat, JsonValueDepthAccountsForBinaryEncodingAndRejectsDiscardedValues) {
+    using namespace Luminumbra::Persistence;
+    const auto binary = nlohmann::json::binary({1});
+    EXPECT_FALSE(AdmitJsonValueDepth(binary, 1));
+    EXPECT_FALSE(AdmitJsonValueDepth(binary, 2, 3));
+    EXPECT_TRUE(AdmitJsonValueDepth(binary, 2, 4));
+    const auto object = nlohmann::json{{"payload", binary}};
+    EXPECT_FALSE(AdmitJsonValueDepth(object, 2));
+    EXPECT_FALSE(AdmitJsonValueDepth(object, 3, 4));
+    EXPECT_TRUE(AdmitJsonValueDepth(object, 3, 5));
+    auto nested = binary;
+    for (std::size_t depth = 0; depth < SavedInputLimits::kJsonNestingDepth - 2; ++depth)
+        nested = nlohmann::json::array({std::move(nested)});
+    std::string bytes;
+    ASSERT_TRUE(BoundedJsonDump(nested, SavedInputLimits::kMetadataBytes, bytes));
+    EXPECT_TRUE(SavedInputLimits::JsonDepthAllowed(bytes));
+    const auto accepted = bytes;
+    nested = nlohmann::json::array({std::move(nested)});
+    EXPECT_FALSE(BoundedJsonDump(nested, SavedInputLimits::kMetadataBytes, bytes));
+    EXPECT_EQ(bytes, accepted);
+    const auto discarded = nlohmann::json(nlohmann::json::value_t::discarded);
+    for (const auto& invalid : {discarded, nlohmann::json::array({discarded})}) {
+        EXPECT_FALSE(BoundedJsonDump(invalid, SavedInputLimits::kMetadataBytes, bytes));
+        EXPECT_EQ(bytes, accepted);
+    }
+}
+
+TEST(WorldSaveRegionFormat, PreparedWorldWriteReusesRecordsAndInvalidPreparationCannotPublish) {
+    TempSaveDir directory("prepared_records");
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
+    chunk->heightmap_data = {8.0f};
+    WorldSaveService::PreparedWorldWrite prepared;
+    ASSERT_TRUE(prepared.prepare(state, directory.path, false));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_manifest_path(directory.path)));
+    chunk->heightmap_data = {19.0f};
+    ASSERT_TRUE(prepared.publish());
+    EXPECT_FALSE(prepared.publish());
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+    ASSERT_NE(loaded.find_chunk(chunk->get_id()), nullptr);
+    EXPECT_EQ(loaded.find_chunk(chunk->get_id())->heightmap_data, std::vector<float>{8.0f});
+    const auto path = WorldSaveService::region_file_path(directory.path, 0, 0);
+    const auto original = ReadFileBytes(path);
+    chunk->mark_voxel_data_dirty();
+    WorldSaveService::PreparedWorldWrite empty;
+    EXPECT_FALSE(empty.publish());
+    const auto invalid = directory.path / "invalid";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(invalid / "world_info.json", "{"));
+    EXPECT_FALSE(prepared.prepare(state, invalid, true, &errors));
+    EXPECT_FALSE(prepared.publish(&errors));
+    EXPECT_EQ(ReadFileBytes(path), original);
+    ASSERT_TRUE(prepared.prepare(state, directory.path, false));
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(prepared.publish(&errors));
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(prepared.publish(&errors));
+    EXPECT_EQ(ReadFileBytes(path), original);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+}
+
+TEST(WorldSaveRegionFormat, ChunkSnapshotDepthAdmissionPrecedesParsing) {
+    using namespace Luminumbra::Persistence;
+    WorldStreamingState state;
+    state.get_or_create_chunk(IVec3(0, 0, 0));
+    const auto canonical = SerializeWorldStreamingStateSnapshotJson(state);
+    for (const bool over : {false, true}) {
+        auto snapshot = nlohmann::json::parse(canonical);
+        nlohmann::json extension = 0;
+        for (std::size_t depth = 1; depth < SavedInputLimits::kJsonNestingDepth + (over ? 1u : 0u);
+             ++depth)
+            extension = nlohmann::json::array({std::move(extension)});
+        snapshot["extension"] = std::move(extension);
+        WorldStreamingState loaded;
+        loaded.get_or_create_chunk(IVec3(1, 0, 0));
+        std::vector<std::string> errors;
+        EXPECT_EQ(LoadWorldStreamingStateSnapshotJson(snapshot.dump(), loaded, errors), !over);
+        EXPECT_EQ(loaded.size(), over ? 0u : 1u);
+        EXPECT_EQ(errors.empty(), !over);
+        auto chunk = snapshot.at("chunks").front();
+        chunk["extension"] = snapshot.at("extension");
+        errors.clear();
+        EXPECT_EQ(ValidateWorldStreamingChunkFormatJson(chunk.dump(), errors), !over);
+        EXPECT_EQ(errors.empty(), !over);
+    }
+}
+
+TEST(WorldSaveRegionFormat, LedgerReadsRefuseWrongTypesAndPartialDataWithoutChangingOutput) {
+    using namespace Luminumbra;
+    TempSaveDir directory("ledger_input");
+    const auto path = WorldSaveService::active_regions_path(directory.path);
+    world::ActiveRegionLedger ledger;
+    ledger.set_local_anchor(Vec3(8, 18, 8));
+    const auto original = ledger.canonical_bytes();
+    std::filesystem::create_directories(path);
+    EXPECT_FALSE(WorldSaveService::load_active_regions(ledger, directory.path));
+    EXPECT_EQ(ledger.canonical_bytes(), original);
+    std::filesystem::remove(path);
+    for (const auto& bytes : {std::string{}, std::string("partial")}) {
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+        EXPECT_FALSE(WorldSaveService::load_active_regions(ledger, directory.path));
+        EXPECT_EQ(ledger.canonical_bytes(), original);
+    }
+    std::filesystem::remove(path);
+    ASSERT_TRUE(WorldSaveService::load_active_regions(ledger, directory.path));
+    EXPECT_TRUE(ledger.records().empty());
+    EXPECT_FALSE(ledger.local_anchor().has_value());
+#if !defined(_WIN32)
+    std::filesystem::create_symlink(directory.path / "absent", path);
+    EXPECT_FALSE(WorldSaveService::load_active_regions(ledger, directory.path));
+    EXPECT_FALSE(ledger.local_anchor().has_value());
+#endif
 }
