@@ -921,7 +921,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
-            "changes": "bbad0c708291b24b67c6a8ead9d8febb1cf7684639a8bbccd493d99e9ced5e2c",
+            "changes": "5ede01fa894d623e3c154f04bed732dffa11359fffe4bbd4442f8c8a0baca19b",
             # Require all three offline-dependency partitions in local-check evidence.
             "linux": "449d5b0b5082349470a9e065221f45694d7bfdc473cd476e0ff07bb13ef8e170",
             "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
@@ -2528,55 +2528,114 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertEqual(value(step, key, 10), "${{ " + expression + " }}")
         script = value(step, "run", 8)
         paths = (
-            (".github/workflows/ci.yml", True), ("cmake/windows.cmake", True),
-            ("CMakeLists.txt", True), ("CMakePresets.json", True),
-            ("src/client/platform/windows/window.cpp", True), ("src/platform/posix.cpp", True),
-            ("tools/ci/ucrt_attribution.sh", True), ("scripts/lint.ps1", True),
-            ("docs/windows.md", False), ("src/client/ui/Button.cpp", False),
-            ("src/platformish/window.cpp", False), ("cmakeish/file.txt", False),
-            ("docs/a name [with] spaces.md", False),
+            (".github/workflows/ci.yml", b"changed\n", True),
+            ("cmake/dependencies.cmake", b"changed\n", True),
+            ("CMakeLists.txt", b"changed\n", True), ("CMakePresets.json", b"changed\n", True),
+            ("vendor/CMakeLists.txt", b"changed\n", True),
+            ("vendor/fastnoise/README.md", b"changed\n", True),
+            ("src/luminumbra_common/CMakeLists.txt", b"changed\n", True),
+            ("src/luminumbra_common/sources.cmake", b"changed\n", True),
+            ("tools/ci/ucrt_attribution.sh", b"changed\n", True),
+            ("scripts/lint.sh", b"changed\n", True),
+            ("tools/static_preview/main.cpp", b"changed\n", True),
+            ("src/luminumbra_common/core/FilesystemPath.cpp", b"#ifdef _WIN32\n#endif\n", True),
+            ("src/luminumbra_common/core/CrashReport.cpp", b"#ifdef _MSC_VER\n#endif\n", True),
+            ("src/luminumbra_common/persistence/WorldSaveService.cpp", b"#include <windows.h>\n", True),
+            ("docs/architecture.md", b"shared design\n", False),
+            ("src/luminumbra_common/core/FilesystemPath.cpp", b"shared code\n", False),
+            ("data/common/biomes.json", b"{}\n", False),
+            ("src/platform/posix.cpp", b"shared code\n", False),
+            ("src/platformish/window.cpp", b"shared code\n", False),
+            ("cmakeish/file.txt", b"shared code\n", False),
+            ("docs/a name [with] spaces.md", b"shared design\n", False),
+            ("docs/a name w spaces.md", b"_WIN32\n", True),
+            ('docs/a\nname "quoted".md', b"_WIN32\n", True),
+            ("docs/empty.md", b"", False),
+            ("data/binary.dat", b"\x00shared\xff\n", False),
+            ("data/binary.dat", b"\x00_WIN32\xff\n", True),
         )
+        markers = ("_WIN32", "WIN32", "__MINGW32__", "__MINGW64__", "_MSC_VER", "MSYS",
+                   "MinGW", "Mingw", "mingw", "minGW", "Windows", "windows")
+        paths += tuple(("src/luminumbra_common/core/FilesystemPath.cpp", marker.encode(), True)
+                       for marker in markers)
+        paths += tuple((f"docs/{marker}.md", b"shared design\n", True) for marker in markers)
+        # Primary path fixtures must stay aligned with the repository layout.
+        for path, _, _ in paths[:17]:
+            self.assertTrue((ROOT / path).is_file(), path)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve(strict=True)
-            # One import builds a base and one independent child per path.
+            # One import builds a base and independent children with byte-exact blobs.
             # No checkout, configure, native executable or network is needed.
             subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True, timeout=10)
-            stream = "commit refs/heads/base\nmark :1\ncommitter Fixture <fixture@example.invalid> 1 +0000\ndata 4\nbase\n\n"
-            for index, (path, _) in enumerate(paths, 2):
-                stream += (f"commit refs/heads/case-{index}\nmark :{index}\n"
-                           "committer Fixture <fixture@example.invalid> 2 +0000\ndata 4\nhead\n"
-                           f"from :1\nM 100644 inline {path}\ndata 7\nchanged\n\n")
-            for name, operation in (("deleted", "D .github/workflows/ci.yml"),
-                                    ("renamed", "R .github/workflows/ci.yml docs/moved.yml")):
-                stream += (f"commit refs/heads/{name}\n"
-                           "committer Fixture <fixture@example.invalid> 3 +0000\ndata 4\nhead\n"
-                           f"from :2\n{operation}\n\n")
+            stream = bytearray(b"commit refs/heads/base\nmark :1\ncommitter Fixture <fixture@example.invalid> 1 +0000\ndata 4\nbase\n\n")
+            def commit(name, parent, operations, mark=""):
+                stream.extend((f"commit refs/heads/{name}\n" + mark +
+                               "committer Fixture <fixture@example.invalid> 2 +0000\ndata 4\nhead\n"
+                               f"from {parent}\n").encode())
+                for operation, content in operations:
+                    stream.extend((operation + "\n").encode())
+                    if content is not None:
+                        stream.extend(f"data {len(content)}\n".encode() + content + b"\n")
+                stream.extend(b"\n")
+            def quote_path(path):
+                return '"' + path.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+            for index, (path, content, _) in enumerate(paths, 2):
+                commit(f"case-{index}", ":1", [(f"M 100644 inline {quote_path(path)}", content)],
+                       f"mark :{index}\n")
+            platform_path = "src/luminumbra_common/core/FilesystemPath.cpp"
+            platform_parent = ":" + str(next(index for index, (path, _, expected) in enumerate(paths, 2)
+                                              if path == platform_path and expected))
+            platform_ref = "case-" + platform_parent.removeprefix(":")
+            for name, parent, operations in (
+                ("deleted", ":2", [("D .github/workflows/ci.yml", None)]),
+                ("renamed", ":2", [("R .github/workflows/ci.yml docs/moved.yml", None)]),
+                ("platform-deleted", platform_parent, [(f"D {platform_path}", None)]),
+                ("platform-renamed", platform_parent, [(f"R {platform_path} docs/moved.cpp", None)]),
+                ("platform-removed", platform_parent, [(f"M 100644 inline {platform_path}", b"shared code\n")]),
+                ("mixed", ":1", [("M 100644 inline docs/design.md", b"shared design\n"),
+                                  (f"M 100644 inline {platform_path}", b"_WIN32\n")]),
+                ("literal-path", ":1", [("M 100644 inline \"docs/a name [with] spaces.md\"", b"shared design\n"),
+                                         ("M 100644 inline \"docs/a name w spaces.md\"", b"_WIN32\n")]),
+                ("literal-change", "refs/heads/literal-path",
+                 [("M 100644 inline \"docs/a name [with] spaces.md\"", b"updated shared design\n")]),
+            ):
+                commit(name, parent, operations)
             # Fast-import lengths count bytes; Windows text pipes expand LF.
-            subprocess.run(["git", "fast-import", "--quiet"], cwd=root, input=stream.encode("utf-8"),
+            subprocess.run(["git", "fast-import", "--quiet"], cwd=root, input=bytes(stream),
                            check=True, capture_output=True, timeout=10)
             cases = [("pull_request", "base", f"case-{index}", expected)
-                     for index, (_, expected) in enumerate(paths, 2)]
+                     for index, (_, _, expected) in enumerate(paths, 2)]
             cases.extend([
                 ("pull_request", "base", "base", False),  # Empty diff.
                 ("pull_request", "case-2", "deleted", True),
                 ("pull_request", "case-2", "renamed", True),
+                ("pull_request", platform_ref, "platform-deleted", True),
+                ("pull_request", platform_ref, "platform-renamed", True),
+                ("pull_request", platform_ref, "platform-removed", True),
+                ("pull_request", "base", "mixed", True),
+                ("pull_request", "literal-path", "literal-change", False),
                 # The base advanced with Windows changes absent from the PR.
-                ("pull_request", "case-2", "case-10", False),
+                ("pull_request", "case-2", "case-17", False),
                 ("pull_request", "", "case-2", True),
                 ("pull_request", "base", "", True),
                 ("pull_request", "missing", "case-2", True),
                 ("pull_request", "base", "missing", True),
+                ("pull_request", "base", "0" * 40, True),
                 ("push", "", "", True), ("workflow_dispatch", "", "", True),
             ])
             output = root / "output"
-            commands = []
-            for event, base, head, _ in cases:
-                commands.append(f"CI_EVENT={shlex.quote(event)}; CI_BASE_SHA={shlex.quote(base)}; "
-                                f"CI_HEAD_SHA={shlex.quote(head)}\n" + script)
-            result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", "\n".join(commands)],
-                                    cwd=root, env=dict(os.environ, GITHUB_OUTPUT=output.as_posix()),
-                                    capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            # Small batches keep each subprocess below its existing deadline.
+            for offset in range(0, len(cases), 8):
+                batch = cases[offset:offset + 8]
+                commands = []
+                for event, base, head, _ in batch:
+                    commands.append(f"CI_EVENT={shlex.quote(event)}; CI_BASE_SHA={shlex.quote(base)}; "
+                                    f"CI_HEAD_SHA={shlex.quote(head)}\n" + script)
+                with self.subTest(cases=batch):
+                    result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", "\n".join(commands)],
+                                            cwd=root, env=dict(os.environ, GITHUB_OUTPUT=output.as_posix()),
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(output.read_text().splitlines(),
                              ["needs_ucrt64=" + str(expected).lower() for *_, expected in cases])
             # An unwritable output must fail classification, never publish a skip.
@@ -2584,6 +2643,42 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     env=dict(os.environ, CI_EVENT="push", GITHUB_OUTPUT=root.as_posix()),
                                     capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
+
+    def test_ucrt64_content_classifier_fails_open_on_git_errors(self):
+        changes = jobs(self.workflows["ci.yml"])["changes"]
+        step, = [step for step in steps(changes) if "name: Classify UCRT64 paths\n" in step]
+        script = value(step, "run", 8)
+        # Shell functions reach the actual subprocess and model partial Git output.
+        wrapper = r'''
+        git() {
+          case "$1" in
+            merge-base) printf 'base\n'; return "$MERGE_STATUS" ;;
+            diff) printf 'src/shared.cpp\0'; return "$DIFF_STATUS" ;;
+            grep) return "$GREP_STATUS" ;;
+            *) return 99 ;;
+          esac
+        }
+        '''
+        cases = ((0, 0, 1, False), (0, 0, 2, True), (0, 0, 128, True),
+                 (0, 1, 1, True), (0, 128, 1, True), (128, 0, 1, True))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(strict=True)
+            output = root / "output"
+            commands = []
+            for merge, diff, grep, _ in cases:
+                commands.append(f"MERGE_STATUS={merge}; DIFF_STATUS={diff}; GREP_STATUS={grep}\n" + script)
+            env = dict(os.environ, CI_EVENT="pull_request", CI_BASE_SHA="base", CI_HEAD_SHA="head",
+                       GITHUB_OUTPUT=output.as_posix())
+            result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", wrapper + "\n".join(commands)],
+                                    cwd=root, env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text().splitlines(),
+                             ["needs_ucrt64=" + str(expected).lower() for *_, expected in cases])
+            output.unlink()
+            result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", "mktemp() { return 1; }\n" + script],
+                                    cwd=root, env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(output.exists())
 
     def test_ucrt64_configure_changes_only_debug_information_level(self):
         job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]

@@ -115,15 +115,41 @@ jobs:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Shared build configuration, platform code and CI scripts can affect
-          # Windows even without a Windows-specific filename. Unknown diffs run.
+          # Inspect both snapshots so deleted platform code still opts in.
+          # Unknown history or unreadable content keeps qualification enabled.
           needs_ucrt64=true
+          windows_pattern='_WIN32|WIN32|__MINGW32__|__MINGW64__|_MSC_VER|MSYS|[Mm]in[Gg][Ww]|[Ww]indows'
           if [ "$CI_EVENT" = pull_request ] && [ -n "$CI_BASE_SHA" ] && [ -n "$CI_HEAD_SHA" ]; then
-            if git diff --quiet --no-ext-diff --no-renames "$CI_BASE_SHA...$CI_HEAD_SHA" -- \
-                .github/workflows/ cmake/ CMakeLists.txt CMakePresets.json \
-                ':(glob)src/**/platform/**' tools/ci/ scripts/; then
+            changed_paths=$(mktemp)
+            trap 'rm -f -- "$changed_paths"' EXIT
+            if merge_base=$(git merge-base "$CI_BASE_SHA" "$CI_HEAD_SHA") &&
+               git diff --name-only -z --no-ext-diff --no-renames "$merge_base" "$CI_HEAD_SHA" -- > "$changed_paths"; then
               needs_ucrt64=false
+              while IFS= read -r -d '' path; do
+                case "$path" in
+                  .github/workflows/*|cmake/*|tools/ci/*|scripts/*|vendor/*|tools/static_preview/*|CMakePresets.json|CMakeLists.txt|*/CMakeLists.txt|*.cmake)
+                    needs_ucrt64=true
+                    break
+                    ;;
+                esac
+                if [[ "$path" =~ $windows_pattern ]]; then
+                  needs_ucrt64=true
+                  break
+                fi
+                if git grep -a -E -q --no-textconv -e "$windows_pattern" "$merge_base" "$CI_HEAD_SHA" -- ":(literal)$path"; then
+                  needs_ucrt64=true
+                  break
+                else
+                  status=$?
+                  if [ "$status" -ne 1 ]; then
+                    needs_ucrt64=true
+                    break
+                  fi
+                fi
+              done < "$changed_paths"
             fi
+            rm -f -- "$changed_paths"
+            trap - EXIT
           fi
           echo "needs_ucrt64=$needs_ucrt64" >> "$GITHUB_OUTPUT"
 
