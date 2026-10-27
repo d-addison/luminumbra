@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -56,6 +56,7 @@ jobs:
       needs_python: ${{ steps.paths.outputs.needs_python }}
       needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
       heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
+      needs_ucrt64: ${{ steps.ucrt64.outputs.needs_ucrt64 }}
     steps:
       - name: Check out repository and PR history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -106,6 +107,25 @@ jobs:
           else
             all_lanes
           fi
+
+      - name: Classify UCRT64 paths
+        id: ucrt64
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Shared build configuration, platform code and CI scripts can affect
+          # Windows even without a Windows-specific filename. Unknown diffs run.
+          needs_ucrt64=true
+          if [ "$CI_EVENT" = pull_request ] && [ -n "$CI_BASE_SHA" ] && [ -n "$CI_HEAD_SHA" ]; then
+            if git diff --quiet --no-ext-diff --no-renames "$CI_BASE_SHA...$CI_HEAD_SHA" -- \
+                .github/workflows/ cmake/ CMakeLists.txt CMakePresets.json \
+                ':(glob)src/**/platform/**' tools/ci/ scripts/; then
+              needs_ucrt64=false
+            fi
+          fi
+          echo "needs_ucrt64=$needs_ucrt64" >> "$GITHUB_OUTPUT"
 
   # Drafts cannot merge. ready_for_review reruns these jobs on the same head;
   # maintainers must wait for that run's required checks to pass before merging.
@@ -844,12 +864,10 @@ jobs:
 
   windows-ucrt64:
     name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
-    # Runs on ready pull requests (devel- and main-bound), main/devel pushes,
-    # and every manual dispatch. Devel pushes seed the compiler cache restored
-    # by pull requests into devel. A MinGW/UCRT break shows on the pull request
-    # that causes it. It is not a required devel context; it stays required on main.
+    # Main/devel pushes seed the cache; manual dispatches and ready PRs with
+    # Windows paths or the windows-proof label provide on-demand qualification.
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true'))) }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -967,7 +985,7 @@ jobs:
         run: >-
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DCMAKE_C_FLAGS=-g -DCMAKE_CXX_FLAGS=-g
+          -DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
@@ -1088,7 +1106,7 @@ jobs:
         run: python tools/ci/slowest_tests.py build/release/ctest.junit.xml --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Upload shard JUnit
-        if: always() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ucrt64-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
@@ -1306,24 +1324,24 @@ jobs:
         env:
           CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.windows-ucrt64.result }}
-          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          NEEDS_CPP: "true"
           CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          CI_ENABLED: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')) }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
           --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
-        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        if: needs.windows-ucrt64.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: ucrt64-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*
           path: build/ucrt64-shards
       - name: Merge shard JUnit and check inventory
-        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        if: needs.windows-ucrt64.result == 'success'
         env:
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
         run: |
@@ -1341,7 +1359,7 @@ jobs:
           # Require each developer target explicitly; total-count margin cannot hide one.
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Upload merged JUnit
-        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        if: needs.windows-ucrt64.result == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ucrt64-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
