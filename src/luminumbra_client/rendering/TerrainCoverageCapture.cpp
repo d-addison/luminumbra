@@ -296,6 +296,8 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
                               "for spatial coverage comparisons",
                               "residency and draw submission do not prove per-pixel coverage",
                               "raw readback and file writes are excluded from measured frames"};
+    if (glGetError() != GL_NO_ERROR)
+        return false;
     {
         ReadbackState state(gbuffer().fbo_id);
         glReadBuffer(GL_BACK);

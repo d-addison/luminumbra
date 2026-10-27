@@ -3,7 +3,6 @@
 #include "audio/IAudioManager.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
-#include "rendering/PixelIo.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -1169,57 +1168,32 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     namespace fs = std::filesystem;
     std::error_code ec;
 
-    // Fixture/capture content contains authored thumbnails. Interactive photos
-    // are published directories whose image, thumbnail and verdict all completed.
-    const bool fixture_source =
-        !m_galleryCaptureDir.empty() || Filesystem::capture_content_paths().active();
-    struct GalleryPhoto {
-        int id = 0;
-        int stars = 0;
-        bool legacy = false;
-    };
-    std::vector<GalleryPhoto> ids;
+    // Each shutter writes <root>/data/ui/captures/cap_<N>.tga; collect them
+    // newest-first.: enumerate against the ASSET ROOT (the same root the
+    // emitted <img src> resolves through — the old CWD-relative lookup silently
+    // found nothing when CWD != root), unless a fixture source was injected
+    // (SetGalleryCaptureSource / --ui-fixtures).
+    std::vector<int> ids;
     const fs::path thumbs_dir = m_galleryCaptureDir.empty()
                                     ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
                                     : m_galleryCaptureDir;
+    // Enumeration supplies names only; RmlFileInterface verifies each image's
+    // owning read handle even if this directory is replaced after discovery.
     if (!Filesystem::capture_content_paths().allows(thumbs_dir))
         return;
-    for (fs::directory_iterator entry(thumbs_dir, ec), end; !ec && entry != end;
-         entry.increment(ec)) {
-        const auto path = entry->path();
-        if (fixture_source && path.extension() != ".tga")
-            continue;
-        const bool legacy = path.extension() == ".tga";
-        const std::string stem =
-            Filesystem::GenericUtf8PathString(legacy ? path.stem() : path.filename());
-        if (stem.rfind("cap_", 0) != 0)
-            continue;
-        int id = 0;
-        const auto digits = std::string_view(stem).substr(4);
-        const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), id);
-        if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || id <= 0 ||
-            stem != "cap_" + std::to_string(id))
-            continue;
-        int stars = 0;
-        if (!Filesystem::capture_content_paths().active()) {
-            if (!fixture_source &&
-                !Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, stars, legacy))
+    if (fs::exists(thumbs_dir, ec)) {
+        for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
+            if (entry.path().extension() != ".tga")
                 continue;
+            const std::string stem = entry.path().stem().string(); // "cap_<N>"
+            if (stem.rfind("cap_", 0) != 0)
+                continue;
+            try {
+                ids.push_back(std::stoi(stem.substr(4)));
+            } catch (...) {}
         }
-        // Only the newest page is retained; insertion moves at most 12 entries.
-        const auto position =
-            std::lower_bound(ids.begin(), ids.end(), id, [](const GalleryPhoto& photo, int value) {
-                return photo.id > value;
-            });
-        if (position != ids.end() && position->id == id) {
-            if (!legacy)
-                *position = {.id = id, .stars = stars, .legacy = false};
-        } else {
-            ids.insert(position, {.id = id, .stars = stars, .legacy = legacy});
-        }
-        if (ids.size() > 12)
-            ids.pop_back();
     }
+    std::sort(ids.begin(), ids.end(), std::greater<int>());
 
     if (ids.empty()) {
         grid->SetInnerRML(
@@ -1229,11 +1203,29 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     }
 
     std::string html;
-    for (const auto& [id, stars, legacy] : ids) {
-        const std::string image =
-            "cap_" + std::to_string(id) + (legacy ? ".tga" : "/thumbnail.tga");
+    int shown = 0;
+    for (int id : ids) {
+        if (shown++ >= 12)
+            break; // one page of the most recent captures
+        // Personal ratings are optional user data outside the capture inventory.
+        // Capture uses only the validated thumbnails, without consulting ratings
+        // or marking their intentional omission as a content refusal.
+        int stars = 0;
+        if (!Filesystem::capture_content_paths().active()) {
+            const auto sidecar =
+                fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json");
+            std::ifstream sf(sidecar);
+            if (sf) {
+                try {
+                    nlohmann::json j;
+                    sf >> j;
+                    if (j.contains("stars") && j["stars"].is_number_integer())
+                        stars = j["stars"].get<int>();
+                } catch (...) {}
+            }
+        }
         html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"" + m_galleryImgPrefix +
-                image + "\"/>";
+                "cap_" + std::to_string(id) + ".tga\"/>";
         if (stars >= 4)
             html += "<span class=\"photo-fav\">\xE2\x98\x85</span>";
         html += "</div>";

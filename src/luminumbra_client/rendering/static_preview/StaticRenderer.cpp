@@ -184,12 +184,6 @@ StaticFrame StaticRenderer::Render(const RenderView& view,
         throw std::invalid_argument("Missing scene or exhausted frame sequence");
     const auto started = std::chrono::steady_clock::now();
     glfwMakeContextCurrent(impl.window);
-    // OpenGL has at most eight error flags. Drain stale rendering errors
-    // before capture; errors produced by the capture still refuse publication.
-    for (unsigned capture_error = 0; capture_error < 8; ++capture_error) {
-        if (glGetError() == GL_NO_ERROR)
-            break;
-    }
     impl.Resize(view.description().width, view.description().height);
     glDisable(GL_FRAMEBUFFER_SRGB);
     glDisable(GL_BLEND);

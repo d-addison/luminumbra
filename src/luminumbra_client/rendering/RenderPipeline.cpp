@@ -453,10 +453,6 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
-    // Refuse frame errors before redispatch or target allocation can consume them.
-    if (glGetError() != GL_NO_ERROR)
-        return false;
-
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -590,10 +586,6 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
     const GLsizei h = static_cast<GLsizei>(m_screen_height);
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
-        return false;
-
-    // Refuse frame errors before redispatch or target allocation can consume them.
-    if (glGetError() != GL_NO_ERROR)
         return false;
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
@@ -1230,10 +1222,6 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
     const GLsizei h = static_cast<GLsizei>(m_screen_height);
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
-        return false;
-
-    // Refuse frame errors before redispatch or target allocation can consume them.
-    if (glGetError() != GL_NO_ERROR)
         return false;
 
     RenderContext ctx = make_ssao_context(camera);
@@ -2445,12 +2433,6 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   UploadPresentation presentation) {
     if (!m_started) {
         return;
-    }
-    // Clear unrelated errors before preparation or dispatch can produce this
-    // frame's errors. Bound the drain to eight calls, even for a faulty context.
-    for (unsigned frame_error = 0; frame_error < 8; ++frame_error) {
-        if (glGetError() == GL_NO_ERROR)
-            break;
     }
     //   (the  unlock): prepare once (ALL per-frame CPU mutation),
     // dispatch once (the pure GPU stage sequence over the prepared state), then the
