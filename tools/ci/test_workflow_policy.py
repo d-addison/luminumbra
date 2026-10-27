@@ -44,6 +44,20 @@ import ci_shell as shell
 
 BASH = shell.bash_executable()
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def write_bash_script(path, script):
+    path.write_bytes(script.replace("\r\n", "\n").encode("utf-8"))
+    return path.as_posix()
+
+
+def run_bash_script(script, *, flags=("-e", "-o", "pipefail"), executable=BASH, arguments=(), **kwargs):
+    # Close the LF-only file before Bash opens it; keep scripts out of Windows argv.
+    with tempfile.TemporaryDirectory(prefix="workflow shell ") as directory:
+        path = write_bash_script(Path(directory) / "script.sh", script)
+        return subprocess.run([executable, "--noprofile", "--norc", *flags, path, *arguments], **kwargs)
+
+
 GUARDED = {
     "ci.yml": ("linux-result", "Linux / GCC"),
     "asan.yml": ("asan", "Linux / GCC ASan"),
@@ -217,13 +231,45 @@ class WorkflowShellTests(unittest.TestCase):
                       'IFS= read -r line < "input with spaces.txt"\n'
                       '[[ "$line" == $\'first\\r\' ]]\n'
                       'printf \'contract passed\\n\'\nexit 7')
-            result = subprocess.run([shell.bash_executable(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script,
-                                     "contract", "C:/directory with spaces/file", 'a "quote"', ""],
+            result = run_bash_script(script, executable=shell.bash_executable(),
+                                    arguments=("C:/directory with spaces/file", 'a "quote"', ""),
                                     cwd=root, env=dict(os.environ, CONTRACT_VALUE="kept"),
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
             self.assertEqual(result.stdout, "contract passed\n")
             self.assertEqual(result.stderr, "")
+
+    def test_script_files_preserve_bytes_and_cleanup_after_process_failures(self):
+        script = 'while read -r value; do\r\n  printf \'%s\\n\' \'a "quote" [path]\\tail\'\r\ndone\r\n'
+        expected = script.replace("\r\n", "\n").encode("utf-8")
+        for response in (subprocess.CompletedProcess([], 0, b"", b""),
+                         subprocess.CompletedProcess([], 7, b"partial", b"\xfferror"),
+                         PermissionError("denied"),
+                         subprocess.TimeoutExpired([BASH], 10, output=b"partial", stderr=b"\xfferror")):
+            paths = []
+            def launch(command, **kwargs):
+                self.assertEqual(command[:6], [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail"])
+                self.assertEqual(len(command), 7)
+                self.assertNotIn("\\", command[-1])
+                path = Path(command[-1])
+                paths.append(path)
+                self.assertEqual(path.read_bytes(), expected)
+                # Windows refuses to rename a file that the parent left open.
+                moved = path.with_suffix(".moved")
+                path.rename(moved)
+                moved.rename(path)
+                self.assertEqual(kwargs, dict(capture_output=True, timeout=10))
+                if isinstance(response, Exception):
+                    raise response
+                return response
+            with self.subTest(response=response), patch.object(subprocess, "run", side_effect=launch):
+                if isinstance(response, Exception):
+                    with self.assertRaises(type(response)):
+                        run_bash_script(script, capture_output=True, timeout=10)
+                else:
+                    self.assertIs(run_bash_script(script, capture_output=True, timeout=10), response)
+            self.assertEqual(len(paths), 1)
+            self.assertFalse(paths[0].parent.exists())
 
 
 class WorkflowShellDiagnosticTests(unittest.TestCase):
@@ -1091,8 +1137,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIsNotNone(script)
                 for event, draft, expected in cases:
                     with self.subTest(workflow=filename, job=job_id, event=event, draft=draft):
-                        result = subprocess.run(
-                            [BASH, "--noprofile", "--norc", "-e", "-c", script],
+                        result = run_bash_script(
+                            script, flags=("-e",),
                             cwd=directory,
                             env=dict(os.environ, CI_EVENT_NAME=event, CI_PR_DRAFT=draft),
                             capture_output=True,
@@ -1247,10 +1293,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         dependencies = {"changes": "success", "fast-lane": fast, "asan-shard": "skipped"}
                         refuses = evaluate_condition(value(refusal, "if", 8), dependencies)
                         script = (value(refusal, "run", 8) + "\n" if refuses else "") + value(route, "run", 8)
-                        process = subprocess.run(
-                            [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                        process = run_bash_script(
+                            script,
                             env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT="skipped",
-                                     CI_PATHS_RESULT="success", GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
+                                     CI_PATHS_RESULT="success", GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
                             capture_output=True, text=True, timeout=10)
                         self.assertEqual(process.returncode == 0,
                                          cpp == "false" and fast in ("success", "skipped"), process.stderr)
@@ -1528,7 +1574,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                RUNNER_TEMP=root.as_posix(), GITHUB_WORKSPACE=root.as_posix(),
                                GITHUB_OUTPUT=output.as_posix(), FAKE_BASE_SCRIPT=base.as_posix(),
                                FAKE_PYTHON=Path(sys.executable).as_posix())
-                    result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", fixtures + script],
+                    result = run_bash_script(fixtures + script,
                                             env=env, capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     actual = dict(line.split("=", 1) for line in output.read_text().splitlines())
@@ -1625,7 +1671,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          r"D:\Python runtime\3.14.8\python.exe",
                          "C:/PROGRA~1/Python/python.exe", "C:/Python $literal; value/python.exe"):
                 with self.subTest(job=job_id, path=path), tempfile.TemporaryDirectory() as directory:
-                    result = subprocess.run([BASH, "--noprofile", "--norc", "-e", "-c", script],
+                    result = run_bash_script(script, flags=("-e",),
                                             cwd=directory, env=dict(os.environ, CI_PYTHON_EXECUTABLE=path),
                                             capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -1725,8 +1771,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     for filename in ("ctest-discovery.json", "netsoak.junit.xml"):
                         if filename != missing:
                             (source / filename).write_text(f"owner-{owner}-{filename}", encoding="utf-8")
-                    result = subprocess.run(
-                        [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                    result = run_bash_script(
+                        prepare,
                         cwd=root, env=dict(os.environ, CI_QUALIFICATION=full),
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode == 0, missing is None, result.stderr)
@@ -1746,7 +1792,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         continue
                     script = re.sub(r"\$\{\{.*?\}\}", "1", script)
                     with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
-                        result = subprocess.run([BASH, "--noprofile", "--norc", "-n", "-c", script],
+                        result = run_bash_script(script, flags=("-n",),
                                                 capture_output=True, text=True, timeout=10)
                         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1764,9 +1810,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             script = "\n".join(commands[start:end + 1])
             for needs_heavy in ("false", "true", "", "False", "0", "unknown"):
                 with self.subTest(job=job, needs_heavy=needs_heavy):
-                    result = subprocess.run(
-                        [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                         'python3() { printf "%s\\n" "$@"; }\n' + script],
+                    result = run_bash_script(
+                        'python3() { printf "%s\\n" "$@"; }\n' + script,
                         env=dict(os.environ, CI_NEEDS_HEAVY=needs_heavy), capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     arguments = result.stdout.splitlines()
@@ -1959,8 +2004,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         source = root / "build/asan-shards" / name
                         source.mkdir(parents=True)
                         (source / "producer").write_text(str(attempt), encoding="utf-8")
-                result = subprocess.run(
-                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                result = run_bash_script(
+                    prepare,
                     cwd=root, capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 for _, (attempt, shard) in selected.items():
@@ -2037,8 +2082,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                                              failed=earlier_step_failed)
                                 self.assertEqual(refuses, invalid)
                             if admitted and invalid:
-                                process = subprocess.run(
-                                    [BASH, "--noprofile", "--norc", "-e", "-c", value(refusal, "run", 8)],
+                                process = run_bash_script(
+                                    value(refusal, "run", 8), flags=("-e",),
                                     capture_output=True, text=True, timeout=10)
                                 self.assertNotEqual(process.returncode, 0)
             # Re-evaluate admission after each actual step, including download,
@@ -2093,9 +2138,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         for result, cpp, event, draft, qualification, enabled, accepted in cases:
                             script = 'python3() { "$POLICY_PYTHON" -I -B "$@"; }\n'
                             script += (refusal_script + "\n" if classification != "success" or result not in ("success", "skipped") else "") + gate_script
+                            path = write_bash_script(Path(directory) / f"route-{job}-{index}.sh", script)
                             yield PolicyRouteCase(
                                 (classification, result, cpp, event, draft, qualification, enabled), accepted,
-                                (BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script),
+                                (BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", path),
                                 str(ROOT),
                                 tuple(dict(environment, POLICY_PYTHON=Path(sys.executable).as_posix(),
                                            CI_PATHS_RESULT=classification, CI_CANCELLED="false", SHARD_RESULT=result, NEEDS_CPP=cpp, CI_EVENT=event, CI_DRAFT=draft,
@@ -2141,9 +2187,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                            if step.startswith("      - name: Reject invalid dependencies\n"))
             self.assertIsNone(value(refusal, "continue-on-error", 8))
             # This must be an unconditional failure whenever the refusal runs.
-            process = subprocess.run(
-                [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                 value(refusal, "run", 8)], capture_output=True, text=True, timeout=10,
+            process = run_bash_script(
+                value(refusal, "run", 8), capture_output=True, text=True, timeout=10,
             )
             self.assertNotEqual(process.returncode, 0, process.stdout + process.stderr)
             for cancelled in (False, True):
@@ -2257,9 +2302,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     self.assertIn(result, ("success", "skipped"))
                                     continue
                                 refuses = evaluate_condition(value(refusal, "if", 8), dependencies, failed=False)
-                                process = subprocess.run(
-                                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                                     (refusal_script + "\n" if refuses else "") + script],
+                                process = run_bash_script(
+                                    (refusal_script + "\n" if refuses else "") + script,
                                     env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
                                              CI_PATHS_RESULT=classification,
                                              GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
@@ -2286,9 +2330,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIsNone(value(gate, "if", 8))
                 self.assertIsNone(value(gate, "continue-on-error", 8))
                 self.assertLess(aggregate.index(refusal), aggregate.index(gate))
-                result = subprocess.run(
-                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                     value(refusal, "run", 8)], capture_output=True, text=True, timeout=10)
+                result = run_bash_script(
+                    value(refusal, "run", 8), capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Aggregate dependencies did not pass", result.stderr)
 
@@ -2367,7 +2410,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     cases.append((classification, shard, cpp, cancelled, key))
                 # Use a file, rather than -c, to stay below Windows argv limits.
                 path = Path(directory) / f"{job_id}.sh"
-                path.write_text("\n".join(driver) + "\n", encoding="utf-8", newline="\n")
+                write_bash_script(path, "\n".join(driver) + "\n")
                 process = subprocess.run([BASH, "--noprofile", "--norc", path.as_posix()],
                                          cwd=directory, capture_output=True, text=True, timeout=10)
                 self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
@@ -2549,7 +2592,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             ("cmakeish/file.txt", b"shared code\n", False),
             ("docs/a name [with] spaces.md", b"shared design\n", False),
             ("docs/a name w spaces.md", b"_WIN32\n", True),
-            ('docs/a\nname "quoted".md', b"_WIN32\n", True),
+            ("docs/a name [quoted].md", b"_WIN32\n", True),
             ("docs/empty.md", b"", False),
             ("data/binary.dat", b"\x00shared\xff\n", False),
             ("data/binary.dat", b"\x00_WIN32\xff\n", True),
@@ -2562,11 +2605,13 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Primary path fixtures must stay aligned with the repository layout.
         for path, _, _ in paths[:17]:
             self.assertTrue((ROOT / path).is_file(), path)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix="ucrt64 classifier ") as directory:
             root = Path(directory).resolve(strict=True)
             # One import builds a base and independent children with byte-exact blobs.
             # No checkout, configure, native executable or network is needed.
-            subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True, timeout=10)
+            result = subprocess.run(["git", "init", "--quiet", str(root)], capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0,
+                             f"git init: returncode={result.returncode}; stderr={result.stderr.decode(errors='replace')}")
             stream = bytearray(b"commit refs/heads/base\nmark :1\ncommitter Fixture <fixture@example.invalid> 1 +0000\ndata 4\nbase\n\n")
             def commit(name, parent, operations, mark=""):
                 stream.extend((f"commit refs/heads/{name}\n" + mark +
@@ -2601,8 +2646,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             ):
                 commit(name, parent, operations)
             # Fast-import lengths count bytes; Windows text pipes expand LF.
-            subprocess.run(["git", "fast-import", "--quiet"], cwd=root, input=bytes(stream),
-                           check=True, capture_output=True, timeout=10)
+            result = subprocess.run(["git", "fast-import", "--quiet"], cwd=root, input=bytes(stream),
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0,
+                             f"git fast-import: returncode={result.returncode}; stderr={result.stderr.decode(errors='replace')}")
             cases = [("pull_request", "base", f"case-{index}", expected)
                      for index, (_, _, expected) in enumerate(paths, 2)]
             cases.extend([
@@ -2632,17 +2679,22 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     commands.append(f"CI_EVENT={shlex.quote(event)}; CI_BASE_SHA={shlex.quote(base)}; "
                                     f"CI_HEAD_SHA={shlex.quote(head)}\n" + script)
                 with self.subTest(cases=batch):
-                    result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", "\n".join(commands)],
-                                            cwd=root, env=dict(os.environ, GITHUB_OUTPUT=output.as_posix()),
-                                            capture_output=True, text=True, timeout=10)
-                    self.assertEqual(result.returncode, 0, result.stderr)
+                    result = run_bash_script("\n".join(commands),
+                                            cwd=root, env=dict(os.environ, GITHUB_OUTPUT=output.as_posix(),
+                                                               TMPDIR=root.as_posix()),
+                                            capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 0,
+                                     f"bash: returncode={result.returncode}; stderr={result.stderr.decode(errors='replace')}")
+                    self.assertEqual(list(root.glob("tmp.*")), [])
             self.assertEqual(output.read_text().splitlines(),
                              ["needs_ucrt64=" + str(expected).lower() for *_, expected in cases])
             # An unwritable output must fail classification, never publish a skip.
-            result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", script], cwd=root,
-                                    env=dict(os.environ, CI_EVENT="push", GITHUB_OUTPUT=root.as_posix()),
-                                    capture_output=True, text=True, timeout=10)
-            self.assertNotEqual(result.returncode, 0)
+            result = run_bash_script(script, cwd=root,
+                                    env=dict(os.environ, CI_EVENT="push", GITHUB_OUTPUT=root.as_posix(),
+                                             TMPDIR=root.as_posix()),
+                                    capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0,
+                                f"bash: returncode={result.returncode}; stderr={result.stderr.decode(errors='replace')}")
 
     def test_ucrt64_content_classifier_fails_open_on_git_errors(self):
         changes = jobs(self.workflows["ci.yml"])["changes"]
@@ -2661,24 +2713,60 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         '''
         cases = ((0, 0, 1, False), (0, 0, 2, True), (0, 0, 128, True),
                  (0, 1, 1, True), (0, 128, 1, True), (128, 0, 1, True))
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix="ucrt64 classifier ") as directory:
             root = Path(directory).resolve(strict=True)
             output = root / "output"
             commands = []
             for merge, diff, grep, _ in cases:
                 commands.append(f"MERGE_STATUS={merge}; DIFF_STATUS={diff}; GREP_STATUS={grep}\n" + script)
             env = dict(os.environ, CI_EVENT="pull_request", CI_BASE_SHA="base", CI_HEAD_SHA="head",
-                       GITHUB_OUTPUT=output.as_posix())
-            result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", wrapper + "\n".join(commands)],
-                                    cwd=root, env=env, capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
+                       GITHUB_OUTPUT=output.as_posix(), TMPDIR=root.as_posix())
+            result = run_bash_script(wrapper + "\n".join(commands),
+                                    cwd=root, env=env, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0,
+                             f"bash: returncode={result.returncode}; stderr={result.stderr.decode(errors='replace')}")
+            self.assertEqual(list(root.glob("tmp.*")), [])
             self.assertEqual(output.read_text().splitlines(),
                              ["needs_ucrt64=" + str(expected).lower() for *_, expected in cases])
             output.unlink()
-            result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", "mktemp() { return 1; }\n" + script],
-                                    cwd=root, env=env, capture_output=True, text=True, timeout=10)
-            self.assertNotEqual(result.returncode, 0)
+            result = run_bash_script("mktemp() { return 1; }\n" + script,
+                                    cwd=root, env=env, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0,
+                                f"bash: returncode={result.returncode}; stderr={result.stderr.decode(errors='replace')}")
             self.assertFalse(output.exists())
+
+    def test_ucrt64_classifier_fixtures_use_portable_subprocesses(self):
+        run = subprocess.run
+        def checked_run(command, **kwargs):
+            self.assertFalse({"text", "encoding", "universal_newlines"} & kwargs.keys(),
+                             "classifier subprocess pipes must remain binary")
+            if command[0] == BASH:
+                self.assertFalse("-c" in command, "Bash scripts must be passed by file")
+                self.assertEqual(command[1:6], ["--noprofile", "--norc", "-e", "-o", "pipefail"])
+                self.assertEqual(len(command), 7)
+                self.assertNotIn("\\", command[-1])
+                self.assertNotIn(b"\r", Path(command[-1]).read_bytes())
+                for name in ("TMPDIR", "GITHUB_OUTPUT"):
+                    self.assertNotIn("\\", kwargs["env"][name])
+            elif command[:2] == ["git", "fast-import"]:
+                self.assertIsInstance(kwargs["input"], bytes)
+                # The import's quoted M paths must also be legal Windows names.
+                for line in kwargs["input"].decode("utf-8", errors="replace").splitlines():
+                    if line.startswith("M 100644 inline "):
+                        path, = shlex.split(line.removeprefix("M 100644 inline "))
+                        self.assertNotRegex(path, r'[<>:"\\|?*\x00-\x1f]')
+                        for part in path.split("/"):
+                            self.assertFalse(part.endswith((".", " ")), path)
+            return run(command, **kwargs)
+        for method in ("test_ucrt64_path_classifier_uses_merge_base_and_fails_open",
+                       "test_ucrt64_content_classifier_fails_open_on_git_errors"):
+            with self.subTest(method=method), patch.object(subprocess, "run", side_effect=checked_run):
+                case = WorkflowDraftPolicyTests(method)
+                case.workflows = self.workflows
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(result.errors, [], result.errors)
+                self.assertEqual(result.failures, [], result.failures)
 
     def test_ucrt64_configure_changes_only_debug_information_level(self):
         job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
