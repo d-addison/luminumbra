@@ -1031,7 +1031,9 @@ const char* QueuedReplayRecorder::State::FailureReason() const {
 }
 
 std::string_view QueuedReplayRecorder::State::OpenRefusal() const {
-    return open_refusal != nullptr ? std::string_view(open_refusal) : sink->OpenRefusal();
+    if (open_refusal != nullptr)
+        return open_refusal;
+    return sink ? sink->OpenRefusal() : std::string_view{};
 }
 
 std::size_t QueuedReplayRecorder::State::RetainedBytes() const {

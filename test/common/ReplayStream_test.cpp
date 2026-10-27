@@ -440,6 +440,56 @@ TEST_F(ReplayStreamTest, OccupiedRecorderCandidateRefusesWithoutDeletingTheOther
     ASSERT_TRUE(fs::remove(directory));
 }
 
+// Every candidate directory in one attempt window is already taken: the refusal
+// reports the window size and the exact candidate range it tried.
+TEST_F(ReplayStreamTest, ExhaustedRecorderCandidatesRefuseWithTheTriedRange) {
+    constexpr auto kCandidates = replay::BoundedReplayRecorder::kSegmentTicks;
+    const auto directory = fs::path(m_path + ".exhausted");
+    ASSERT_TRUE(fs::create_directory(directory));
+    const auto destination = (directory / "dump.lrec1").string();
+    const std::string prefix = "lockstep-recording-";
+    replay::BoundedReplayRecorder probe;
+    ASSERT_TRUE(probe.Configure(18, 0));
+    ASSERT_TRUE(probe.Open(destination, MakeHeader())) << probe.OpenRefusal();
+    std::string name;
+    {
+        const auto entry = fs::directory_iterator(directory);
+        ASSERT_NE(entry, fs::directory_iterator{});
+        name = entry->path().filename().string();
+    }
+    ASSERT_EQ(name.find(prefix), 0u);
+    const auto first = std::stoull(name.substr(prefix.size())) + 1;
+    probe.Close();
+    ASSERT_TRUE(fs::is_empty(directory));
+    for (std::uint64_t ordinal = first; ordinal < first + kCandidates; ++ordinal)
+        ASSERT_TRUE(fs::create_directory(directory / (prefix + std::to_string(ordinal))));
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(18, 0));
+    EXPECT_FALSE(recorder.Open(destination, MakeHeader()));
+    EXPECT_EQ(recorder.RetainedBytes(), 0u);
+    EXPECT_EQ(recorder.SegmentCount(), 0u);
+    const std::string refusal(recorder.OpenRefusal());
+    EXPECT_LT(refusal.size(), replay::BoundedReplayRecorder::kOpenRefusalBytes);
+    EXPECT_TRUE(refusal.starts_with("exhausted: " + std::to_string(kCandidates) + " candidates " +
+                                    prefix + std::to_string(first) + ".." + prefix +
+                                    std::to_string(first + kCandidates - 1) + " beside '"))
+        << refusal;
+    EXPECT_TRUE(refusal.ends_with("' already exist")) << refusal;
+    std::error_code cleanup;
+    fs::remove_all(directory, cleanup);
+    EXPECT_FALSE(cleanup);
+}
+
+// A queued recorder without a sink has no refusal text to forward and refuses
+// without dereferencing it.
+TEST_F(ReplayStreamTest, QueuedRecorderWithoutSinkRefusesWithoutDereferencing) {
+    replay::QueuedReplayRecorder queued(nullptr);
+    EXPECT_TRUE(queued.OpenRefusal().empty());
+    EXPECT_FALSE(queued.Configure(18, 0));
+    EXPECT_FALSE(queued.Open(m_path, MakeHeader()));
+    EXPECT_EQ(queued.OpenRefusal(), "unconfigured: Configure must succeed before Open");
+}
+
 // Each refused Open names its failing step in fixed-size text, carries the OS
 // error where one exists, keeps only a path tail, and clears after success.
 TEST_F(ReplayStreamTest, OpenRefusalsNameTheFailingStepAndStayBounded) {
