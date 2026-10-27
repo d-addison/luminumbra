@@ -684,7 +684,9 @@ class UploadBudgetWiring(unittest.TestCase):
         helpers = read(RENDERING / "PixelIo.h")
         image = compact(body(pixels, "bool WritePixelBufferPpm("))
         self.assertIn("!CapturePixelBytes(width, height, 3, bytes) || pixels.size() != bytes", image)
-        self.assertIn("if (!CloseCaptureFile(output))", image)
+        self.assertIn("const bool written = WritePixelBufferPpmStream(output, width, height, pixels);", image)
+        self.assertIn("const bool closed = CloseCaptureFile(output);", image)
+        self.assertIn("if (!written || !closed)", image)
         flush = compact(body(helpers, "bool FlushCaptureStream("))
         self.assertEqual(flush, "output.flush(); return static_cast<bool>(output);")
         close = compact(body(helpers, "bool CloseCaptureFile("))
@@ -710,6 +712,184 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("TruncatedIndexFlushFailureAndCompleteStreamAreDistinct", native)
         gl_native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
         self.assertIn("UnwritableReportImageInvalidScanAndCompleteOutput", gl_native)
+
+    def test_interactive_photos_publish_only_after_every_output_completed(self):
+        pixels = read(RENDERING / "PixelIo.cpp")
+        helpers = read(RENDERING / "PixelIo.h")
+        capture = compact(body(pixels, "int PersistPhotoCapture("))
+        files = compact(body(helpers, "bool WritePhotoCaptureFiles("))
+        self.assertIn("const bool opened = image && thumbnail && sidecar;", files)
+        self.assertIn("opened && WritePixelBufferPpmStream(image, width, height, pixels) && "
+                      "WritePixelBufferThumbnailTgaStream(thumbnail, width, height, pixels, 512);", files)
+        self.assertIn("payloads_written && image_closed && thumbnail_closed && "
+                      "WriteCaptureStream(sidecar, metadata)", files)
+        self.assertLess(files.index("const bool thumbnail_closed"), files.index("WriteCaptureStream(sidecar"))
+        for signature, parameter in (("bool WritePixelBufferPpmStream(", "output"),
+                                     ("bool WritePixelBufferThumbnailTgaStream(", "out")):
+            serializer = compact(body(pixels, signature))
+            self.assertIn("CapturePixelBytes(", serializer)
+            self.assertIn("return FlushCaptureStream(" + parameter + ");", serializer)
+        text = compact(body(helpers, "bool WriteCaptureStream("))
+        self.assertIn("output.write(text.data(), static_cast<std::streamsize>(text.size()));", text)
+        self.assertIn("return FlushCaptureStream(output);", text)
+        for artifact in ("image", "thumbnail", "sidecar"):
+            self.assertIn(f"const bool {artifact}_closed = CloseCaptureFile({artifact});", files)
+        self.assertIn("return sidecar_written && sidecar_closed && publish();", files)
+        for writer in ("WritePixelBufferPpmStream(image", "WritePixelBufferThumbnailTgaStream(thumbnail",
+                       "WriteCaptureStream(sidecar, metadata)"):
+            self.assertIn(writer, files)
+        self.assertIn('return std::filesystem::create_directory(thumbnail_dir / "complete", error);', capture)
+        self.assertIn("pixels, json, publish)) return 0;", capture)
+        self.assertIn("EXPECT_FALSE(published)", read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp"))
+        self.assertIn('if (!std::filesystem::create_directory(thumbnail_dir, error)) return 0;', capture)
+        self.assertEqual(capture.count("if (error) return 0;"), 3)
+        self.assertIn("attempt < 1024", capture)
+        self.assertNotIn("remove", capture.replace("No rollback deletes by pathname.", ""))
+        for platform_flag in ("_O_EXCL", "O_EXCL", "O_NOFOLLOW"):
+            self.assertIn(platform_flag, pixels)
+        self.assertIn("O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW", pixels)
+        self.assertIn("_O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY", pixels)
+        self.assertIn("std::fclose(file) == 0", pixels)
+        self.assertIn("std::fflush(m_file)", pixels)
+        reader = compact(body(pixels, "bool ReadCompletedPhotoCapture("))
+        self.assertIn('thumbnail_dir / "complete"', reader)
+        for artifact in ('photo_dir / "image.ppm"', 'thumbnail_dir / "thumbnail.tga"',
+                         'photo_dir / "verdict.photo.json"'):
+            self.assertIn(artifact, reader)
+        self.assertIn("sidecar.size() > buffer.size()", reader)
+        self.assertIn("count != sidecar.size()", reader)
+        self.assertIn("image.size() != expected_header.size() + bytes", reader)
+        self.assertIn("thumbnail.size() != 18 + thumb_bytes", reader)
+        overlay = compact(body(read(ROOT / "src/luminumbra_client/app/DebugOverlays.cpp"),
+                               "void UpdatePhotoCapture("))
+        self.assertIn("const bool readback_ok = ReadPhotoCapturePixels(cap_w, cap_h, px);", overlay)
+        self.assertIn("readback_ok ? photo_allocator.Persist(", overlay)
+        self.assertIn("if (saved_id > 0)", overlay)
+        self.assertIn("Photo could not be saved.", overlay)
+        gallery = compact(body(read(ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp"),
+                               "void Rml_UIManager::PopulateGallery("))
+        self.assertIn("!Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, photo.stars, legacy)", gallery)
+        self.assertIn('legacy ? ".tga" : "/thumbnail.tga"', gallery)
+        self.assertIn("parsed.ptr != digits.data() + digits.size()", gallery)
+        self.assertIn("if (ids.size() == 12) break;", gallery)
+        self.assertIn("if (entries == kMaxGalleryEntries) { candidates.clear(); break; }", gallery)
+        self.assertIn("if (ec) candidates.clear();", gallery)
+        self.assertLess(gallery.index("std::sort(candidates.begin()"), gallery.index("ReadCompletedPhotoCapture("))
+        self.assertIn("if (!ids.empty() && ids.back().id == photo.id) continue;", gallery)
+        gallery_native = read(ROOT / "test/ui/ui_smoke_test.cpp")
+        self.assertIn("kGalleryEntryBound = 65536", gallery_native)
+        self.assertIn('WriteCaptureText(thumbs / "overflow", "unrelated")', gallery_native)
+        wrapper = compact(body(read(ROOT / "src/luminumbra_client/app/WindowModeControls.cpp"),
+                               "bool WriteCaptureThumbnailTga("))
+        self.assertIn("return Luminumbra::Rendering::WritePixelBufferThumbnailTga(", wrapper)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for name in ("EveryPhotoArtifactOpenWriteFlushAndCloseFailureRefusesPublication",
+                     "PhotoDirectoriesCompletionAndUnrelatedFilesArePreserved"):
+            self.assertIn("TEST(CaptureArtifacts, " + name + ")", native)
+        self.assertIn("artifact < 3", native)
+        self.assertIn("failure < 4", native)
+
+    def test_photo_allocation_covers_history_and_bounds_header_ranges(self):
+        pixels = read(RENDERING / "PixelIo.cpp")
+        occupied = body(pixels, "bool PhotoIdOccupied(")
+        for reservation in ('photos / stamp', 'stamp + ".ppm"', 'stamp + ".photo.json"',
+                            'thumbnails / cap', 'cap + ".tga"'):
+            self.assertIn(reservation, occupied)
+        self.assertIn('symlink_status(path, error)', occupied)
+        initializer = body(pixels, "bool FindNextPhotoId(")
+        self.assertIn('for (const bool thumbnail : {false, true})', initializer)
+        self.assertIn('entries == kMaxReservationEntries', initializer)
+        self.assertIn('if (error)', initializer)
+        allocator = body(pixels, "int PhotoCaptureAllocator::Persist(")
+        self.assertIn('!m_initialized || m_root != root', allocator)
+        self.assertIn('FindNextPhotoId(root, next)', allocator)
+        self.assertIn('saved + 1', allocator)
+        overlay = body(read(ROOT / "src/luminumbra_client/app/DebugOverlays.cpp"),
+                       "void UpdatePhotoCapture(")
+        self.assertIn('photo_allocator.Persist(root_path_str, cap_w, cap_h, px, side)', compact(overlay))
+        self.assertNotIn('root_path_str, app.hud.photoMode.captures', compact(overlay))
+        reader = body(pixels, "bool ReadCompletedPhotoCapture(")
+        self.assertIn('header.size() < 11', reader)
+        self.assertLess(reader.index('header.size() < 11'), reader.index('std::from_chars('))
+        self.assertIn('parsed_width.ptr == header.data() + header.size()', reader)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for regression in ('EveryLegacyAndDirectoryReservationBlocksIdReuse',
+                           'AllocationCursorStartsBeyondHistoryAndSurvivesSessionRestarts',
+                           'AllocationUsesEveryHistoricalFormatAndRefusesUnreadableRoots',
+                           'EveryTruncatedHeaderPrefixRefusesBothCaptureFormats'):
+            self.assertIn('TEST(CaptureArtifacts, ' + regression + ')', native)
+
+    def test_gl_error_drains_exist_only_at_allowlisted_pre_work_sites(self):
+        # Resource allocation/driver inspection has existing drains outside capture.
+        # The only capture drain is immediately before interactive photo readback.
+        drain = re.compile(
+            r'while\s*\(\s*glGetError\(\)'
+            r'|for\s*\([^;]*;[^;]*glGetError\(\)'
+            r'|glGetError\(\)\s*==\s*GL_NO_ERROR\)\s*\{?\s*break;')
+        infrastructure = {
+            'src/luminumbra_client/core/HardwareInfo.cpp': 1,
+            'src/luminumbra_client/rendering/RenderResourceRegistry.cpp': 2,
+            'src/luminumbra_client/rendering/passes/ChunkGeometryPool.cpp': 2,
+        }
+        found = {}
+        for path in sorted((ROOT / 'src').rglob('*')):
+            if path.suffix not in ('.cpp', '.cc', '.h', '.hpp', '.inl', '.mm'):
+                continue
+            count = len(drain.findall(read(path)))
+            if count:
+                found[path.relative_to(ROOT).as_posix()] = count
+        for path, count in infrastructure.items():
+            self.assertEqual(found.pop(path, None), count)
+        self.assertEqual(found, {'src/luminumbra_client/app/WindowModeControls.cpp': 1})
+        readback = body(read(ROOT / 'src/luminumbra_client/app/WindowModeControls.cpp'),
+                        'bool ReadPhotoCapturePixels(')
+        self.assertEqual(readback.count('query < 8'), 2)
+        self.assertEqual(readback.count('glGetError()'), 2)
+        self.assertLess(readback.index('CapturePixelBytes('), readback.index('readback(bytes)'))
+        self.assertLess(readback.index('++stale_errors'), readback.index('glReadBuffer(GL_BACK)'))
+        self.assertIn('if (stale_errors != 0)', readback)
+        self.assertEqual(readback.count('LUMINUMBRA_CORE_WARN('), 1)
+        self.assertLess(readback.index('LUMINUMBRA_CORE_WARN('), readback.index('glReadBuffer(GL_BACK)'))
+        self.assertLess(readback.index('glReadPixels('), readback.index('bool readback_ok = true'))
+        self.assertIn('if (glGetError() != GL_NO_ERROR) {\n            readback_ok = false;', readback)
+        self.assertIn('if (readback_ok)\n                pixels.swap(readback);', readback)
+        self.assertIn('return readback_ok;', readback)
+        native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
+        for case in ('InteractivePhotoClearsStaleErrorsAndPublishesAllArtifacts',
+                     'InteractivePhotoRefusesOwnReadbackErrorsWithoutPublishingOrDeleting'):
+            self.assertIn('TEST_F(FarWorldWaterGl, ' + case + ')', native)
+
+    def test_frame_errors_survive_every_post_render_capture(self):
+        render = body(self.pipeline, 'void RenderPipeline::render_frame(')
+        self.assertNotIn('glGetError()', render)
+        scopes = [
+            (RENDERING / 'FrameScan.cpp', 'FrameScanReport ScanFrame('),
+            (RENDERING / 'SceneSurvey.cpp', 'bool RunSceneSurvey('),
+            (RENDERING / 'TerrainCoverageCapture.cpp',
+             'bool RenderPipeline::capture_terrain_coverage('),
+            (RENDERING / 'static_preview/StaticRenderer.cpp',
+             'StaticFrame StaticRenderer::Render('),
+        ]
+        for name in ('capture_frame_parity', 'capture_upscale_seam_parity',
+                     'capture_ssao_parity'):
+            scopes.append((RENDERING / 'RenderPipeline.cpp',
+                           'bool RenderPipeline::' + name + '('))
+        for path, signature in scopes:
+            with self.subTest(path=path.name, signature=signature):
+                scope = body(read(path), signature)
+                queries = list(re.finditer(r'glGetError\(\)', scope))
+                self.assertTrue(queries)
+                for query in queries:
+                    self.assertRegex(scope[query.end():], r'^\s*(?:==|!=)\s*GL_NO_ERROR')
+                self.assertNotRegex(scope, r'glGetError\(\)[\s\S]{0,40}\bbreak;')
+        native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
+        regression = body(native, 'TEST_F(FarWorldWaterGl, FrameRenderErrorsStillRefuseEveryCapture)')
+        self.assertIn('FrameRenderError failure(pipeline)', regression)
+        self.assertIn('ASSERT_GT(failure.failures(), 0u)', regression)
+        self.assertIn('EXPECT_FALSE(ScanFrame(pipeline, 9, 9, materials).ok)', regression)
+        self.assertIn('EXPECT_FALSE(pipeline.capture_terrain_coverage(', regression)
+        for name in ('capture_frame_parity', 'capture_upscale_seam_parity', 'capture_ssao_parity'):
+            self.assertRegex(compact(regression), r'EXPECT_FALSE\(\s*pipeline\.' + name + r'\(')
 
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))
