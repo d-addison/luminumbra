@@ -75,28 +75,24 @@ ctest --preset release -L manual \
 
 The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
 Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
-use 1000M each. Qualification captures bypass the cache. Immutable save keys include
+use 500M each. Qualification captures bypass the cache. Immutable save keys include
 the commit SHA; restores prefer the matching CMake configuration prefix where
 available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
 before saving, and cache-save failures cannot
-fail a job. A full Windows build writes well over 1 GB of compressed objects
-(embedded debug information for render-child failure evidence), so a 500M cap
-retained only about a third of them and every restore hit about 35%. The Windows
-lanes therefore write their generation on devel pushes only: a main run cannot
-restore devel's generation, and a main generation expires unused between
-promotions. One generation per branch and lane then totals 3.75 GB on devel and
-1.75 GB on main, 5.5 GB together, leaving 0.5 GB of the 6 GB budget for package
-and analysis caches; a devel push adds at most one more 3.75 GB generation before
-cleanup, staying below GitHub's 10 GB cap. These lanes use standard runners and
-the existing cache actions, with no paid cache service.
+fail a job. Starting from the measured 1.55 GB devel generation, the two cap
+increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB:
+about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
+6 GB budget for other caches. At all seven lanes' configured caps, one generation
+per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
+package and analysis caches. These lanes use standard runners and the existing
+cache actions, with no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
 scheduled runs, and manual dispatches never save caches. `cache-cleanup.yml` runs
 only after CI, AddressSanitizer or Performance observations completes for a push
-to main/devel. CI saves the Linux and Diligent compiler caches, clang-tidy shards
-and MSYS2 packages on both branches and the Windows MSVC/UCRT64 compiler caches
-on devel only; AddressSanitizer saves its compiler cache;
+to main/devel. CI saves the Linux, Diligent, Windows MSVC/UCRT64 compiler caches,
+clang-tidy shards and MSYS2 packages; AddressSanitizer saves its compiler cache;
 Performance observations saves preview and paired compiler caches (its candidate
 cache save is also covered, though qualification capture currently runs manually).
 Documentation, game-assets, Blender authoring, release and UCRT attribution do not
@@ -283,9 +279,7 @@ or failed-shard rerun selects the latest attempt of each producer within the sam
 run, retaining evidence from successful earlier attempts. ASan retains its
 existing overwrite-per-shard artifact contract and the same 30-day retention.
 Only shard 1 saves each lane's compiler cache; only UCRT64 shard 1 enables the
-MSYS2 package cache; only MSVC shard 2 (or shard 0 for manual full qualification)
-runs the standalone Python contracts, because shard 1 carries the longer test
-partition. The cache caps and 6 GB cleanup budget described above apply
+MSYS2 package cache. The cache caps and 6 GB cleanup budget described above apply
 per lane, shared by its test shards.
 
 The GCC aggregate checks acceptance-matrix execution after merging and validating

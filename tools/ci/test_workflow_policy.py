@@ -924,12 +924,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin the selected Python, partitioned local checks, render failure symbols,
-            # shard-2-only Python contracts, verbose compiler cache statistics and the
-            # 1000M devel-only compiler cache generation.
-            "windows-msvc": "519a035a994f730a51ab1c31816c2057d37a931a48b129b2ed47ef1aa1788730",
-            # Pin the selected Python, render failure symbols, verbose compiler cache
-            # statistics and the 1000M devel-only compiler cache generation in UCRT64.
-            "windows-ucrt64": "f87df3ca840c2a8777aeb67f622936e7d40668166554b540fff3b35d61bbc582",
+            # shard-2-only Python contracts and verbose compiler cache statistics.
+            "windows-msvc": "d6164af56312ee3cff2821ee21ebc4b5cb487a9b86ea1722f29ee9f3df9f75c8",
+            # Pin the selected Python, render failure symbols and verbose compiler cache statistics in UCRT64.
+            "windows-ucrt64": "fdde3c6e5bf5132120ba644424e20409bea34466d94c4f932704a1c74a712896",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
@@ -2513,15 +2511,11 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
         self.assertEqual(value(named["Restore compiler cache"], "if", 8),
                          "${{ !(" + capture + ") }}")
-        # The compiler cache generation is written on devel only: main cannot restore
-        # devel's generation and its own would expire unused, so the budget keeps
-        # one Windows generation per lane and spends the room on a larger cap.
         for name in ("Clean compiler cache before saving", "Save compiler cache"):
             with self.subTest(step=name):
                 self.assertEqual(
                     value(named[name], "if", 8),
-                    "${{ matrix.shard == 1 && always() && github.event_name == 'push' && "
-                    "github.ref == 'refs/heads/devel' && !(" + capture + ") && "
+                    "${{ matrix.shard == 1 && always() && " + trusted_push + " && !(" + capture + ") && "
                     "steps.compiler-cache.outcome == 'success' && "
                     "steps.compiler-cache.outputs.cache-hit != 'true' }}",
                 )

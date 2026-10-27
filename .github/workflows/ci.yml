@@ -511,7 +511,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 1000M
+      CCACHE_MAXSIZE: 500M
       # Only the main configure opts in via command-line launchers. Captures
       # and packaging must not inherit a launcher from the environment.
       CMAKE_C_COMPILER_LAUNCHER: ""
@@ -758,12 +758,12 @@ jobs:
         shell: pwsh
         run: ccache -s -v
       - name: Clean compiler cache before saving
-        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && github.ref == 'refs/heads/devel' && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
+        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         continue-on-error: true
         shell: pwsh
         run: ccache --cleanup
       - name: Save compiler cache
-        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && github.ref == 'refs/heads/devel' && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
+        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -867,7 +867,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 1000M
+      CCACHE_MAXSIZE: 500M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -983,12 +983,12 @@ jobs:
         shell: msys2 {0}
         run: ccache -s -v || true
       - name: Clean compiler cache before saving
-        if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && github.ref == 'refs/heads/devel' && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         shell: msys2 {0}
         run: ccache --cleanup || true
       - name: Save compiler cache
-        if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && github.ref == 'refs/heads/devel' && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
