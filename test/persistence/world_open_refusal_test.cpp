@@ -2895,6 +2895,82 @@ TEST_F(WorldOpenRefusal, EmbeddedPresetByteLimitIsInclusiveAndRefusesWithoutWrit
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+TEST_F(WorldOpenRefusal, NewWorldPresetIdentityReopensAtTheCompactWriteBoundary) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Canonical preset", "1337", "default"));
+    auto preset = nlohmann::json::parse(Read(session.GetWorldSaveDir() / "preset.json"));
+    for (const bool near_limit : {false, true}) {
+        SCOPED_TRACE(near_limit);
+        preset["extension"] = "";
+        if (near_limit)
+            preset["extension"] = std::string(
+                Persistence::SavedInputLimits::kPresetBytes - 1 - preset.dump().size(), 'x');
+        const auto canonical = preset.dump();
+        ASSERT_TRUE(session.CreateWorld("Reopen preset", "1337", "default", &canonical));
+        const auto destination = session.GetWorldSaveDir();
+        const auto id = session.GetMetadata().worldId;
+        EXPECT_EQ(Read(destination / "preset.json"), canonical + "\n");
+        const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+        EXPECT_EQ(metadata.at("presetIdentity"), Persistence::StableChecksum(canonical));
+        const auto inspected = Persistence::InspectSavedWorld(root, id);
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.preset_json, canonical);
+        ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+    }
+}
+
+TEST_F(WorldOpenRefusal, ExactCompactPresetLoadsAndSavesWithoutReplacementButRefusesFreshExport) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Full preset", "1337", "default"));
+    const auto destination = session.GetWorldSaveDir();
+    const auto id = session.GetMetadata().worldId;
+    auto preset = nlohmann::json::parse(Read(destination / "preset.json"));
+    preset["extension"] = "";
+    preset["extension"] =
+        std::string(Persistence::SavedInputLimits::kPresetBytes - preset.dump().size(), 'x');
+    const auto canonical = preset.dump();
+    ASSERT_EQ(canonical.size(), Persistence::SavedInputLimits::kPresetBytes);
+    Write(destination / "preset.json", canonical);
+    auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+    metadata["presetIdentity"] = Persistence::StableChecksum(canonical);
+    Write(destination / "world_info.json", metadata.dump());
+    ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(Read(destination / "preset.json"), canonical);
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(session.SaveWorldStateTo(root / "full-preset-export", nullptr, true));
+    EXPECT_EQ(DiskBytes(root), before);
+
+    // An admitted file can expand on compact dumping (1e2 becomes 100.0).
+    // Reusing that existing file must not apply a new-file encoding budget.
+    preset["extension"] = nullptr;
+    auto encoded = preset.dump();
+    const auto offset = encoded.find("\"extension\":null");
+    ASSERT_NE(offset, std::string::npos);
+    const auto count = Persistence::SavedInputLimits::kPresetBytes / 5;
+    std::string numbers = "[";
+    numbers.reserve(count * 4 + 1);
+    for (std::size_t index = 0; index < count; ++index)
+        numbers += index + 1 == count ? "1e2]" : "1e2,";
+    encoded.replace(offset + std::string("\"extension\":").size(), 4, numbers);
+    ASSERT_LT(encoded.size(), Persistence::SavedInputLimits::kPresetBytes);
+    const auto expanded_canonical = nlohmann::json::parse(encoded).dump();
+    ASSERT_GT(expanded_canonical.size(), Persistence::SavedInputLimits::kPresetBytes);
+    Write(destination / "preset.json", encoded);
+    metadata["presetIdentity"] = Persistence::StableChecksum(expanded_canonical);
+    Write(destination / "world_info.json", metadata.dump());
+    ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(Read(destination / "preset.json"), encoded);
+}
+
 TEST_F(WorldOpenRefusal, PresetAdmissionRefusesCreationBeforeDirectoryOrLiveStateChanges) {
     GameSession session;
     session.SetRootPath(RootString());
@@ -2920,14 +2996,14 @@ TEST_F(WorldOpenRefusal, PresetAdmissionRefusesCreationBeforeDirectoryOrLiveStat
     }
 }
 
-TEST_F(WorldOpenRefusal, CatalogKeepsItsOneMiBLimitAndTextLimitsAreInclusive) {
+TEST_F(WorldOpenRefusal, CatalogSharesWriterMetadataLimitAndTextLimitsAreInclusive) {
     const auto original = nlohmann::json::parse(Read(save / "world_info.json"));
     auto metadata = original;
     metadata["name"] = std::string(Persistence::SavedInputLimits::kWorldNameBytes, 'x');
     metadata["seed"] = std::string(Persistence::SavedInputLimits::kWorldSeedBytes, '7');
     auto bytes = metadata.dump();
-    bytes.resize(Persistence::SavedInputLimits::kCatalogMetadataBytes, ' ');
-    Write(save / "world_info.json", bytes);
+    bytes.resize(Persistence::SavedInputLimits::kMetadataBytes, ' ');
+    ASSERT_TRUE(WorldSaveService::save_metadata(bytes, save));
     EXPECT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
     bytes += ' ';
     Write(save / "world_info.json", bytes);

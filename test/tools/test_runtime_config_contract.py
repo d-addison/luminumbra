@@ -330,7 +330,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         save = service[start:end]
         self.assertIn("constautostaging=save_dir/path.filename();", save)
         self.assertLess(save.index("ReclaimAbandonedStaging(staging);"),
-                        save.index("if(snapshot.entities.empty())"))
+                        save.index("if(m_empty)"))
         self.assertIn("WriteFileDurably(path,", save)
         self.assertIn(",staging,errors)", save)
 
@@ -371,7 +371,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for operation in ("ClockConfigurationCompatible(save_dir)",
                           "validate_save(save_dir)",
                           "SavedPresetCompatible(save_dir)", "prepared_chunks.prepare(",
-                          "prepared_chunks.publish(", "save_plant_entities(", "SaveEnergyFieldRecord(",
+                          "prepared_chunks.publish(", "prepared_plants.publish(", "write_file_durably(energy_path,energy_bytes)",
                           "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
                           "m_activeRegionLedger.mark_saved(",
                           "chunk->clear_voxel_data_dirty()"):
@@ -387,6 +387,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             start = service.index("WorldSaveService::" + name + "(")
             body = service.index("{", start)
             self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)
+        plant_publish = service.index("boolWorldSaveService::PreparedPlantWrite::publish(")
+        plant_body = service.index("{", plant_publish)
+        self.assertTrue(service[plant_body:].startswith("{constSaveGuardguard;"))
         # The prepared records retain ownership from validation through publication.
         data = service[service.index("structWorldSaveService::PreparedWorldWrite::Data{"):
                        service.index("WorldSaveService::PreparedWorldWrite::PreparedWorldWrite()")]
@@ -420,12 +423,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
     def test_energy_empty_and_nonempty_saves_share_owned_cleanup(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
                               .read_text(encoding="utf-8"))
-        start = session.index("boolGameSession::SaveEnergyFieldRecord(")
-        end = session.index("std::stringGameSession::ComputeAetherStateSubHash", start)
+        start = session.index("boolGameSession::SaveWorldStateToImpl(")
+        end = session.index("boolGameSession::LoadWorldState()", start)
         energy = session[start:end]
-        self.assertIn('WorldSaveService::remove_file_and_staging(save_dir/"aether_state.efs")',
+        self.assertIn('WorldSaveService::remove_file_and_staging(energy_path)',
                       energy)
-        self.assertIn('WorldSaveService::write_file_durably(save_dir/"aether_state.efs",record)',
+        self.assertIn('WorldSaveService::write_file_durably(energy_path,energy_bytes)',
                       energy)
         self.assertNotIn("fs::remove(", energy)
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -457,7 +460,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
     def test_empty_plant_roster_checks_removal_error(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
-        start = service.index("if(snapshot.entities.empty()){")
+        start = service.index("if(m_empty){")
         end = service.index("returnFlushRemovalDirectory(path,errors);", start)
         empty_roster = service[start:end]
         self.assertIn("std::filesystem::remove(path,ec);if(ec){", empty_roster)

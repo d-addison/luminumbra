@@ -1284,8 +1284,11 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     // Admit the exact compact encoding plus its trailing newline before any
     // directory creation, recursive preset validation or live-world replacement.
     std::string saved_preset_json;
-    if (!Persistence::BoundedJsonDump(
-            resolved, Persistence::SavedInputLimits::kPresetBytes - 1, saved_preset_json)) {
+    if (!Persistence::BoundedJsonDump(resolved,
+                                      Persistence::SavedInputLimits::kPresetBytes - 1,
+                                      saved_preset_json,
+                                      -1,
+                                      false)) {
         m_worldOpenError = "Saved-input admission refused: preset compatibility limit.";
         return false;
     }
@@ -1828,13 +1831,17 @@ bool GameSession::ReconcileWorldStateMetadataTo(const fs::path& save_dir) {
     std::string bytes;
     if (!PrepareWorldMetadataTo(save_dir, false, bytes))
         return false;
-    return bytes.empty() || Persistence::WorldSaveService::save_metadata(bytes, save_dir);
+    if (bytes.empty())
+        return true;
+    // This session operation may create a new metadata-only destination.
+    std::error_code directory_error;
+    fs::create_directories(save_dir, directory_error);
+    return !directory_error && Persistence::WorldSaveService::save_metadata(bytes, save_dir);
 }
 
 bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
     const auto& canonical = m_savedPresetJson;
-    if (canonical.size() >= Persistence::SavedInputLimits::kPresetBytes ||
-        !Persistence::SavedInputLimits::JsonDepthAllowed(canonical))
+    if (!Persistence::SavedInputLimits::JsonDepthAllowed(canonical))
         return false;
     try {
         const auto preset_path = save_dir / "preset.json";
@@ -1870,8 +1877,9 @@ bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
         }
         if (has_preset)
             return !canonical.empty() && preset.dump() == canonical;
-        // Unmarked legacy saves and new destinations may embed the session's preset later.
-        return true;
+        // A new preset needs one byte for its write-time newline. Existing
+        // admitted presets above take the comparison path and need no replacement.
+        return canonical.size() < Persistence::SavedInputLimits::kPresetBytes;
     } catch (const std::exception&) {
         return false;
     }
@@ -2090,20 +2098,35 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                       : Persistence::WorldSaveService::has_world_save(save_dir));
     Persistence::WorldSaveService::PreparedWorldWrite prepared_chunks;
     std::string metadata_bytes;
-    std::string plant_bytes;
+    Persistence::WorldSaveService::PreparedPlantWrite prepared_plants;
     if (!PrepareWorldMetadataTo(save_dir, write_metadata && !m_transientWorld, metadata_bytes) ||
-        !Persistence::WorldSaveService::prepare_plant_entities(
-            plant_snapshot, plant_bytes, &errors) ||
+        !prepared_plants.prepare(plant_snapshot, &errors) ||
         (write_chunks &&
          !prepared_chunks.prepare(state, save_dir, !full_snapshot && has_snapshot, &errors))) {
         for (const auto& error : errors)
             LUMINUMBRA_CORE_ERROR("World state admission refused: {}", error);
         return false;
     }
+    std::optional<luminumbra::fields::EnergyFieldState> prepared_energy;
+    // Serialize once into the energy writer's named record-byte bound.
+    std::string energy_bytes;
+    bool remove_energy = false;
     if (m_energyFieldState) {
         try {
             auto energy_snapshot = *m_energyFieldState;
-            static_cast<void>(energy_snapshot.SerializeRecord(GetSimulationTickCount()));
+            const auto tick = GetSimulationTickCount();
+            if (energy_snapshot.page_count() == 0) {
+                const auto absent_remaining =
+                    m_activeRegionsEnabled ? luminumbra::fields::kEnergyCadenceTicks -
+                                                 tick % luminumbra::fields::kEnergyCadenceTicks
+                                           : luminumbra::fields::kEnergyCadenceTicks;
+                const auto next_fire = energy_snapshot.next_fire_tick();
+                // Absence reconstructs this phase. A legacy import can retain
+                // another phase, which still needs its header-only record.
+                remove_energy = next_fire > tick && next_fire - tick == absent_remaining;
+            }
+            energy_bytes = energy_snapshot.SerializeRecord(tick);
+            prepared_energy = std::move(energy_snapshot);
         } catch (const std::length_error& error) {
             LUMINUMBRA_CORE_ERROR("{}", error.what());
             return false;
@@ -2122,9 +2145,15 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         }
     }
     if (ok)
-        ok = Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors);
-    if (ok)
-        ok = SaveEnergyFieldRecord(save_dir);
+        ok = prepared_plants.publish(save_dir, &errors);
+    if (ok && prepared_energy.has_value()) {
+        const auto energy_path = save_dir / "aether_state.efs";
+        ok = remove_energy
+                 ? Persistence::WorldSaveService::remove_file_and_staging(energy_path)
+                 : Persistence::WorldSaveService::write_file_durably(energy_path, energy_bytes);
+        if (ok && !remove_energy)
+            *m_energyFieldState = std::move(*prepared_energy);
+    }
     // Publish complete-save metadata and reconcile presentation calendars only
     // after every payload succeeds, before acknowledging any dirty chunks.
     write_metadata = write_metadata && !m_transientWorld;
@@ -2489,40 +2518,6 @@ void GameSession::InitializeEnergyFieldState() {
     m_energyFieldState = std::make_unique<luminumbra::fields::EnergyFieldState>(/*channels=*/2);
     m_scriptState->set_energy_field(m_energyFieldState.get());
     LUMINUMBRA_CORE_INFO("Energy field state layer initialized (sim.aether_state ON, 2 channels).");
-}
-
-bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
-    if (!m_worldUsable)
-        return false;
-    if (!m_energyFieldState || save_dir.empty())
-        return true;
-    if (m_energyFieldState->page_count() == 0) {
-        const auto tick = GetSimulationTickCount();
-        const auto absent_remaining = m_activeRegionsEnabled
-                                          ? luminumbra::fields::kEnergyCadenceTicks -
-                                                tick % luminumbra::fields::kEnergyCadenceTicks
-                                          : luminumbra::fields::kEnergyCadenceTicks;
-        const auto next_fire = m_energyFieldState->next_fire_tick();
-        if (next_fire > tick && next_fire - tick == absent_remaining) {
-            // Absence reconstructs this phase. Retire any stale nonempty record.
-            return Persistence::WorldSaveService::remove_file_and_staging(save_dir /
-                                                                          "aether_state.efs");
-        }
-        // A legacy import can retain a different phase after its last unit decays.
-        // The existing header alone preserves it without adding zero pages.
-    }
-    try {
-        auto energy_snapshot = *m_energyFieldState;
-        const std::string record = energy_snapshot.SerializeRecord(GetSimulationTickCount());
-        if (!Persistence::WorldSaveService::write_file_durably(save_dir / "aether_state.efs",
-                                                               record))
-            return false;
-        *m_energyFieldState = std::move(energy_snapshot);
-        return true;
-    } catch (const std::length_error& error) {
-        LUMINUMBRA_CORE_ERROR("{}", error.what());
-        return false;
-    }
 }
 
 std::string GameSession::ComputeAetherStateSubHash() const {

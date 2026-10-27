@@ -956,10 +956,14 @@ TEST(WorldSaveRegionFormat, SavedJsonDepthBoundaryCoversMetadataManifestAndPrese
                 EXPECT_NE(errors.front().find("Saved-input admission refused"), std::string::npos);
             }
         }
-        // Writer admission uses the same boundary, before creating a directory.
+        // Legacy metadata publication requires an existing directory; admission
+        // still refuses excessive depth before creating any file.
         const auto destination = directory.path / (over ? "refused" : "accepted");
+        ASSERT_TRUE(std::filesystem::create_directory(destination));
         EXPECT_EQ(WorldSaveService::save_metadata(metadata, destination), !over);
-        EXPECT_EQ(std::filesystem::exists(destination), !over);
+        EXPECT_EQ(std::filesystem::exists(destination / "world_info.json"), !over);
+        if (over)
+            EXPECT_TRUE(std::filesystem::is_empty(destination));
     }
     EXPECT_TRUE(SavedInputLimits::JsonDepthAllowed(nested(SavedInputLimits::kJsonNestingDepth)));
     EXPECT_FALSE(

@@ -1297,12 +1297,6 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         (has_clock || has_render_calendar) ? metadata.dump(4) + "\n" : bytes;
     if (!admit_metadata_bytes(output_bytes, errors))
         return false;
-    std::error_code directory_error;
-    std::filesystem::create_directories(save_dir, directory_error);
-    if (directory_error) {
-        AddError(errors, "failed to create metadata directory: " + directory_error.message());
-        return false;
-    }
     const auto destination = save_dir / "world_info.json";
     ReclaimAbandonedStaging(destination);
     std::filesystem::path temp;
@@ -1529,12 +1523,27 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
     const SaveGuard guard;
-    std::string bytes;
-    if (!prepare_plant_entities(snapshot, bytes, errors))
+    PreparedPlantWrite prepared;
+    return prepared.prepare(snapshot, errors) && prepared.publish(save_dir, errors);
+}
+
+bool WorldSaveService::PreparedPlantWrite::prepare(const Ecs::EntityRegistrySnapshot& snapshot,
+                                                   std::vector<std::string>* errors) {
+    m_prepared = false;
+    m_bytes.clear();
+    if (!prepare_plant_entities(snapshot, m_bytes, errors))
         return false;
+    m_empty = snapshot.entities.empty();
+    m_prepared = true;
+    return true;
+}
+
+bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& save_dir,
+                                                   std::vector<std::string>* errors) const {
+    const SaveGuard guard;
     LUMIN_PROFILE_ZONE_N("File plant entities save");
-    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot)) {
-        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+    if (!m_prepared) {
+        AddError(errors, "plant write has not been prepared");
         return false;
     }
     if (!validate_save(save_dir, errors))
@@ -1545,7 +1554,7 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
     const auto staging = save_dir / path.filename();
     ReclaimAbandonedStaging(staging);
     std::error_code ec;
-    if (snapshot.entities.empty()) {
+    if (m_empty) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
         std::filesystem::remove(path, ec);
         if (ec) {
@@ -1561,7 +1570,7 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
         AddError(errors, "failed to create plant directory: " + ec.message());
         return false;
     }
-    return WriteFileDurably(path, bytes, staging, errors);
+    return WriteFileDurably(path, m_bytes, staging, errors);
 }
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
@@ -2015,7 +2024,7 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // Revalidate the parsed source under ownership so another persistence writer
     // cannot change the source between the caller's parse and this transaction.
     {
-        const SavedInputFile input(source);
+        const SavedInputFile input(source, SavedInputFile::LeafSymlinks::Follow);
         std::string contents;
         if (!input.read(contents, expected_bytes.size()) || contents != expected_bytes) {
             AddError(errors, "rename source changed or cannot be read");

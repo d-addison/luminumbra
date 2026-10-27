@@ -42,8 +42,6 @@ inline bool JsonDepthAllowed(std::string_view bytes) {
     // Syntax validation belongs to the parser, after depth admission.
     return true;
 }
-// Historical catalog policy remains 1 MiB, independent of direct service admission.
-inline constexpr std::size_t kCatalogMetadataBytes = 1024u * 1024u;
 // Policy decision for previously unbounded UTF-8 world name and seed text.
 inline constexpr std::size_t kWorldNameBytes = 4u * 1024u;
 inline constexpr std::size_t kWorldSeedBytes = 4u * 1024u;

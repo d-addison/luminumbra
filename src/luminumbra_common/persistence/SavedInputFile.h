@@ -23,11 +23,34 @@
 #endif
 
 namespace Luminumbra::Persistence {
-// Type, length, and bytes come from one open handle. Leaf symlinks and special
-// files are refusals; only a missing entry is a clean miss.
+#if !defined(_WIN32)
+namespace detail {
+// Share the POSIX retry rule between payload reads and the final EOF probe.
+// The callable is inlined; each attempt performs exactly one read syscall.
+template<typename Read>
+auto ReadSavedInputRetryingInterrupt(Read&& read) {
+    for (;;) {
+        const auto received = read();
+        if (received >= 0 || errno != EINTR)
+            return received;
+    }
+}
+} // namespace detail
+#endif
+
+// Type, length, and bytes come from one open handle. Special files are refusals;
+// only a missing entry is a clean miss. Leaf links are refused by default.
 class SavedInputFile {
 public:
-    explicit SavedInputFile(const std::filesystem::path& path) {
+    // Checked rename follows a source leaf to verify its expected target bytes,
+    // then retires only the leaf. Saved-world admission always uses Refuse.
+    enum class LeafSymlinks {
+        Refuse,
+        Follow
+    };
+
+    explicit SavedInputFile(const std::filesystem::path& path,
+                            LeafSymlinks leaf_symlinks = LeafSymlinks::Refuse) {
 #if defined(_WIN32)
         // Win32 can report PATH_NOT_FOUND for an overlong component beneath a
         // missing directory. Such an invalid path must never become a clean miss.
@@ -36,13 +59,11 @@ public:
             if (component.native().size() > 255)
                 return;
         }
-        m_handle = ::CreateFileW(path.c_str(),
-                                 GENERIC_READ,
-                                 FILE_SHARE_READ,
-                                 nullptr,
-                                 OPEN_EXISTING,
-                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                                 nullptr);
+        const DWORD flags = leaf_symlinks == LeafSymlinks::Refuse
+                                ? FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS
+                                : FILE_FLAG_BACKUP_SEMANTICS;
+        m_handle = ::CreateFileW(
+            path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, flags, nullptr);
         if (m_handle == INVALID_HANDLE_VALUE) {
             const DWORD error = ::GetLastError();
             m_missing = error == ERROR_FILE_NOT_FOUND ||
@@ -51,7 +72,10 @@ public:
 #else
         // NONBLOCK prevents a FIFO open from waiting for a writer; NOFOLLOW
         // refuses even dangling symlinks rather than mistaking them for absence.
-        m_descriptor = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        const int flags = leaf_symlinks == LeafSymlinks::Refuse
+                              ? O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                              : O_RDONLY | O_NONBLOCK | O_CLOEXEC;
+        m_descriptor = ::open(path.c_str(), flags);
         m_missing = m_descriptor < 0 && errno == ENOENT;
 #endif
     }
@@ -121,9 +145,8 @@ public:
                 received == 0)
                 return false;
 #else
-            const auto received = ::read(m_descriptor, destination + offset, count);
-            if (received < 0 && errno == EINTR)
-                continue;
+            const auto received = detail::ReadSavedInputRetryingInterrupt(
+                [&] { return ::read(m_descriptor, destination + offset, count); });
             if (received <= 0)
                 return false;
 #endif
@@ -147,7 +170,8 @@ public:
         DWORD received = 0;
         return ::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0;
 #else
-        return ::read(m_descriptor, &trailing, 1) == 0;
+        return detail::ReadSavedInputRetryingInterrupt(
+                   [&] { return ::read(m_descriptor, &trailing, 1); }) == 0;
 #endif
     }
 

@@ -612,7 +612,6 @@ private:
     void InitializeEnergyFieldState();
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
-    bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
     void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
     bool m_finiteHydrologyEnabled = true;

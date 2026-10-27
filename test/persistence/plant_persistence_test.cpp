@@ -941,3 +941,34 @@ TEST_F(PlantSaveRecovery, PlantFileAcceptsExact256MiBAndRefusesOneMoreBeforePars
     EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(snapshot, Directory()));
     EXPECT_EQ(std::filesystem::file_size(path), SS::SavedInputLimits::kPlantFileBytes + 1);
 }
+
+TEST_F(PlantSaveRecovery, PreparedPlantWriteOwnsBytesAndFailedReprepareCannotPublish) {
+    namespace SS = ::Luminumbra::Persistence;
+    E::EntityRegistrySnapshot snapshot;
+    snapshot.entities.push_back(
+        {.entity_id = 1, .name = "prepared", .components = {{"Future", 7}}});
+    std::string expected;
+    ASSERT_TRUE(SS::WorldSaveService::prepare_plant_entities(snapshot, expected));
+    const auto path = SS::WorldSaveService::plant_entities_path(Directory());
+    const auto read = [&path]() {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    SS::WorldSaveService::PreparedPlantWrite prepared;
+    EXPECT_FALSE(prepared.publish(Directory()));
+    EXPECT_FALSE(std::filesystem::exists(path));
+    ASSERT_TRUE(prepared.prepare(snapshot));
+    snapshot.entities.front().name = "changed after preparation";
+    ASSERT_TRUE(prepared.publish(Directory()));
+    EXPECT_EQ(read(), expected);
+    snapshot.entities.front().components.front().data =
+        std::string(SS::SavedInputLimits::kPlantComponentBytes, 'x');
+    EXPECT_FALSE(prepared.prepare(snapshot));
+    EXPECT_FALSE(prepared.publish(Directory()));
+    EXPECT_EQ(read(), expected);
+    snapshot.entities.clear();
+    ASSERT_TRUE(prepared.prepare(snapshot));
+    ASSERT_TRUE(prepared.publish(Directory()));
+    EXPECT_FALSE(std::filesystem::exists(path));
+    ASSERT_TRUE(prepared.publish(Directory()));
+}

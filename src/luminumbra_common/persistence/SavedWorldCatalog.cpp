@@ -133,11 +133,11 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         nlohmann::json json;
         bool missing = false;
         const bool readable =
-            ReadSavedJson(metadata_path, SavedInputLimits::kCatalogMetadataBytes, json, missing);
+            ReadSavedJson(metadata_path, SavedInputLimits::kMetadataBytes, json, missing);
         if (missing)
             return result;
         if (!readable || !AdmitMetadata(json)) {
-            result.error = "Corrupt world metadata: unreadable or exceeds the 1 MiB limit or text "
+            result.error = "Corrupt world metadata: unreadable or exceeds the 2 MiB limit or text "
                            "compatibility limits.";
             return result;
         }

@@ -507,3 +507,33 @@ TEST(AetherEmitterDeterminism, LargestEnergyWriterEncodingFitsItsDerivedByteLimi
     ASSERT_TRUE(field.DeserializeRecord(record, 0));
     EXPECT_THROW(static_cast<void>(field.SerializeRecord(0)), std::length_error);
 }
+
+TEST(AetherEmitterDeterminism, EnergyWriterCountsOnlyPagesRemainingAfterFrozenDecay) {
+    using namespace luminumbra::fields;
+    for (const bool excess_decays : {false, true}) {
+        SCOPED_TRACE(excess_decays);
+        // All pages are frozen outside the active window. Exactly the excess
+        // page has value 1 in the successful case; one firing decays it to zero.
+        std::string record = "EFS1 1 8\n";
+        for (std::size_t page = 0; page <= kEnergyWritePages; ++page)
+            record += "P " + std::to_string(page + 100) +
+                      " 0 0:" + (excess_decays && page == kEnergyWritePages ? "1\n" : "65535\n");
+        EnergyFieldState field;
+        ASSERT_TRUE(field.DeserializeRecord(record, 0));
+        field.SetAnchorCell(0, 0);
+        field.Tick(kEnergyCadenceTicks);
+        ASSERT_EQ(field.page_count(), kEnergyWritePages + 1);
+        const auto before = field.CanonicalBytes();
+        if (excess_decays) {
+            const auto bytes = field.SerializeRecord(kEnergyCadenceTicks);
+            EXPECT_EQ(field.page_count(), kEnergyWritePages);
+            EnergyFieldState loaded;
+            ASSERT_TRUE(loaded.DeserializeRecord(bytes, 0));
+            EXPECT_EQ(loaded.page_count(), kEnergyWritePages);
+        } else {
+            EXPECT_THROW(static_cast<void>(field.SerializeRecord(kEnergyCadenceTicks)),
+                         std::length_error);
+            EXPECT_EQ(field.CanonicalBytes(), before);
+        }
+    }
+}

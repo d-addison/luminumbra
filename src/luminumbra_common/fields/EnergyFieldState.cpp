@@ -438,11 +438,14 @@ std::string EnergyFieldState::SerializeRecord(std::uint64_t save_tick) {
     // Normalize: bring EVERY page current through the completed firings, so
     // the record is a pure snapshot and last-step bookkeeping restarts at zero
     // on load (frozen-page ages collapse into the values themselves).
-    if (m_channels > kEnergyRecordChannels || m_pages.size() > kEnergyWritePages)
+    if (m_channels > kEnergyRecordChannels)
         throw std::length_error(
             "Saved-input admission refused: energy channel/page compatibility limit.");
     auto normalized = *this;
     normalized.NormalizeAllPages();
+    if (normalized.m_pages.size() > kEnergyWritePages)
+        throw std::length_error(
+            "Saved-input admission refused: energy channel/page compatibility limit.");
 
     // Ticks remaining until the next cadence firing — the epoch-rebase
     // quantity (-4): load restores the phase from it so the next

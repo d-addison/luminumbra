@@ -81,6 +81,24 @@ public:
     static bool save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+    // Own the admitted encoding so a compound save serializes plants once,
+    // before any payload writes. Empty snapshots retain stale-file retirement.
+    class PreparedPlantWrite {
+    public:
+        PreparedPlantWrite() = default;
+        PreparedPlantWrite(const PreparedPlantWrite&) = delete;
+        PreparedPlantWrite& operator=(const PreparedPlantWrite&) = delete;
+        bool prepare(const Ecs::EntityRegistrySnapshot& snapshot,
+                     std::vector<std::string>* errors = nullptr);
+        bool publish(const std::filesystem::path& save_dir,
+                     std::vector<std::string>* errors = nullptr) const;
+
+    private:
+        // Bounded by SavedInputLimits::kPlantFileBytes during preparation.
+        std::string m_bytes;
+        bool m_prepared = false;
+        bool m_empty = true;
+    };
     // A missing file is a clean miss: out is emptied, returns true.
     static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                     const std::filesystem::path& save_dir,
