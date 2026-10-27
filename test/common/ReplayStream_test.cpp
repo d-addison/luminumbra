@@ -471,7 +471,7 @@ TEST_F(ReplayStreamTest, ExhaustedRecorderCandidatesRefuseWithTheTriedRange) {
     const std::string refusal(recorder.OpenRefusal());
     EXPECT_LT(refusal.size(), replay::BoundedReplayRecorder::kOpenRefusalBytes);
     EXPECT_TRUE(refusal.starts_with("exhausted: " + std::to_string(kCandidates) + " candidates " +
-                                    prefix + std::to_string(first) + ".." + prefix +
+                                    prefix + std::to_string(first) + ".." +
                                     std::to_string(first + kCandidates - 1) + " beside '"))
         << refusal;
     EXPECT_TRUE(refusal.ends_with("' already exist")) << refusal;
