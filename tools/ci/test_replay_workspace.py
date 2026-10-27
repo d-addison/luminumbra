@@ -82,7 +82,7 @@ class ReplayWorkspaceContract(unittest.TestCase):
     def test_every_open_refusal_is_bounded_and_names_its_step(self):
         source = read("src/luminumbra_common/replay/ReplayStream.cpp")
         opened = body(source, "bool BoundedReplayRecorder::Open(")
-        refusals = opened.count("return Refused(std::snprintf(m_open_refusal.data(),")
+        refusals = len(re.findall(r"return Refused\(\s*std::snprintf\(m_open_refusal\.data\(\),", opened))
         self.assertEqual(refusals, 6)
         self.assertEqual(opened.count("kOpenRefusalBytes,"), refusals)
         self.assertEqual(opened.count("return false;"), 0)
@@ -95,9 +95,12 @@ class ReplayWorkspaceContract(unittest.TestCase):
             for helper in ("PathTailPrefix(", "PathTailLength(", "PathTail(",
                            "message.c_str()", "ec.category().name()", "ec.value()"):
                 self.assertIn(helper, refusal, (stage, helper))
+        self.assertEqual(opened.count("(%.16s %d)"), 2)
+        self.assertIn("static_assert(kLongestRefusalBytes < BoundedReplayRecorder::kOpenRefusalBytes",
+                      source)
         self.assertIn("m_open_refusal_length = 0;", opened)
         header = read("src/luminumbra_common/replay/ReplayStream.h")
-        self.assertIn("static constexpr std::size_t kOpenRefusalBytes = 256;", header)
+        self.assertIn("static constexpr std::size_t kOpenRefusalBytes = 512;", header)
         self.assertIn("std::array<char, kOpenRefusalBytes> m_open_refusal{};", header)
         queued = body(source, "bool QueuedReplayRecorder::State::Open(")
         self.assertIn('state.open_refusal = "already-open: recorder is open";', queued)

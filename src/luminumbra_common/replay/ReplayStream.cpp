@@ -41,6 +41,18 @@ namespace fs = std::filesystem;
 // strings go to the logger. The three helpers feed one "%s%.*s" conversion.
 constexpr std::size_t kRefusalFragmentBytes = 80;
 
+// The longest refusal (reserve-directory) with every field at its bound must fit
+// the fixed buffer, so the error category and code are never truncated away.
+constexpr std::size_t kUnsigned64Digits = 20;
+constexpr std::size_t kSignedIntChars = 11;
+constexpr std::size_t kCategoryBytes = 16;
+constexpr std::size_t kLongestRefusalBytes =
+    sizeof("reserve-directory: attempt  candidate 'lockstep-recording-' beside '': (  )") +
+    2 * kUnsigned64Digits + 2 * (kRefusalFragmentBytes + sizeof("...") - 1) + kCategoryBytes +
+    kSignedIntChars;
+static_assert(kLongestRefusalBytes < BoundedReplayRecorder::kOpenRefusalBytes,
+              "the longest Open refusal must fit the fixed refusal buffer");
+
 const char* PathTailPrefix(const std::string& text) {
     return text.size() > kRefusalFragmentBytes ? "..." : "";
 }
@@ -428,7 +440,7 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
                 "Replay recorder: cannot create parent '{}': {} ({})", parent, message, ec.value());
             return Refused(std::snprintf(m_open_refusal.data(),
                                          kOpenRefusalBytes,
-                                         "create-parent: '%s%.*s': %.*s (%s %d)",
+                                         "create-parent: '%s%.*s': %.*s (%.16s %d)",
                                          PathTailPrefix(parent),
                                          PathTailLength(parent),
                                          PathTail(parent),
@@ -465,19 +477,20 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
                                   candidate,
                                   message,
                                   ec.value());
-            return Refused(std::snprintf(m_open_refusal.data(),
-                                         kOpenRefusalBytes,
-                                         "reserve-directory: attempt %llu candidate "
-                                         "'lockstep-recording-%llu' beside '%s%.*s': %.*s (%s %d)",
-                                         static_cast<unsigned long long>(attempt),
-                                         static_cast<unsigned long long>(ordinal),
-                                         PathTailPrefix(destination),
-                                         PathTailLength(destination),
-                                         PathTail(destination),
-                                         PathTailLength(message),
-                                         message.c_str(),
-                                         ec.category().name(),
-                                         ec.value()));
+            return Refused(
+                std::snprintf(m_open_refusal.data(),
+                              kOpenRefusalBytes,
+                              "reserve-directory: attempt %llu candidate "
+                              "'lockstep-recording-%llu' beside '%s%.*s': %.*s (%.16s %d)",
+                              static_cast<unsigned long long>(attempt),
+                              static_cast<unsigned long long>(ordinal),
+                              PathTailPrefix(destination),
+                              PathTailLength(destination),
+                              PathTail(destination),
+                              PathTailLength(message),
+                              message.c_str(),
+                              ec.category().name(),
+                              ec.value()));
         }
     }
     LUMINUMBRA_CORE_ERROR("Replay recorder: exhausted {} directory candidates beside '{}'",

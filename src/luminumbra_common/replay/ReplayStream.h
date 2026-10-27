@@ -184,8 +184,9 @@ public:
     static constexpr std::size_t kSegmentTicks = 1024;
     static constexpr std::size_t kSegmentBytes = std::size_t{64} * 1024 * 1024;
     // Fixed capacity of the Open refusal text, including its terminator. Paths
-    // contribute only their tail so one refusal never allocates or grows.
-    static constexpr std::size_t kOpenRefusalBytes = 256;
+    // and OS messages contribute only a bounded tail so one refusal never
+    // allocates or grows and always keeps its error category and code.
+    static constexpr std::size_t kOpenRefusalBytes = 512;
 
     BoundedReplayRecorder() = default;
     ~BoundedReplayRecorder() override;
