@@ -582,8 +582,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       # One Windows shard is enough: the contracts do not depend on the shard's test partition.
+      # Shard 2 carries them because its test partition is the shorter one.
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
+        if: ${{ matrix.shard != 1 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
@@ -755,7 +756,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
         continue-on-error: true
         shell: pwsh
-        run: ccache -s
+        run: ccache -s -v
       - name: Clean compiler cache before saving
         if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         continue-on-error: true
@@ -980,7 +981,7 @@ jobs:
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
         shell: msys2 {0}
-        run: ccache -s || true
+        run: ccache -s -v || true
       - name: Clean compiler cache before saving
         if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
