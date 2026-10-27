@@ -172,12 +172,20 @@ public:
     [[nodiscard]] virtual std::size_t RetainedBytes() const = 0;
     [[nodiscard]] virtual std::size_t ByteLimit() const = 0;
     [[nodiscard]] virtual std::size_t SegmentCount() const = 0;
+    // Bounded text naming the step that refused the most recent Open and the OS
+    // error it saw. Empty before the first Open and after every successful Open.
+    [[nodiscard]] virtual std::string_view OpenRefusal() const {
+        return {};
+    }
 };
 
 class BoundedReplayRecorder final : public ReplayTickSink {
 public:
     static constexpr std::size_t kSegmentTicks = 1024;
     static constexpr std::size_t kSegmentBytes = std::size_t{64} * 1024 * 1024;
+    // Fixed capacity of the Open refusal text, including its terminator. Paths
+    // contribute only their tail so one refusal never allocates or grows.
+    static constexpr std::size_t kOpenRefusalBytes = 256;
 
     BoundedReplayRecorder() = default;
     ~BoundedReplayRecorder() override;
@@ -206,6 +214,9 @@ public:
     [[nodiscard]] std::size_t SegmentCount() const override {
         return m_segments.size();
     }
+    [[nodiscard]] std::string_view OpenRefusal() const override {
+        return {m_open_refusal.data(), m_open_refusal_length};
+    }
 
 private:
     struct Segment {
@@ -216,6 +227,9 @@ private:
         std::size_t ticks = 0;
     };
     bool Prune(std::uint64_t tick, std::uint64_t confirmed_tick);
+    // Records the length of the refusal text just formatted into m_open_refusal
+    // and returns false so Open can refuse in one statement.
+    bool Refused(int formatted);
 
     ReplayHeader m_header;
     std::string m_directory;
@@ -228,6 +242,8 @@ private:
     std::uint64_t m_elided_tick = 0;
     std::uint64_t m_elided_digest = 1469598103934665603ULL;
     std::uint64_t m_last_tick = 0;
+    std::array<char, kOpenRefusalBytes> m_open_refusal{};
+    std::size_t m_open_refusal_length = 0;
 };
 
 // Ordered recording on one existing JobSystem worker. Open is a setup operation;
@@ -270,6 +286,10 @@ public:
     void Close();
 
     [[nodiscard]] const char* FailureReason() const;
+    // Why the most recent Open was refused: this recorder's own precondition or
+    // the sink's bounded refusal text. Empty before the first and after a
+    // successful Open. Read it on the thread that called Open.
+    [[nodiscard]] std::string_view OpenRefusal() const;
     // Const snapshots published after each whole-tick sink operation. Flush
     // before comparing them with files on disk.
     [[nodiscard]] std::size_t RetainedBytes() const;

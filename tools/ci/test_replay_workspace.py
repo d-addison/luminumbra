@@ -76,7 +76,59 @@ class ReplayWorkspaceContract(unittest.TestCase):
                            "exhausted {} directory candidates"):
             self.assertIn(diagnostic, opened)
         self.assertEqual(opened.count("ec.message()"), 2)
-        self.assertEqual(opened.count("ec.value()"), 2)
+        # Both filesystem failures log the OS error and repeat it in the refusal.
+        self.assertEqual(opened.count("ec.value()"), 4)
+
+    def test_every_open_refusal_is_bounded_and_names_its_step(self):
+        source = read("src/luminumbra_common/replay/ReplayStream.cpp")
+        opened = body(source, "bool BoundedReplayRecorder::Open(")
+        refusals = opened.count("return Refused(std::snprintf(m_open_refusal.data(),")
+        self.assertEqual(refusals, 6)
+        self.assertEqual(opened.count("kOpenRefusalBytes,"), refusals)
+        self.assertEqual(opened.count("return false;"), 0)
+        for stage in ("unconfigured: ", "already-open: ", "header-budget: ", "create-parent: ",
+                      "reserve-directory: ", "exhausted: "):
+            self.assertEqual(opened.count(f'"{stage}'), 1, stage)
+        # Paths and OS messages enter the refusal only through the bounded helpers.
+        for stage in ("create-parent: ", "reserve-directory: "):
+            refusal = opened.split(f'"{stage}', 1)[1].split(";", 1)[0]
+            for helper in ("PathTailPrefix(", "PathTailLength(", "PathTail(",
+                           "message.c_str()", "ec.category().name()", "ec.value()"):
+                self.assertIn(helper, refusal, (stage, helper))
+        self.assertIn("m_open_refusal_length = 0;", opened)
+        header = read("src/luminumbra_common/replay/ReplayStream.h")
+        self.assertIn("static constexpr std::size_t kOpenRefusalBytes = 256;", header)
+        self.assertIn("std::array<char, kOpenRefusalBytes> m_open_refusal{};", header)
+        queued = body(source, "bool QueuedReplayRecorder::State::Open(")
+        self.assertIn('state.open_refusal = "already-open: recorder is open";', queued)
+        self.assertIn('state.open_refusal = "unconfigured: Configure must succeed before Open";',
+                      queued)
+        self.assertIn("state.open_refusal = nullptr;", queued)
+        session = body(read("src/luminumbra_common/net/LockstepSession.cpp"),
+                       "bool LockstepSession::OpenReplayRecorder()")
+        self.assertIn("const auto refusal = m_replay->OpenRefusal();", session)
+        self.assertIn('m_status.replay_error = "recorder setup failed";', session)
+        self.assertIn('m_status.replay_error.append(": ").append(refusal);', session)
+        native = read("test/common/ReplayStream_test.cpp")
+        self.assertIn("TEST_F(ReplayStreamTest, OpenRefusalsNameTheFailingStepAndStayBounded)",
+                      native)
+        self.assertIn("TEST(LockstepSessionTest, "
+                      "RecorderSetupRefusalNamesTheFailingStepInReplayError)",
+                      read("test/common/LockstepSession_test.cpp"))
+        # Every fixture Open of a recorder reports the refusal in its assertion.
+        # Declarations precede uses, so the latest declared type of a name wins.
+        declared = {}
+        recorders = {"BoundedReplayRecorder", "QueuedReplayRecorder"}
+        checked = 0
+        for line in native.splitlines():
+            declaration = re.search(r"replay::(\w+) (\w+)[;({]", line)
+            if declaration:
+                declared[declaration.group(2)] = declaration.group(1)
+            opened = re.search(r"ASSERT_TRUE\((\w+)\.Open\(", line)
+            if opened and declared.get(opened.group(1)) in recorders:
+                self.assertIn(f" << {opened.group(1)}.OpenRefusal();", line, line)
+                checked += 1
+        self.assertGreaterEqual(checked, 15)
 
     def test_late_desync_keeps_every_budget_and_artifact_assertion(self):
         case = body(read("test/common/LockstepSession_test.cpp"),

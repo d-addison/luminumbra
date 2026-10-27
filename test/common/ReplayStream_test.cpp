@@ -166,6 +166,9 @@ public:
     std::size_t SegmentCount() const override {
         return m_disk.SegmentCount();
     }
+    std::string_view OpenRefusal() const override {
+        return m_disk.OpenRefusal();
+    }
 
 private:
     std::shared_ptr<RecorderGate> m_gate;
@@ -177,7 +180,7 @@ TEST_F(ReplayStreamTest, QueuedTickOnlyRetainsImmutableDataWhileSinkIsBlocked) {
     replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
     const ReleaseRecorderGate release{gate};
     ASSERT_TRUE(recorder.Configure(1024, 0));
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
     const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(512, 0xab);
     const std::weak_ptr<const std::vector<std::uint8_t>> lifetime = inputs;
     ASSERT_TRUE(recorder.RecordTick(1, inputs, nullptr, 1));
@@ -208,7 +211,7 @@ TEST_F(ReplayStreamTest, QueuedRecorderLatchesCountAndByteOverloadAndDrainsAccep
         // Each input frame costs 18 bytes. Both limits include the active tick.
         ASSERT_TRUE(recorder.Configure(
             18, 0, {.bytes = byte_limit ? 36u : 1024u, .ticks = byte_limit ? 4u : 2u}));
-        ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
         const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(1, 0xab);
         ASSERT_TRUE(recorder.RecordTick(1, inputs, nullptr, 1));
         WaitForRecorderWorker(gate);
@@ -241,7 +244,7 @@ TEST_F(ReplayStreamTest, QueuedRecorderChargesRetainedCapacityBeforeEnqueue) {
     replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
     const ReleaseRecorderGate release{gate};
     ASSERT_TRUE(recorder.Configure(18, 0, {.bytes = 1024, .ticks = 2}));
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
     std::vector<std::uint8_t> storage;
     storage.reserve(2048);
     storage.push_back(0xab);
@@ -258,12 +261,12 @@ TEST_F(ReplayStreamTest, QueuedRecorderPreservesOrderingDigestAndDesyncArtifactB
     const auto expected_path = m_path + ".expected";
     replay::BoundedReplayRecorder expected;
     ASSERT_TRUE(expected.Configure(256, 64));
-    ASSERT_TRUE(expected.Open(expected_path, MakeHeader()));
+    ASSERT_TRUE(expected.Open(expected_path, MakeHeader())) << expected.OpenRefusal();
     auto gate = std::make_shared<RecorderGate>();
     replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
     const ReleaseRecorderGate release{gate};
     ASSERT_TRUE(recorder.Configure(256, 64));
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
     constexpr std::uint64_t ticks = 5000;
     constexpr std::uint64_t divergence = 4970;
     for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
@@ -316,7 +319,7 @@ TEST_F(ReplayStreamTest, QueuedSinkFailureIsReportedAfterAcceptedWorkDrains) {
     replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
     const ReleaseRecorderGate release{gate};
     ASSERT_TRUE(recorder.Configure(18, 0));
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
     const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(1, 0xab);
     ASSERT_TRUE(recorder.RecordTick(1, inputs, nullptr, 1));
     WaitForRecorderWorker(gate);
@@ -346,7 +349,7 @@ TEST_F(ReplayStreamTest, QueuedShutdownDrainsBeforeRemovingAllWorkingFiles) {
         replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
         const ReleaseRecorderGate release{gate};
         ASSERT_TRUE(recorder.Configure(18, 0));
-        ASSERT_TRUE(recorder.Open(destination, MakeHeader()));
+        ASSERT_TRUE(recorder.Open(destination, MakeHeader())) << recorder.OpenRefusal();
         for (std::uint64_t tick = 1; tick <= 128; ++tick) {
             ASSERT_TRUE(recorder.RecordTick(
                 tick, std::make_shared<const std::vector<std::uint8_t>>(1, 0xab), nullptr, tick));
@@ -373,7 +376,7 @@ TEST_F(ReplayStreamTest, OccupiedRecorderCandidateRefusesWithoutDeletingTheOther
     const auto destination = (directory / "dump.lrec1").string();
     replay::BoundedReplayRecorder probe;
     ASSERT_TRUE(probe.Configure(18, 0));
-    ASSERT_TRUE(probe.Open(destination, MakeHeader()));
+    ASSERT_TRUE(probe.Open(destination, MakeHeader())) << probe.OpenRefusal();
     std::string name;
     {
         const auto entry = fs::directory_iterator(directory);
@@ -394,9 +397,24 @@ TEST_F(ReplayStreamTest, OccupiedRecorderCandidateRefusesWithoutDeletingTheOther
     }
     replay::BoundedReplayRecorder recorder;
     ASSERT_TRUE(recorder.Configure(18, 0));
+    EXPECT_TRUE(recorder.OpenRefusal().empty());
     EXPECT_FALSE(recorder.Open(destination, MakeHeader()));
     EXPECT_EQ(recorder.RetainedBytes(), 0u);
     EXPECT_EQ(recorder.SegmentCount(), 0u);
+    // The refusal names the reservation step, the candidate and the OS error the
+    // same operation reports here, so a hosted failure identifies itself.
+    std::error_code expected_error;
+    EXPECT_FALSE(fs::create_directory(occupied, expected_error));
+    ASSERT_TRUE(expected_error);
+    const std::string refusal(recorder.OpenRefusal());
+    EXPECT_LT(refusal.size(), replay::BoundedReplayRecorder::kOpenRefusalBytes);
+    EXPECT_TRUE(refusal.starts_with("reserve-directory: attempt 0 candidate '" + prefix +
+                                    std::to_string(next) + "' beside '"))
+        << refusal;
+    EXPECT_NE(refusal.find("(" + std::string(expected_error.category().name()) + " " +
+                           std::to_string(expected_error.value()) + ")"),
+              std::string::npos)
+        << refusal;
     recorder.Close();
     EXPECT_FALSE(fs::exists(destination));
     {
@@ -405,7 +423,8 @@ TEST_F(ReplayStreamTest, OccupiedRecorderCandidateRefusesWithoutDeletingTheOther
         EXPECT_EQ(std::string(std::istreambuf_iterator<char>(blocker), {}), "other owner");
     }
     // A reserved sibling workspace has no dependence on the occupied candidate.
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+    EXPECT_TRUE(recorder.OpenRefusal().empty());
     ASSERT_TRUE(recorder.RecordTick(1, {0xab}, nullptr, 1));
     ASSERT_TRUE(recorder.Finalize(m_path, 1, 1));
     const auto contents = replay::ReadReplay(m_path);
@@ -421,14 +440,85 @@ TEST_F(ReplayStreamTest, OccupiedRecorderCandidateRefusesWithoutDeletingTheOther
     ASSERT_TRUE(fs::remove(directory));
 }
 
+// Each refused Open names its failing step in fixed-size text, carries the OS
+// error where one exists, keeps only a path tail, and clears after success.
+TEST_F(ReplayStreamTest, OpenRefusalsNameTheFailingStepAndStayBounded) {
+    constexpr auto kBound = replay::BoundedReplayRecorder::kOpenRefusalBytes;
+    replay::BoundedReplayRecorder recorder;
+    EXPECT_TRUE(recorder.OpenRefusal().empty());
+    EXPECT_FALSE(recorder.Open(m_path, MakeHeader()));
+    EXPECT_EQ(recorder.OpenRefusal(), "unconfigured: Configure must succeed before Open");
+    ASSERT_TRUE(recorder.Configure(18, 0));
+    // An oversized header part is refused before any directory I/O.
+    auto header = MakeHeader();
+    const auto oversized = replay::BoundedReplayRecorder::kSegmentBytes;
+    header.preset.assign(oversized, 'p');
+    EXPECT_FALSE(recorder.Open(m_path, header));
+    EXPECT_TRUE(recorder.OpenRefusal().starts_with("header-budget: part 1 holds " +
+                                                   std::to_string(oversized) + " bytes, "))
+        << recorder.OpenRefusal();
+    EXPECT_FALSE(fs::exists(m_path));
+    // A regular file where a parent directory should be refuses parent creation
+    // with the same error the filesystem reports here.
+    const auto blocker = m_path + ".parent";
+    {
+        std::ofstream file(blocker, std::ios::binary);
+        ASSERT_TRUE(file.is_open());
+        file << "not a directory";
+        ASSERT_TRUE(file.good());
+    }
+    const auto destination = (fs::path(blocker) / "sub" / "dump.lrec1").string();
+    EXPECT_FALSE(recorder.Open(destination, MakeHeader()));
+    std::error_code expected_error;
+    fs::create_directories(fs::path(destination).parent_path(), expected_error);
+    ASSERT_TRUE(expected_error);
+    std::string refusal(recorder.OpenRefusal());
+    EXPECT_LT(refusal.size(), kBound);
+    EXPECT_TRUE(refusal.starts_with("create-parent: '")) << refusal;
+    EXPECT_NE(refusal.find("(" + std::string(expected_error.category().name()) + " " +
+                           std::to_string(expected_error.value()) + ")"),
+              std::string::npos)
+        << refusal;
+    // A long destination contributes only its tail; the text stays bounded.
+    const auto long_destination =
+        (fs::path(blocker) / std::string(600, 'd') / "dump.lrec1").string();
+    EXPECT_FALSE(recorder.Open(long_destination, MakeHeader()));
+    refusal = std::string(recorder.OpenRefusal());
+    EXPECT_LT(refusal.size(), kBound);
+    EXPECT_TRUE(refusal.starts_with("create-parent: '...")) << refusal;
+    EXPECT_EQ(refusal.find(long_destination), std::string::npos) << refusal;
+    // Success clears the text; a second Open on the open recorder is refused.
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+    EXPECT_TRUE(recorder.OpenRefusal().empty());
+    EXPECT_FALSE(recorder.Open(m_path, MakeHeader()));
+    EXPECT_TRUE(recorder.OpenRefusal().starts_with("already-open: working directory '"))
+        << recorder.OpenRefusal();
+    EXPECT_EQ(recorder.SegmentCount(), 0u);
+    recorder.Close();
+    // The queued recorder reports its own preconditions and forwards the sink's.
+    replay::QueuedReplayRecorder queued;
+    EXPECT_TRUE(queued.OpenRefusal().empty());
+    EXPECT_FALSE(queued.Open(m_path, MakeHeader()));
+    EXPECT_EQ(queued.OpenRefusal(), "unconfigured: Configure must succeed before Open");
+    ASSERT_TRUE(queued.Configure(18, 0));
+    EXPECT_FALSE(queued.Open(destination, MakeHeader()));
+    EXPECT_TRUE(queued.OpenRefusal().starts_with("create-parent: '")) << queued.OpenRefusal();
+    ASSERT_TRUE(queued.Open(m_path, MakeHeader())) << queued.OpenRefusal();
+    EXPECT_TRUE(queued.OpenRefusal().empty());
+    EXPECT_FALSE(queued.Open(m_path, MakeHeader()));
+    EXPECT_EQ(queued.OpenRefusal(), "already-open: recorder is open");
+    queued.Close();
+    ASSERT_TRUE(fs::remove(blocker));
+}
+
 TEST_F(ReplayStreamTest, ClosingOneRecorderPreservesTheOtherRecordersWorkingFiles) {
     replay::BoundedReplayRecorder first;
     replay::BoundedReplayRecorder second;
     ASSERT_TRUE(first.Configure(18, 0));
     ASSERT_TRUE(second.Configure(18, 0));
     const auto other_path = m_path + ".peer";
-    ASSERT_TRUE(first.Open(m_path, MakeHeader()));
-    ASSERT_TRUE(second.Open(other_path, MakeHeader()));
+    ASSERT_TRUE(first.Open(m_path, MakeHeader())) << first.OpenRefusal();
+    ASSERT_TRUE(second.Open(other_path, MakeHeader())) << second.OpenRefusal();
     ASSERT_TRUE(first.RecordTick(1, {0xab}, nullptr, 1));
     ASSERT_TRUE(second.RecordTick(1, {0xcd}, nullptr, 1));
     ASSERT_TRUE(first.Finalize(m_path, 1, 1));
@@ -453,7 +543,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderRejectsOverflowAndOversizedTicksBeforeWr
     EXPECT_FALSE(recorder.Configure((std::numeric_limits<std::size_t>::max)(), 1));
     EXPECT_FALSE(recorder.Configure(17, (std::numeric_limits<std::uint64_t>::max)()));
     ASSERT_TRUE(recorder.Configure(17, 0));
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
     EXPECT_FALSE(recorder.RecordTick(1, {1}, nullptr, 1));
     EXPECT_EQ(recorder.RetainedBytes(), 0u);
     EXPECT_EQ(recorder.SegmentCount(), 0u);
@@ -471,7 +561,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderKeepsCompleteReplayEncodingBeforeRotatio
     ASSERT_TRUE(expected.Open(expected_path, header));
     replay::BoundedReplayRecorder recorder;
     ASSERT_TRUE(recorder.Configure(128, 3));
-    ASSERT_TRUE(recorder.Open(m_path, header));
+    ASSERT_TRUE(recorder.Open(m_path, header)) << recorder.OpenRefusal();
     for (std::uint64_t tick = 1; tick <= 3; ++tick) {
         const std::vector<std::uint8_t> inputs{static_cast<std::uint8_t>(tick)};
         const replay::CheckpointRecord checkpoint{.tick = tick,
@@ -507,7 +597,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderKeepsCompleteReplayEncodingBeforeRotatio
 TEST_F(ReplayStreamTest, BoundedRecorderPrefixDigestMatchesElidedWireBytes) {
     replay::BoundedReplayRecorder recorder;
     ASSERT_TRUE(recorder.Configure(18, 0));
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
     std::string prefix;
     for (std::uint64_t tick = 1; tick <= 2048; ++tick) {
         const auto byte = static_cast<std::uint8_t>(tick);
@@ -584,7 +674,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderRotatesOnByteLimitAndRetainsMaximumTick)
     replay::BoundedReplayRecorder recorder;
     constexpr std::size_t payload_bytes = replay::BoundedReplayRecorder::kSegmentBytes;
     ASSERT_TRUE(recorder.Configure(payload_bytes + 17, 0));
-    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
     const std::vector<std::uint8_t> inputs(payload_bytes, 0xab);
     for (std::uint64_t tick = 1; tick <= 3; ++tick) {
         ASSERT_TRUE(recorder.RecordTick(tick, inputs, nullptr, tick));
