@@ -739,17 +739,20 @@ class CaptureBindingTests(RunnerTestBase):
 class ArtifactHandlingTests(RunnerTestBase):
     def test_capture_readers_refuse_over_capacity_without_truncating(self):
         path = self.tmp / 'oversized-capture.json'
-        # Sparse input exercises the real capacity without allocating its payload.
-        with path.open('wb') as output:
-            output.write(b'{}')
-            output.truncate(rq.MAX_CAPTURE_BYTES + 1)
-        for reader in (rq.read_capture_bytes, rq.capture_file_sha256,
-                       lambda path: rq.debug_json(path, capture=True)):
-            with self.subTest(reader=reader), self.assertRaisesRegex(
-                    rq.UsageError, f'capture evidence exceeds {rq.MAX_CAPTURE_BYTES} byte cap'):
-                reader(path)
-        self.assertIsNone(rq.read_json_object(path, capture=True))
-        self.assertEqual(path.stat().st_size, rq.MAX_CAPTURE_BYTES + 1)
+        # A small patched capacity keeps the file real on every platform; extending a
+        # file to the production capacity zero-fills hundreds of MiB on Windows.
+        bound = 1024 * 1024
+        with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
+            with path.open('wb') as output:
+                output.write(b'{}')
+                output.write(b' ' * (bound + 1 - 2))
+            for reader in (rq.read_capture_bytes, rq.capture_file_sha256,
+                           lambda path: rq.debug_json(path, capture=True)):
+                with self.subTest(reader=reader), self.assertRaisesRegex(
+                        rq.UsageError, f'capture evidence exceeds {bound} byte cap'):
+                    reader(path)
+            self.assertIsNone(rq.read_json_object(path, capture=True))
+            self.assertEqual(path.stat().st_size, bound + 1)
 
     def test_capture_byte_boundary_and_growth_are_bounded(self):
         path = self.tmp / 'growing-capture.json'
