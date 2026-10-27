@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import runpy
 import shutil
 import stat
 import subprocess
@@ -26,7 +27,6 @@ import plan_qualification as planner
 import qualification_matrix as matrix_lib
 import run_qualification as rq
 import validate_render_capture as capture_checker
-from check_gl_debug_log import MAX_FILE_BYTES
 
 MATRIX_PATH = planner.DEFAULT_MATRIX
 FIXTURE_PATH = Path(__file__).resolve().parent / 'fixtures' / 'adapter-mismatch.v3.json'
@@ -221,7 +221,104 @@ def index_of(results, cell_id):
     return next(index for index, result in enumerate(results) if result['id'] == cell_id)
 
 
+def run_python_fixture(command, *, scripts, cwd, env, stdout, stderr, timeout,
+                       check, input=b''):
+    """Run only explicitly selected fixture scripts without interpreter startup.
+
+    Keep the actual script, arguments, files and checker assertions. Callers opt
+    in only when testing qualification logic; process/CLI controls still spawn.
+    """
+    assert len(command) >= 2
+    assert rq.runner.resolve_path(command[0]) == rq.runner.resolve_path(sys.executable)
+    index = 1
+    while command[index] in ('-I', '-B'):
+        index += 1
+        assert index < len(command)
+    assert Path(command[index]).resolve() in scripts
+    assert stderr == subprocess.STDOUT and not check and timeout > 0
+    assert env.get('FAKE_CLIENT_MODE') != 'hang'
+    previous = Path.cwd()
+    output = io.StringIO(newline=os.linesep)
+    with mock.patch.object(sys, 'argv', command[index:]), \
+            mock.patch.dict(os.environ, env, clear=True), \
+            mock.patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(input), encoding='utf-8')), \
+            contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        try:
+            os.chdir(cwd)
+            try:
+                runpy.run_path(command[index], run_name='__main__')
+                code = 0
+            except SystemExit as error:
+                code = error.code
+        finally:
+            os.chdir(previous)
+            stdout.write(output.getvalue().encode('utf-8'))
+    return subprocess.CompletedProcess(command, code)
+
+
+class PythonFixtureTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.script = self.root / 'fixture.py'
+        self.output = io.BytesIO()
+        self.kwargs = dict(scripts={self.script}, cwd=self.root,
+                           env=dict(os.environ, FIXTURE_VALUE='child', FAKE_CLIENT_MODE='ok'),
+                           stdout=self.output, stderr=subprocess.STDOUT, timeout=10,
+                           check=False, input=b'input\r\n\xff')
+        self.state = (Path.cwd(), dict(os.environ), sys.argv, sys.stdin, sys.stdout, sys.stderr)
+
+    def assert_restored(self):
+        self.assertEqual(Path.cwd(), self.state[0])
+        self.assertEqual(dict(os.environ), self.state[1])
+        for actual, previous in zip((sys.argv, sys.stdin, sys.stdout, sys.stderr), self.state[2:]):
+            self.assertIs(actual, previous)
+
+    def test_fixture_matches_subprocess_output_exit_and_restores_state(self):
+        self.script.write_text(
+            'import os, sys\n'
+            'print(ascii((os.getcwd(), os.environ["FIXTURE_VALUE"], sys.argv[1:], '
+            'sys.stdin.buffer.read())), flush=True)\n'
+            'print("stderr", file=sys.stderr)\n'
+            'sys.exit(int(sys.argv[-1]))\n', encoding='utf-8')
+        for code in (0, 3):
+            with self.subTest(code=code):
+                command = [sys.executable, '-I', '-B', str(self.script), str(code)]
+                kwargs = {key: value for key, value in self.kwargs.items()
+                          if key not in ('scripts', 'stdout')}
+                expected = subprocess.run(command, stdout=subprocess.PIPE, **kwargs)
+                self.output.seek(0)
+                self.output.truncate()
+                actual = run_python_fixture(command, **self.kwargs)
+                self.assertEqual(actual.returncode, expected.returncode)
+                self.assertEqual(self.output.getvalue(), expected.stdout)
+                self.assert_restored()
+
+    def test_fixture_exception_restores_state(self):
+        self.script.write_text('raise RuntimeError("fixture failure")\n', encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+            run_python_fixture([sys.executable, str(self.script)], **self.kwargs)
+        self.assert_restored()
+
+    def test_fixture_refuses_unknown_commands_and_process_cases(self):
+        commands = ([], [sys.executable], [sys.executable, '-I', '-B'],
+                    [sys.executable, str(self.root / 'unknown.py')],
+                    [str(self.root / 'unknown-python'), str(self.script)])
+        for command in commands:
+            with self.subTest(command=command), self.assertRaises(AssertionError):
+                run_python_fixture(command, **self.kwargs)
+        for overrides in ({'check': True}, {'stderr': subprocess.PIPE}, {'timeout': 0},
+                          {'env': dict(self.kwargs['env'], FAKE_CLIENT_MODE='hang')}):
+            with self.subTest(overrides=overrides), self.assertRaises(AssertionError):
+                run_python_fixture([sys.executable, str(self.script)],
+                                   **dict(self.kwargs, **overrides))
+        self.assert_restored()
+
+
 class RunnerTestBase(unittest.TestCase):
+    in_process_fixtures = False
+
     def setUp(self):
         def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
             return subprocess.run(command, **kwargs)
@@ -240,6 +337,12 @@ class RunnerTestBase(unittest.TestCase):
         self.fake_checker.write_text(FAKE_CHECKER, encoding='utf-8')
         self.out = self.tmp / 'out'
         self.matrix_path = self.write_matrix(with_poses=True)
+        if self.in_process_fixtures:
+            fixture_patch = mock.patch.object(
+                rq.subprocess, 'run', side_effect=lambda command, **kwargs: run_python_fixture(
+                    command, scripts={self.fake_client, self.fake_checker}, **kwargs))
+            fixture_patch.start()
+            self.addCleanup(fixture_patch.stop)
 
     def make_runtime(self, root):
         for name in rq.RUNTIME_SENTINELS:
@@ -324,6 +427,9 @@ class DryRunTests(RunnerTestBase):
 
 
 class FullMatrixTests(RunnerTestBase):
+    # Matrix coverage needs all 28 ready cells, but no process startup semantics.
+    in_process_fixtures = True
+
     def test_full_matrix_with_recorded_poses(self):
         code, out, _ = self.run_main(self.argv())
         self.assertEqual(code, 3)
@@ -707,6 +813,8 @@ class ProcessFailureTests(RunnerTestBase):
 
 
 class CaptureBindingTests(RunnerTestBase):
+    in_process_fixtures = True
+
     def test_wrong_profile_is_refused(self):
         self.run_main(self.argv('--only', SURFACE_CELL),
                       env={'FAKE_CLIENT_MODE': 'wrongprofile'})
@@ -741,7 +849,7 @@ class ArtifactHandlingTests(RunnerTestBase):
         path = self.tmp / 'oversized-capture.json'
         # A small patched capacity keeps the file real on every platform; extending a
         # file to the production capacity zero-fills hundreds of MiB on Windows.
-        bound = 1024 * 1024
+        bound = 16 * 1024
         with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
             with path.open('wb') as output:
                 output.write(b'{}')
@@ -811,13 +919,15 @@ class ArtifactHandlingTests(RunnerTestBase):
             with self.assertRaisesRegex(rq.UsageError, 'capture evidence changed while opening'):
                 rq.read_capture_bytes(path)
 
+    # Keep the depth-overflow input below the patched byte cap.
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 256)
     def test_json_object_readers_share_regular_file_byte_and_depth_bounds(self):
         path = self.tmp / 'bounded-evidence.json'
         path.write_bytes(b'\xef\xbb\xbf{"value": 1}')
         self.assertEqual(rq.read_json_object(path), {'value': 1})
         for payload in (b'[]', b'', b'{', b'\xff', b'{"value":1}\0ignored',
                         b'[' * 65 + b']' * 65,
-                        b'{"value":"' + b'x' * MAX_FILE_BYTES + b'"}'):
+                        b'{}' + b' ' * (rq.MAX_FILE_BYTES - 1)):
             with self.subTest(size=len(payload)):
                 path.write_bytes(payload)
                 self.assertIsNone(rq.read_json_object(path))
@@ -899,6 +1009,8 @@ class ArtifactHandlingTests(RunnerTestBase):
 
 
 class VerdictReconciliationTests(RunnerTestBase):
+    in_process_fixtures = True
+
     def assert_invalid(self, env, reason, cell_id=SURFACE_CELL):
         code, _, _ = self.run_main(self.argv('--only', cell_id), env=env)
         self.assertEqual(code, 1)
@@ -1102,6 +1214,8 @@ class DirectoryLockTests(RunnerTestBase):
 
 
 class HostEvidenceTests(RunnerTestBase):
+    in_process_fixtures = True
+
     def setUp(self):
         super().setUp()
         self.host = {'os_caption': 'Windows', 'os_version': '10.0',
@@ -1363,9 +1477,10 @@ class HostEvidenceTests(RunnerTestBase):
                 self.assert_previous_pair()
                 self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_oversized_staged_host_refuses_without_modifying_pair(self):
         content = json.dumps(self.host).encode('utf-8')
-        self.staged_host.write_bytes(content + b' ' * (MAX_FILE_BYTES + 1 - len(content)))
+        self.staged_host.write_bytes(content + b' ' * (rq.MAX_FILE_BYTES + 1 - len(content)))
         with mock.patch.object(rq, 'run_cells') as launch:
             code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2, err)
@@ -1390,9 +1505,11 @@ class HostEvidenceTests(RunnerTestBase):
         self.staged_host.write_text(json.dumps(self.host), encoding='utf-8-sig')
         self.assertEqual(json.loads(rq.load_host_record(self.staged_host)), self.host)
 
+    # Ordinary process receipts must also fit this shared host/receipt bound.
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_host_reads_accept_exact_byte_cap(self):
         content = json.dumps(self.host).encode('utf-8')
-        payload = content + b' ' * (MAX_FILE_BYTES - len(content))
+        payload = content + b' ' * (rq.MAX_FILE_BYTES - len(content))
         self.staged_host.write_bytes(payload)
         self.assertEqual(json.loads(rq.load_host_record(self.staged_host)), self.host)
         host_path = self.out / 'host.json'
@@ -1401,19 +1518,20 @@ class HostEvidenceTests(RunnerTestBase):
         self.assertEqual(code, 0, err)
         self.assert_current_host()
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_non_ascii_host_near_cap_publishes_and_round_trips(self):
         self.host['extra'] = ''
         empty = json.dumps(self.host, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-        self.host['extra'] = 'é' * ((MAX_FILE_BYTES - len(empty) - 1) // 2)
+        self.host['extra'] = 'é' * ((rq.MAX_FILE_BYTES - len(empty) - 1) // 2)
         content = json.dumps(self.host, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
         self.staged_host.write_bytes(content)
-        self.assertLessEqual(len(content), MAX_FILE_BYTES)
-        self.assertGreaterEqual(len(content), MAX_FILE_BYTES - 2)
+        self.assertLessEqual(len(content), rq.MAX_FILE_BYTES)
+        self.assertGreaterEqual(len(content), rq.MAX_FILE_BYTES - 2)
         code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
         self.assertEqual(code, 0, err)
         host_path = self.out / 'host.json'
         published = host_path.read_bytes()
-        self.assertLessEqual(len(published), MAX_FILE_BYTES)
+        self.assertLessEqual(len(published), rq.MAX_FILE_BYTES)
         self.assertIn('é'.encode('utf-8'), published)
         self.assert_current_host()
         # Use the published record as both staged input and the previous host.
@@ -1426,12 +1544,13 @@ class HostEvidenceTests(RunnerTestBase):
         self.assertEqual(code, 0, err)
         self.assertFalse(host_path.exists())
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_serialized_host_over_cap_refuses_before_execution(self):
         self.host['extra'] = ''
         empty = json.dumps(self.host, separators=(',', ':')).encode('utf-8')
-        self.host['extra'] = 'x' * (MAX_FILE_BYTES - len(empty))
+        self.host['extra'] = 'x' * (rq.MAX_FILE_BYTES - len(empty))
         content = json.dumps(self.host, separators=(',', ':')).encode('utf-8')
-        self.assertEqual(len(content), MAX_FILE_BYTES)
+        self.assertEqual(len(content), rq.MAX_FILE_BYTES)
         self.staged_host.write_bytes(content)
         # The terminating newline makes the published record exceed the cap.
         with mock.patch.object(rq, 'run_cells') as launch:
@@ -1442,6 +1561,7 @@ class HostEvidenceTests(RunnerTestBase):
         self.assert_previous_pair()
         self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_host_growth_after_stat_is_bounded(self):
         original_fstat = os.fstat
         for candidate in (self.staged_host, self.out / 'host.json'):
@@ -1453,7 +1573,7 @@ class HostEvidenceTests(RunnerTestBase):
                     info = original_fstat(descriptor)
                     if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
                         with candidate.open('ab') as output:
-                            output.write(b' ' * (MAX_FILE_BYTES + 1 - info.st_size))
+                            output.write(b' ' * (rq.MAX_FILE_BYTES + 1 - info.st_size))
                     return info
 
                 with mock.patch.object(os, 'fstat', side_effect=fstat), \
@@ -1467,10 +1587,11 @@ class HostEvidenceTests(RunnerTestBase):
                 self.assertFalse((self.out / rq.LOCK_NAME).exists())
                 candidate.write_text(json.dumps(self.host), encoding='utf-8')
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_oversized_previous_host_refuses_hostful_and_hostless_runs(self):
         host_path = self.out / 'host.json'
         with host_path.open('wb') as output:
-            output.truncate(MAX_FILE_BYTES + 1)
+            output.truncate(rq.MAX_FILE_BYTES + 1)
         for hostful in (False, True):
             with self.subTest(hostful=hostful):
                 argv = self.host_argv if hostful else self.argv
@@ -1479,7 +1600,7 @@ class HostEvidenceTests(RunnerTestBase):
                 self.assertEqual(code, 2, err)
                 self.assertIn('byte cap', err)
                 launch.assert_not_called()
-                self.assertEqual(host_path.stat().st_size, MAX_FILE_BYTES + 1)
+                self.assertEqual(host_path.stat().st_size, rq.MAX_FILE_BYTES + 1)
                 self.assertEqual((self.out / rq.QUALIFICATION_NAME).read_bytes(),
                                  self.previous_qualification)
                 self.assertEqual(list(self.out.glob('*.prev-*')), [])
@@ -1773,6 +1894,8 @@ class ClientIdentityTests(RunnerTestBase):
 
 
 class MatrixIdentityTests(RunnerTestBase):
+    in_process_fixtures = True
+
     def test_identical_copy_of_committed_matrix_is_still_custom(self):
         self.matrix_path.write_bytes(MATRIX_PATH.read_bytes())
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
@@ -1973,7 +2096,7 @@ class BuildManifestTests(RealCheckerTests):
 
     def native_control(self, manifest_mode='match', mutate=False, capture_mode='private',
                        receipt_defect=None, mutate_checked_capture=False, debug_mode='pass',
-                       capture_bytes=None, debug_capture_bytes=None):
+                       capture_bytes=None, debug_capture_bytes=None, real_checkers=False):
         # Copy an existing native binary; never compile or claim GPU performance.
         client = self.tmp / ('native-client.exe' if os.name == 'nt' else 'native-client')
         shutil.copy2(sys.executable, client)
@@ -2060,8 +2183,8 @@ class BuildManifestTests(RealCheckerTests):
                         output.write(b'changed')
                 return subprocess.CompletedProcess(argv, 0)
 
-            # Only native client execution is simulated. Receipt retention/hashing and
-            # the real checker subprocess execute normally.
+            # Only native client execution is simulated here. Receipt retention and
+            # hashing execute normally; checker scripts run below.
             with mock.patch.object(rq.runner.subprocess, 'run', side_effect=emit_capture):
                 result = original(command, **kwargs)
             if receipt_defect is not None:
@@ -2069,8 +2192,12 @@ class BuildManifestTests(RealCheckerTests):
                 receipt.update(receipt_defect)
                 kwargs['receipt_path'].write_text(json.dumps(receipt), encoding='utf-8')
             if kwargs['environment'].get('LUMIN_GL_DEBUG') == '1':
-                malformed = {'receipt-list': b'[]', 'receipt-partial': b'{',
-                             'receipt-large': b'{"value":"' + b'x' * MAX_FILE_BYTES + b'"}'}
+                malformed = {'receipt-list': b'[]', 'receipt-partial': b'{'}
+                if debug_mode == 'receipt-large':
+                    # Keep a valid receipt so only the byte guard can refuse it.
+                    payload = kwargs['receipt_path'].read_bytes()
+                    self.assertLessEqual(len(payload), rq.MAX_FILE_BYTES)
+                    malformed[debug_mode] = payload + b' ' * (rq.MAX_FILE_BYTES + 1 - len(payload))
                 if debug_mode in malformed:
                     kwargs['receipt_path'].write_bytes(malformed[debug_mode])
             return result
@@ -2092,15 +2219,26 @@ class BuildManifestTests(RealCheckerTests):
                     output.write(b'\n')
             return command
 
-        with mock.patch.object(rq.runner, 'run_process', side_effect=native_process), \
+        # These cases test evidence reconciliation, using the actual checker code
+        # without repeatedly starting Python. The qualifying control retains both
+        # checker subprocesses, including the debug checker's binary stdin pipe.
+        scripts = {Path(capture_checker.__file__).resolve(),
+                   Path(rq.__file__).with_name('check_gl_debug_log.py').resolve()}
+        checker_context = (contextlib.nullcontext() if real_checkers else
+                           mock.patch.object(rq.subprocess, 'run', side_effect=
+                               lambda command, **kwargs: run_python_fixture(
+                                   command, scripts=scripts, **kwargs)))
+        with checker_context, \
+                mock.patch.object(rq.runner, 'run_process', side_effect=native_process), \
                 mock.patch.object(rq, 'check_command', side_effect=checker_command):
             code, _, _ = self.run_main(args)
         document = self.load_qualification()
         receipt = rq.read_json_object(self.out / 'cells' / f'{cell_id}.process.json')
         return code, document['cells'][0], receipt
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_measured_and_debug_captures_over_host_cap_are_accepted(self):
-        size = MAX_FILE_BYTES + 1
+        size = rq.MAX_FILE_BYTES + 1
         code, cell, _ = self.native_control(capture_bytes=size)
         self.assertEqual(code, 0)
         self.assertEqual(cell['state'], 'pass')
@@ -2109,7 +2247,7 @@ class BuildManifestTests(RealCheckerTests):
         for suffix in ('.json', '.artifact.json', '.debug.artifact.json'):
             path = self.out / 'cells' / (cell['id'] + suffix)
             self.assertEqual(path.stat().st_size, size)
-            with self.assertRaisesRegex(rq.UsageError, f'host evidence exceeds {MAX_FILE_BYTES} byte cap'):
+            with self.assertRaisesRegex(rq.UsageError, f'host evidence exceeds {rq.MAX_FILE_BYTES} byte cap'):
                 rq.read_host_bytes(path)
             self.assertIsNone(rq.read_json_object(path))
         self.assertTrue(cell['client']['native_build'])
@@ -2117,7 +2255,7 @@ class BuildManifestTests(RealCheckerTests):
         self.assertTrue(cell['checker_canonical'])
 
     def test_over_capacity_captures_fail_closed_with_clear_reason(self):
-        bound = 1024 * 1024
+        bound = 16 * 1024
         with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
             code, cell, _ = self.native_control(capture_bytes=bound + 1)
             self.assertEqual(code, 1)
@@ -2135,7 +2273,7 @@ class BuildManifestTests(RealCheckerTests):
             self.assertFalse(rq.cell_qualifies(cell))
 
     def test_manifest_bound_native_control_can_qualify(self):
-        code, cell, receipt = self.native_control()
+        code, cell, receipt = self.native_control(real_checkers=True)
         self.assertEqual(code, 0)
         self.assertEqual(cell['state'], 'pass')
         self.assertTrue(cell['checker_canonical'])
@@ -2164,6 +2302,7 @@ class BuildManifestTests(RealCheckerTests):
         self.assertTrue(document['render_floor_qualified'])
         self.assertFalse(document['expanded_qualified'])
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_separate_debug_pass_requires_installed_clean_matching_evidence(self):
         for mode in ('missing', 'error', 'malformed', 'unreadable', 'no-capture',
                      'wrongadapter', 'timeout', 'spawn', 'exit', 'partialcapture',
