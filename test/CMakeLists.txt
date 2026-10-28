@@ -47,6 +47,16 @@ target_link_libraries(worldgen_layer_snapshot_test PRIVATE
     luminumbra_common
 )
 
+# The headless session regressions instantiate enough EnTT storage to exceed
+# the default COFF section count on both Windows toolchains.
+if(MSVC)
+    set_source_files_properties(common/GameSessionHeadlessWorld_test.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+elseif(MINGW)
+    set_source_files_properties(common/GameSessionHeadlessWorld_test.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wa,-mbig-obj")
+endif()
+
 set(ASSET_PROCESSOR_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../tools/asset_processor.cpp")
 set_source_files_properties("${ASSET_PROCESSOR_SOURCE}" PROPERTIES
     COMPILE_DEFINITIONS "main=asset_processor_main"
