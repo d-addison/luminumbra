@@ -483,6 +483,156 @@ TEST(FarLodPersistence, QueuedTilesRecheckAuthorityAfterAcquiringPersistenceOwne
     }
 }
 
+namespace {
+struct AuthorityPublicationOverlap {
+    Systems::SHIELD_WorldSystem& authority;
+    std::filesystem::path path;
+    bool refuse_publication = false;
+    std::atomic<bool> bumped{false};
+    bool bump_blocked = false;
+    u64 publication_revision = 0;
+    std::jthread editor{};
+
+    static AuthorityPublicationOverlap*& Active() {
+        static AuthorityPublicationOverlap* overlap = nullptr;
+        return overlap;
+    }
+
+    static bool Publish(const std::filesystem::path& target, bool removing) {
+        auto& overlap = *Active();
+        if (removing || target != overlap.path)
+            return true;
+        // The tile's initial revision check has passed and staging is durable.
+        // Attempt the edit on another thread: a same-thread call would merely
+        // exercise recursive ownership and could not prove mutual exclusion.
+        overlap.editor = std::jthread([&overlap] {
+            overlap.authority.notify_far_lod_authority_durable(IVec3(-1, 0, 64));
+            overlap.bumped.store(true, std::memory_order_release);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!overlap.bumped.load(std::memory_order_acquire) &&
+               WorldSaveService::waiting_save_writers() == 0 &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        overlap.bump_blocked = WorldSaveService::waiting_save_writers() == 1 &&
+                               !overlap.bumped.load(std::memory_order_acquire);
+        overlap.publication_revision = overlap.authority.far_lod_authority_revision();
+        return !overlap.refuse_publication;
+    }
+};
+
+void CheckAuthorityPublication(FarLodTier tier, bool existing, bool refuse, bool closing) {
+    const SaveDirectory world;
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    if (existing)
+        ASSERT_TRUE(FarLodStore(world.path()).save_tile(Tile(tier, 50)));
+    const auto before = Bytes(path);
+    const auto revision = authority.far_lod_authority_revision();
+    EXPECT_EQ(revision, 0u); // Zero is a valid captured revision.
+    auto tile = Tile(tier, 100);
+    FarLodSdfSnapshot source;
+    source.coords = IVec3(-1, 0, 64);
+    source.revision = 1;
+    // One full chunk lattice bounds the source and reduced SDF streams.
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    source.sdf_data.assign(kSamples, -1.0f);
+    source.material_data.assign(kSamples, 11u);
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, source), FarLodSdfReduceResult::Inserted);
+    const auto fresh = tile;
+    AsyncFarLodStore writer;
+    AuthorityPublicationOverlap overlap{
+        .authority = authority, .path = path, .refuse_publication = refuse};
+    AuthorityPublicationOverlap::Active() = &overlap;
+    Persistence::detail::set_file_publication_hook_for_testing(
+        &AuthorityPublicationOverlap::Publish);
+    if (!writer.enqueue(world.path(), std::move(tile), &authority, revision))
+        std::_Exit(1);
+    std::atomic<bool> drained{false};
+    std::jthread drain([&] {
+        if (!closing)
+            writer.flush();
+        writer.close();
+        drained.store(true, std::memory_order_release);
+    });
+    // Bound both lifecycle waits and editor cleanup, including a lock inversion.
+    // No sleep or unbounded join can mask a regression in the child process.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((!drained.load(std::memory_order_acquire) ||
+            !overlap.bumped.load(std::memory_order_acquire)) &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    if (!drained.load(std::memory_order_acquire) || !overlap.bumped.load(std::memory_order_acquire))
+        std::_Exit(2);
+    drain.join();
+    overlap.editor.join();
+    Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+    AuthorityPublicationOverlap::Active() = nullptr;
+    EXPECT_TRUE(overlap.bump_blocked);
+    EXPECT_EQ(overlap.publication_revision, revision);
+    EXPECT_EQ(authority.far_lod_authority_revision(), revision + 1u);
+    EXPECT_EQ(writer.diagnostics().saved, refuse ? 0u : 1u);
+    EXPECT_EQ(writer.diagnostics().failed, refuse ? 1u : 0u);
+    EXPECT_EQ(writer.diagnostics().pending, 0u);
+    EXPECT_TRUE(writer.diagnostics().closed);
+    FarLodTile loaded;
+    if (refuse) {
+        EXPECT_EQ(Bytes(path), before);
+        EXPECT_EQ(std::filesystem::exists(path), existing);
+    } else {
+        // Authoritative tiles intentionally bypass the params hash. Publication
+        // itself must therefore be ordered before the authority change.
+        ASSERT_TRUE(FarLodStore(world.path()).load_tile(tier, -1, 2, 9999, loaded));
+        EXPECT_EQ(loaded.height_q.front(), 100u);
+        EXPECT_TRUE(loaded.edited);
+    }
+    ExpectNoTemps(world.path());
+    // Session saves notify while already owning persistence. Bound that nested
+    // acquisition as well, so replacing recursive ownership cannot hang cleanup.
+    std::atomic<bool> nested_notified{false};
+    std::jthread notification([&] {
+        const WorldSaveService::SaveOwnership ownership;
+        authority.notify_far_lod_authority_durable(IVec3(-1, 0, 64));
+        nested_notified.store(true, std::memory_order_release);
+    });
+    const auto nested_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!nested_notified.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < nested_deadline)
+        std::this_thread::yield();
+    if (!nested_notified.load(std::memory_order_acquire))
+        std::_Exit(2);
+    notification.join();
+    EXPECT_EQ(authority.far_lod_authority_revision(), revision + 2u);
+    const auto published = Bytes(path);
+    EXPECT_FALSE(FarLodStore(world.path()).save_tile(fresh, nullptr, &authority, revision));
+    EXPECT_EQ(Bytes(path), published);
+    EXPECT_TRUE(FarLodStore(world.path())
+                    .save_tile(fresh, nullptr, &authority, authority.far_lod_authority_revision()));
+    ExpectNoTemps(world.path());
+}
+} // namespace
+
+TEST(FarLodPersistence, AuthorityBumpCannotCrossTilePublication) {
+    ASSERT_EXIT(
+        {
+            // Sixteen bounded cases cover both tiers, first/replacement writes,
+            // failed publication, and flush/shutdown draining an active worker.
+            for (const auto tier : {FarLodTier::F1, FarLodTier::F2})
+                for (const bool existing : {false, true})
+                    for (const bool refuse : {false, true})
+                        for (const bool closing : {false, true}) {
+                            CheckAuthorityPublication(tier, existing, refuse, closing);
+                            if (::testing::Test::HasFailure())
+                                std::_Exit(3);
+                        }
+            std::_Exit(0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
 TEST(FarLodPersistence, CurrentAuthorityStillValidatesPayloadAndSavedInputBeforePublishing) {
     const SaveDirectory world;
     const auto params = Luminumbra::Test::SyntheticTerrainParams();

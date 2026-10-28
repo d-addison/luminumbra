@@ -715,6 +715,23 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                          "std::_Exit(2)", "writer.flush()", "writer.close()"):
             self.assertIn(contract, bounded)
 
+    def test_authority_changes_serialize_with_tile_publication(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        bump = self.function(source, "bump_far_lod_authority_revision", "SHIELD_WorldSystem::")
+        self.assertEqual(source.count("m_far_lod_authority_revision.fetch_add("), 1)
+        self.assertEqual(bump.count("SaveOwnership ownership;"), 1)
+        self.assertLess(bump.index("SaveOwnership ownership;"),
+                        bump.index("m_far_lod_authority_revision.fetch_add("))
+        self.assertLess(bump.index("SaveOwnership ownership;"),
+                        bump.index("m_far_lod_region_revision_mutex"))
+        native = read_source("test/rendering/far_lod_persistence_test.cpp")
+        self.assertIn("TEST(FarLodPersistence, AuthorityBumpCannotCrossTilePublication)", native)
+        self.assertRegex(native, r"set_file_publication_hook_for_testing\(\s*"
+                                 r"&AuthorityPublicationOverlap::Publish\)")
+        for contract in ("waiting_save_writers()", "overlap.bump_blocked", "overlap.publication_revision",
+                         "std::chrono::steady_clock::now() < deadline", "std::_Exit(2)"):
+            self.assertIn(contract, native)
+
     def test_saved_input_budgets_precede_allocations_and_publication(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         region = source.split("bool ReadRegionFile(", 1)[1].split("bool AdmitRegionWrite(", 1)[0]

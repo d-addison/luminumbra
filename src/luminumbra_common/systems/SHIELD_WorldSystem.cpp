@@ -3,6 +3,7 @@
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../core/WaterSeedInputs.h"
+#include "../persistence/WorldSaveService.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
@@ -6210,6 +6211,11 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
     else if (local_z == kChunksPerRegion - 1)
         affected_z[z_count++] = home_rz + 1;
 
+    // Serialize authority changes with the entire tile check/merge/publication.
+    // Take ownership before the region mutex, matching the durable-save path.
+    // Recursive ownership permits notification inside an existing session save;
+    // no jobs are dispatched or awaited while these locks are held.
+    const Persistence::WorldSaveService::SaveOwnership ownership;
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
                        lock,
