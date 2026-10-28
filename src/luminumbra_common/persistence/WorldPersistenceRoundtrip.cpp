@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -307,6 +308,31 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         {"water_state", WaterStateToJson(chunk)}};
 }
 
+std::vector<std::int32_t> WaterGridFromJson(const nlohmann::json& values) {
+    if (!values.is_array())
+        throw std::invalid_argument("Water grid must be an integer array");
+    std::vector<std::int32_t> grid;
+    if (values.size() > grid.max_size())
+        throw std::length_error("Water grid exceeds capacity");
+    grid.reserve(values.size());
+    for (const auto& value : values) {
+        // Preserve all int32 bits, including raw negative depths. Wider JSON integers
+        // saturate to the grid type before narrowing; migration/stepping normalize depths.
+        if (value.is_number_unsigned()) {
+            grid.push_back(static_cast<std::int32_t>(std::min<std::uint64_t>(
+                value.get<std::uint64_t>(), std::numeric_limits<std::int32_t>::max())));
+        } else if (value.is_number_integer()) {
+            grid.push_back(static_cast<std::int32_t>(
+                std::clamp<std::int64_t>(value.get<std::int64_t>(),
+                                         std::numeric_limits<std::int32_t>::min(),
+                                         std::numeric_limits<std::int32_t>::max())));
+        } else {
+            throw std::invalid_argument("Water grid cells must be integers");
+        }
+    }
+    return grid;
+}
+
 void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
     chunk.sdf_data = value.at("sdf_data").get<std::vector<float>>();
@@ -340,17 +366,21 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     // restore the authoritative fixed-point water state (absent in pre saves -> empty,
     // the sim re-seeds on the next tick).
     chunk.water_depth_mm = value.contains("water_depth_mm")
-                               ? value.at("water_depth_mm").get<std::vector<std::int32_t>>()
+                               ? WaterGridFromJson(value.at("water_depth_mm"))
                                : std::vector<std::int32_t>{};
     chunk.water_bed_mm = value.contains("water_bed_mm")
-                             ? value.at("water_bed_mm").get<std::vector<std::int32_t>>()
+                             ? WaterGridFromJson(value.at("water_bed_mm"))
                              : std::vector<std::int32_t>{};
     // / (authoritative-state change): flow momentum round-trips (see ChunkToJson). Saves
     // that predate the field restore as zeros — the old cleared-on-load behaviour
     // (momentum re-seeds from surface differences on the next tick).
-    chunk.water_edge_flux = value.contains("water_edge_flux")
-                                ? value.at("water_edge_flux").get<std::vector<std::int32_t>>()
-                                : std::vector<std::int32_t>(chunk.water_depth_mm.size() * 2u, 0);
+    if (value.contains("water_edge_flux")) {
+        chunk.water_edge_flux = WaterGridFromJson(value.at("water_edge_flux"));
+    } else {
+        if (chunk.water_depth_mm.size() > chunk.water_edge_flux.max_size() / 2u)
+            throw std::length_error("Water flux grid exceeds capacity");
+        chunk.water_edge_flux.assign(chunk.water_depth_mm.size() * 2u, 0);
+    }
     const nlohmann::json& water_state =
         value.contains("water_state") ? value.at("water_state") : value;
     chunk.has_water_sim.store(water_state.at("has_water_sim").get<bool>(),
@@ -676,9 +706,13 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
     for (const char* field : {"mesh_indices",
                               "water_mesh_indices",
                               "pending_mesh_indices",
-                              "pending_water_mesh_indices"}) {
+                              "pending_water_mesh_indices",
+                              "water_bed_mm",
+                              "water_depth_mm"}) {
         RequireIntegerArray(chunk, field, errors);
     }
+    if (chunk.contains("water_edge_flux"))
+        RequireIntegerArray(chunk, "water_edge_flux", errors);
     for (const char* field : {"mesh_vertices",
                               "water_mesh_vertices",
                               "pending_mesh_vertices",
