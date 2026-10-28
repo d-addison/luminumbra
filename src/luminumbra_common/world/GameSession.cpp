@@ -1511,16 +1511,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
-    if (!ReadWorldStateFrom(worldPath, loaded, true)) {
-        if (!loaded.input_refused) {
-            ++m_worldRevision;
-            m_lastLoadedChunkCount = 0;
-            m_worldUsable = false;
-            if (m_worldSystem)
-                m_worldSystem->clear_world(m_physicsSystem.get());
-        }
+    if (!ReadWorldStateFrom(worldPath, loaded, true))
         return false;
-    }
 
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
@@ -1628,16 +1620,8 @@ bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save
 
     // Validate all refusing state readers before replacing the live world.
     LoadedWorldState loaded;
-    if (!ReadWorldStateFrom(worldPath, loaded, true)) {
-        if (!loaded.input_refused) {
-            ++m_worldRevision;
-            m_lastLoadedChunkCount = 0;
-            m_worldUsable = false;
-            if (m_worldSystem)
-                m_worldSystem->clear_world(m_physicsSystem.get());
-        }
+    if (!ReadWorldStateFrom(worldPath, loaded, true))
         return false;
-    }
 
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;

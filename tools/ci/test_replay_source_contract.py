@@ -874,8 +874,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 self.assertIn("LoadedWorldState loaded;", preparation)
                 preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
                 self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded, true))", state_read)
-                self.assertLess(state_read.index("m_worldUsable = false;"),
-                                state_read.index("m_worldSystem->clear_world("))
+                self.assertNotIn("m_worldUsable", state_read)
+                self.assertNotIn("clear_world(", state_read)
+                self.assertNotIn("m_lastLoadedChunkCount =", state_read)
             self.assertNotIn("m_worldUsable", preparation)
             self.assertIn("m_worldOpenError =", preparation)
             self.assertLess(adoption.index("m_speciesTable ="),
@@ -933,7 +934,11 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 1)
         self.assertIn("if (!state.input_refused)", failure)
         for name in ("LoadWorld", "LoadWorldFrom"):
-            self.assertIn("if (!loaded.input_refused)", self.function(source, name))
+            candidate = self.function(source, name)
+            preparation = candidate.split("ResetWorldSystems();", 1)[0]
+            self.assertNotIn("clear_world(", preparation)
+            self.assertNotIn("m_worldUsable =", preparation)
+            self.assertNotIn("m_lastLoadedChunkCount =", preparation)
         reader = self.function(source, "ReadWorldStateFrom")
         self.assertEqual(reader.count("return false;"), 7)
         self.assertEqual(reader.count("m_worldOpenError ="), 7)
