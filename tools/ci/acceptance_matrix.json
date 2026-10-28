@@ -3,6 +3,27 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "ci.base-edit-routing",
+      "source": "issue #637",
+      "statement": "CI admits pull-request edited events only when changes.base is present. Metadata-only edits skip every job before runner allocation, use unique non-cancelling concurrency groups, and publish distinct skipped check names so required check names retain their validation results. Real base edits preserve normal routing; every ready pull request retargeted to main enables Windows/UCRT64 regardless of labels or changed paths. Offline behavioural regressions cover missing and partial edit metadata, dependency failures and cancellation, concurrency isolation, check names, draft guards and retarget admission. Hosted check publication remains pending qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_workflow_policy.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "profiler.build-contract",
       "source": "issue #433",
       "statement": "Static source contracts require the existing Linux/GCC GNS compile job to configure the profile preset and build the common library, server, shipping client, QA client and both macro fixtures against pinned Tracy. The bootstrap installs NumPy and Pillow before enabling tests. Disposable TCP accept attempts retain job and future-wait zones without process-lifetime thread-name registration; persistent workers remain named. The licence disclosure links to the repository-hosted notice from generated documentation. Enabled native compile/link qualification is pending a successful CI run; no local profile configure or application build is claimed. Windows and macOS enabled builds, profiler captures and GPU execution remain outside this check. Release/perf lanes retain Tracy disabled.",
@@ -96,7 +117,7 @@
     {
       "id": "ci.workflow-policy-partitions",
       "source": "tools/ci/test_workflow_policy.py",
-      "statement": "Ten disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for both new entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "statement": "Twelve disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates UCRT64 route and classifier fixtures. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
       "status": "covered",
       "evidence": [
         {
@@ -138,6 +159,14 @@
         {
           "kind": "ctest",
           "ref": "WorkflowPolicyContractPart9"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart10"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart11"
         }
       ]
     },
