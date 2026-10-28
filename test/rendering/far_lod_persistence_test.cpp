@@ -363,6 +363,120 @@ TEST(FarLodPersistence, AsyncBytesMatchSynchronousIncludingOrderedSameTileWrites
     ExpectNoTemps(asynchronous.path());
 }
 
+TEST(FarLodPersistence, QueuedTilesRecheckAuthorityAfterAcquiringPersistenceOwnership) {
+    // Both tiers and both absent/present durable tiles must refuse an obsolete
+    // capture. Zero is a valid initial authority revision, never an unknown token.
+    for (const auto tier : {FarLodTier::F1, FarLodTier::F2}) {
+        for (const bool publish_newer : {false, true}) {
+            SCOPED_TRACE(static_cast<unsigned>(tier));
+            SCOPED_TRACE(publish_newer);
+            const SaveDirectory world;
+            const auto params = Luminumbra::Test::SyntheticTerrainParams();
+            Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+            AsyncFarLodStore writer;
+            const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+            FarLodSdfSnapshot source;
+            source.coords = IVec3(-1, 0, 64);
+            source.revision = 1;
+            constexpr std::size_t kSamples = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                             (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            source.sdf_data.assign(kSamples, -1.0f);
+            source.material_data.assign(kSamples, 11u);
+            auto obsolete = Tile(tier, 100);
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(obsolete, source), FarLodSdfReduceResult::Inserted);
+            auto newer = Tile(tier, 200);
+            source.revision = 2;
+            source.sdf_data.assign(kSamples, -2.0f);
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(newer, source), FarLodSdfReduceResult::Inserted);
+            std::string newer_bytes;
+            {
+                const RegionFileWriteGuard transaction(path);
+                ASSERT_TRUE(writer.enqueue(world.path(),
+                                           std::move(obsolete),
+                                           &authority,
+                                           authority.far_lod_authority_revision()));
+                WaitForCompetingWriter(transaction);
+                if (publish_newer) {
+                    WorldStreamingState state;
+                    auto chunk = state.get_or_create_chunk(IVec3(-1, 0, 64));
+                    chunk->sdf_data = {-2.0f, 3.0f};
+                    chunk->material_data = {7u, 11u};
+                    chunk->mark_voxel_data_dirty();
+                    ASSERT_TRUE(WorldSaveService{}.save_world(state, world.path()));
+                    ASSERT_TRUE(FarLodStore(world.path()).save_tile(newer));
+                    newer_bytes = Bytes(path);
+                }
+                // Matches the session's durable notification while it still
+                // owns the complete save, including partial-failure attempts.
+                authority.notify_far_lod_authority_durable(IVec3(-1, 0, 64));
+            }
+            writer.flush();
+            EXPECT_EQ(writer.diagnostics().failed, 1u);
+            EXPECT_EQ(writer.diagnostics().saved, 0u);
+            EXPECT_EQ(writer.diagnostics().pending, 0u);
+            if (publish_newer)
+                EXPECT_EQ(Bytes(path), newer_bytes);
+            else
+                EXPECT_TRUE(std::filesystem::is_empty(world.path()));
+            // A fresh capture can still commit and drain after stale rejection.
+            auto fresh = Tile(tier, 300);
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(fresh, source), FarLodSdfReduceResult::Inserted);
+            ASSERT_TRUE(writer.enqueue(world.path(),
+                                       std::move(fresh),
+                                       &authority,
+                                       authority.far_lod_authority_revision()));
+            writer.close();
+            EXPECT_EQ(writer.diagnostics().saved, 1u);
+            EXPECT_TRUE(writer.diagnostics().closed);
+            FarLodTile loaded;
+            ASSERT_TRUE(FarLodStore(world.path()).load_tile(tier, -1, 2, 1234, loaded));
+            EXPECT_EQ(loaded.height_q.front(), 300u);
+            EXPECT_TRUE(loaded.edited);
+            ASSERT_EQ(loaded.sdf_bricks.size(), 1u);
+            EXPECT_EQ(loaded.sdf_bricks.front().revision, 2u);
+            ExpectNoTemps(world.path());
+        }
+    }
+}
+
+TEST(FarLodPersistence, CurrentAuthorityStillValidatesPayloadAndSavedInputBeforePublishing) {
+    const SaveDirectory world;
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+    AsyncFarLodStore writer;
+    const auto revision = authority.far_lod_authority_revision();
+    EXPECT_EQ(revision, 0u);
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 100), &authority, revision));
+    writer.flush();
+    ASSERT_EQ(writer.diagnostics().saved, 1u);
+    const auto before = Bytes(path);
+    auto malformed = Tile(FarLodTier::F1, 200);
+    malformed.material.pop_back();
+    ASSERT_TRUE(writer.enqueue(world.path(), std::move(malformed), &authority, revision));
+    writer.flush();
+    EXPECT_EQ(writer.diagnostics().failed, 1u);
+    EXPECT_EQ(Bytes(path), before);
+    // Both an unreadable directory and partial container bytes must retain the
+    // durable input, even when the captured authority itself is still current.
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(std::filesystem::create_directory(path));
+    ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 300), &authority, revision));
+    writer.flush();
+    EXPECT_EQ(writer.diagnostics().failed, 2u);
+    EXPECT_TRUE(std::filesystem::is_directory(path));
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, "LMR"));
+    ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 400), &authority, revision));
+    writer.close();
+    EXPECT_EQ(writer.diagnostics().failed, 3u);
+    EXPECT_EQ(writer.diagnostics().saved, 1u);
+    EXPECT_EQ(Bytes(path), "LMR");
+    EXPECT_EQ(writer.diagnostics().pending, 0u);
+    EXPECT_TRUE(writer.diagnostics().closed);
+    ExpectNoTemps(world.path());
+}
+
 TEST(FarLodPersistence, WorldBoundaryDrainsCapturedPathsAndCloseRejectsNewWork) {
     const SaveDirectory old_world;
     const SaveDirectory new_world;

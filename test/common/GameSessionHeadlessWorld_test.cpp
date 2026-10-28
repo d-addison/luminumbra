@@ -2255,6 +2255,42 @@ TEST_P(SavedWorldPresetTest, InvalidPlantProjectionRefusesAllLoadPathsWithoutAdo
     EXPECT_TRUE(session.SaveWorldStateTo(Root().path() / "after-refused-plant"));
 }
 
+TEST_P(SavedWorldPresetTest, GenericPartialPlantRecordsRefuseAllLoadPathsBeforeAdoption) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, true));
+    const PendingSnapshotState pending(session);
+    const RetainedCreationState retained(session);
+    const auto save = session.GetWorldSaveDir();
+    const auto original = luminumbra::foliage::BuildPlantEntitySnapshot(session.GetRegistry());
+    ASSERT_FALSE(original.entities.empty());
+    const auto world_id = session.GetMetadata().worldId;
+    for (unsigned mask = 0; mask < 7; ++mask) {
+        SCOPED_TRACE(mask);
+        auto snapshot = original;
+        std::erase_if(snapshot.entities.front().components, [mask](const auto& component) {
+            return (component.type == "Transform" && (mask & 1u) == 0) ||
+                   (component.type == "PlantGenome" && (mask & 2u) == 0) ||
+                   (component.type == "PlantGrowth" && (mask & 4u) == 0);
+        });
+        ASSERT_TRUE(P::WorldSaveService::save_plant_entities(snapshot, save));
+        const auto disk = SavedPresetTestDiskBytes(Root().path());
+        for (int entry = 0; entry < 3; ++entry) {
+            SCOPED_TRACE(entry);
+            const bool loaded = entry == 0   ? session.LoadWorld(world_id)
+                                : entry == 1 ? session.LoadWorldFrom(world_id, Root().path())
+                                             : session.LoadWorldStateFrom(save);
+            EXPECT_FALSE(loaded);
+            EXPECT_NE(session.GetWorldOpenError().find("invalid plant snapshot"),
+                      std::string::npos);
+            retained.ExpectUnchanged(session);
+            pending.ExpectUnchanged(session, *chunk);
+            EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+        }
+    }
+}
+
 #if !defined(_WIN32)
 TEST_P(SavedWorldPresetTest, NonRegularPlantFilesRefuseAllLoadPathsBeforeAdoption) {
     GameSession session;

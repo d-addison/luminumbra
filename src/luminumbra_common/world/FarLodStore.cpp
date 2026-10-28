@@ -782,11 +782,17 @@ AsyncFarLodStore::~AsyncFarLodStore() {
     close();
 }
 
-bool AsyncFarLodStore::enqueue(const std::filesystem::path& save_dir, FarLodTile&& tile) {
+bool AsyncFarLodStore::enqueue(const std::filesystem::path& save_dir,
+                               FarLodTile&& tile,
+                               const Systems::SHIELD_WorldSystem* authority,
+                               u64 authority_revision) {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_closing || save_dir.empty() || m_diagnostics.pending >= kMaxPendingSaves)
         return false;
-    m_queue.push_back(Save{.save_dir = save_dir, .tile = std::move(tile)});
+    m_queue.push_back(Save{.save_dir = save_dir,
+                           .tile = std::move(tile),
+                           .authority = authority,
+                           .authority_revision = authority_revision});
     ++m_diagnostics.pending;
     m_ready.notify_one();
     return true;
@@ -827,7 +833,14 @@ void AsyncFarLodStore::run() {
         }
         bool saved = false;
         try {
-            saved = FarLodStore(save.save_dir).save_tile(save.tile);
+            // Validate after acquiring the same ownership as the chunk writers,
+            // and retain it through publication. A newer world save (including
+            // a partially failed save) bumps authority before releasing it, so
+            // an older queued tile cannot overwrite that durable authority.
+            const Persistence::WorldSaveService::SaveOwnership ownership;
+            if (!save.authority ||
+                save.authority->far_lod_authority_revision() == save.authority_revision)
+                saved = FarLodStore(save.save_dir).save_tile(save.tile);
         } catch (const std::exception&) {
             // Derived bytes are a cache. Failure never invalidates live geometry
             // or escapes the worker; shutdown still drains all accepted work.

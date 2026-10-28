@@ -1753,7 +1753,7 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
 bool WorldSaveService::prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
                                               std::string& bytes,
                                               std::vector<std::string>* errors) {
-    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot)) {
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot, false)) {
         AddError(errors, "Saved-input admission refused: invalid plant component value.");
         return false;
     }
@@ -1913,7 +1913,7 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
             AddError(errors, e);
         return false;
     }
-    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(candidate)) {
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(candidate, false)) {
         AddError(errors, "Saved-input admission refused: invalid plant component value.");
         return false;
     }
@@ -2585,12 +2585,17 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             std::filesystem::exists(chunks_dir / kWorldStateBackupFileName)) {
             return reject(kObsoleteWorldMessage);
         }
-        if (!std::filesystem::exists(chunks_dir))
+        const auto chunks_status = std::filesystem::symlink_status(chunks_dir);
+        if (!std::filesystem::exists(chunks_status))
             return false;
+        if (!std::filesystem::is_directory(chunks_status))
+            return reject("corrupt world persistence directory: " +
+                          Filesystem::GenericUtf8PathString(chunks_dir));
         for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
-            if (entry.path() != region_dir || !entry.is_directory())
+            if (entry.path() != region_dir ||
+                !std::filesystem::is_directory(std::filesystem::symlink_status(entry.path())))
                 return reject("corrupt or unknown world persistence artifact: " +
                               Filesystem::GenericUtf8PathString(entry.path()));
         }
@@ -2605,7 +2610,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             const std::shared_lock read(detail::RegionFileSyncFor(entry.path()).publication);
             // A plant file can be retired after iterator discovery. Inspect it
             // under its publication lock and accept that clean disappearance.
-            const auto status = std::filesystem::status(entry.path());
+            // Inspect the leaf itself: a dangling link is present and invalid,
+            // never the clean disappearance of a retired plant file. Payload
+            // readers independently open once and verify that same handle.
+            const auto status = std::filesystem::symlink_status(entry.path());
             if (!std::filesystem::exists(status) && entry.path() == plant_entities_path(save_dir))
                 continue;
             if (!std::filesystem::is_regular_file(status))

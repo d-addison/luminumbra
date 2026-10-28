@@ -111,6 +111,15 @@ class ReplaySourceContract(unittest.TestCase):
         self.assert_shipping_owner(read_source("test/CMakeLists.txt"),
                                    read_source("test/common/EffectivePresetIdentity_test.cpp"))
 
+    def test_headless_session_test_has_source_specific_windows_section_capacity(self):
+        cmake = read_source("test/CMakeLists.txt")
+        self.assertRegex(cmake, r'if\(MSVC\)\s+set_source_files_properties\('
+                         r'common/GameSessionHeadlessWorld_test\.cpp PROPERTIES\s+'
+                         r'COMPILE_OPTIONS "/bigobj"\)\s+elseif\(MINGW\)\s+'
+                         r'set_source_files_properties\('
+                         r'common/GameSessionHeadlessWorld_test\.cpp PROPERTIES\s+'
+                         r'COMPILE_OPTIONS "-Wa,-mbig-obj"\)\s+endif\(\)')
+
     def test_removing_shipping_replay_coverage_is_detected(self):
         cmake = read_source("test/CMakeLists.txt")
         identity = read_source("test/common/EffectivePresetIdentity_test.cpp")

@@ -1103,7 +1103,8 @@ void FarLodSystem::queue_completed_saves() {
         if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed) {
             // The owner is the sole producer; after the capacity check the
             // consumer can only free slots. Moving transfers all tile arrays.
-            if (!m_tile_saves.enqueue(result.save_dir, std::move(result.tile))) {
+            if (!m_tile_saves.enqueue(
+                    result.save_dir, std::move(result.tile), m_world, result.authority_revision)) {
                 LUMIN_PROFILE_LOCK(
                     std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
                 m_shared->completed.push_front(std::move(result));

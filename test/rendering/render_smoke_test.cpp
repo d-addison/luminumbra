@@ -4500,7 +4500,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     EXPECT_FALSE(worker_generates_chunk(worker_signature + generation_call));
     EXPECT_TRUE(worker_generates_chunk(worker_signature + "\r\n" + generation_call + "\r\n}\r\n"));
     const std::size_t stale_check = source.find("if (!build_result_current(result)");
-    const std::size_t owner_save = source.find("m_tile_saves.enqueue(result.save_dir");
+    const std::size_t owner_save = source.find("m_tile_saves.enqueue(");
     ASSERT_NE(stale_check, std::string::npos);
     ASSERT_NE(owner_save, std::string::npos);
     EXPECT_LT(stale_check, owner_save);
@@ -4679,7 +4679,8 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "++m_stats.builds_failed_total;",
          "continue;",
          "if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed)",
-         "m_tile_saves.enqueue(result.save_dir, std::move(result.tile))",
+         "m_tile_saves.enqueue(",
+         "result.save_dir, std::move(result.tile), m_world, result.authority_revision)",
          "m_ready_builds.push_back(std::move(result));"});
     const auto integrate = section(
         source, "void FarLodSystem::integrate_completed_builds()", "void FarLodSystem::update(");

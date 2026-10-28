@@ -805,6 +805,40 @@ TEST(WorldSaveRegionFormat, CancellationAtEachSavedPayloadOpenDiscardsStagedAuth
     }
 }
 
+#if !defined(_WIN32)
+TEST(WorldSaveRegionFormat, PersistenceDirectoryLinksAreRefusalsIncludingDanglingTargets) {
+    for (const bool link_chunks : {false, true}) {
+        for (const bool dangling : {false, true}) {
+            SCOPED_TRACE(link_chunks);
+            SCOPED_TRACE(dangling);
+            TempSaveDir directory("linked_persistence_directory");
+            const auto target = directory.path / "target";
+            WorldStreamingState empty;
+            ASSERT_TRUE(WorldSaveService{}.save_world(empty, target));
+            const auto alias = directory.path / "alias";
+            std::filesystem::create_directories(alias);
+            const auto leaf =
+                link_chunks ? alias / "chunks" : WorldSaveService::region_directory(alias);
+            std::filesystem::create_directories(leaf.parent_path());
+            const auto destination = dangling      ? directory.path / "absent"
+                                     : link_chunks ? target / "chunks"
+                                                   : WorldSaveService::region_directory(target);
+            std::filesystem::create_directory_symlink(destination, leaf);
+            const auto manifest = WorldSaveService::world_manifest_path(target);
+            const auto before = ReadFileBytes(manifest);
+            WorldStreamingState loaded;
+            loaded.get_or_create_chunk(IVec3(1, 0, 1));
+            std::vector<std::string> errors;
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, alias, errors));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_TRUE(std::filesystem::is_symlink(leaf));
+            EXPECT_EQ(ReadFileBytes(manifest), before);
+        }
+    }
+}
+#endif
+
 TEST(WorldSaveRegionFormat, ManifestExactCompatibilityLimitLoadsButOneMoreByteRefuses) {
     using namespace Luminumbra::Persistence;
     TempSaveDir directory("manifest_limits");

@@ -2261,7 +2261,8 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir,
                                      bool resetting_clock) {
     const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
-    if (!Persistence::WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)) {
+    if (!Persistence::WorldSaveService::load_plant_entities(state.plants, save_dir, &errors) ||
+        !luminumbra::foliage::ValidatePlantEntitySnapshot(state.plants)) {
         state.input_refused = true;
         m_worldOpenError = errors.empty() ? "Saved-input admission refused: invalid plant snapshot."
                                           : errors.front();
