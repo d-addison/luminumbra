@@ -499,7 +499,7 @@ jobs:
   windows-msvc:
     name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && (needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: windows-2025
     timeout-minutes: 90
     strategy:
@@ -694,7 +694,8 @@ jobs:
           # Developer-shell setup can change PATH; retain the selected runtime.
           Set-Alias -Name python -Value $pythonExecutable
           # Preserve Release optimization and retain embedded compiler symbols
-          # plus the linked PDB for render-child failure evidence.
+          # plus the linked PDB for render-child failure evidence. Dependency
+          # precompiled headers and Jolt's /Zi are disabled so ccache can cache them.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
@@ -703,6 +704,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
             -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `
             '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
@@ -1232,7 +1234,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"

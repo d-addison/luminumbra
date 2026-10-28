@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import io
+import itertools
 import json
 import os
 import re
@@ -283,7 +284,7 @@ class PathGateTests(unittest.TestCase):
         }
         routes = (
             ("ci", "linux", "guarded-python"),
-            ("ci", "windows-msvc", "ready-native"),
+            ("ci", "windows-msvc", "ready-native-or-python"),
             ("ci", "gns-compile-probe", "ready-native"),
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
@@ -302,7 +303,7 @@ class PathGateTests(unittest.TestCase):
             # Missing/failed classifier output is represented by the empty string.
             for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
                 for draft in (True, False, None):
-                    for cpp in ("true", "false", ""):
+                    for cpp, python in itertools.product(("true", "false", ""), ("true", "false", "")):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
                             if route == "required-aggregate":
@@ -313,6 +314,9 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled
                             elif route == "guarded-native":
                                 expected = not cancelled and (not ready or cpp != "false")
+                            elif route == "ready-native-or-python":
+                                # MSVC also carries the standalone Python contracts.
+                                expected = not cancelled and ready and (cpp != "false" or python != "false")
                             else:
                                 expected = not cancelled and ready and cpp != "false"
                             actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
@@ -325,10 +329,11 @@ class PathGateTests(unittest.TestCase):
                                 "needs.asan-shard.result", repr("success")
                             ).replace("needs.tidy-shard.result", repr("success")
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
+                                "needs.changes.outputs.needs_python", repr(python)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
                             with self.subTest(workflow=workflow, job=job, event=event,
-                                              draft=draft, cpp=cpp, cancelled=cancelled):
+                                              draft=draft, cpp=cpp, python=python, cancelled=cancelled):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
 
     def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):
