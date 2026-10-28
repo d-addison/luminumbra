@@ -1164,7 +1164,10 @@ class FrameAttributionWiring(unittest.TestCase):
                          "app.capture.ui_preview_settle_after_ready = 0;", "ready_to_capture = false;"):
             self.assertIn(fragment, reset)
         candidate = block(menu, "if (sig != previewState.lastSig)")
-        self.assertLess(candidate.index("candidate_source_failed = true;"), candidate.index("std::ifstream in"))
+        self.assertLess(candidate.index("candidate_source_failed = true;"), candidate.index("ReadPreviewPreset("))
+        reader = block(read(CLIENT / "app/MenuScreens.cpp"), "bool ReadPreviewPreset(")
+        self.assertIn("Persistence::ReadSavedJson(", reader)
+        self.assertIn("!missing", reader)
         self.assertIn("previewState.candidate_source_failed = "
                       "!worldgenPreview->set_candidate(resolved, data_root, seedVal);", compact(candidate))
         setup = block(read(CLIENT / "app/MenuScreens.cpp"), "bool PrepareMenuCapture(")

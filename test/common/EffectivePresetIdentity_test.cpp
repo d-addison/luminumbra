@@ -5,6 +5,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/replay/ReplayStream.h"
@@ -147,6 +148,42 @@ TEST_F(EffectivePresetIdentity, FileLoaderRefusesMalformedTruncatedAndOverflowin
         ASSERT_EQ(loaded.errors.size(), 1u);
         EXPECT_NE(loaded.errors.front().find("failed to parse world preset JSON"),
                   std::string::npos);
+    }
+}
+
+TEST_F(EffectivePresetIdentity, HelloAndReplayRefusePresetLimitsBeforeIdentityAdmission) {
+    using namespace Luminumbra::Persistence;
+    nlohmann::json extension = 0;
+    for (std::size_t depth = 1; depth < SavedInputLimits::kJsonNestingDepth; ++depth)
+        extension = nlohmann::json::array({std::move(extension)});
+    auto preset = shipping;
+    preset["extension"] = extension;
+    const auto accepted = preset.dump();
+    preset["extension"] = nlohmann::json::array({std::move(extension)});
+    auto padded = shipping.dump();
+    padded.resize(SavedInputLimits::kPresetBytes + 1, ' ');
+    for (const bool override_preset : {false, true}) {
+        const auto admit = [&](const std::string& bytes) {
+            {
+                std::ofstream output(root / "worlds/atlas/presets/default.json");
+                output << bytes;
+                EXPECT_TRUE(output.good());
+            }
+            options.preset_json_override = override_preset ? std::optional(bytes) : std::nullopt;
+            return RuntimeHelloFrom(options);
+        };
+        const auto hello = admit(accepted);
+        ASSERT_FALSE(hello.preset_content_hash.empty());
+        Luminumbra::Replay::ReplayHeader header;
+        header.seed_string = options.seed;
+        header.preset = options.preset;
+        header.system_config_identity = hello.system_config_identity;
+        header.preset_content_hash = hello.preset_content_hash;
+        ASSERT_TRUE(ReplayRunnerConfigFrom(options, header).has_value());
+        for (const auto& bytes : {preset.dump(), padded}) {
+            EXPECT_TRUE(admit(bytes).preset_content_hash.empty());
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+        }
     }
 }
 

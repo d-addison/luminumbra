@@ -14,7 +14,13 @@
 // the no-plant save path stays byte-identical.
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -41,6 +47,82 @@ inline void GenesFromJson(const nlohmann::json& a,
                           std::array<float, ::Luminumbra::Components::kPlantGeneCount>& g) {
     for (std::size_t i = 0; i < g.size() && i < a.size(); ++i)
         g[i] = a[i].get<float>();
+}
+// Test representation before get<T>: JSON numeric conversion otherwise silently
+// narrows integers and can invoke undefined behaviour for a large floating value.
+template<typename T>
+inline bool FitsNumber(const nlohmann::json& value) {
+    if constexpr (std::is_floating_point_v<T>) {
+        if (!value.is_number())
+            return false;
+        const double number = value.get<double>();
+        return std::isfinite(number) && number >= -std::numeric_limits<T>::max() &&
+               number <= std::numeric_limits<T>::max();
+    } else {
+        if (value.is_number_unsigned())
+            return value.get<std::uint64_t>() <= std::numeric_limits<T>::max();
+        if (!value.is_number_integer())
+            return false;
+        const auto number = value.get<std::int64_t>();
+        return number >= 0 && static_cast<std::uint64_t>(number) <= std::numeric_limits<T>::max();
+    }
+}
+
+inline bool ValidGenes(const nlohmann::json& genes) {
+    if (!genes.is_array())
+        return false;
+    // Historical snapshots may contain a partial genome; missing genes stay zero.
+    for (std::size_t i = 0; i < genes.size() && i < ::Luminumbra::Components::kPlantGeneCount;
+         ++i) {
+        if (!FitsNumber<float>(genes[i]) || genes[i].get<double>() < 0.0 ||
+            genes[i].get<double>() > 1.0)
+            return false;
+    }
+    return true;
+}
+
+inline bool ValidComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& component) {
+    namespace C = ::Luminumbra::Components;
+    const auto& data = component.data;
+    const auto& type = component.type;
+    if (type == "Transform")
+        return FitsNumber<float>(data.at("x")) && FitsNumber<float>(data.at("y")) &&
+               FitsNumber<float>(data.at("z"));
+    if (type == "PlantGenome")
+        return ValidGenes(data.at("genes"));
+    if (type == "PlantGrowth")
+        return FitsNumber<std::uint16_t>(data.at("species_id")) &&
+               FitsNumber<std::uint8_t>(data.at("stage")) &&
+               data.at("stage").get<std::uint8_t>() < C::kPlantStageCount &&
+               FitsNumber<std::uint8_t>(data.at("quality")) &&
+               data.at("quality").get<std::uint8_t>() <= 100 &&
+               FitsNumber<std::uint32_t>(data.at("growth_points")) &&
+               FitsNumber<std::uint32_t>(data.at("stress_points")) &&
+               FitsNumber<std::uint8_t>(data.at("tended")) &&
+               FitsNumber<std::uint64_t>(data.at("planted_tick")) &&
+               FitsNumber<std::uint64_t>(data.at("last_tick"));
+    if (type == "SoilFeeder")
+        return FitsNumber<std::uint16_t>(data.at("uptake")) &&
+               FitsNumber<std::uint32_t>(data.at("absorbed"));
+    if (type == "PlantHealth")
+        return FitsNumber<std::uint16_t>(data.at("infection")) &&
+               data.at("infection").get<std::uint16_t>() <= C::kDiseaseUnitScale &&
+               FitsNumber<std::uint16_t>(data.at("resistance")) &&
+               data.at("resistance").get<std::uint16_t>() <= C::kDiseaseUnitScale &&
+               FitsNumber<std::uint8_t>(data.at("state")) &&
+               data.at("state").get<std::uint8_t>() < C::kPlantDiseaseStateCount &&
+               FitsNumber<std::uint32_t>(data.at("infected_ticks"));
+    if (type == "Pollination")
+        return data.at("pollinated").is_boolean() &&
+               FitsNumber<std::uint64_t>(data.at("last_pollen_tick")) &&
+               FitsNumber<std::uint32_t>(data.at("crosses")) && ValidGenes(data.at("next_genome"));
+    if (type == "CropLifecycle")
+        return data.at("perennial").is_boolean() &&
+               FitsNumber<std::uint32_t>(data.at("ripe_ticks")) &&
+               FitsNumber<std::uint32_t>(data.at("lifespan_ticks")) &&
+               FitsNumber<std::uint16_t>(data.at("generations")) &&
+               FitsNumber<std::uint16_t>(data.at("species_id"));
+    return true; // Unknown components remain forward-compatible and are skipped.
 }
 } // namespace pp_detail
 
@@ -112,10 +194,47 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
     return snap;
 }
 
+// Read-only admission for the complete roster. No registry operation runs until
+// every plant passes, including plants after the first valid record.
+inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
+    try {
+        for (const auto& record : snap.entities) {
+            if (record.name != "plant")
+                continue;
+            // Fixed shipping component set; unknown extension payloads are ignored.
+            constexpr std::array<std::string_view, 7> known = {"Transform",
+                                                               "PlantGenome",
+                                                               "PlantGrowth",
+                                                               "SoilFeeder",
+                                                               "PlantHealth",
+                                                               "Pollination",
+                                                               "CropLifecycle"};
+            std::array<bool, known.size()> seen{};
+            for (const auto& component : record.components) {
+                const auto found = std::find(known.begin(), known.end(), component.type);
+                if (found == known.end())
+                    continue;
+                const auto index = static_cast<std::size_t>(found - known.begin());
+                if (seen[index] || !pp_detail::ValidComponent(component))
+                    return false;
+                seen[index] = true;
+            }
+            if (!seen[0] || !seen[1] || !seen[2])
+                return false;
+        }
+        return true;
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+}
+
 // Reconstruct plant entities from a snapshot into `reg` (creates fresh entities). Unknown component
-// types are skipped. Deterministic (snapshot is id-ordered).
-inline void ApplyPlantEntitySnapshot(entt::registry& reg,
+// types are skipped. Returns false without registry mutation for invalid input.
+// Deterministic (snapshot is id-ordered).
+inline bool ApplyPlantEntitySnapshot(entt::registry& reg,
                                      const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
+    if (!ValidatePlantEntitySnapshot(snap))
+        return false;
     namespace C = ::Luminumbra::Components;
     for (const auto& rec : snap.entities) {
         if (rec.name != "plant")
@@ -173,6 +292,7 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
             }
         }
     }
+    return true;
 }
 
 } // namespace luminumbra::foliage
