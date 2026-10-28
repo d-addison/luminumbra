@@ -691,6 +691,51 @@ bool ReclaimOwnedLedgerStaging(const std::filesystem::path& staging) {
     return true;
 }
 
+bool ValidOrphanedStagingOwnership(const std::filesystem::path& staging,
+                                   const StagingFile& record) {
+    const auto parent =
+        staging.has_parent_path() ? staging.parent_path() : std::filesystem::path(".");
+    const StagingFile directory(parent, StagingFile::Mode::Directory);
+    StagingIdentity world_identity{}, staging_identity{}, instance_identity{};
+    std::string recorded;
+    if (!record.matches_name() || !directory.identity(world_identity, true) ||
+        !record.identity(instance_identity) || !record.read_record(recorded))
+        return false;
+    // Only the historical payload identity is unavailable after publication.
+    // Read its six fixed-width fields within the admitted 512-byte record, then
+    // require the entire canonical encoding, including all remaining bindings.
+    constexpr std::size_t kPayloadIdentityOffset = 8 + 3 * 8;
+    if (recorded.size() < kPayloadIdentityOffset + staging_identity.size() * 8)
+        return false;
+    for (std::size_t index = 0; index < staging_identity.size(); ++index)
+        staging_identity[index] = ReadU64(reinterpret_cast<const unsigned char*>(
+            recorded.data() + kPayloadIdentityOffset + index * 8));
+    const auto expected =
+        StagingOwnershipBytes(staging, world_identity, staging_identity, instance_identity);
+    return !expected.empty() && recorded == expected;
+}
+
+bool StagingPathMissing(const std::filesystem::path& staging) {
+    // A failed open is not absence: preserve inaccessible and nonregular leaves,
+    // including dangling symlinks and reparse points.
+#if defined(_WIN32)
+    return ::GetFileAttributesW(staging.c_str()) == INVALID_FILE_ATTRIBUTES &&
+           ::GetLastError() == ERROR_FILE_NOT_FOUND;
+#else
+    struct stat named {};
+    return ::lstat(staging.c_str(), &named) != 0 && errno == ENOENT;
+#endif
+}
+
+bool ReclaimOrphanedLedgerStaging(const std::filesystem::path& staging) {
+    const StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
+    if (!ValidOrphanedStagingOwnership(staging, record) || !StagingPathMissing(staging) ||
+        !record.remove())
+        return false;
+    FlushRemovalDirectory(staging, nullptr);
+    return true;
+}
+
 std::filesystem::path NextLedgerTempPath(const std::filesystem::path& destination) {
     auto path = NextRegionTempPath(destination);
     std::random_device entropy;
@@ -802,7 +847,12 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
         if (entry.path().filename().native().rfind(prefix.native(), 0) != 0)
             continue;
         if (destination.filename() == "active-regions.arl") {
-            if (entry.path().extension() != ".owner" && ReclaimOwnedLedgerStaging(entry.path()))
+            if (entry.path().extension() == ".owner") {
+                auto staging = entry.path();
+                staging.replace_extension();
+                if (ReclaimOrphanedLedgerStaging(staging))
+                    ++reclaimed;
+            } else if (ReclaimOwnedLedgerStaging(entry.path()))
                 ++reclaimed;
             continue;
         }

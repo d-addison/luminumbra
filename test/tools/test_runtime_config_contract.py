@@ -270,7 +270,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         cleanup = service[service.index("std::size_tReclaimAbandonedStaging("):]
         cleanup = cleanup[:cleanup.index("#ifdefined(_WIN32)")]
         self.assertIn('if(destination.filename()=="active-regions.arl")', cleanup)
-        self.assertIn('entry.path().extension()!=".owner"&&ReclaimOwnedLedgerStaging(entry.path())', cleanup)
+        self.assertIn('elseif(ReclaimOwnedLedgerStaging(entry.path()))', cleanup)
         self.assertLess(cleanup.index('destination.filename()=="active-regions.arl"'),
                         cleanup.index('entry.is_regular_file(kind_error)'))
         owned = service[service.index("boolReclaimOwnedLedgerStaging("):service.index("std::filesystem::pathNextLedgerTempPath(")]
@@ -295,6 +295,40 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                          "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
             self.assertIn(required, native)
         self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))
+
+    def test_ledger_orphan_cleanup_validates_proof_and_absence_before_verified_removal(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        cleanup = service[service.index("std::size_tReclaimAbandonedStaging("):]
+        self.assertIn('if(entry.path().extension()==".owner")', cleanup)
+        self.assertIn('staging.replace_extension();if(ReclaimOrphanedLedgerStaging(staging))', cleanup)
+        validator = service[service.index("boolValidOrphanedStagingOwnership("):
+                            service.index("boolStagingPathMissing(")]
+        for proof in ("record.matches_name()", "directory.identity(world_identity,true)",
+                      "record.identity(instance_identity)", "record.read_record(recorded)",
+                      "StagingOwnershipBytes(staging,world_identity,staging_identity,instance_identity)",
+                      "!expected.empty()&&recorded==expected"):
+            self.assertIn(proof, validator)
+        self.assertLess(validator.index('recorded.size()<'), validator.index('ReadU64('))
+        missing = service[service.index("boolStagingPathMissing("):
+                          service.index("boolReclaimOrphanedLedgerStaging(")]
+        self.assertIn('::GetLastError()==ERROR_FILE_NOT_FOUND', missing)
+        self.assertIn('::lstat(staging.c_str(),&named)!=0&&errno==ENOENT', missing)
+        orphan = service[service.index("boolReclaimOrphanedLedgerStaging("):
+                         service.index("std::filesystem::pathNextLedgerTempPath(")]
+        ordered = ("ValidOrphanedStagingOwnership(staging,record)",
+                   "StagingPathMissing(staging)", "record.remove()", "FlushRemovalDirectory(")
+        positions = [orphan.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('payload.remove()', orphan)
+        fixture = compact_cpp((ROOT / "test/persistence/world_save_service_test.cpp")
+                              .read_text(encoding="utf-8"))
+        for regression in ("LedgerStagingReclaimsValidOrphanAfterPublication",
+                           "LedgerStagingPreservesInvalidOrphanOwnership",
+                           "LedgerStagingRepeatedPublicationInterruptionsDoNotAccumulateSidecars",
+                           "LedgerStagingReclaimsValidOrphanAfterPayloadRemoval",
+                           "LedgerStagingPreservesOrphanCopiedFromAnotherWorldOrInstance"):
+            self.assertIn('TEST(WorldSaveService,' + regression + ')', fixture)
 
     def test_ledger_staging_is_durable_before_hook_and_replacement(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
