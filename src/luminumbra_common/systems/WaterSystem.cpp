@@ -992,10 +992,11 @@ void WaterSystem::update(entt::registry& registry,
         if (chunk_ptr->has_water_sim.load()) {
             const WaterDetailLevel required_detail =
                 CalculateRequiredDetail(*chunk_ptr, 0.0f, false);
-            // Only the chunks whose grid resolution must actually change are resize candidates
+            // Legacy float-only chunks also need conversion at the session resolution.
             // (Off is left to the existing path — never disabled here, preserving prior behaviour).
             if (required_detail != WaterDetailLevel::Off &&
-                static_cast<int>(required_detail) != chunk_ptr->current_water_resolution.load()) {
+                (static_cast<int>(required_detail) != chunk_ptr->current_water_resolution.load() ||
+                 (chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()))) {
                 resize_requests.push_back({chunk_ptr.get(), chunk_ptr->get_id(), required_detail});
             }
         } else if (!init_cap_reached) {
@@ -1722,7 +1723,8 @@ std::size_t WaterSystem::MigrateChunksToSimResolution(
         if (cp == nullptr || !cp->has_water_sim.load(std::memory_order_relaxed)) {
             continue;
         }
-        if (cp->current_water_resolution.load(std::memory_order_relaxed) == m_sim_resolution) {
+        if (cp->current_water_resolution.load(std::memory_order_relaxed) == m_sim_resolution &&
+            HasCompleteIntegerWaterGrid(*cp, m_sim_resolution)) {
             continue;
         }
         if (ResizeSimulationGrid(*cp, target_level))
@@ -1735,7 +1737,8 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     int new_resolution = static_cast<int>(new_level);
     int current_resolution = chunk.current_water_resolution.load();
 
-    if (new_resolution == current_resolution) {
+    if (new_resolution == current_resolution &&
+        !(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())) {
         return HasCompleteIntegerWaterGrid(chunk, current_resolution);
     }
 
@@ -1774,9 +1777,11 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     // Store old data for interpolation
     std::vector<f32> old_water_levels = std::move(chunk.water_level_data);
     std::vector<Vec2> old_flow_data = std::move(chunk.water_flow_data);
-    const bool can_interpolate = current_resolution > 1 &&
-                                 old_water_levels.size() >= GetWaterCellCount(current_resolution) &&
-                                 old_flow_data.size() >= GetWaterCellCount(current_resolution);
+    const bool can_interpolate_surface = old_water_levels.size() >= old_cell_count;
+    const auto flow_at = [&](int x, int z) {
+        const auto index = static_cast<std::size_t>(z * current_resolution + x);
+        return index < old_flow_data.size() ? old_flow_data[index] : Vec2(0.0f);
+    };
     // fixed-point water: the HASHED depth interpolates NATIVELY in the mm
     // domain from the OLD mm truth — integer bilinear with 1/256 fixed-point
     // weights — killing the old float->mm feedback (the mirror was interpolated
@@ -1831,7 +1836,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
                 m_shield_system->GetTerrainHeightAt(world_x, world_z);
 
             // Bilinear interpolation from old grid
-            if (can_interpolate) {
+            {
                 float old_x = (static_cast<float>(x) / (float)(new_resolution - 1)) *
                               static_cast<float>(current_resolution - 1);
                 float old_z = (static_cast<float>(z) / (float)(new_resolution - 1)) *
@@ -1845,34 +1850,33 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
                 float fx = old_x - static_cast<float>(x0);
                 float fz = old_z - static_cast<float>(z0);
 
-                // Sample old grid
-                float w00 =
-                    old_water_levels[static_cast<std::size_t>(z0 * current_resolution + x0)];
-                float w10 =
-                    old_water_levels[static_cast<std::size_t>(z0 * current_resolution + x1)];
-                float w01 =
-                    old_water_levels[static_cast<std::size_t>(z1 * current_resolution + x0)];
-                float w11 =
-                    old_water_levels[static_cast<std::size_t>(z1 * current_resolution + x1)];
+                chunk.water_level_data[idx] = SEA_LEVEL;
+                if (can_interpolate_surface) {
+                    // Sample old grid
+                    float w00 =
+                        old_water_levels[static_cast<std::size_t>(z0 * current_resolution + x0)];
+                    float w10 =
+                        old_water_levels[static_cast<std::size_t>(z0 * current_resolution + x1)];
+                    float w01 =
+                        old_water_levels[static_cast<std::size_t>(z1 * current_resolution + x0)];
+                    float w11 =
+                        old_water_levels[static_cast<std::size_t>(z1 * current_resolution + x1)];
 
-                // Bilinear interpolation
-                float w0 = w00 * (1.0f - fx) + w10 * fx;
-                float w1 = w01 * (1.0f - fx) + w11 * fx;
-                chunk.water_level_data[idx] = w0 * (1.0f - fz) + w1 * fz;
+                    // Bilinear interpolation
+                    float w0 = w00 * (1.0f - fx) + w10 * fx;
+                    float w1 = w01 * (1.0f - fx) + w11 * fx;
+                    chunk.water_level_data[idx] = w0 * (1.0f - fz) + w1 * fz;
+                }
 
                 // Similar interpolation for flow data
-                Vec2 f00 = old_flow_data[static_cast<std::size_t>(z0 * current_resolution + x0)];
-                Vec2 f10 = old_flow_data[static_cast<std::size_t>(z0 * current_resolution + x1)];
-                Vec2 f01 = old_flow_data[static_cast<std::size_t>(z1 * current_resolution + x0)];
-                Vec2 f11 = old_flow_data[static_cast<std::size_t>(z1 * current_resolution + x1)];
+                Vec2 f00 = flow_at(x0, z0);
+                Vec2 f10 = flow_at(x1, z0);
+                Vec2 f01 = flow_at(x0, z1);
+                Vec2 f11 = flow_at(x1, z1);
 
                 Vec2 f0 = f00 * (1.0f - fx) + f10 * fx;
                 Vec2 f1 = f01 * (1.0f - fx) + f11 * fx;
                 chunk.water_flow_data[idx] = f0 * (1.0f - fz) + f1 * fz;
-            } else {
-                // Initialize with default values
-                chunk.water_level_data[idx] = SEA_LEVEL;
-                chunk.water_flow_data[idx] = Vec2(0.0f);
             }
         }
     }
