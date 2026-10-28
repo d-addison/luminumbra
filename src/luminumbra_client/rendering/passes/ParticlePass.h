@@ -224,6 +224,8 @@ public:
                                  const glm::vec3& plunge_pos,
                                  float drop_height,
                                  float channel_width);
+    // Remove waterfall emitters and their mist while preserving other emitter handles.
+    void clear_waterfall_spray();
 
     // per-frame WIND velocity (world-space; horizontal XZ carried in
     // x/z, y usually 0) sampled by the client from the  wind field / replicated
@@ -275,6 +277,7 @@ private:
         double spawn_accumulator = 0.0; // fractional particles carried frame to frame
         uint64_t rng_state = 0;         // xorshift state, render-only
         float spawn_scale = 1.0f;       // live presentation intensity, not authored data
+        bool waterfall_spray = false;
     };
 
     // Render-only particle (motion state lives here, NEVER snapshotted).

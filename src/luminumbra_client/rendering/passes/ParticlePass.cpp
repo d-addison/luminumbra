@@ -357,6 +357,7 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
         return kInvalidEmitter;
     }
     ActiveEmitter& spray = m_active_emitters.back();
+    spray.waterfall_spray = true;
     // Spawn box spans the channel width horizontally and a shallow band at the
     // plunge pool surface; clamp so the mist stays a plume, not a fog bank.
     const float half_w = std::clamp(channel_width * 0.6f, 1.5f, 8.0f);
@@ -369,6 +370,43 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
     spray.data.base_velocity.y = std::max(spray.data.base_velocity.y, 1.5f * intensity);
     spray.data.wind_response = std::max(spray.data.wind_response, 0.4f); // mist drifts on wind
     return id;
+}
+
+void ParticlePass::clear_waterfall_spray() {
+    // At world replacement only: one pass over at most kMaxEmitters emitters and
+    // kMaxInstances particles. Stable compaction preserves unrelated emitter ids.
+    std::array<std::size_t, kMaxEmitters> remap{};
+    std::size_t kept = 0;
+    const auto old_size = m_active_emitters.size();
+    for (std::size_t index = 0; index < old_size; ++index) {
+        if (m_active_emitters[index].waterfall_spray) {
+            remap[index] = kNoSplashEmitter;
+            continue;
+        }
+        remap[index] = kept;
+        if (kept != index)
+            m_active_emitters[kept] = std::move(m_active_emitters[index]);
+        ++kept;
+    }
+    if (kept == old_size)
+        return;
+    m_live_count = 0;
+    for (auto& particle : m_particles) {
+        if (!particle.alive)
+            continue;
+        const auto mapped = remap[particle.emitter_index];
+        if (mapped == kNoSplashEmitter) {
+            particle.alive = false;
+        } else {
+            particle.emitter_index = static_cast<uint32_t>(mapped);
+            ++m_live_count;
+        }
+    }
+    if (m_splash_emitter_index != kNoSplashEmitter)
+        m_splash_emitter_index = remap[m_splash_emitter_index];
+    m_active_emitters.resize(kept);
+    m_descriptors.clear();
+    m_frame_instance_count = 0;
 }
 
 uint64_t

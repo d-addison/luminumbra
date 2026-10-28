@@ -113,3 +113,64 @@ TEST(ParticleDeterminism, DescriptorSetTracksWorldState) {
 
     EXPECT_NE(hash_tick_1, hash_tick_2);
 }
+
+TEST(ParticleDeterminism, WaterfallReplacementPreservesOtherEmitterHandles) {
+    ParticlePass pass;
+    pass.clear_waterfall_spray();
+    EXPECT_FALSE(pass.has_emitters());
+    const auto spray_file = SourceRoot() / "data/common/particles/waterfall_spray.json";
+    EXPECT_EQ(pass.add_waterfall_spray(spray_file / "missing.json", glm::vec3(0.0f), 8.0f, 4.0f),
+              ParticlePass::kInvalidEmitter);
+    pass.clear_waterfall_spray();
+    EXPECT_FALSE(pass.has_emitters());
+    const auto first = pass.add_emitter(FixtureEmitter(), glm::vec3(1.0f));
+    ASSERT_NE(first, ParticlePass::kInvalidEmitter);
+    ASSERT_NE(pass.add_waterfall_spray(spray_file, glm::vec3(20.0f), 8.0f, 4.0f),
+              ParticlePass::kInvalidEmitter);
+    const auto middle = pass.add_splash_emitter(FixtureEmitter());
+    ASSERT_NE(middle, ParticlePass::kInvalidEmitter);
+    ASSERT_NE(pass.add_waterfall_spray(spray_file, glm::vec3(40.0f), 8.0f, 4.0f),
+              ParticlePass::kInvalidEmitter);
+    const auto last = pass.add_emitter(FixtureEmitter(), glm::vec3(3.0f));
+    ASSERT_NE(last, ParticlePass::kInvalidEmitter);
+    pass.set_precipitation(SourceRoot() / "data/common/particles", glm::vec3(5.0f), 1.0f, 1.0f);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    ASSERT_EQ(pass.emitter_descriptors().size(), 7u);
+    std::vector<ParticlePass::EmitterDescriptor> unrelated;
+    for (const auto& descriptor : pass.emitter_descriptors()) {
+        if (descriptor.id == first || descriptor.id == middle || descriptor.id >= last)
+            unrelated.push_back(descriptor);
+    }
+    ASSERT_EQ(unrelated.size(), 5u);
+    for (int replacement = 0; replacement < 3; ++replacement) {
+        pass.clear_waterfall_spray();
+        pass.clear_waterfall_spray(); // Empty site sets and repeated teardown are harmless.
+        pass.rebuild_emitter_descriptors(777u, 10u);
+        ASSERT_EQ(pass.emitter_descriptors().size(), unrelated.size());
+        EXPECT_EQ(0,
+                  std::memcmp(pass.emitter_descriptors().data(),
+                              unrelated.data(),
+                              unrelated.size() * sizeof(ParticlePass::EmitterDescriptor)));
+        for (int site = 0; site < 24; ++site) {
+            ASSERT_NE(pass.add_waterfall_spray(spray_file, glm::vec3(60.0f), 8.0f, 4.0f),
+                      ParticlePass::kInvalidEmitter);
+        }
+        pass.rebuild_emitter_descriptors(777u, 10u);
+        EXPECT_EQ(pass.emitter_descriptors().size(), unrelated.size() + 24);
+    }
+    pass.clear_waterfall_spray();
+    pass.set_emitter_origin(last, glm::vec3(7.0f));
+    pass.set_precipitation(SourceRoot() / "data/common/particles", glm::vec3(9.0f), 1.0f, 1.0f);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    ASSERT_EQ(pass.emitter_descriptors().size(), 5u);
+    EXPECT_EQ(pass.emitter_descriptors()[2].id, last);
+    EXPECT_EQ(pass.emitter_descriptors()[2].origin_region[0], 7000);
+    EXPECT_EQ(pass.emitter_descriptors()[3].origin_region[0], 9000);
+    EXPECT_EQ(pass.emitter_descriptors()[4].origin_region[0], 9000);
+    pass.clear_emitters();
+    pass.clear_waterfall_spray();
+    EXPECT_FALSE(pass.has_emitters());
+    ASSERT_EQ(pass.add_waterfall_spray(spray_file, glm::vec3(0.0f), 8.0f, 4.0f), 0u);
+    pass.clear_waterfall_spray();
+    EXPECT_FALSE(pass.has_emitters());
+}
