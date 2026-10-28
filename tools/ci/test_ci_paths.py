@@ -1,6 +1,7 @@
 """Path gate coverage, rename safety, and standalone Python runner contracts."""
 
 from pathlib import Path
+import io
 import json
 import os
 import re
@@ -242,7 +243,7 @@ class PathGateTests(unittest.TestCase):
                          "Run standalone Python contracts (including CTest-registered suites)"):
                 condition = body.split(f"      - name: {step}\n", 1)[1].splitlines()[0].strip()
                 expression = condition.removeprefix("if: ${{ ").removesuffix(" }}")
-                # Windows runs the contracts once, on shard 2 (and the shard-0 qualification capture).
+                # Windows selects a disjoint suite set on each shard.
                 shard_bound = job == "windows-msvc" and step.startswith("Run standalone")
                 for shard in (0, 1, 2) if shard_bound else (1,):
                     for cpp, python, expected in (("true", "true", True), ("false", "true", True),
@@ -252,7 +253,7 @@ class PathGateTests(unittest.TestCase):
                             "needs.changes.outputs.needs_python", repr(python)
                         ).replace("matrix.shard", repr(shard)).replace("||", "or").replace("&&", "and")
                         with self.subTest(job=job, step=step, shard=shard, cpp=cpp, python=python):
-                            self.assertEqual(eval(actual, {"__builtins__": {}}), expected and (shard != 1 or not shard_bound))
+                            self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
             self.assertIn("route: ${{ steps.route.outputs.route }}", body)
             self.assertIn("tools/ci/ci_paths.py python-tests", body)
             self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', body)
@@ -282,7 +283,7 @@ class PathGateTests(unittest.TestCase):
         }
         routes = (
             ("ci", "linux", "guarded-python"),
-            ("ci", "windows-msvc", "ready-python"),
+            ("ci", "windows-msvc", "ready-native"),
             ("ci", "gns-compile-probe", "ready-native"),
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
@@ -313,9 +314,7 @@ class PathGateTests(unittest.TestCase):
                             elif route == "guarded-native":
                                 expected = not cancelled and (not ready or cpp != "false")
                             else:
-                                expected = not cancelled and ready and (
-                                    route == "ready-python" or cpp != "false"
-                                )
+                                expected = not cancelled and ready and cpp != "false"
                             actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
                                 "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
                             ).replace("!cancelled()", repr(not cancelled)).replace(
@@ -519,6 +518,69 @@ class PathGateTests(unittest.TestCase):
         self.assertIn(("tools/ci/test_tidy_cache.py",), commands)
         for test in gate.PYTHON_TESTS:
             self.assertIn((test,), commands)
+
+    def test_python_shards_are_stable_disjoint_and_cover_the_original_plan(self):
+        original = [(test,) for test in gate.PYTHON_TESTS]
+        original.extend(sorted(set(gate.PYTHON_SELF_CHECKS.values())))
+        self.assertEqual(gate.python_test_commands(ROOT), original)
+        self.assertEqual(gate.python_test_commands(ROOT, 0), original)
+        parts = [gate.python_test_commands(ROOT, shard) for shard in (1, 2)]
+        self.assertTrue(all(parts))
+        self.assertFalse(set(parts[0]) & set(parts[1]))
+        self.assertCountEqual(parts[0] + parts[1], original)
+        self.assertEqual(len(parts[0] + parts[1]), len(set(original)))
+        for platform in ("nt", "posix"):
+            with patch.object(gate.os, "name", platform):
+                self.assertEqual([gate.python_test_commands(ROOT, shard) for shard in (1, 2)], parts)
+        # Reordering and adding a suite must not move an existing suite.
+        with patch.object(gate, "PYTHON_TESTS", (*reversed(gate.PYTHON_TESTS), "new_suite.py")):
+            for shard, expected in enumerate(parts, 1):
+                actual = gate.python_test_commands(ROOT, shard)
+                self.assertCountEqual([item for item in actual if item != ("new_suite.py",)], expected)
+        # Fixed vectors also reject process-randomized hashing or index partitioning.
+        self.assertIn(("tools/ci/test_workflow_policy.py",), parts[0])
+        self.assertIn(("tools/ci/test_ctest_shards.py",), parts[1])
+
+    def test_python_shards_refuse_invalid_and_empty_selection(self):
+        for shard in (None, "1", True, -1, 3, 1.0):
+            with self.subTest(shard=shard), self.assertRaisesRegex(ValueError, "shard must"):
+                gate.python_test_commands(ROOT, shard)
+        with patch.object(gate, "PYTHON_TESTS", ()), patch.object(gate, "PYTHON_SELF_CHECKS", {}):
+            for shard in (1, 2):
+                with self.assertRaisesRegex(ValueError, "empty Python contract shard"):
+                    gate.python_test_commands(ROOT, shard)
+
+    def test_python_shard_cli_executes_only_selected_commands_and_propagates_failure(self):
+        for shard in (0, 1, 2):
+            commands = gate.python_test_commands(ROOT, shard)
+            with self.subTest(shard=shard), patch.object(sys, "argv", [
+                    "ci_paths.py", "python-tests", "--shard", str(shard)]), patch.object(
+                    gate.subprocess, "run") as run, patch.object(sys, "stdout", new_callable=io.StringIO):
+                self.assertEqual(gate.main(), 0)
+                self.assertEqual([call.args[0] for call in run.call_args_list],
+                                 [[sys.executable, "-B", *command] for command in commands])
+                self.assertTrue(all(call.kwargs == {"cwd": ROOT, "check": True} for call in run.call_args_list))
+                run.reset_mock()
+                run.side_effect = subprocess.CalledProcessError(1, "python")
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.main()
+                self.assertEqual(run.call_count, 1)
+
+    def test_python_shard_cli_rejects_invalid_metadata_before_running_or_writing(self):
+        with patch.object(sys, "argv", ["ci_paths.py", "python-tests", "--shard", "0"]), patch.object(
+                gate, "python_test_commands", return_value=[]), patch.object(gate.subprocess, "run") as run:
+            self.assertEqual(gate.main(), 0)
+            run.assert_not_called()
+        for args in (["python-tests", "--shard"], ["python-tests", "--shard", "3"],
+                     ["python-tests", "--shard", "unknown"], ["classify", "--shard", "1"]):
+            with self.subTest(args=args), patch.object(sys, "argv", ["ci_paths.py", *args]), patch.object(
+                    gate.subprocess, "run") as run, patch.object(gate, "classify") as classify, patch.object(
+                    sys, "stderr", new_callable=io.StringIO), self.assertRaises(
+                    SystemExit) as error:
+                gate.main()
+            self.assertEqual(error.exception.code, 2)
+            run.assert_not_called()
+            classify.assert_not_called()
 
     def test_performance_lane_selects_every_registered_render_runner_case(self):
         cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")

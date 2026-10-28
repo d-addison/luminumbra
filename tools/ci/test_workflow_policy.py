@@ -924,12 +924,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin the selected Python, partitioned local checks, render failure symbols,
-            # shard-2-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "d6164af56312ee3cff2821ee21ebc4b5cb487a9b86ea1722f29ee9f3df9f75c8",
+            # Python contracts across both shards and verbose compiler cache statistics.
+            "windows-msvc": "22033107b508290d7dee41b6c18f29c56b45446b0d10560d98e15ba2ab1824ad",
             # Pin the selected Python, render failure symbols and verbose compiler cache statistics in UCRT64.
             "windows-ucrt64": "fdde3c6e5bf5132120ba644424e20409bea34466d94c4f932704a1c74a712896",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
-            "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
+            "windows-msvc-result": "c7fd56803b478d9141923c929c4804b52371b7493fbd4e5c157e69fe1ec83c83",
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
@@ -1144,7 +1144,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(value(ci[job_id], "if", 4),
                                  "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ") }}")
         self.assertEqual(value(ci["windows-msvc"], "needs", 4), "changes")
-        self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ !cancelled() && (" + READY + ") }}")
+        self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ") }}")
         self.assertEqual(value(ci["tidy"], "needs", 4), "[changes, tidy-shard]")
         self.assertEqual(value(ci["tidy"], "if", 4), "${{ (!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ") }}")
         self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + " }}")
@@ -2495,6 +2495,76 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                 with self.subTest(event=event, branch=branch, draft=draft,
                                                   cpp=cpp, cancelled=cancelled, capture=capture):
                                     self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_windows_docs_skip_precedes_checkout_and_keeps_unknown_classification_native(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job_id in ("windows-msvc", "windows-ucrt64"):
+            job = ci[job_id]
+            expression = value(job, "if", 4)
+            self.assertIn("needs.changes.outputs.needs_cpp != 'false'", expression)
+            self.assertLess(job.index("    if:"), job.index("actions/checkout@"))
+            for event in ("pull_request", "push", "workflow_dispatch"):
+                for cpp in ("false", "true", "", "unknown"):
+                    for draft in (False, True, None):
+                        for cancelled in (False, True):
+                            condition = expression.replace("github.event_name", repr(event)).replace(
+                                "github.event.pull_request.draft", repr(draft)).replace(
+                                "needs.changes.outputs.needs_cpp", repr(cpp)).replace("== false", "== False")
+                            expected = not cancelled and cpp != "false" and (event != "pull_request" or draft is False)
+                            with self.subTest(job=job_id, event=event, cpp=cpp, draft=draft, cancelled=cancelled):
+                                self.assertEqual(evaluate_condition(condition, {"changes": "success"}, cancelled=cancelled), expected)
+            # Every producer artifact consumer must also require native classification.
+            aggregate = ci[job_id + "-result"]
+            for step in steps(aggregate):
+                if any(marker in step for marker in ("actions/download-artifact@", "ctest_shards.py merge", "actions/upload-artifact@")):
+                    self.assertIn("needs.changes.outputs.needs_cpp != 'false'", value(step, "if", 8))
+
+    def test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty(self):
+        ci = jobs(self.workflows["ci.yml"])
+        with tempfile.TemporaryDirectory() as directory:
+            for job_id in ("windows-msvc", "windows-ucrt64"):
+                gate = next(step for step in steps(ci[job_id + "-result"])
+                            if "name: Require expected producers and route" in step)
+                for index, (cpp, classification, result, accepted) in enumerate((
+                        ("false", "success", "skipped", True),
+                        ("false", "failure", "skipped", False),
+                        ("false", "", "skipped", False),
+                        ("", "success", "skipped", False),
+                        ("unknown", "success", "skipped", False),
+                        ("true", "success", "skipped", False),
+                        ("false", "success", "failure", False))):
+                    enabled = value(gate, "CI_ENABLED", 10).replace(
+                        "needs.changes.outputs.needs_cpp", repr(cpp)).replace("github.event_name", repr("pull_request"))
+                    enabled = str(evaluate_condition(enabled, {})).lower()
+                    script = 'python3() { "$POLICY_PYTHON" -I -B "$@"; }\n' + value(gate, "run", 8)
+                    # Bytes on stdin avoid Windows quote and CRLF conversion.
+                    process = subprocess.run([BASH, "--noprofile", "--norc", "-e"], input=script.encode("utf-8"),
+                                             cwd=ROOT, env=dict(os.environ,
+                                                 POLICY_PYTHON=Path(sys.executable).as_posix(),
+                                                 CI_PATHS_RESULT=classification, SHARD_RESULT=result, NEEDS_CPP=cpp,
+                                                 CI_CANCELLED="false", CI_EVENT="pull_request", CI_DRAFT="false",
+                                                 CI_QUALIFICATION="false", CI_ENABLED=enabled,
+                                                 GITHUB_STEP_SUMMARY=(Path(directory) / f"summary-{job_id}-{index}").as_posix()),
+                                             capture_output=True, timeout=10)
+                    with self.subTest(job=job_id, cpp=cpp, classification=classification, result=result):
+                        self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
+                        if accepted:
+                            self.assertIn(b"skipped", process.stdout)
+
+    def test_windows_standalone_contract_step_partitions_both_shards_and_preserves_full_capture(self):
+        ci = jobs(self.workflows["ci.yml"])
+        step = next(step for step in steps(ci["windows-msvc"])
+                    if "name: Run standalone Python contracts" in step)
+        self.assertEqual(value(step, "run", 8),
+                         '& "$env:CI_PYTHON_EXECUTABLE" -B tools/ci/ci_paths.py python-tests --shard ${{ matrix.shard }}')
+        for shard in (0, 1, 2):
+            for cpp, python in (("true", "true"), ("true", "false"), ("", "")):
+                condition = value(step, "if", 8).replace("matrix.shard", repr(shard)).replace(
+                    "needs.changes.outputs.needs_cpp", repr(cpp)).replace("needs.changes.outputs.needs_python", repr(python))
+                with self.subTest(shard=shard, cpp=cpp, python=python):
+                    self.assertEqual(evaluate_condition(condition, {}), python != "false")
+        linux_step = next(step for step in steps(ci["linux"]) if "name: Run standalone Python contracts" in step)
+        self.assertEqual(value(linux_step, "run", 8), "python3 -B tools/ci/ci_paths.py python-tests")
 
     def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
         job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
