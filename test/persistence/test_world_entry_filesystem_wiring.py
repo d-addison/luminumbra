@@ -227,23 +227,25 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
                      "save_active_regions(ledger, clock, save_dir, errors, artifacts)"):
             self.assertEqual(paired.count(call), 2)
 
-    def test_fatal_snapshot_refusals_change_revision_on_every_load_path(self):
+    def test_snapshot_refusals_keep_the_live_world_or_change_revision_when_it_is_torn_down(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
-        for method, state in (("LoadWorld", "loaded"), ("LoadWorldFrom", "loaded"),
-                              ("LoadWorldStateFrom", "state")):
+        for method in ("LoadWorld", "LoadWorldFrom"):
             with self.subTest(method=method):
                 loading = body(session, f"bool GameSession::{method}(")
-                match = re.search(
-                    rf"if \(!ReadWorldStateFrom\([^;]*,\s*{state}(?:,\s*true)?\)\) \{{",
-                    loading,
-                )
+                match = re.search(r"if \(!ReadWorldStateFrom\([^;]*,\s*loaded,\s*true\)\)\s*return false;", loading)
                 self.assertIsNotNone(match)
-                refusal = loading[match.end():].split("return false;", 1)[0]
-                refusal = body(refusal, f"if (!{state}.input_refused)")
-                self.assertIn("++m_worldRevision;", refusal)
-                self.assertLess(refusal.index("++m_worldRevision;"),
-                                refusal.index("m_worldSystem->clear_world("))
-                self.assertIn("m_worldUsable = false;", refusal)
+                # A refused candidate never touches the live world, so the revision stays put.
+                self.assertLess(match.start(), loading.index("ResetWorldSystems();"))
+        with self.subTest(method="LoadWorldStateFrom"):
+            loading = body(session, "bool GameSession::LoadWorldStateFrom(")
+            match = re.search(r"if \(!ReadWorldStateFrom\([^;]*,\s*state\)\) \{", loading)
+            self.assertIsNotNone(match)
+            refusal = loading[match.end():].split("return false;", 1)[0]
+            refusal = body(refusal, "if (!state.input_refused)")
+            self.assertIn("++m_worldRevision;", refusal)
+            self.assertLess(refusal.index("++m_worldRevision;"),
+                            refusal.index("m_worldSystem->clear_world("))
+            self.assertIn("m_worldUsable = false;", refusal)
 
     def test_async_persistence_keeps_refusal_latches_and_checks_optional_in_adoption(self):
         machine = (ROOT / "src/luminumbra_client/world/WorldEntry.h").read_text(encoding="utf-8")
