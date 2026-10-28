@@ -7,7 +7,7 @@ This is deliberately scoped to their current YAML layout, not a YAML parser.
 The 72-case baseline launched 772 subprocesses on POSIX; aggregate cancellation,
 ASan admission and Bash syntax cases accounted for 340, 210 and 79 launches.
 Windows qualification exhausted the suite's 30-second CTest deadline without
-per-case timings. Ten disjoint registrations isolate those workloads and keep
+per-case timings. Twelve disjoint registrations isolate those workloads and keep
 each 30-second deadline. Each selected case reports elapsed time so a slow case
 remains visible. Native per-case qualification is still required; local timings
 do not establish that every Windows case fits its deadline. Direct invocation
@@ -862,7 +862,7 @@ class WorkflowExpressionPolicyTests(unittest.TestCase):
         self.assertEqual(status_function_violations(""), [])
 
 
-class WorkflowDraftPolicyTests(unittest.TestCase):
+class WorkflowPolicyFixture:
     @classmethod
     def setUpClass(cls):
         cls.workflows = {
@@ -870,6 +870,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for filename in GUARDED
         }
 
+
+class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_profile_source_checker_requires_complete_ordered_configuration(self):
         spec = importlib.util.spec_from_file_location(
             "profile_contract", ROOT / "test/tools/check_profiler_contract.py")
@@ -2198,6 +2200,164 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                             if classification != "success" or result not in ("success", "skipped"):
                                 self.assertIn("Aggregate dependencies did not pass", process.stderr)
 
+    def test_asan_aggregate_accepts_only_success_or_the_original_path_skip(self):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        step = next(step for step in steps(aggregate) if step.splitlines()[0].removeprefix("      - name: ") == "Require all ASan shards to pass")
+        self.assertEqual(value(step, "ASAN_SHARD_RESULT", 10), "${{ needs.asan-shard.result }}")
+        self.assertEqual(value(step, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
+        self.assertEqual(value(step, "NEEDS_CPP", 10), "${{ needs.changes.outputs.needs_cpp }}")
+        self.assertIsNone(value(step, "ASAN_CANCELLED", 10))
+        self.assertEqual(value(step, "if", 8), "always() && (" + READY + ")")
+        self.assertIsNone(value(step, "continue-on-error", 8))
+        self.check_asan_aggregate_results(value(step, "run", 8))
+
+    def check_asan_aggregate_results(self, script):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        refusal = next(step for step in steps(aggregate)
+                       if step.startswith("      - name: Reject invalid dependencies\n"))
+        self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression("asan-shard") + ") }}")
+        self.assertIsNone(value(refusal, "continue-on-error", 8))
+        refusal_script = value(refusal, "run", 8)
+        self.assertIsNotNone(refusal_script)
+        with tempfile.TemporaryDirectory() as directory:
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for cancelled in (False, True):
+                    for cpp in ("true", "false", ""):
+                        for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                            with self.subTest(cancelled=cancelled, classification=classification,
+                                              cpp=cpp, result=result):
+                                dependencies = {"changes": classification, "asan-shard": result,
+                                                "fast-lane": "success"}
+                                admitted = evaluate_condition(value(aggregate, "if", 4), dependencies,
+                                                              cancelled=cancelled)
+                                if not admitted:
+                                    self.assertTrue(cancelled)
+                                    self.assertEqual(classification, "success")
+                                    self.assertIn(result, ("success", "skipped"))
+                                    continue
+                                refuses = evaluate_condition(value(refusal, "if", 8), dependencies, failed=False)
+                                process = run_bash_script(
+                                    (refusal_script + "\n" if refuses else "") + script,
+                                    env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
+                                             CI_PATHS_RESULT=classification,
+                                             GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
+                                    capture_output=True, text=True, timeout=10,
+                                )
+                                accepted = not cancelled and classification == "success" and (
+                                    result == "success" or (classification == "success" and
+                                                            cpp == "false" and result == "skipped"))
+                                self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
+                                if cancelled:
+                                    self.assertIn("Aggregate dependencies did not pass", process.stderr)
+
+    def test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
+            with self.subTest(job=job):
+                aggregate = ci[job]
+                refusal = next(step for step in steps(aggregate)
+                               if step.startswith("      - name: Reject invalid dependencies\n"))
+                gate = next(step for step in steps(aggregate)
+                            if step.startswith("      - name: Require expected producers and route\n"))
+                self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression(job.removesuffix("-result")) + ") }}")
+                self.assertIsNone(value(refusal, "continue-on-error", 8))
+                self.assertIsNone(value(gate, "if", 8))
+                self.assertIsNone(value(gate, "continue-on-error", 8))
+                self.assertLess(aggregate.index(refusal), aggregate.index(gate))
+                result = run_bash_script(
+                    value(refusal, "run", 8), capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Aggregate dependencies did not pass", result.stderr)
+
+    def test_ucrt64_configure_changes_only_debug_information_level(self):
+        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
+        configure, = [step for step in steps(job) if step.startswith("      - name: Configure\n")]
+        self.assertEqual(value(configure, "run", 8),
+                         'cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache '
+                         '"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE" '
+                         '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache '
+                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1')
+
+    def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
+        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
+        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(job)}
+        trusted_push = (
+            "github.event_name == 'push' && "
+            "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel')"
+        )
+        capture = "github.event_name == 'workflow_dispatch' && inputs.qualification_capture"
+        self.assertEqual(value(named["Set up MSYS2 UCRT64"], "cache", 10),
+                         "${{ matrix.shard == 1 && " + trusted_push + " }}")
+        disable = named["Disable compiler cache for qualification captures"]
+        self.assertEqual(value(disable, "if", 8), capture)
+        self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
+        self.assertEqual(value(named["Restore compiler cache"], "if", 8),
+                         "${{ !(" + capture + ") }}")
+        for name in ("Clean compiler cache before saving", "Save compiler cache"):
+            with self.subTest(step=name):
+                self.assertEqual(
+                    value(named[name], "if", 8),
+                    "${{ matrix.shard == 1 && always() && " + trusted_push + " && !(" + capture + ") && "
+                    "steps.compiler-cache.outcome == 'success' && "
+                    "steps.compiler-cache.outputs.cache-hit != 'true' }}",
+                )
+
+    def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
+        group = (
+            "${{ github.event_name == 'workflow_dispatch' && "
+            "format('{0}-manual-{1}', github.workflow, github.run_id) || "
+            "github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+            "format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || "
+            "github.event_name == 'push' && github.ref == 'refs/heads/devel' && "
+            "format('{0}-{1}-push', github.workflow, github.ref) || "
+            "format('{0}-{1}', github.workflow, github.ref) }}"
+        )
+        cancellation = "${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
+        workflows = dict(self.workflows)
+        workflows["ucrt-attribution.yml"] = (
+            ROOT / ".github/workflows/ucrt-attribution.yml"
+        ).read_text(encoding="utf-8")
+        for filename, workflow in workflows.items():
+            with self.subTest(workflow=filename):
+                expected_group = group
+                expected_cancellation = cancellation
+                if filename == "ci.yml":
+                    expected_group = group.replace("${{ ", "${{ (github.event_name == 'pull_request' && "
+                                                   "github.event.action == 'edited' && !github.event.changes.base) && "
+                                                   "format('{0}-metadata-{1}', github.workflow, github.run_id) || ", 1)
+                    expected_cancellation = cancellation.replace(
+                        "${{ ", "${{ !(github.event_name == 'pull_request' && github.event.action == 'edited' && "
+                        "!github.event.changes.base) && ", 1)
+                self.assertEqual(value(workflow, "group", 2), expected_group)
+                self.assertEqual(value(workflow, "cancel-in-progress", 2), expected_cancellation)
+
+    def test_policy_suite_is_part_of_cheap_inventory_check(self):
+        inventory = jobs(self.workflows["ci.yml"])["public-tree"]
+        self.assertIn("python3 tools/ci/test_workflow_policy.py", inventory)
+
+    def test_freeze_audit_comment_is_identical_in_every_workflow(self):
+        expected = {
+            "ci.yml", "asan.yml", "performance.yml", "docs.yml",
+            "game-assets.yml", "blender-authoring.yml", "ucrt-attribution.yml",
+        }
+        comments = {}
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            matches = re.findall(
+                r"^  # The campaign freeze audit[^\n]*\n(?:  #[^\n]*\n)*?"
+                r"(?=  # Main pushes)", workflow, re.MULTILINE,
+            )
+            with self.subTest(workflow=path.name):
+                if path.name in expected:
+                    self.assertEqual(len(matches), 1)
+                if matches:
+                    self.assertEqual(len(matches), 1)
+                    comments[path.name] = matches[0]
+        self.assertEqual(set(comments), expected)
+        self.assertEqual(len(set(comments.values())), 1, comments)
+
+
+class WorkflowRequiredAggregatePolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies(self):
         # At job level cancelled() reads workflow cancellation. At step level
         # it reads the current job status, which can still be successful while
@@ -2293,7 +2453,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     # Apply only inside this job, not the classifier or shards.
                     mutated = aggregate.replace(original, replacement)
                     self.assertNotEqual(mutated, aggregate)
-                    case = WorkflowDraftPolicyTests(method)
+                    case = type(self)(method)
                     case.workflows = {**self.workflows, filename: workflow.replace(aggregate, mutated, 1)}
                     result = unittest.TestResult()
                     unittest.FunctionTestCase(
@@ -2301,75 +2461,6 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     ).run(result)
                     self.assertEqual(result.errors, [], result.errors)
                     self.assertTrue(result.failures)
-
-    def test_asan_aggregate_accepts_only_success_or_the_original_path_skip(self):
-        aggregate = jobs(self.workflows["asan.yml"])["asan"]
-        step = next(step for step in steps(aggregate) if step.splitlines()[0].removeprefix("      - name: ") == "Require all ASan shards to pass")
-        self.assertEqual(value(step, "ASAN_SHARD_RESULT", 10), "${{ needs.asan-shard.result }}")
-        self.assertEqual(value(step, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
-        self.assertEqual(value(step, "NEEDS_CPP", 10), "${{ needs.changes.outputs.needs_cpp }}")
-        self.assertIsNone(value(step, "ASAN_CANCELLED", 10))
-        self.assertEqual(value(step, "if", 8), "always() && (" + READY + ")")
-        self.assertIsNone(value(step, "continue-on-error", 8))
-        self.check_asan_aggregate_results(value(step, "run", 8))
-
-    def check_asan_aggregate_results(self, script):
-        aggregate = jobs(self.workflows["asan.yml"])["asan"]
-        refusal = next(step for step in steps(aggregate)
-                       if step.startswith("      - name: Reject invalid dependencies\n"))
-        self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression("asan-shard") + ") }}")
-        self.assertIsNone(value(refusal, "continue-on-error", 8))
-        refusal_script = value(refusal, "run", 8)
-        self.assertIsNotNone(refusal_script)
-        with tempfile.TemporaryDirectory() as directory:
-            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
-                for cancelled in (False, True):
-                    for cpp in ("true", "false", ""):
-                        for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
-                            with self.subTest(cancelled=cancelled, classification=classification,
-                                              cpp=cpp, result=result):
-                                dependencies = {"changes": classification, "asan-shard": result,
-                                                "fast-lane": "success"}
-                                admitted = evaluate_condition(value(aggregate, "if", 4), dependencies,
-                                                              cancelled=cancelled)
-                                if not admitted:
-                                    self.assertTrue(cancelled)
-                                    self.assertEqual(classification, "success")
-                                    self.assertIn(result, ("success", "skipped"))
-                                    continue
-                                refuses = evaluate_condition(value(refusal, "if", 8), dependencies, failed=False)
-                                process = run_bash_script(
-                                    (refusal_script + "\n" if refuses else "") + script,
-                                    env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
-                                             CI_PATHS_RESULT=classification,
-                                             GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
-                                    capture_output=True, text=True, timeout=10,
-                                )
-                                accepted = not cancelled and classification == "success" and (
-                                    result == "success" or (classification == "success" and
-                                                            cpp == "false" and result == "skipped"))
-                                self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
-                                if cancelled:
-                                    self.assertIn("Aggregate dependencies did not pass", process.stderr)
-
-    def test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate(self):
-        ci = jobs(self.workflows["ci.yml"])
-        for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
-            with self.subTest(job=job):
-                aggregate = ci[job]
-                refusal = next(step for step in steps(aggregate)
-                               if step.startswith("      - name: Reject invalid dependencies\n"))
-                gate = next(step for step in steps(aggregate)
-                            if step.startswith("      - name: Require expected producers and route\n"))
-                self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression(job.removesuffix("-result")) + ") }}")
-                self.assertIsNone(value(refusal, "continue-on-error", 8))
-                self.assertIsNone(value(gate, "if", 8))
-                self.assertIsNone(value(gate, "continue-on-error", 8))
-                self.assertLess(aggregate.index(refusal), aggregate.index(gate))
-                result = run_bash_script(
-                    value(refusal, "run", 8), capture_output=True, text=True, timeout=10)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Aggregate dependencies did not pass", result.stderr)
 
     def test_required_aggregate_verdicts_run_after_failure_and_cancellation(self):
         results = ("success", "failure", "cancelled", "skipped", "", "unknown")
@@ -2490,7 +2581,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 with self.subTest(job=job_id, mutation=mutation):
                     mutated = verdict.replace(original, replacement, 1)
                     self.assertNotEqual(mutated, verdict)
-                    case = WorkflowDraftPolicyTests(method)
+                    case = type(self)(method)
                     case.workflows = {
                         **self.workflows,
                         filename: workflow.replace(aggregate, aggregate.replace(verdict, mutated, 1), 1),
@@ -2504,7 +2595,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     def test_required_aggregate_verdict_grid_keeps_bounded_launches_and_step_isolation(self):
         method = "test_required_aggregate_verdicts_run_after_failure_and_cancellation"
-        case = WorkflowDraftPolicyTests(method)
+        case = type(self)(method)
         case.workflows = dict(self.workflows)
         for filename, job_id in (("asan.yml", "asan"), ("ci.yml", "tidy")):
             workflow = case.workflows[filename]
@@ -2544,7 +2635,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             subprocess.TimeoutExpired([BASH], 10, output=b"0\n"),
         ):
             with self.subTest(response=response):
-                case = WorkflowDraftPolicyTests(method)
+                case = type(self)(method)
                 case.workflows = self.workflows
                 result = unittest.TestResult()
                 options = ({"side_effect": response} if isinstance(response, Exception)
@@ -2553,6 +2644,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     case.run(result)
                 self.assertTrue(result.failures or result.errors)
 
+
+class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
         ci = jobs(self.workflows["ci.yml"])
         job = ci["windows-ucrt64"]
@@ -2799,99 +2892,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for method in ("test_ucrt64_path_classifier_uses_merge_base_and_fails_open",
                        "test_ucrt64_content_classifier_fails_open_on_git_errors"):
             with self.subTest(method=method), patch.object(subprocess, "run", side_effect=checked_run):
-                case = WorkflowDraftPolicyTests(method)
+                case = type(self)(method)
                 case.workflows = self.workflows
                 result = unittest.TestResult()
                 case.run(result)
                 self.assertEqual(result.errors, [], result.errors)
                 self.assertEqual(result.failures, [], result.failures)
-
-    def test_ucrt64_configure_changes_only_debug_information_level(self):
-        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
-        configure, = [step for step in steps(job) if step.startswith("      - name: Configure\n")]
-        self.assertEqual(value(configure, "run", 8),
-                         'cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache '
-                         '"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE" '
-                         '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache '
-                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1')
-
-    def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
-        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
-        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(job)}
-        trusted_push = (
-            "github.event_name == 'push' && "
-            "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel')"
-        )
-        capture = "github.event_name == 'workflow_dispatch' && inputs.qualification_capture"
-        self.assertEqual(value(named["Set up MSYS2 UCRT64"], "cache", 10),
-                         "${{ matrix.shard == 1 && " + trusted_push + " }}")
-        disable = named["Disable compiler cache for qualification captures"]
-        self.assertEqual(value(disable, "if", 8), capture)
-        self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
-        self.assertEqual(value(named["Restore compiler cache"], "if", 8),
-                         "${{ !(" + capture + ") }}")
-        for name in ("Clean compiler cache before saving", "Save compiler cache"):
-            with self.subTest(step=name):
-                self.assertEqual(
-                    value(named[name], "if", 8),
-                    "${{ matrix.shard == 1 && always() && " + trusted_push + " && !(" + capture + ") && "
-                    "steps.compiler-cache.outcome == 'success' && "
-                    "steps.compiler-cache.outputs.cache-hit != 'true' }}",
-                )
-
-    def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
-        group = (
-            "${{ github.event_name == 'workflow_dispatch' && "
-            "format('{0}-manual-{1}', github.workflow, github.run_id) || "
-            "github.event_name == 'push' && github.ref == 'refs/heads/main' && "
-            "format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || "
-            "github.event_name == 'push' && github.ref == 'refs/heads/devel' && "
-            "format('{0}-{1}-push', github.workflow, github.ref) || "
-            "format('{0}-{1}', github.workflow, github.ref) }}"
-        )
-        cancellation = "${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
-        workflows = dict(self.workflows)
-        workflows["ucrt-attribution.yml"] = (
-            ROOT / ".github/workflows/ucrt-attribution.yml"
-        ).read_text(encoding="utf-8")
-        for filename, workflow in workflows.items():
-            with self.subTest(workflow=filename):
-                expected_group = group
-                expected_cancellation = cancellation
-                if filename == "ci.yml":
-                    expected_group = group.replace("${{ ", "${{ (github.event_name == 'pull_request' && "
-                                                   "github.event.action == 'edited' && !github.event.changes.base) && "
-                                                   "format('{0}-metadata-{1}', github.workflow, github.run_id) || ", 1)
-                    expected_cancellation = cancellation.replace(
-                        "${{ ", "${{ !(github.event_name == 'pull_request' && github.event.action == 'edited' && "
-                        "!github.event.changes.base) && ", 1)
-                self.assertEqual(value(workflow, "group", 2), expected_group)
-                self.assertEqual(value(workflow, "cancel-in-progress", 2), expected_cancellation)
-
-    def test_policy_suite_is_part_of_cheap_inventory_check(self):
-        inventory = jobs(self.workflows["ci.yml"])["public-tree"]
-        self.assertIn("python3 tools/ci/test_workflow_policy.py", inventory)
-
-    def test_freeze_audit_comment_is_identical_in_every_workflow(self):
-        expected = {
-            "ci.yml", "asan.yml", "performance.yml", "docs.yml",
-            "game-assets.yml", "blender-authoring.yml", "ucrt-attribution.yml",
-        }
-        comments = {}
-        for path in (ROOT / ".github/workflows").glob("*.yml"):
-            workflow = path.read_text(encoding="utf-8")
-            matches = re.findall(
-                r"^  # The campaign freeze audit[^\n]*\n(?:  #[^\n]*\n)*?"
-                r"(?=  # Main pushes)", workflow, re.MULTILINE,
-            )
-            with self.subTest(workflow=path.name):
-                if path.name in expected:
-                    self.assertEqual(len(matches), 1)
-                if matches:
-                    self.assertEqual(len(matches), 1)
-                    comments[path.name] = matches[0]
-        self.assertEqual(set(comments), expected)
-        self.assertEqual(len(set(comments.values())), 1, comments)
 
 
 class WorkflowBaseEditPolicyTests(unittest.TestCase):
@@ -3279,7 +3285,7 @@ def policy_route_results(cases, workers):
 
 # Keep launch-heavy cases separate without changing any case or subtest.
 # Selection scans the finite unittest roster once; no subprocess is started here.
-POLICY_PARTITIONS = tuple(str(index) for index in range(10))
+POLICY_PARTITIONS = tuple(str(index) for index in range(12))
 POLICY_ROUTE_CASE = "WorkflowDraftPolicyTests.test_native_aggregates_preserve_route_checks"
 POLICY_CASE_PARTITIONS = {
     "WorkflowDraftPolicyTests.test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies": "1",
@@ -3293,6 +3299,8 @@ POLICY_CASE_PARTITIONS = {
 POLICY_CLASS_PARTITIONS = {
     "WorkflowBaseEditPolicyTests": "0",
     "WorkflowDraftPolicyTests": "0",
+    "WorkflowRequiredAggregatePolicyTests": "10",
+    "WorkflowUcrtClassifierPolicyTests": "11",
     "WorkflowExpressionPolicyTests": "0",
     "WorkflowCacheCleanupPolicyTests": "0",
     "WorkflowAttributionPolicyTests": "0",
@@ -3313,6 +3321,9 @@ def policy_cases(suite):
 def policy_partition_suite(loader, module, partition):
     if partition not in POLICY_PARTITIONS:
         raise ValueError("unknown policy partition")
+    if any(value not in POLICY_PARTITIONS for value in (
+            *POLICY_CLASS_PARTITIONS.values(), *POLICY_CASE_PARTITIONS.values())):
+        raise ValueError("invalid policy partition mapping")
     cases = list(policy_cases(loader.loadTestsFromModule(module)))
     seen = set()
     selected = []
@@ -3699,15 +3710,19 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 "test_asan_rerun_evidence_retained_for_full_30_day_window",
                 "test_aggregate_status_conditions_use_valid_contexts",
                 "test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies",
-                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
-                "test_required_aggregate_graph_rejects_cancellation_regressions",
                 "test_asan_aggregate_accepts_only_success_or_the_original_path_skip",
                 "test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate",
-                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
                 "test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures",
                 "test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes",
                 "test_policy_suite_is_part_of_cheap_inventory_check",
                 "test_freeze_audit_comment_is_identical_in_every_workflow",
+            ),
+            "WorkflowRequiredAggregatePolicyTests": (
+                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
+                "test_required_aggregate_graph_rejects_cancellation_regressions",
+            ),
+            "WorkflowUcrtClassifierPolicyTests": (
+                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
             ),
             "WorkflowBaseEditPolicyTests": (
                 "test_edited_without_base_change_skips_every_job_and_uses_distinct_names",
@@ -3746,6 +3761,8 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
         self.assertEqual(len(selected), len(set(selected)))
         self.assertCountEqual(selected, complete)
         self.assertTrue(any("WorkflowPartitionSelectionTests." in name for name in selected))
+        self.assertEqual(set(POLICY_CLASS_PARTITIONS),
+                         {type(case).__name__ for case in policy_cases(loader.loadTestsFromModule(module))})
         # New methods in known classes enter the same exhaustive selection.
         class Extended(WorkflowShellTests):
             def test_added_case(self):
@@ -3760,7 +3777,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "-1", "10", "01", "0/10", None, 0):
+        for invalid in ("", "-1", "12", "01", "0/12", None, 0):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 policy_partition_suite(loader, module, invalid)
         complete = list(policy_cases(loader.loadTestsFromModule(module)))
@@ -3778,6 +3795,43 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             with self.subTest(message=message), patch.object(loader, "loadTestsFromModule", return_value=unittest.TestSuite(cases)):
                 with self.assertRaisesRegex(ValueError, message):
                     policy_partition_suite(loader, module, partition)
+
+    def test_selection_refuses_unassigned_classes_and_invalid_mapping_targets(self):
+        module = sys.modules[__name__]
+        for mapping in (POLICY_CLASS_PARTITIONS, POLICY_CASE_PARTITIONS):
+            for invalid in ("", "12", "unknown", None, 0):
+                with self.subTest(mapping=list(mapping), invalid=invalid), patch.dict(
+                        mapping, {next(iter(mapping)): invalid}):
+                    with self.assertRaisesRegex(ValueError, "invalid policy partition mapping"):
+                        policy_partition_suite(unittest.TestLoader(), module, "0")
+        for name in POLICY_CLASS_PARTITIONS:
+            remaining = {key: value for key, value in POLICY_CLASS_PARTITIONS.items() if key != name}
+            with self.subTest(missing_class=name), patch.dict(POLICY_CLASS_PARTITIONS, remaining, clear=True):
+                with self.assertRaisesRegex(ValueError, "unregistered policy class: " + name):
+                    policy_partition_suite(unittest.TestLoader(), module, "0")
+
+    def test_remaining_behavioural_groups_have_separate_complete_partitions(self):
+        module = sys.modules[__name__]
+        groups = {
+            "10": ("WorkflowRequiredAggregatePolicyTests", {
+                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
+                "test_required_aggregate_graph_rejects_cancellation_regressions",
+                "test_required_aggregate_verdicts_run_after_failure_and_cancellation",
+                "test_required_aggregate_verdict_policy_rejects_weakened_conditions",
+                "test_required_aggregate_verdict_grid_keeps_bounded_launches_and_step_isolation",
+            }),
+            "11": ("WorkflowUcrtClassifierPolicyTests", {
+                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
+                "test_ucrt64_path_classifier_uses_merge_base_and_fails_open",
+                "test_ucrt64_content_classifier_fails_open_on_git_errors",
+                "test_ucrt64_classifier_fixtures_use_portable_subprocesses",
+            }),
+        }
+        for partition, (name, methods) in groups.items():
+            with self.subTest(partition=partition):
+                cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
+                self.assertEqual({type(case).__name__ for case in cases}, {name})
+                self.assertEqual({case._testMethodName for case in cases}, methods)
 
     def test_launch_heavy_cases_keep_individual_partitions(self):
         module = sys.modules[__name__]
@@ -3836,12 +3890,12 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             self.assertCountEqual(roster(discovered_cases), roster(expected_cases))
 
     def test_cli_listing_and_refusals_use_actual_selection(self):
-        for partition in ("0", "7", "8", "9"):
+        for partition in POLICY_PARTITIONS:
             with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(policy_main(["--partition", partition, "--list-tests"]), 0)
                 expected = policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in policy_cases(expected)])
-        for argv in (["--partition"], ["--partition", "10"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", "12"], ["--partition", "01"],
                      ["--partition", "0", "--partition", "1"], ["--list-tests"],
                      ["--partition", "0", "WorkflowShellTests"], ["--partition", "0", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
