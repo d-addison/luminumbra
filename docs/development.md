@@ -275,9 +275,10 @@ aggregates with valid dependencies; invalid dependencies still reach an explicit
 failure step. They reject drafts, missing draft metadata, cancellations and
 missing or unsuccessful expected producers. GCC and MSVC retain their Python-only
 route for Python changes; MSVC skips PRs classified as needing neither C++ nor Python.
-UCRT64 requires C++ classification (unknown outputs keep the native route) and runs on
-every main/devel push, every manual dispatch, every ready PR into `main`, and ready PRs
-into `devel` that change Windows-sensitive paths or carry the `windows-proof` label.
+UCRT64 runs on every ready PR into `main`, including confirmed non-C++ changes.
+Main/devel pushes, manual dispatches, and ready PRs into `devel` that change
+Windows-sensitive paths or carry the `windows-proof` label require C++ classification;
+unknown outputs keep those native routes, while confirmed non-C++ changes skip them.
 Devel pushes seed its trusted compiler cache. The existing draft
 guard and job limit remain in place. Manual native qualification captures use a
 single full-suite producer, explicitly distinguished from two-shard evidence. Their existing
@@ -373,8 +374,8 @@ head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
 branch and path filters still apply. CI also listens for `labeled`, `unlabeled`,
 and `edited`. Only `edited` events with `github.event.changes.base` present run
-normal CI, so retargeting to main runs Windows/UCRT64 validation when C++ classification
-is required or uncertain. Confirmed non-C++ PRs retain the UCRT64 producer skip.
+normal CI, so retargeting a ready PR to main runs Windows/UCRT64 validation even
+for confirmed non-C++ changes. Its aggregate requires successful native producers.
 Title/body edits skip every CI job before runner allocation, use unique
 non-cancelling concurrency groups, and give skipped checks a ` (metadata edit)`
 suffix. This keeps their skipped results separate from required check names on
@@ -474,8 +475,9 @@ report failure; `success` here describes an executed check that passes. Devel pu
 columns describe runs that reach execution, subject to batching below.
 Windows/UCRT64 runs on main/devel pushes and every manual dispatch as well as
 every ready PR into main; ready PRs into devel retain label and path admission.
-The UCRT64 producer also requires C++ classification; confirmed non-C++ changes skip
-regardless of labels or base branch. Drafts retain their existing guards. Devel pushes
+Every ready main-bound PR requires successful UCRT64 native producers. Other routes
+require C++ classification; unknown outputs run, and confirmed non-C++ changes skip
+even with the label or sensitive paths. Drafts retain their existing guards. Devel pushes
 seed the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
 cache also saves on these trusted pushes. It shares the workflow-wide devel
 push concurrency group described below. The paired server comparison retains

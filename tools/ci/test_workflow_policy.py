@@ -40,6 +40,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shell as shell
+import ctest_shards as shards
 
 
 BASH = shell.bash_executable()
@@ -93,6 +94,10 @@ ASAN_REQUIRED_TESTS = (
 ASAN_MERGE_COMMAND = ('python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards '
                       '--output build/debug-asan/ctest.junit.xml --needs-heavy "$CI_NEEDS_HEAVY" '
                       '--reason "$CI_HEAVY_REASON"')
+UCRT_CLASSIFICATION = (
+    "needs.changes.outputs.needs_cpp != 'false' || "
+    "(github.event_name == 'pull_request' && github.base_ref == 'main')"
+)
 UCRT_ROUTE = (
     "(github.event_name == 'push' && (github.ref == 'refs/heads/devel' || "
     "github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || "
@@ -1013,10 +1018,10 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             # Python contracts across both shards and verbose compiler cache statistics.
             "windows-msvc": "758b7bdf1a5fd7f96488f229b46db30c50f7b3d2700e15a5a3357353abec95f7",
             # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
-            "windows-ucrt64": "2a49f549ac6ab0d975c1a0d791fe3148496a3cc66deb9414329d72eeee44940c",
+            "windows-ucrt64": "e062bc566e6220e653ee96f6d85cd1494206802d3971d58f95f62a20b31a59c4",
             "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
             "windows-msvc-result": "8ed308a876a2cabec06a4083fcf87981cdb572e2cf32cbab65aefd327d4e5073",
-            "windows-ucrt64-result": "9580d1b067256b0eafbc8a278bec67409cf64eef8ebb19191df5289c691a4fd0",
+            "windows-ucrt64-result": "34a33c1e0bcb8212b01f3803ccf6798f6c37c8d1d66c575df6b9148e1cb2dc80",
             "lint": "b32b7f25c8c59c2cdc664382725f86838f8aef9328f8cee52fd0741ba41b86e0",
             "tidy-shard": "53d7432d5fec3526d1f32296223f8a28541b584c3b3d5039ac8a2f9476a4a104",
             "tidy": "771a907ee610dfff3fb01bf35c7a34fe5fdf8b5300ab92dbcbbe813ea6ebc949",
@@ -1235,7 +1240,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(ci["windows-msvc"], "if", 4), ci_event_condition("!cancelled() && (needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') && (" + READY + ")"))
         self.assertEqual(value(ci["tidy"], "needs", 4), "[changes, tidy-shard]")
         self.assertEqual(value(ci["tidy"], "if", 4), ci_event_condition("(!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ")"))
-        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), ci_event_condition("!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})"))
+        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), ci_event_condition(f"!cancelled() && ({UCRT_CLASSIFICATION}) && ({READY}) && ({UCRT_ROUTE})"))
         perf = jobs(self.workflows["performance.yml"])
         self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
         self.assertEqual(
@@ -1621,10 +1626,10 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_ucrt64_producer_and_aggregate_enable_all_push_and_manual_routes(self):
         blocks = jobs(self.workflows["ci.yml"])
         producer = value(blocks["windows-ucrt64"], "if", 4)
-        self.assertEqual(producer, ci_event_condition("!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ") && (" + UCRT_ROUTE + ")"))
+        self.assertEqual(producer, ci_event_condition(f"!cancelled() && ({UCRT_CLASSIFICATION}) && ({READY}) && ({UCRT_ROUTE})"))
         aggregate = next(step for step in steps(blocks["windows-ucrt64-result"])
                          if "name: Require expected producers and route" in step)
-        self.assertEqual(value(aggregate, "CI_ENABLED", 10), "${{ needs.changes.outputs.needs_cpp != 'false' && (" + UCRT_ROUTE + ") }}")
+        self.assertEqual(value(aggregate, "CI_ENABLED", 10), "${{ (" + UCRT_CLASSIFICATION + ") && (" + UCRT_ROUTE + ") }}")
         # Opted-in native routes require native evidence, including failed-open classification.
         self.assertEqual(value(aggregate, "NEEDS_CPP", 10), '"true"')
         upload = next(step for step in steps(blocks["windows-ucrt64"])
@@ -2653,14 +2658,14 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
         gate = next(step for step in steps(ci["windows-ucrt64-result"])
                     if step.startswith("      - name: Require expected producers and route\n"))
         self.assertEqual(value(gate, "CI_ENABLED", 10),
-                         "${{ needs.changes.outputs.needs_cpp != 'false' && (" + UCRT_ROUTE + ") }}")
+                         "${{ (" + UCRT_CLASSIFICATION + ") && (" + UCRT_ROUTE + ") }}")
         expression = value(job, "if", 4).removeprefix("${{ ").removesuffix(" }}")
         enabled = value(gate, "CI_ENABLED", 10).removeprefix("${{ ").removesuffix(" }}")
-        # Fixed grid: 8,640 inputs, two pure expression checks each; no child per case.
+        # Fixed grid: 11,520 inputs; expressions and the gate run without children.
         for event, branch, draft, cpp, cancelled, capture, label, paths in product(
                 ("pull_request", "push", "workflow_dispatch", "schedule"),
                 ("main", "devel", "feature"), (True, False, None),
-                ("true", "false", ""), (False, True), (False, True),
+                ("true", "false", "", "unknown"), (False, True), (False, True),
                 ("", "windows-proof", "WINDOWS-PROOF", "windows-proof-extra"),
                 ("true", "false", "", "unknown", "TRUE")):
             eligible = (
@@ -2669,7 +2674,8 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                 or (event == "pull_request" and
                     (branch == "main" or label.lower() == "windows-proof" or paths.lower() == "true"))
             )
-            expected = not cancelled and cpp != "false" and (event != "pull_request" or draft is False) and eligible
+            native = cpp != "false" or (event == "pull_request" and branch == "main")
+            expected = not cancelled and native and (event != "pull_request" or draft is False) and eligible
             def evaluate(condition):
                 actual = render_edit_context(condition).replace("!cancelled()", repr(not cancelled)).replace(
                     "contains(github.event.pull_request.labels.*.name, 'windows-proof')",
@@ -2688,7 +2694,23 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
             with self.subTest(event=event, branch=branch, draft=draft, cpp=cpp,
                               cancelled=cancelled, capture=capture, label=label, paths=paths):
                 self.assertEqual(evaluate(expression), expected)
-                self.assertEqual(evaluate(enabled), cpp != "false" and eligible)
+                enabled_value = str(evaluate(enabled)).lower()
+                self.assertEqual(enabled_value, str(native and eligible).lower())
+                for classification, result in product(("success", "failure", "", "unknown"),
+                                                      ("success", "skipped", "failure", "cancelled", "", "unknown")):
+                    accepted = (classification == "success" and not cancelled
+                                and (event != "pull_request" or draft is False)
+                                and result == ("success" if native and eligible else "skipped"))
+                    arguments = (result, "true", str(cancelled).lower(), event, str(draft).lower(),
+                                 str(event == "workflow_dispatch" and capture).lower(), enabled_value,
+                                 classification)
+                    if accepted:
+                        self.assertEqual(shards.gate(*arguments),
+                                         "skipped" if enabled_value == "false" else
+                                         "full" if event == "workflow_dispatch" and capture else "sharded")
+                    else:
+                        with self.assertRaises(ValueError, msg=repr(arguments)):
+                            shards.gate(*arguments)
 
     def test_windows_docs_skip_precedes_checkout_and_keeps_unknown_classification_native(self):
         ci = jobs(self.workflows["ci.yml"])
@@ -2716,7 +2738,8 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                                     "github.event.pull_request.draft", repr(draft)).replace(
                                     "needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                                     "needs.changes.outputs.needs_python", repr(python)).replace("== false", "== False")
-                                native = cpp != "false" or (python_runs and python != "false")
+                                native = (cpp != "false" or (python_runs and python != "false")
+                                          or (job_id == "windows-ucrt64" and event == "pull_request"))
                                 expected = (not cancelled and native and (event != "pull_request" or draft is False)
                                             and (event != "pull_request" or action != "edited" or base_changed))
                                 with self.subTest(job=job_id, event=event, cpp=cpp, python=python, draft=draft,
@@ -2737,21 +2760,23 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
             for job_id in ("windows-msvc", "windows-ucrt64"):
                 gate = next(step for step in steps(ci[job_id + "-result"])
                             if "name: Require expected producers and route" in step)
-                for index, (cpp, python, classification, result, accepted) in enumerate((
-                        ("false", "false", "success", "skipped", True),
-                        ("false", "false", "failure", "skipped", False),
-                        ("false", "false", "", "skipped", False),
-                        ("", "false", "success", "skipped", False),
-                        ("unknown", "false", "success", "skipped", False),
-                        ("true", "false", "success", "skipped", False),
-                        ("false", "false", "success", "failure", False),
+                for index, (base, (cpp, python, classification, result)) in enumerate(product(("main", "devel"), (
+                        ("false", "false", "success", "skipped"),
+                        ("false", "false", "failure", "skipped"),
+                        ("false", "false", "", "skipped"),
+                        ("", "false", "success", "skipped"),
+                        ("unknown", "false", "success", "skipped"),
+                        ("true", "false", "success", "skipped"),
+                        ("false", "false", "success", "failure"),
                         # MSVC keeps running the Python contracts on a Python-only change.
-                        ("false", "true", "success", "success", job_id == "windows-msvc"),
-                        ("false", "true", "success", "skipped", job_id != "windows-msvc"))):
+                        ("false", "true", "success", "success"),
+                        ("false", "true", "success", "skipped")))):
+                    native = (cpp != "false" or (python != "false" if job_id == "windows-msvc" else base == "main"))
+                    accepted = classification == "success" and result == ("success" if native else "skipped")
                     enabled = value(gate, "CI_ENABLED", 10).replace(
-                        "github.base_ref", repr("main")).replace(
+                        "github.base_ref", repr(base)).replace(
                         "github.ref", repr("refs/heads/main")).replace(
-                        "contains(github.event.pull_request.labels.*.name, 'windows-proof')", "False").replace(
+                        "contains(github.event.pull_request.labels.*.name, 'windows-proof')", "True").replace(
                         "needs.changes.outputs.needs_ucrt64", repr("false")).replace(
                         "needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                         "needs.changes.outputs.needs_python", repr(python)).replace("github.event_name", repr("pull_request"))
@@ -2768,7 +2793,7 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                                                  CI_QUALIFICATION="false", CI_ENABLED=enabled,
                                                  GITHUB_STEP_SUMMARY=(Path(directory) / f"summary-{job_id}-{index}").as_posix()),
                                              capture_output=True, timeout=10)
-                    with self.subTest(job=job_id, cpp=cpp, python=python, classification=classification, result=result):
+                    with self.subTest(job=job_id, base=base, cpp=cpp, python=python, classification=classification, result=result):
                         self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
                         if accepted and result == "skipped":
                             self.assertIn(b"skipped", process.stdout)
@@ -3116,9 +3141,9 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
         for cpp, paths in product(("false", "true", "", "unknown"), ("false", "", "unknown")):
             context = self.context(changes={"base": {"ref": {"from": "devel"}}}, paths=paths, cpp=cpp)
             with self.subTest(cpp=cpp, paths=paths):
-                self.assertEqual(self.admitted(producer, context), cpp != "false")
+                self.assertTrue(self.admitted(producer, context))
                 self.assertTrue(self.admitted(aggregate, context))
-                self.assertEqual(self.expression(value(gate, "CI_ENABLED", 10), context), cpp != "false")
+                self.assertTrue(self.expression(value(gate, "CI_ENABLED", 10), context))
                 self.assertFalse(self.admitted(producer, {**context, "github.base_ref": "devel"}))
                 self.assertFalse(self.admitted(producer, {**context, "github.event.changes.base": ""}))
                 self.assertFalse(self.admitted(aggregate, {**context, "github.event.changes.base": ""}))
