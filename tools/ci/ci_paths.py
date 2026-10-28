@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
@@ -261,18 +260,9 @@ def classify(root: Path, event: str, base: str, head: str,
             "heavy_sensitive_paths" if heavy else "reviewed_presentation_or_docs")
 
 
-def python_test_commands(root: Path, shard: int = 0) -> list[tuple[str, ...]]:
-    if type(shard) is not int or shard not in (0, 1, 2):
-        raise ValueError("Python contract shard must be 0, 1 or 2")
+def python_test_commands(root: Path) -> list[tuple[str, ...]]:
     commands = [(test,) for test in PYTHON_TESTS]
     commands.extend(sorted(set(PYTHON_SELF_CHECKS.values())))
-    if shard:
-        # One pass over the registered suites. SHA-256 keeps ownership stable
-        # across processes, platforms and additions to the inventory.
-        commands = [command for command in commands
-                    if hashlib.sha256(command[0].encode("utf-8")).digest()[0] % 2 + 1 == shard]
-        if not commands:
-            raise ValueError("empty Python contract shard")
     return commands
 
 
@@ -287,14 +277,10 @@ def main() -> int:
     parser.add_argument("--repository", default=os.environ.get("CI_REPOSITORY", ""))
     parser.add_argument("--head-repository", default=os.environ.get("CI_HEAD_REPOSITORY", ""))
     parser.add_argument("--output", type=Path, default=os.environ.get("GITHUB_OUTPUT"))
-    parser.add_argument("--shard", type=int, choices=(0, 1, 2))
     args = parser.parse_args()
-    if args.shard is not None and args.mode != "python-tests":
-        parser.error("--shard requires python-tests")
     root = args.root.resolve()
     if args.mode == "python-tests":
-        commands = python_test_commands(root) if args.shard is None else python_test_commands(root, args.shard)
-        for command in commands:
+        for command in python_test_commands(root):
             print("Running:", " ".join(command), flush=True)
             subprocess.run([sys.executable, "-B", *command], cwd=root, check=True)
         return 0

@@ -634,13 +634,14 @@ jobs:
             build/local-check-contracts/Testing/Temporary
           if-no-files-found: warn
           retention-days: 14
-      # Partition standalone suites by name; qualification shard 0 keeps the full set.
+      # One Windows shard is enough: the contracts do not depend on the shard's test partition.
+      # Shard 1 carries them because its build and test partition is the shorter one.
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
+        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
-          & "$env:CI_PYTHON_EXECUTABLE" -B tools/ci/ci_paths.py python-tests --shard ${{ matrix.shard }}
+          & "$env:CI_PYTHON_EXECUTABLE" -B tools/ci/ci_paths.py python-tests
       - name: Verify manual qualification identity and dependencies
         id: identity
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
