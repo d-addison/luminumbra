@@ -144,7 +144,7 @@
     {
       "id": "ci.compiler-cache-budget",
       "source": "docs/development.md#continuous-integration",
-      "statement": "MSVC and UCRT64 compiler caches use 1500M each. The seven compiler lanes total 4.75 GB per branch; main/devel's newest generations exactly fit the 9.5 GB repository cleanup budget, allowing obsolete generations outside the grace window to be retired. Only 0.5 GB of the 10 GB repository limit remains for other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the 9.5 GB budget cause cleanup to warn and skip deletion. Frequent devel pushes and rare main pushes can still require free least-recently-used eviction at the repository limit; the thin margin does not guarantee against cache churn and no extra cache spend is enabled.",
+      "statement": "MSVC and UCRT64 compiler caches use 1200M each. The seven compiler lanes total 4.15 GB per branch; main/devel's newest generations total 8.3 GB, within the 9.5 GB repository cleanup budget, allowing obsolete generations outside the grace window to be retired. 1.7 GB of the 10 GB repository limit remains for other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the 9.5 GB budget cause cleanup to warn and skip deletion. Frequent devel pushes and rare main pushes can still require free least-recently-used eviction at the repository limit; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
       "status": "covered",
       "evidence": [
         {

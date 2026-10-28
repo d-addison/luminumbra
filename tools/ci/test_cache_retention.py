@@ -402,8 +402,8 @@ class CacheRetentionTests(unittest.TestCase):
             ("ci", "linux", "400M"),
             ("asan", "asan-shard", "600M"),
             ("ci", "diligent-rhi", "250M"),
-            ("ci", "windows-msvc", "1500M"),
-            ("ci", "windows-ucrt64", "1500M"),
+            ("ci", "windows-msvc", "1200M"),
+            ("ci", "windows-ucrt64", "1200M"),
         ):
             with self.subTest(workflow=workflow, job=job):
                 workflow = (ROOT / f".github/workflows/{workflow}.yml").read_text(encoding="utf-8")

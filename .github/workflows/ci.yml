@@ -511,7 +511,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 1500M
+      CCACHE_MAXSIZE: 1200M
       # Only the main configure opts in via command-line launchers. Captures
       # and packaging must not inherit a launcher from the environment.
       CMAKE_C_COMPILER_LAUNCHER: ""
@@ -869,7 +869,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 1500M
+      CCACHE_MAXSIZE: 1200M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

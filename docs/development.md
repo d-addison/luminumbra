@@ -75,15 +75,15 @@ ctest --preset release -L manual \
 
 The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
 Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
-use 1500M (1.5 GB) each. Qualification captures bypass the cache. Immutable save keys include
+use 1200M (1.2 GB) each. Qualification captures bypass the cache. Immutable save keys include
 the commit SHA; restores prefer the matching CMake configuration prefix where
 available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
 before saving, and cache-save failures cannot
 fail a job. At all seven lanes' configured caps, one generation per branch totals
-400 + 600 + 250 + 1500 + 1500 + 250 + 250 = 4750 MB (4.75 GB), or 9.5 GB across
-main/devel, exactly fitting the 9.5 GB cleanup budget. That leaves only 0.5 GB of
-the repository's 10 GB cache limit for package and analysis caches, grace-window
-generations and saves in progress. Devel receives frequent pushes; main rarely
+400 + 600 + 250 + 1200 + 1200 + 250 + 250 = 4150 MB (4.15 GB), or 8.3 GB across
+main/devel, fitting within the 9.5 GB cleanup budget with 1.2 GB to spare. That
+leaves 1.7 GB of the repository's 10 GB cache limit for package and analysis
+caches, grace-window generations and saves in progress. Devel receives frequent pushes; main rarely
 does. Main's newest caches remain reserved even when old, so infrequent main
 pushes do not create more headroom. These lanes use standard runners and the
 existing cache actions, with zero extra cache spend and no paid cache service.
@@ -110,9 +110,9 @@ constant in `cache-cleanup.yml` is six hours: caches whose creation or last acce
 for queued reruns and in-flight runs, including concurrent saves. It also
 targets 9.5 GB total repository cache storage, including package and other caches,
 when reserved caches fit that budget. Both branches' newest compiler generations
-at the caps exactly fit, allowing cleanup to retire obsolete generations outside
+at the caps total 8.3 GB, leaving cleanup room to retire obsolete generations outside
 the grace window. Extra protected or grace-window caches can exceed the budget
-and force cleanup to skip deletion. The thin 0.5 GB margin below the 10 GB
+and force cleanup to skip deletion. The 1.7 GB margin below the 10 GB
 repository limit must accommodate all other caches and grace-window generations;
 GitHub's free least-recently-used eviction can still apply at that limit. Frequent
 devel saves and the six-hour grace window can retain multiple generations;
@@ -289,7 +289,7 @@ existing overwrite-per-shard artifact contract and the same 30-day retention.
 Only shard 1 saves each lane's compiler cache; only UCRT64 shard 1 enables the
 MSYS2 package cache. The compiler-cache caps described above apply per lane,
 shared by its test shards; the 9.5 GB cleanup budget covers the whole repository,
-leaving only 0.5 GB of the 10 GB limit for other caches and grace-window
+leaving 0.5 GB of the 10 GB limit beyond the budget for other caches and grace-window
 generations, so free least-recently-used eviction can still apply.
 
 The GCC aggregate checks acceptance-matrix execution after merging and validating
