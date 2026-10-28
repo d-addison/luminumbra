@@ -1963,10 +1963,16 @@ bool LockstepSession::OpenReplayRecorder() {
     m_replay_open = m_replay->Open(m_dump_path, header);
     m_replay_failed = !m_replay_open;
     if (m_replay_failed) {
+        // The recorder's refusal is fixed-size text naming the failing setup
+        // step and the OS error; it rides along in the diagnostics-only status.
+        const auto refusal = m_replay->OpenRefusal();
         m_status.replay_error = "recorder setup failed";
-        LUMINUMBRA_CORE_ERROR("lockstep[{}]: cannot open bounded replay recorder for '{}'",
+        if (!refusal.empty())
+            m_status.replay_error.append(": ").append(refusal);
+        LUMINUMBRA_CORE_ERROR("lockstep[{}]: cannot open bounded replay recorder for '{}': {}",
                               m_config.local_client_id,
-                              m_dump_path);
+                              m_dump_path,
+                              refusal);
     }
     return m_replay_open;
 }
