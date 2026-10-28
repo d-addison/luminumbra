@@ -95,8 +95,8 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertEqual(self.obsolete(caches), [])
 
     def test_budget_pressure_keeps_single_generation_groups(self):
-        for size, unmanaged_size in ((1_000_000_000, 5_000_000_000),
-                                     (3_000_000_000, 0)):
+        for size, unmanaged_size in ((1_000_000_000, self.budget - 2_000_000_000),
+                                     (self.budget // 3 + 1, 0)):
             with self.subTest(size=size, unmanaged_size=unmanaged_size):
                 caches = [self.cache(shard, f"tidy-cache-Linux-shard{shard}of3-only", size=size)
                           for shard in range(1, 4)]
@@ -125,8 +125,8 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertEqual(self.obsolete(caches), [1])
 
     def test_total_budget_includes_unmanaged_and_package_caches(self):
-        caches = [self.cache(1, "package-old", size=4_000_000_000),
-                  self.cache(2, "package-new", size=4_000_000_000),
+        caches = [self.cache(1, "package-old", size=self.budget // 2 + 1),
+                  self.cache(2, "package-new", size=self.budget // 2 + 1),
                   self.cache(3, "perf-linux-x64-gcc-ccache-sha")]
         removed = self.obsolete(caches)
         self.assertEqual(removed, [1])
@@ -167,11 +167,12 @@ class CacheRetentionTests(unittest.TestCase):
 
     def test_recent_unmanaged_and_newest_managed_caches_survive_excess_budget(self):
         caches = [self.cache(1, "package-cache", size=5_000_000_000),
-                  self.cache(2, "tidy-cache-Linux-shard1of3-old", size=2_000_000_000)]
+                  self.cache(2, "tidy-cache-Linux-shard1of3-old", size=self.budget - 4_000_000_000)]
         caches[0]["last_accessed_at"] = NOW.isoformat()
         with contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertEqual(self.obsolete(caches), [])
-        self.assertIn("7000000000 bytes", log.getvalue())
+        self.assertIn("10500000000 bytes", log.getvalue())
+        self.assertIn("9500000000 byte (9.5 GB) budget by 1000000000 bytes", log.getvalue())
         self.assertIn("skipping cleanup", log.getvalue())
 
     def test_live_heads_survive_later_saves_from_older_builds(self):
@@ -194,7 +195,7 @@ class CacheRetentionTests(unittest.TestCase):
 
     def test_budget_reserves_current_heads_before_newer_unmanaged_caches(self):
         caches = [self.cache(1, "linux-x64-gcc-ccache-config-head", size=2_000_000_000),
-                  self.cache(2, "package-cache", size=5_000_000_000)]
+                  self.cache(2, "package-cache", size=self.budget - 1_000_000_000)]
         removed = self.obsolete(caches, {"refs/heads/devel": "head"})
         self.assertEqual(removed, [2])
         self.assertLessEqual(sum(c["size_in_bytes"] for c in caches if c["id"] not in removed), self.budget)
@@ -208,8 +209,8 @@ class CacheRetentionTests(unittest.TestCase):
         caches.append(self.cache(3, "package-cache"))
         with contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertEqual(self.obsolete(caches, heads), [])
-        self.assertIn("::warning::Newest, protected and grace-window caches use 6250000000 bytes", log.getvalue())
-        self.assertIn("6000000000 byte (6 GB) budget by 250000000 bytes", log.getvalue())
+        self.assertIn("::warning::Newest, protected and grace-window caches use 9750000000 bytes", log.getvalue())
+        self.assertIn("9500000000 byte (9.5 GB) budget by 250000000 bytes", log.getvalue())
 
     def test_oversized_newest_generation_survives_and_excess_budget_warns(self):
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-old"),
@@ -264,7 +265,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_combined_head_trigger_and_recent_caches_exceed_budget_without_deletion(self):
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-B", size=2_000_000_000),
                   self.cache(2, "tidy-cache-Linux-shard1of3-A", size=2_000_000_000),
-                  self.cache(3, "package-cache", size=2_000_000_000),
+                  self.cache(3, "package-cache", size=self.budget - 4_000_000_000),
                   self.cache(4, "tidy-cache-Linux-shard1of3-older")]
         caches[0]["created_at"] = NOW.isoformat()  # Count overlapping protection once.
         caches[2]["created_at"] = NOW.isoformat()
@@ -279,7 +280,7 @@ class CacheRetentionTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as log:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
         delete.assert_not_called()
-        self.assertIn("6000000001 bytes", log.getvalue())
+        self.assertIn("9500000001 bytes", log.getvalue())
         self.assertIn("skipping cleanup", log.getvalue())
 
     def test_head_advance_between_listing_and_deletion_is_rechecked(self):
@@ -317,7 +318,7 @@ class CacheRetentionTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as log:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
         delete.assert_not_called()
-        self.assertIn("::warning::Newest, protected and grace-window caches use 6000000001 bytes", log.getvalue())
+        self.assertIn("::warning::Newest, protected and grace-window caches use 9500000001 bytes", log.getvalue())
         self.assertIn("budget by 1 bytes", log.getvalue())
 
     def test_deletion_api_and_auth_errors_warn_and_continue_successfully(self):
@@ -401,38 +402,73 @@ class CacheRetentionTests(unittest.TestCase):
             ("ci", "linux", "400M"),
             ("asan", "asan-shard", "600M"),
             ("ci", "diligent-rhi", "250M"),
-            ("ci", "windows-msvc", "500M"),
-            ("ci", "windows-ucrt64", "500M"),
+            ("ci", "windows-msvc", "1200M"),
+            ("ci", "windows-ucrt64", "1200M"),
         ):
             with self.subTest(workflow=workflow, job=job):
                 workflow = (ROOT / f".github/workflows/{workflow}.yml").read_text(encoding="utf-8")
                 body = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
                 self.assertEqual(body.split("CCACHE_MAXSIZE: ", 1)[1].splitlines()[0], cap)
 
-    def test_two_branches_at_compiler_caps_fit_budget_and_retire_old_ucrt_generations(self):
+    def test_compiler_caps_retire_old_generations_only_when_reserved_caches_fit_budget(self):
         sizes = {
             "linux-x64-gcc-ccache-": 400_000_000,
             "linux-x64-gcc-asan-ccache-": 600_000_000,
             "diligent-rhi-linux-x64-gcc-ccache-": 250_000_000,
-            "windows-x64-msvc-ccache-": 500_000_000,
-            "windows-x64-ucrt64-gcc-ccache-": 500_000_000,
+            "windows-x64-msvc-ccache-": 1_500_000_000,
+            "windows-x64-ucrt64-gcc-ccache-": 1_500_000_000,
             "perf-linux-x64-gcc-ccache-": 250_000_000,
             "perf-paired-linux-x64-gcc-": 250_000_000,
         }
-        self.assertEqual(self.budget, 6_000_000_000)
-        self.assertEqual(2 * sum(sizes.values()), 5_500_000_000)
-        caches = []
-        old_ids = []
-        for ref in ("refs/heads/main", "refs/heads/devel"):
-            for prefix, size in sizes.items():
-                identity = len(caches) + 1
-                old_ids.append(identity)
-                caches.extend([self.cache(identity, prefix + "old", ref, size),
-                               self.cache(identity + 1, prefix + "new", ref, size)])
-        removed = self.obsolete(caches)
-        self.assertEqual(removed, sorted(old_ids, reverse=True))
-        retained_size = sum(c["size_in_bytes"] for c in caches if c["id"] not in removed)
-        self.assertEqual(self.budget - retained_size, 500_000_000)
+        self.assertEqual(self.budget, 9_500_000_000)
+        generation_size = sum(sizes.values())
+        self.assertEqual(generation_size, 4_750_000_000)
+        self.assertEqual(self.budget - generation_size, 4_750_000_000)
+        self.assertEqual(2 * generation_size, 9_500_000_000)
+        self.assertEqual(self.budget, 2 * generation_size)
+        self.assertEqual(10_000_000_000 - 2 * generation_size, 500_000_000)
+        for refs in (("refs/heads/devel",), ("refs/heads/main", "refs/heads/devel")):
+            with self.subTest(refs=refs):
+                # Seven lanes, at most two branches and two generations each.
+                caches = []
+                old_ids = []
+                for ref in refs:
+                    for prefix, size in sizes.items():
+                        identity = len(caches) + 1
+                        old_ids.append(identity)
+                        caches.extend([self.cache(identity, prefix + "old", ref, size),
+                                       self.cache(identity + 1, prefix + "new", ref, size)])
+                newest = [c for c in caches if c["id"] not in old_ids]
+                for listing in (caches, newest):
+                    with self.subTest(generations=2 if listing is caches else 1):
+                        with contextlib.redirect_stdout(io.StringIO()) as log:
+                            removed = self.obsolete(listing)
+                        self.assertEqual(removed, sorted(old_ids, reverse=True) if listing is caches else [])
+                        self.assertEqual(log.getvalue(), "")
+                        retained_size = sum(c["size_in_bytes"] for c in listing if c["id"] not in removed)
+                        self.assertEqual(retained_size, len(refs) * generation_size)
+                        if len(refs) == 2:
+                            self.assertEqual(retained_size, 2 * generation_size)
+                            self.assertEqual(retained_size, self.budget)
+                            # One extra protected or recent cache exceeds the
+                            # exact-fit budget, even by a single byte. No deletes.
+                            for protection in ("head", "grace"):
+                                for extra_size in (1, 250_000_000):
+                                    with self.subTest(protection=protection, extra_size=extra_size):
+                                        extra = self.cache(29, "package-head", size=extra_size)
+                                        heads = {}
+                                        if protection == "head":
+                                            heads[extra["ref"]] = "head"
+                                        else:
+                                            extra["created_at"] = NOW.isoformat()
+                                        with contextlib.redirect_stdout(io.StringIO()) as warning_log:
+                                            self.assertEqual(self.obsolete(listing + [extra], heads), [])
+                                        self.assertEqual(
+                                            warning_log.getvalue(),
+                                            "::warning::Newest, protected and grace-window caches use "
+                                            f"{self.budget + extra_size} bytes, exceeding the "
+                                            f"9500000000 byte (9.5 GB) budget by {extra_size} bytes; "
+                                            "skipping cleanup\n")
 
     def test_preview_key_refreshes_with_candidate_and_retains_restore_prefix(self):
         workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
@@ -471,7 +507,7 @@ class CacheRetentionTests(unittest.TestCase):
             self.assertIn("steps.compiler-cache.outputs.cache-hit != 'true'", condition)
             self.assertIn("continue-on-error: true", step)
         # Both jobs restore one lane generation; cleanup's budget and grouping stay fixed.
-        self.assertEqual(self.budget, 6_000_000_000)
+        self.assertEqual(self.budget, 9_500_000_000)
         self.assertEqual(self.obsolete([
             self.cache(1, "linux-x64-gcc-asan-ccache-oldconfig-oldsha"),
             self.cache(2, "linux-x64-gcc-asan-ccache-newconfig-newsha"),
