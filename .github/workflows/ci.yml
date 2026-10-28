@@ -635,9 +635,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       # One Windows shard is enough: the contracts do not depend on the shard's test partition.
-      # Shard 2 carries them because its test partition is the shorter one.
+      # Shard 1 carries them because its build and test partition is the shorter one.
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ matrix.shard != 1 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
+        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
