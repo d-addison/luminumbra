@@ -891,9 +891,11 @@ TEST(WorldSaveService, EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop)
     Luminumbra::world::ActiveRegionLedger ledger;
     const Luminumbra::world::WorldClock clock;
     ASSERT_TRUE(WorldSaveService::save_active_regions(ledger, clock, save_dir.path()));
-    EXPECT_FALSE(std::filesystem::exists(ledger_staging));
+    EXPECT_EQ(ReadFileBytes(ledger_staging), "partial ledger");
     EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path())));
-    EXPECT_TRUE(std::filesystem::is_empty(save_dir.path()));
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(save_dir.path()),
+                            std::filesystem::directory_iterator{}),
+              1);
 
     const auto metadata_staging = save_dir.path() / "world_info.json.tmp.abandoned";
     // Exercise cleanup with supported clock metadata; opaque legacy bytes have
@@ -930,9 +932,375 @@ TEST(WorldSaveService, EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop)
     EXPECT_EQ(ReadFileBytes(save_dir.path() / "world_info.json"), valid);
     ASSERT_TRUE(WorldSaveService::write_file_durably(ledger_staging, "partial ledger"));
     ASSERT_TRUE(WorldSaveService::save_active_regions(ledger, clock, save_dir.path()));
-    EXPECT_FALSE(std::filesystem::exists(ledger_staging));
+    EXPECT_EQ(ReadFileBytes(ledger_staging), "partial ledger");
     EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path())));
 }
+
+namespace {
+void WriteStagingFixture(const std::filesystem::path& path, const std::string& bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(output);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    ASSERT_TRUE(output);
+}
+
+struct CapturedLedgerStaging {
+    std::filesystem::path directory;
+    std::filesystem::path payload;
+    std::filesystem::path record;
+    std::string ownership;
+    static CapturedLedgerStaging& current() {
+        static CapturedLedgerStaging capture;
+        return capture;
+    }
+};
+
+void LeaveOwnedLedgerStaging(const std::filesystem::path& directory) {
+    auto& capture = CapturedLedgerStaging::current();
+    capture = {.directory = directory, .payload = {}, .record = {}, .ownership = {}};
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.set_local_anchor(Vec3(1, 2, 3));
+    WorldSaveService::set_before_active_regions_replace_for_testing([] {
+        auto& staged = CapturedLedgerStaging::current();
+        for (const auto& entry : std::filesystem::directory_iterator(staged.directory)) {
+            if (entry.path().filename().string().starts_with("active-regions.arl.tmp.") &&
+                entry.path().extension() != ".owner") {
+                staged.payload = entry.path();
+                staged.record = entry.path();
+                staged.record += ".owner";
+                staged.ownership = ReadFileBytes(staged.record);
+                // Invalidate the record so rollback preserves the pair. Restore
+                // the same record instance after all writer handles are closed.
+                WriteStagingFixture(staged.record, "interrupted record");
+                break;
+            }
+        }
+        return false;
+    });
+    const bool saved =
+        WorldSaveService::save_active_regions(ledger, Luminumbra::world::WorldClock{}, directory);
+    WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    ASSERT_FALSE(saved);
+    ASSERT_FALSE(capture.payload.empty());
+    ASSERT_FALSE(capture.ownership.empty());
+    ASSERT_TRUE(std::filesystem::exists(capture.payload));
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(capture.record, capture.ownership));
+}
+
+void SaveLedgerAfterStaging(const std::filesystem::path& directory, bool empty = false) {
+    Luminumbra::world::ActiveRegionLedger ledger;
+    if (!empty)
+        ledger.set_local_anchor(Vec3(4, 5, 6));
+    ASSERT_TRUE(
+        WorldSaveService::save_active_regions(ledger, Luminumbra::world::WorldClock{}, directory));
+    ASSERT_TRUE(WorldSaveService::validate_save(directory));
+}
+
+void RefreshOwnershipChecksum(std::string& bytes) {
+    ASSERT_GE(bytes.size(), 8u);
+    std::uint64_t checksum = 14695981039346656037ull;
+    for (std::size_t index = 0; index < bytes.size() - 8; ++index) {
+        checksum ^= static_cast<unsigned char>(bytes[index]);
+        checksum *= 1099511628211ull;
+    }
+    for (int index = 0; index < 8; ++index)
+        bytes[bytes.size() - 8 + static_cast<std::size_t>(index)] =
+            static_cast<char>((checksum >> (index * 8)) & 255u);
+}
+} // namespace
+
+TEST(WorldSaveService, LedgerStagingPreservesUnknownOccupantsAndEmptySave) {
+    const TempSaveDir save_dir("unknown_ledger_staging");
+    const auto unknown = save_dir.path() / "active-regions.arl.tmp.abandoned";
+    const auto directory = save_dir.path() / "active-regions.arl.tmp.directory";
+    const auto orphan_record = save_dir.path() / "active-regions.arl.tmp.orphan.owner";
+    const auto unicode =
+        save_dir.path() / Luminumbra::Filesystem::PathFromUtf8("active-regions.arl.tmp.\xc3\xa9");
+    auto unicode_record = unicode;
+    unicode_record += ".owner";
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(unicode, "foreign Unicode"));
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(unicode_record, "foreign Unicode record"));
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(unknown, "foreign bytes"));
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(orphan_record, "foreign record"));
+    std::filesystem::create_directory(directory);
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(directory / "keep", "directory occupant"));
+    for (const bool empty : {true, false}) {
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path(), empty));
+        EXPECT_EQ(ReadFileBytes(unicode), "foreign Unicode");
+        EXPECT_EQ(ReadFileBytes(unicode_record), "foreign Unicode record");
+        EXPECT_EQ(ReadFileBytes(unknown), "foreign bytes");
+        EXPECT_EQ(ReadFileBytes(orphan_record), "foreign record");
+        EXPECT_EQ(ReadFileBytes(directory / "keep"), "directory occupant");
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingReclaimsOnlyValidOwnedPairsIncludingEmptySave) {
+    for (const bool empty : {false, true}) {
+        const TempSaveDir save_dir("owned_ledger_staging");
+        ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(save_dir.path()));
+        const auto capture = CapturedLedgerStaging::current();
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path(), empty));
+        EXPECT_FALSE(std::filesystem::exists(capture.payload));
+        EXPECT_FALSE(std::filesystem::exists(capture.record));
+        for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+            EXPECT_FALSE(entry.path().filename().string().starts_with("active-regions.arl.tmp."));
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingOwnershipSurvivesDirectoryAliases) {
+    const TempSaveDir save_dir("ledger_directory_alias");
+    const auto directory = save_dir.path() / Luminumbra::Filesystem::PathFromUtf8("world_\xc3\xa9");
+    ASSERT_TRUE(std::filesystem::create_directory(directory));
+    ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(directory));
+    const auto capture = CapturedLedgerStaging::current();
+    auto alias = directory / ".";
+#if defined(_WIN32)
+    const DWORD required = ::GetShortPathNameW(directory.c_str(), nullptr, 0);
+    ASSERT_GT(required, 0u);
+    // Bound the native path buffer to Windows' extended path limit.
+    ASSERT_LE(required, 32768u);
+    std::vector<wchar_t> short_name(required);
+    const DWORD length = ::GetShortPathNameW(directory.c_str(), short_name.data(), required);
+    ASSERT_GT(length, 0u);
+    ASSERT_LT(length, required);
+    alias = std::filesystem::path(short_name.data()) / ".";
+#endif
+    ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(alias));
+    EXPECT_FALSE(std::filesystem::exists(capture.payload));
+    EXPECT_FALSE(std::filesystem::exists(capture.record));
+}
+
+TEST(WorldSaveService, LedgerStagingPreservesMalformedAndMismatchedOwnership) {
+    // Magic, world identity, payload identity, record instance, name length,
+    // filename, save-instance token and checksum each have independent coverage.
+    for (const int mutation : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}) {
+        SCOPED_TRACE(mutation);
+        const TempSaveDir save_dir("invalid_ledger_ownership");
+        ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(save_dir.path()));
+        const auto capture = CapturedLedgerStaging::current();
+        auto changed = capture.ownership;
+        ASSERT_GT(changed.size(), 152u);
+        if (mutation == 0)
+            changed.clear();
+        else if (mutation == 1)
+            changed.resize(changed.size() - 1);
+        else if (mutation == 2)
+            changed.assign(513, 'x');
+        else {
+            const std::array<std::size_t, 8> positions{
+                0, 8, 32, 80, 104, 112, changed.size() - 9, changed.size() - 1};
+            changed[positions[static_cast<std::size_t>(mutation - 3)]] ^= 1;
+            if (mutation != 10)
+                ASSERT_NO_FATAL_FAILURE(RefreshOwnershipChecksum(changed));
+        }
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(capture.record, changed));
+        const auto payload = ReadFileBytes(capture.payload);
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        EXPECT_TRUE(std::filesystem::is_regular_file(capture.payload));
+        EXPECT_TRUE(std::filesystem::is_regular_file(capture.record));
+        EXPECT_EQ(ReadFileBytes(capture.payload), payload);
+        EXPECT_EQ(ReadFileBytes(capture.record), changed);
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingPreservesMissingOrSubstitutedProofAndPayload) {
+    for (const int substitution : {0, 1, 2, 3, 4, 5, 6}) {
+        SCOPED_TRACE(substitution);
+        const TempSaveDir save_dir("substituted_ledger_staging");
+        ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(save_dir.path()));
+        const auto capture = CapturedLedgerStaging::current();
+        const auto payload = ReadFileBytes(capture.payload);
+        if (substitution == 0) {
+            ASSERT_TRUE(std::filesystem::remove(capture.record));
+        } else if (substitution == 1) {
+            // Same name and bytes, different file: identity is mandatory.
+            ASSERT_TRUE(WorldSaveService::write_file_durably(capture.payload, payload));
+        } else if (substitution == 2) {
+            ASSERT_TRUE(WorldSaveService::write_file_durably(capture.record, capture.ownership));
+        } else if (substitution == 3) {
+            ASSERT_TRUE(std::filesystem::remove(capture.payload));
+            ASSERT_TRUE(std::filesystem::create_directory(capture.payload));
+            ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(capture.payload / "keep", "keep"));
+        } else if (substitution == 4) {
+            std::filesystem::create_hard_link(capture.payload, save_dir.path() / "foreign-link");
+        } else if (substitution == 5) {
+            ASSERT_TRUE(std::filesystem::remove(capture.record));
+            ASSERT_TRUE(std::filesystem::create_directory(capture.record));
+            ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(capture.record / "keep", "keep"));
+        } else {
+            std::filesystem::create_hard_link(capture.record, save_dir.path() / "foreign-link");
+        }
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        if (substitution == 3)
+            EXPECT_EQ(ReadFileBytes(capture.payload / "keep"), "keep");
+        else
+            EXPECT_EQ(ReadFileBytes(capture.payload), payload);
+        if (substitution == 0)
+            EXPECT_FALSE(std::filesystem::exists(capture.record));
+        else if (substitution == 5)
+            EXPECT_EQ(ReadFileBytes(capture.record / "keep"), "keep");
+        else
+            EXPECT_EQ(ReadFileBytes(capture.record), capture.ownership);
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingPreservesPairCopiedFromAnotherWorldOrFilename) {
+    for (const bool other_world : {false, true}) {
+        const TempSaveDir original("original_ledger_staging");
+        const TempSaveDir foreign("foreign_ledger_staging");
+        ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(original.path()));
+        const auto capture = CapturedLedgerStaging::current();
+        const auto directory = other_world ? foreign.path() : original.path();
+        const auto payload =
+            other_world
+                ? directory / capture.payload.filename()
+                : directory / "active-regions.arl.tmp.other.00000000000000000000000000000000";
+        auto record = payload;
+        record += ".owner";
+        const auto expected = ReadFileBytes(capture.payload);
+        std::filesystem::copy_file(capture.payload, payload);
+        std::filesystem::copy_file(capture.record, record);
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(directory));
+        EXPECT_EQ(ReadFileBytes(payload), expected);
+        EXPECT_EQ(ReadFileBytes(record), capture.ownership);
+    }
+}
+
+#ifndef _WIN32
+TEST(WorldSaveService, LedgerStagingPreservesSymlinkAndSpecialFileSubstitutions) {
+    for (const int substitution : {0, 1, 2, 3}) {
+        SCOPED_TRACE(substitution);
+        const TempSaveDir save_dir("special_ledger_staging");
+        ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(save_dir.path()));
+        const auto capture = CapturedLedgerStaging::current();
+        const auto replaced = substitution % 2 == 0 ? capture.payload : capture.record;
+        const auto target = save_dir.path() / "foreign-target";
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(target, "foreign target"));
+        ASSERT_TRUE(std::filesystem::remove(replaced));
+        if (substitution < 2)
+            std::filesystem::create_symlink(target.filename(), replaced);
+        else
+            ASSERT_EQ(::mkfifo(replaced.c_str(), 0600), 0);
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        const auto kind = std::filesystem::symlink_status(replaced).type();
+        EXPECT_EQ(kind,
+                  substitution < 2 ? std::filesystem::file_type::symlink
+                                   : std::filesystem::file_type::fifo);
+        EXPECT_EQ(ReadFileBytes(target), "foreign target");
+        if (replaced != capture.payload)
+            EXPECT_TRUE(std::filesystem::is_regular_file(capture.payload));
+        if (replaced != capture.record)
+            EXPECT_EQ(ReadFileBytes(capture.record), capture.ownership);
+    }
+}
+#endif
+
+TEST(WorldSaveService, LedgerStagingSubstitutionBeforePublishUsesFreshName) {
+    const TempSaveDir save_dir("ledger_publish_substitution");
+    auto& capture = CapturedLedgerStaging::current();
+    capture = {.directory = save_dir.path(), .payload = {}, .record = {}, .ownership = {}};
+    WorldSaveService::set_before_active_regions_replace_for_testing([] {
+        auto& staged = CapturedLedgerStaging::current();
+        for (const auto& entry : std::filesystem::directory_iterator(staged.directory)) {
+            if (entry.path().filename().string().starts_with("active-regions.arl.tmp.") &&
+                entry.path().extension() != ".owner") {
+                staged.payload = entry.path();
+                staged.record = entry.path();
+                staged.record += ".owner";
+                staged.ownership = ReadFileBytes(staged.record);
+                // Keep the original inode alive so replacement is deterministic.
+                std::filesystem::rename(staged.payload, staged.directory / "held-ledger");
+                WriteStagingFixture(staged.payload, "substituted payload");
+                break;
+            }
+        }
+        return true;
+    });
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.set_local_anchor(Vec3(7, 8, 9));
+    const bool saved = WorldSaveService::save_active_regions(
+        ledger, Luminumbra::world::WorldClock{}, save_dir.path());
+    WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    ASSERT_TRUE(saved);
+    ASSERT_FALSE(capture.payload.empty());
+    EXPECT_EQ(ReadFileBytes(capture.payload), "substituted payload");
+    EXPECT_EQ(ReadFileBytes(capture.record), capture.ownership);
+    EXPECT_TRUE(std::filesystem::exists(save_dir.path() / "held-ledger"));
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::active_regions_path(save_dir.path())),
+              ledger.encode());
+}
+
+#if defined(_WIN32)
+TEST(WorldSaveService, LedgerStagingPreservesUnreadableOwnership) {
+    const TempSaveDir save_dir("locked_ledger_ownership");
+    ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(save_dir.path()));
+    const auto capture = CapturedLedgerStaging::current();
+    const HANDLE locked = ::CreateFileW(capture.record.c_str(),
+                                        GENERIC_READ,
+                                        0,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+    ASSERT_NE(locked, INVALID_HANDLE_VALUE);
+    SaveLedgerAfterStaging(save_dir.path());
+    EXPECT_NE(::CloseHandle(locked), 0);
+    EXPECT_TRUE(std::filesystem::is_regular_file(capture.payload));
+    EXPECT_EQ(ReadFileBytes(capture.record), capture.ownership);
+    ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(capture.payload));
+    EXPECT_FALSE(std::filesystem::exists(capture.record));
+}
+#endif
+
+TEST(WorldSaveService, LedgerStagingInterruptedWriteRemovesItsPairAndPreservesLiveLedger) {
+    const TempSaveDir save_dir("ledger_rollback_ownership");
+    ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+    const auto original = ReadFileBytes(WorldSaveService::active_regions_path(save_dir.path()));
+    WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.set_local_anchor(Vec3(7, 8, 9));
+    const bool saved = WorldSaveService::save_active_regions(
+        ledger, Luminumbra::world::WorldClock{}, save_dir.path());
+    WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::active_regions_path(save_dir.path())), original);
+    for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+        EXPECT_FALSE(entry.path().filename().string().starts_with("active-regions.arl.tmp."));
+}
+
+#ifndef _WIN32
+TEST(WorldSaveService, LedgerOwnershipFlushFailurePreservesLiveLedgerAndRemovesOwnPair) {
+    const TempSaveDir save_dir("ledger_ownership_flush");
+    const DirectoryFlushReset reset;
+    const auto path = WorldSaveService::active_regions_path(save_dir.path());
+    int staging_ancestors = 0;
+    for (auto ancestor = save_dir.path(); !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path())
+        ++staging_ancestors;
+    int destination_ancestors = 0;
+    for (auto ancestor = path.parent_path(); !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path())
+        ++destination_ancestors;
+    const int before_final_flush = staging_ancestors + 1 + destination_ancestors;
+    for (const int failure : {0, staging_ancestors, staging_ancestors + 1, before_final_flush}) {
+        SCOPED_TRACE(failure);
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        const auto original = ReadFileBytes(path);
+        WorldSaveService::set_directory_flush_failure_for_testing(failure);
+        Luminumbra::world::ActiveRegionLedger ledger;
+        ledger.set_local_anchor(Vec3(7, 8, 9));
+        EXPECT_FALSE(WorldSaveService::save_active_regions(
+            ledger, Luminumbra::world::WorldClock{}, save_dir.path()));
+        EXPECT_EQ(ReadFileBytes(path), failure == before_final_flush ? ledger.encode() : original);
+        for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+            EXPECT_FALSE(entry.path().filename().string().starts_with("active-regions.arl.tmp."));
+        ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path()));
+    }
+    ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+}
+#endif
 
 TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
     const TempSaveDir save_dir("fresh");

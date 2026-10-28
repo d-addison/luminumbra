@@ -38,6 +38,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -341,6 +342,444 @@ void RemoveTemporaryFile(const std::filesystem::path& path) {
     std::filesystem::remove(path, remove_error);
 }
 
+// A sidecar is separate from every save format. Its instance identity is the
+// exclusively created record's file identity; the payload binds that instance
+// to one filename, one staging identity/change stamp and one save directory.
+using StagingIdentity = std::array<std::uint64_t, 6>;
+
+class StagingFile {
+public:
+    enum class Mode {
+        Inspect,
+        Create,
+        Directory
+    };
+
+    StagingFile(const std::filesystem::path& path, Mode mode)
+        : m_path(path) {
+#if defined(_WIN32)
+        const DWORD access = mode == Mode::Directory ? FILE_READ_ATTRIBUTES
+                             : mode == Mode::Create  ? GENERIC_READ | GENERIC_WRITE
+                                                     : GENERIC_READ | DELETE;
+        const DWORD sharing = mode == Mode::Create || mode == Mode::Directory
+                                  ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                                  : FILE_SHARE_READ | FILE_SHARE_DELETE;
+        m_handle = ::CreateFileW(path.c_str(),
+                                 access,
+                                 sharing,
+                                 nullptr,
+                                 mode == Mode::Create ? CREATE_NEW : OPEN_EXISTING,
+                                 (mode == Mode::Directory ? 0 : FILE_FLAG_OPEN_REPARSE_POINT) |
+                                     (mode == Mode::Create ? FILE_FLAG_WRITE_THROUGH : 0) |
+                                     FILE_FLAG_BACKUP_SEMANTICS,
+                                 nullptr);
+#else
+        const int flags = mode == Mode::Create ? O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC
+                          : mode == Mode::Directory
+                              ? O_RDONLY | O_DIRECTORY | O_CLOEXEC
+                              : O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC;
+        m_descriptor = ::open(path.c_str(), flags, 0666);
+#endif
+    }
+    StagingFile(const StagingFile&) = delete;
+    StagingFile& operator=(const StagingFile&) = delete;
+    ~StagingFile() {
+#if defined(_WIN32)
+        if (m_handle != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_handle);
+#else
+        if (m_descriptor >= 0)
+            ::close(m_descriptor);
+#endif
+    }
+
+    bool identity(StagingIdentity& result, bool directory = false) const {
+#if defined(_WIN32)
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (m_handle == INVALID_HANDLE_VALUE || ::GetFileType(m_handle) != FILE_TYPE_DISK ||
+            !::GetFileInformationByHandle(m_handle, &info) ||
+            (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory ||
+            (!directory && info.nNumberOfLinks != 1))
+            return false;
+        result = {info.dwVolumeSerialNumber,
+                  info.nFileIndexHigh,
+                  info.nFileIndexLow,
+                  (static_cast<std::uint64_t>(info.ftCreationTime.dwHighDateTime) << 32) |
+                      info.ftCreationTime.dwLowDateTime,
+                  (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
+                      info.ftLastWriteTime.dwLowDateTime,
+                  (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow};
+#else
+        struct stat info {};
+        if (m_descriptor < 0 || ::fstat(m_descriptor, &info) != 0 || info.st_ino == 0 ||
+            (directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode)) ||
+            (!directory && (info.st_nlink != 1 || info.st_size < 0)))
+            return false;
+#if defined(__APPLE__)
+        const auto changed = info.st_ctimespec;
+#else
+        const auto changed = info.st_ctim;
+#endif
+        result = {static_cast<std::uint64_t>(info.st_dev),
+                  static_cast<std::uint64_t>(info.st_ino),
+                  0,
+                  static_cast<std::uint64_t>(changed.tv_sec),
+                  static_cast<std::uint64_t>(changed.tv_nsec),
+                  directory ? 0 : static_cast<std::uint64_t>(info.st_size)};
+#endif
+        return true;
+    }
+
+    bool write(const std::string& bytes) const {
+        std::size_t offset = 0;
+        // Bounded by the admitted ledger size (or the 512-byte sidecar bound).
+        while (offset < bytes.size()) {
+#if defined(_WIN32)
+            DWORD written = 0;
+            const auto count =
+                static_cast<DWORD>(std::min<std::size_t>(bytes.size() - offset, 65536));
+            if (!::WriteFile(m_handle, bytes.data() + offset, count, &written, nullptr) ||
+                written == 0)
+                return false;
+#else
+            const auto count = std::min<std::size_t>(bytes.size() - offset, 65536);
+            const auto written = ::write(m_descriptor, bytes.data() + offset, count);
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written <= 0)
+                return false;
+#endif
+            offset += static_cast<std::size_t>(written);
+        }
+#if defined(_WIN32)
+        return ::FlushFileBuffers(m_handle) != 0;
+#else
+        int flushed = 0;
+        do {
+            flushed = ::fsync(m_descriptor);
+        } while (flushed != 0 && errno == EINTR);
+        return flushed == 0;
+#endif
+    }
+
+    bool finish_write() {
+        // Check close errors before use, then retain only the same file through
+        // publication. A replacement observed during reopening is never adopted.
+        StagingIdentity before{};
+        if (!identity(before))
+            return false;
+#if defined(_WIN32)
+        const bool closed = ::CloseHandle(m_handle) != 0;
+        m_handle = INVALID_HANDLE_VALUE;
+        if (!closed)
+            return false;
+        m_handle = ::CreateFileW(m_path.c_str(),
+                                 GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr,
+                                 OPEN_EXISTING,
+                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                                 nullptr);
+#else
+        const bool closed = ::close(m_descriptor) == 0;
+        m_descriptor = -1;
+        if (!closed)
+            return false;
+        m_descriptor = ::open(m_path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+#endif
+        StagingIdentity after{};
+#if defined(_WIN32)
+        // Windows finalizes last-write time when the writing handle closes.
+        // Creation time, identity and length must survive the reopen unchanged.
+        if (identity(after) && std::equal(before.begin(), before.begin() + 4, after.begin()) &&
+            before[5] == after[5])
+            return true;
+#else
+        if (identity(after) && after == before)
+            return true;
+#endif
+#if defined(_WIN32)
+        if (m_handle != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_handle);
+        m_handle = INVALID_HANDLE_VALUE;
+#else
+        if (m_descriptor >= 0)
+            ::close(m_descriptor);
+        m_descriptor = -1;
+#endif
+        return false;
+    }
+
+    bool read_record(std::string& bytes) const {
+        StagingIdentity current{};
+        // Sidecars have a fixed 512-byte admission ceiling, before allocation.
+        if (!identity(current) || current[5] > 512)
+            return false;
+        bytes.assign(static_cast<std::size_t>(current[5]), '\0');
+#if defined(_WIN32)
+        LARGE_INTEGER start{};
+        if (!::SetFilePointerEx(m_handle, start, nullptr, FILE_BEGIN))
+            return false;
+#else
+        if (::lseek(m_descriptor, 0, SEEK_SET) < 0)
+            return false;
+#endif
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+#if defined(_WIN32)
+            DWORD received = 0;
+            if (!::ReadFile(m_handle,
+                            bytes.data() + offset,
+                            static_cast<DWORD>(bytes.size() - offset),
+                            &received,
+                            nullptr) ||
+                received == 0)
+                return false;
+#else
+            const auto received =
+                ::read(m_descriptor, bytes.data() + offset, bytes.size() - offset);
+            if (received < 0 && errno == EINTR)
+                continue;
+            if (received <= 0)
+                return false;
+#endif
+            offset += static_cast<std::size_t>(received);
+        }
+        StagingIdentity after{};
+        return identity(after) && after == current;
+    }
+
+    bool matches_path(const std::filesystem::path& path) const {
+        StagingIdentity held{};
+        FileIdentity named;
+        if (!identity(held) || !ReadFileIdentity(path, named))
+            return false;
+#if defined(_WIN32)
+        return named.volume == held[0] && named.index_high == held[1] && named.index_low == held[2];
+#else
+        return static_cast<std::uint64_t>(named.device) == held[0] &&
+               static_cast<std::uint64_t>(named.inode) == held[1];
+#endif
+    }
+
+    bool matches_name() const {
+        return matches_path(m_path);
+    }
+
+    bool remove() const {
+        StagingIdentity held{};
+        if (!identity(held) || !matches_name())
+            return false;
+#if defined(_WIN32)
+        // Reopen only for delete access, verify against the retained identity,
+        // then disposition targets that handle even if the name is substituted.
+        const HANDLE retiring =
+            ::CreateFileW(m_path.c_str(),
+                          DELETE | FILE_READ_ATTRIBUTES,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                          nullptr);
+        if (retiring == INVALID_HANDLE_VALUE)
+            return false;
+        BY_HANDLE_FILE_INFORMATION info{};
+        FILE_DISPOSITION_INFO disposition{TRUE};
+        const bool removed = ::GetFileInformationByHandle(retiring, &info) &&
+                             (info.dwFileAttributes &
+                              (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
+                             info.nNumberOfLinks == 1 && info.dwVolumeSerialNumber == held[0] &&
+                             info.nFileIndexHigh == held[1] && info.nFileIndexLow == held[2] &&
+                             ::SetFileInformationByHandle(retiring,
+                                                          FileDispositionInfo,
+                                                          &disposition,
+                                                          static_cast<DWORD>(sizeof(disposition)));
+        const bool closed = ::CloseHandle(retiring) != 0;
+        return removed && closed;
+#else
+        struct stat named {};
+        // SaveGuard excludes cooperating writers. Recheck at unlink itself;
+        // POSIX has no identity-conditioned unlink for hostile concurrent writers.
+        return ::lstat(m_path.c_str(), &named) == 0 && S_ISREG(named.st_mode) &&
+               named.st_nlink == 1 && static_cast<std::uint64_t>(named.st_dev) == held[0] &&
+               static_cast<std::uint64_t>(named.st_ino) == held[1] && ::unlink(m_path.c_str()) == 0;
+#endif
+    }
+
+private:
+    std::filesystem::path m_path;
+#if defined(_WIN32)
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+    int m_descriptor = -1;
+#endif
+};
+
+std::filesystem::path OwnershipPath(const std::filesystem::path& staging) {
+    auto record = staging;
+    record += ".owner";
+    return record;
+}
+
+std::string StagingOwnershipBytes(const std::filesystem::path& staging,
+                                  const StagingIdentity& world_identity,
+                                  const StagingIdentity& staging_identity,
+                                  const StagingIdentity& instance_identity) {
+    const auto filename = staging.filename();
+    const auto& native_name = filename.native();
+    // Native staging names are short ASCII; reject foreign names before UTF-8
+    // conversion, including ill-formed native Unicode. The record is <= 512 bytes.
+    if (native_name.size() > 256 ||
+        std::any_of(native_name.begin(), native_name.end(), [](auto unit) {
+            return static_cast<std::uint64_t>(unit) > 127;
+        }))
+        return {};
+    const auto name = Filesystem::GenericUtf8PathString(filename);
+    std::string bytes = "AROWN001";
+    for (std::size_t index = 0; index < 3; ++index)
+        AppendU64(bytes, world_identity[index]);
+    for (const auto value : staging_identity)
+        AppendU64(bytes, value);
+    for (std::size_t index = 0; index < 3; ++index)
+        AppendU64(bytes, instance_identity[index]);
+    AppendU64(bytes, name.size());
+    bytes += name;
+    const auto instance_start = name.rfind('.');
+    if (instance_start == std::string::npos || name.size() - instance_start - 1 != 32)
+        return {};
+    const auto instance = name.substr(instance_start + 1);
+    if (instance.find_first_not_of("0123456789abcdef") != std::string::npos)
+        return {};
+    bytes += instance;
+    std::uint64_t checksum = 14695981039346656037ull;
+    for (const unsigned char byte : bytes) {
+        checksum ^= byte;
+        checksum *= 1099511628211ull;
+    }
+    AppendU64(bytes, checksum);
+    return bytes;
+}
+
+bool ValidStagingOwnership(const std::filesystem::path& staging,
+                           const StagingFile& payload,
+                           const StagingFile& record) {
+    // This detects invalid/altered records, not deliberate valid fabrication by
+    // an actor already able to write the save directory; that is outside scope.
+    const auto parent =
+        staging.has_parent_path() ? staging.parent_path() : std::filesystem::path(".");
+    const StagingFile directory(parent, StagingFile::Mode::Directory);
+    StagingIdentity world_identity{}, staging_identity{}, instance_identity{};
+    std::string recorded;
+    if (!payload.matches_name() || !record.matches_name() ||
+        !directory.identity(world_identity, true) || !payload.identity(staging_identity) ||
+        !record.identity(instance_identity) || !record.read_record(recorded))
+        return false;
+    const auto expected =
+        StagingOwnershipBytes(staging, world_identity, staging_identity, instance_identity);
+    return !expected.empty() && recorded == expected;
+}
+
+bool ReclaimOwnedLedgerStaging(const std::filesystem::path& staging) {
+    const StagingFile payload(staging, StagingFile::Mode::Inspect);
+    const StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
+    if (!ValidStagingOwnership(staging, payload, record) || !payload.remove())
+        return false;
+    record.remove();
+    FlushRemovalDirectory(staging, nullptr);
+    return true;
+}
+
+std::filesystem::path NextLedgerTempPath(const std::filesystem::path& destination) {
+    auto path = NextRegionTempPath(destination);
+    std::random_device entropy;
+    // A 128-bit suffix avoids predictable collisions after sequence/PID reuse.
+    constexpr char digits[] = "0123456789abcdef";
+    std::string instance;
+    instance.reserve(32);
+    for (int word = 0; word < 4; ++word) {
+        const auto value = static_cast<std::uint32_t>(entropy());
+        for (int shift = 28; shift >= 0; shift -= 4)
+            instance.push_back(digits[(value >> shift) & 15u]);
+    }
+    path += "." + instance;
+    return path;
+}
+
+class LedgerStaging {
+public:
+    explicit LedgerStaging(const std::filesystem::path& destination)
+        : m_path(NextLedgerTempPath(destination))
+        , m_payload(m_path, StagingFile::Mode::Create)
+        , m_record(OwnershipPath(m_path), StagingFile::Mode::Create) {}
+    ~LedgerStaging() {
+        // Only remove objects created by this call. A substituted payload or
+        // record has lost proof and both occupants must survive untouched.
+        if (m_ready) {
+            if (ValidStagingOwnership(m_path, m_payload, m_record) && m_payload.remove())
+                m_record.remove();
+        } else {
+            if (m_payload_created)
+                m_payload.remove();
+            if (m_record_created)
+                m_record.remove();
+        }
+    }
+    LedgerStaging(const LedgerStaging&) = delete;
+    LedgerStaging& operator=(const LedgerStaging&) = delete;
+
+    bool available() {
+        StagingIdentity payload_identity{}, record_identity{};
+        m_payload_created = m_payload.identity(payload_identity);
+        m_record_created = m_record.identity(record_identity);
+        return m_payload_created && m_record_created;
+    }
+    bool prepare(const std::string& bytes, std::vector<std::string>* errors) {
+        const auto parent =
+            m_path.has_parent_path() ? m_path.parent_path() : std::filesystem::path(".");
+        const StagingFile directory(parent, StagingFile::Mode::Directory);
+        StagingIdentity world_identity{}, staging_identity{}, instance_identity{};
+        if (!m_payload.write(bytes) || !m_payload.finish_write() ||
+            !directory.identity(world_identity, true) || !m_payload.identity(staging_identity) ||
+            !m_record.identity(instance_identity))
+            return false;
+        const auto ownership =
+            StagingOwnershipBytes(m_path, world_identity, staging_identity, instance_identity);
+        if (ownership.empty() || !m_record.write(ownership) || !m_record.finish_write() ||
+            !FlushAncestorEntries(m_path, errors) || !FlushRemovalDirectory(m_path, errors))
+            return false;
+        m_ready = true;
+        return true;
+    }
+    bool valid() const {
+        return m_ready && ValidStagingOwnership(m_path, m_payload, m_record);
+    }
+    const std::filesystem::path& path() const {
+        return m_path;
+    }
+    bool installed_at(const std::filesystem::path& destination) const {
+        return m_payload.matches_path(destination);
+    }
+    void published() {
+        // The payload was renamed (including a post-rename flush failure).
+        // The caller's live ledger is never retired through this handle.
+        m_ready = false;
+        m_payload_created = false;
+        if (m_record.remove())
+            m_record_created = false;
+        FlushRemovalDirectory(m_path, nullptr);
+    }
+
+private:
+    std::filesystem::path m_path;
+    StagingFile m_payload;
+    StagingFile m_record;
+    bool m_payload_created = false;
+    bool m_record_created = false;
+    bool m_ready = false;
+};
+
 // SaveGuard spans enumeration through replacement/removal for every writer.
 // Existing staging belongs to a completed or terminated save, never another
 // active in-process writer. Independently launched processes sharing a save
@@ -360,10 +799,15 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     for (const std::filesystem::directory_iterator end; !list_error && it != end;
          it.increment(list_error)) {
         const auto& entry = *it;
+        if (entry.path().filename().native().rfind(prefix.native(), 0) != 0)
+            continue;
+        if (destination.filename() == "active-regions.arl") {
+            if (entry.path().extension() != ".owner" && ReclaimOwnedLedgerStaging(entry.path()))
+                ++reclaimed;
+            continue;
+        }
         std::error_code kind_error;
         if (!entry.is_regular_file(kind_error) || kind_error)
-            continue;
-        if (entry.path().filename().native().rfind(prefix.native(), 0) != 0)
             continue;
         std::error_code remove_error;
         if (std::filesystem::remove(entry.path(), remove_error) && !remove_error)
@@ -1680,19 +2124,38 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     try {
         const auto path = active_regions_path(save_dir);
         std::filesystem::create_directories(path.parent_path());
-        std::filesystem::path temp;
-        // Keep abandoned staging files outside the strict region integrity scan.
-        // The save root is on the save filesystem; replacement refuses EXDEV
-        // if a separately mounted chunks/region/ directory violates that layout.
-        if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
-            return false;
-        if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
-            RemoveTemporaryFile(temp);
-            AddError(errors, "interrupted before active-region ledger replacement");
-            return false;
+        // Exclusive creation skips unknown payload or sidecar occupants. The
+        // bounded retry also handles a substituted file observed before use.
+        bool hook_called = false;
+        bool replaced = false;
+        for (int attempt = 0; attempt < 128; ++attempt) {
+            LedgerStaging temporary(staging);
+            if (!temporary.available())
+                continue;
+            if (!temporary.prepare(bytes, errors)) {
+                AddError(errors, "Cannot durably record active-region staging ownership");
+                return false;
+            }
+            if (!hook_called) {
+                hook_called = true;
+                if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
+                    AddError(errors, "interrupted before active-region ledger replacement");
+                    return false;
+                }
+            }
+            if (!temporary.valid())
+                continue;
+            replaced = ReplaceRegionFileAtomically(temporary.path(), path, errors);
+            // A failed final directory flush can leave the complete new ledger
+            // installed. Retiring the sidecar never removes that live file.
+            if (temporary.installed_at(path))
+                temporary.published();
+            if (!replaced)
+                return false;
+            break;
         }
-        if (!ReplaceRegionFileAtomically(temp, path, errors)) {
-            RemoveTemporaryFile(temp);
+        if (!replaced) {
+            AddError(errors, "Cannot allocate unique active-region staging");
             return false;
         }
         ledger = std::move(saved);

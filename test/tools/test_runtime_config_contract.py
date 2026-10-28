@@ -264,6 +264,71 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn('prefix+=".tmp.";', fixture)
         self.assertIn("entry.path().filename().native().find(prefix.native())", fixture)
 
+    def test_ledger_staging_requires_persistent_matching_ownership(self):
+        source = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(encoding="utf-8")
+        service = compact_cpp(source)
+        cleanup = service[service.index("std::size_tReclaimAbandonedStaging("):]
+        cleanup = cleanup[:cleanup.index("#ifdefined(_WIN32)")]
+        self.assertIn('if(destination.filename()=="active-regions.arl")', cleanup)
+        self.assertIn('entry.path().extension()!=".owner"&&ReclaimOwnedLedgerStaging(entry.path())', cleanup)
+        self.assertLess(cleanup.index('destination.filename()=="active-regions.arl"'),
+                        cleanup.index('entry.is_regular_file(kind_error)'))
+        owned = service[service.index("boolReclaimOwnedLedgerStaging("):service.index("std::filesystem::pathNextLedgerTempPath(")]
+        self.assertLess(owned.index("ValidStagingOwnership(staging,payload,record)"),
+                        owned.index("payload.remove()"))
+        self.assertLess(owned.index("payload.remove()"), owned.index("record.remove()"))
+        validator = service[service.index("boolValidStagingOwnership("):service.index("boolReclaimOwnedLedgerStaging(")]
+        for proof in ("payload.matches_name()", "record.matches_name()",
+                      "directory.identity(world_identity,true)", "payload.identity(staging_identity)",
+                      "record.identity(instance_identity)", "record.read_record(recorded)"):
+            self.assertIn(proof, validator)
+        self.assertIn("!expected.empty()&&recorded==expected", validator)
+        encoder = service[service.index("std::stringStagingOwnershipBytes("):service.index("boolValidStagingOwnership(")]
+        for field in ("world_identity[index]", "staging_identity", "instance_identity[index]",
+                      "bytes+=name;", "bytes+=instance;", "AppendU64(bytes,checksum)"):
+            self.assertIn(field, encoder)
+        self.assertIn('"AROWN001"', encoder)
+        native = service[service.index("classStagingFile{"):service.index("std::filesystem::pathOwnershipPath(")]
+        for required in ("O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", "::fstat(m_descriptor,&info)",
+                         "FILE_FLAG_OPEN_REPARSE_POINT", "::GetFileInformationByHandle(m_handle,&info)",
+                         "FILE_DISPOSITION_INFO", "::lstat(m_path.c_str(),&named)",
+                         "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
+            self.assertIn(required, native)
+        self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))
+
+    def test_ledger_staging_is_durable_before_hook_and_replacement(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        writer = service[service.index("boolWorldSaveService::save_active_regions("):]
+        writer = writer[:writer.index("std::uint64_tWorldSaveService::region_simulation_digest(")]
+        ordered = ("validate_save(save_dir,errors)", "ReclaimAbandonedStaging(staging)",
+                   "LedgerStagingtemporary(staging)", "temporary.available()", "temporary.prepare(bytes,errors)",
+                   "BeforeActiveRegionsReplaceForTesting()", "temporary.valid()",
+                   "ReplaceRegionFileAtomically(temporary.path(),path,errors)", "ledger=std::move(saved)")
+        positions = [writer.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        transaction = service[service.index("classLedgerStaging{"):service.index("std::size_tReclaimAbandonedStaging(")]
+        ordered = ("m_payload.write(bytes)", "StagingOwnershipBytes(", "m_record.write(ownership)",
+                   "FlushAncestorEntries(m_path,errors)", "FlushRemovalDirectory(m_path,errors)", "m_ready=true")
+        positions = [transaction.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        fixture = compact_cpp((ROOT / "test/persistence/world_save_service_test.cpp").read_text(encoding="utf-8"))
+        for regression in ("LedgerStagingPreservesUnknownOccupantsAndEmptySave",
+                           "LedgerStagingReclaimsOnlyValidOwnedPairsIncludingEmptySave",
+                           "LedgerStagingOwnershipSurvivesDirectoryAliases",
+                           "LedgerStagingPreservesMalformedAndMismatchedOwnership",
+                           "LedgerStagingPreservesMissingOrSubstitutedProofAndPayload",
+                           "LedgerStagingPreservesPairCopiedFromAnotherWorldOrFilename",
+                           "LedgerStagingPreservesSymlinkAndSpecialFileSubstitutions",
+                           "LedgerStagingSubstitutionBeforePublishUsesFreshName",
+                           "LedgerStagingPreservesUnreadableOwnership",
+                           "LedgerStagingInterruptedWriteRemovesItsPairAndPreservesLiveLedger",
+                           "LedgerOwnershipFlushFailurePreservesLiveLedgerAndRemovesOwnPair"):
+            self.assertIn("TEST(WorldSaveService," + regression + ")", fixture)
+        restart = compact_cpp((ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(encoding="utf-8"))
+        self.assertIn('ASSERT_TRUE(fs::is_regular_file(ownership));', restart)
+        self.assertIn('EXPECT_FALSE(fs::exists(ownership));', restart)
+
     def test_metadata_cleanup_fixture_exercises_validated_clock_bytes(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
