@@ -1,4 +1,6 @@
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_client/rendering/PixelIo.h"
+#include "luminumbra_common/game/PhotoMode.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -1789,6 +1791,8 @@ void CheckCaptureGalleryContentPolicy() {
         fs::copy_file(SourceRoot() / "data/ui/fixtures/captures/cap_1.tga",
                       thumbs / ("cap_" + std::to_string(number) + ".tga"));
 
+    for (const auto* name : {"cap_0.tga", "cap_01.tga", "cap_3junk.tga", "cap_2147483648.tga"})
+        fs::copy_file(SourceRoot() / "data/ui/fixtures/captures/cap_1.tga", thumbs / name);
     const HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
     Luminumbra::Client::Rml_UIManager ui(root.path().string() + "/");
@@ -1807,11 +1811,58 @@ void CheckCaptureGalleryContentPolicy() {
         gallery->GetElementsByClassName(favorites, "photo-fav");
         EXPECT_EQ(favorites.size(), expected_favorites);
     };
-    // Positive control: ordinary play still reads the saved rating.
-    inspect(6, 1);
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-1.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-1.photo.json",
+                                                        "{\"stamp\":\"photo-1\",\"stars\":5}"));
+    // Admit complete historical photos as well as published captures; partial
+    // legacy artifacts stay hidden.
+    luminumbra::game::PhotoSidecar side;
+    side.verdict.stars = 5;
+    ASSERT_EQ(Luminumbra::Rendering::PersistPhotoCapture(root.path(), 7, 1, 1, {1, 2, 3}, side), 7);
+    // A duplicate legacy id must not displace the published photo or its rating.
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-7.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-7.photo.json",
+                                                        "{\"stamp\":\"photo-7\",\"stars\":0}"));
+    fs::copy_file(thumbs / "cap_1.tga", thumbs / "cap_7.tga");
+    fs::create_directory(thumbs / "cap_8"); // Unpublished newer capture stays hidden.
+    inspect(2, 2);
+    // A restarted session must place its shutter result ahead of historical ids.
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-100.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-100.photo.json",
+                                                        "{\"stamp\":\"photo-100\",\"stars\":5}"));
+    fs::copy_file(thumbs / "cap_1.tga", thumbs / "cap_100.tga");
+    Luminumbra::Rendering::PhotoCaptureAllocator restarted_session;
+    ASSERT_EQ(restarted_session.Persist(root.path(), 1, 1, {1, 2, 3}, side), 101);
+    inspect(4, 4);
+    auto* ordered_gallery = FindDocumentByElementId(ui.GetContext(), "gallery");
+    ASSERT_NE(ordered_gallery, nullptr);
+    Rml::ElementList ordered_thumbnails;
+    ordered_gallery->GetElementsByClassName(ordered_thumbnails, "photo-thumb");
+    ASSERT_EQ(ordered_thumbnails.size(), 4u);
+    EXPECT_EQ(ordered_thumbnails.front()->GetAttribute<Rml::String>("src", ""),
+              "captures/cap_101/thumbnail.tga");
+    // Discovery is bounded even when almost every entry is unrelated. Keep
+    // exactly 65536 entries first, then refuse an incomplete 65537-entry scan.
+    constexpr std::size_t kGalleryEntryBound = 65536;
+    const auto present = static_cast<std::size_t>(
+        std::distance(fs::directory_iterator(thumbs), fs::directory_iterator{}));
+    for (std::size_t entry = present; entry < kGalleryEntryBound; ++entry) {
+        std::ofstream output(thumbs / ("unrelated-" + std::to_string(entry)));
+        ASSERT_TRUE(Luminumbra::Rendering::CloseCaptureFile(output));
+    }
+    inspect(4, 4);
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(thumbs / "overflow", "unrelated"));
+    inspect(0, 0);
+    ASSERT_TRUE(fs::remove(thumbs / "overflow"));
+    for (std::size_t entry = present; entry < kGalleryEntryBound; ++entry)
+        ASSERT_TRUE(fs::remove(thumbs / ("unrelated-" + std::to_string(entry))));
+    ASSERT_TRUE(fs::remove(thumbs / "cap_100.tga"));
     auto& policy = Luminumbra::Filesystem::capture_content_paths();
     policy.enable(root.path());
-    inspect(6, 0);
+    inspect(7, 0);
     EXPECT_FALSE(policy.refused());
     fs::remove_all(thumbs);
     fs::create_directory(thumbs);

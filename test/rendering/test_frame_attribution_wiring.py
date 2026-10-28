@@ -1204,17 +1204,22 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_capture_writer_reports_write_flush_and_close_failures(self):
         writer = block(read(CLIENT / "rendering/PixelIo.cpp"), "bool WritePixelBufferPpm(")
-        tail = writer[writer.index("output.write("):]
+        stream_writer = block(read(CLIENT / "rendering/PixelIo.cpp"), "bool WritePixelBufferPpmStream(")
+        self.assertIn("output.write(", stream_writer)
+        self.assertIn("return FlushCaptureStream(output);", stream_writer)
+        self.assertIn("const bool written = WritePixelBufferPpmStream(output, width, height, pixels);", writer)
+        self.assertIn("const bool closed = CloseCaptureFile(output);", writer)
+        tail = writer[writer.index("const bool written ="):]
         helper = read(CLIENT / "rendering/PixelIo.h")
         flush = block(helper, "bool FlushCaptureStream(")
         self.assertLess(flush.index("output.flush();"), flush.index("return static_cast<bool>(output);"))
         close = block(helper, "bool CloseCaptureFile(")
         self.assertLess(close.index("FlushCaptureStream(output)"), close.index("output.close();"))
         self.assertIn("return flushed && static_cast<bool>(output);", close)
-        failure = block(tail, "if (!CloseCaptureFile(output))")
+        failure = block(tail, "if (!written || !closed)")
         self.assertIn("return false;", failure)
         self.assertIn("Failed to finish screenshot artifact", failure)
-        self.assertLess(tail.index("if (!CloseCaptureFile(output))"), tail.index("return true;"))
+        self.assertLess(tail.index("if (!written || !closed)"), tail.index("return true;"))
 
     def test_thumbnail_keys_and_readback_refusals_preserve_batch_progress(self):
         source = read(CLIENT / "app/MenuScreens.cpp")
