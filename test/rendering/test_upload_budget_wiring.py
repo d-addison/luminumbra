@@ -711,6 +711,91 @@ class UploadBudgetWiring(unittest.TestCase):
         gl_native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
         self.assertIn("UnwritableReportImageInvalidScanAndCompleteOutput", gl_native)
 
+    def test_water_migration_preserves_both_integer_grids_without_float_feedback(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
+        self.assertIn("old_bed_mm = std::move(chunk.water_bed_mm)", resize)
+        self.assertIn("sample_mm(old_bed_mm, x, z)", resize)
+        self.assertIn("sample_mm(old_depth_mm, x, z)", resize)
+        sampler = re.sub(r"//[^\n]*", "", body(body(source, "bool WaterSystem::ResizeSimulationGrid("), "const auto sample_mm ="))
+        for forbidden in ("float", "floor", "lround"):
+            self.assertNotIn(forbidden, sampler)
+        self.assertIn("sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536)", sampler)
+        self.assertIn("new_resolution == current_resolution", resize)
+        self.assertIn("current_resolution > 32", resize)
+        self.assertIn("chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty()", resize)
+        self.assertIn("chunk.water_bed_mm.size() == old_cell_count && "
+                      "chunk.water_depth_mm.size() == old_cell_count", resize)
+        refusal = "if (!legacy_float_only && !complete_integer_pair) { return false; }"
+        self.assertIn(refusal, resize)
+        self.assertLess(resize.index(refusal), resize.index("std::move(chunk.water_level_data)"))
+        self.assertNotIn("can_interpolate_bed", resize)
+        self.assertNotIn("can_interpolate_mm", resize)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        self.assertIn("CompleteIntegerPairStepsWithAbsentOrWrongSizedFlux", native)
+        self.assertIn("LegacyFloatPairMigratesTogetherAndThenSteps", native)
+        self.assertIn("EditedChannelAndDamSurviveMigrationAndSavedContinuation", native)
+        self.assertIn("IntegerMigrationDoesNotRequireRenderMirrorsAndRefusesInvalidSourceResolution", native)
+        self.assertIn("MigratedWaterOracle(beds, old_res, new_res)", native)
+        self.assertIn("-4000, 8", native)
+        self.assertIn("4000, 8", native)
+        self.assertIn("step < 4", native)
+        registration = read(ROOT / "test/CMakeLists.txt")
+        self.assertIn("common/WaterSeedInputs_test.cpp", registration)
+        self.assertIn("rendering/FarWorldWaterGl_test.cpp", registration)
+
+    def test_rejected_water_grids_are_excluded_at_every_consumer(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        complete = body(source, 'bool HasCompleteIntegerWaterGrid(')
+        for condition in ('resolution > 32', '32 % resolution',
+                          'chunk.water_bed_mm.size() == cells',
+                          'chunk.water_depth_mm.size() == cells'):
+            self.assertIn(condition, complete)
+        self.assertNotIn('water_edge_flux', complete)
+        step = body(source, 'void StepChunkWaterFixed(')
+        self.assertIn('c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0)', step)
+        self.assertLess(step.index('!HasCompleteIntegerWaterGrid(c, res)'),
+                        step.index('c.water_edge_flux.assign('))
+        self.assertLess(step.index('c.water_edge_flux.assign('),
+                        step.index('flux[eidx]'))
+        for signature in ('std::uint64_t WaterActivityScore(', 'bool HasCompleteWaterGrid(',
+                          'void StepChunkWaterFixed(', 'void WaterSystem::update(',
+                          'int WaterSystem::EditTerrainBed('):
+            self.assertIn('HasCompleteIntegerWaterGrid(', body(source, signature))
+        update = body(source, 'void WaterSystem::update(')
+        self.assertIn('!HasCompleteIntegerWaterGrid(*chunk_ptr, GetWaterResolution(*chunk_ptr))', update)
+        self.assertLess(update.index('!HasCompleteIntegerWaterGrid(*chunk_ptr'),
+                        update.index('const bool sleeping_pre'))
+        self.assertIn('!HasCompleteIntegerWaterGrid(*A, res)', update)
+        self.assertIn('!HasCompleteIntegerWaterGrid(*B, res)', update)
+        for signature in ('f32 WaterSystem::get_water_level_at(',
+                          'Vec2 WaterSystem::get_water_flow_at(',
+                          'void WaterSystem::apply_displacement('):
+            self.assertIn('HasCompleteWaterGrid(', body(source, signature))
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for regression in ('RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits',
+                           'InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep',
+                           'WorldWaterProbesRefuseUnsupportedResolutionBeforeSizeArithmetic'):
+            self.assertIn('TEST(WaterSeedInputs, ' + regression + ')', native)
+        world = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.cpp')
+        readiness = body(world, 'bool SHIELD_WorldSystem::debug_water_grid_at(')
+        for condition in ('c->water_bed_mm.size() == cells',
+                          'c->water_depth_mm.size() == cells',
+                          'c->water_level_data.size() >= cells',
+                          'c->water_flow_data.size() >= cells',
+                          'c->water_sim_terrain_height.size() >= cells'):
+            self.assertIn(condition, readiness)
+        self.assertNotIn('water_edge_flux', readiness)
+        self.assertIn('SourceReadinessRequiresTheSameArraysAsInjection', native)
+        for signature in ('bool SHIELD_WorldSystem::IsUnderwater(',
+                          'std::int64_t SHIELD_WorldSystem::debug_water_volume_near(',
+                          'bool SHIELD_WorldSystem::debug_lowest_land_pos(',
+                          'bool SHIELD_WorldSystem::debug_find_shoreline(',
+                          'Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(',
+                          'float SHIELD_WorldSystem::live_water_surface_at(',
+                          'bool SHIELD_WorldSystem::debug_water_grid_at('):
+            self.assertIn('IsBoundedWaterResolution(res)', body(world, signature))
+
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))
         self.assertIn('if (!WriteCaptureText(out_dir / "survey.json",', survey)
