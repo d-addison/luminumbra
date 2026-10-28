@@ -45,8 +45,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <tlhelp32.h>
 #include <windows.h>
+
+#include <tlhelp32.h>
 #endif
 #if defined(__linux__)
 #include <dlfcn.h>
