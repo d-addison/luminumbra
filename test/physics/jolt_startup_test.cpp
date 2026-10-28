@@ -42,6 +42,11 @@
 
 #if defined(_WIN32)
 #include <malloc.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <tlhelp32.h>
+#include <windows.h>
 #endif
 #if defined(__linux__)
 #include <dlfcn.h>
@@ -1216,6 +1221,300 @@ TEST(JoltStartup, ZeroWorkersAcceptNullOnlyForZeroAllocatorAndExecuteBarrierJobs
 namespace {
 using ApplicationPhysics = Luminumbra::Systems::PhysicsSystem;
 
+#if defined(_WIN32) && !defined(JPH_DISABLE_CUSTOM_ALLOCATOR)
+// Patch resolved imports in this child process, including the CRT DLL that
+// implements std::thread. Executable-only replacement misses that DLL boundary.
+struct WindowsNativeState {
+    const DWORD owner = GetCurrentThreadId();
+    bool active = false;
+    unsigned launches = 0;
+    unsigned fail_launch = 0;
+    unsigned semaphores = 0;
+    unsigned fail_semaphore = 0;
+    unsigned failures = 0;
+    unsigned created = 0;
+    unsigned joined = 0;
+    unsigned acquired = 0;
+    unsigned closed = 0;
+    struct OwnedHandle {
+        HANDLE handle = nullptr;
+        bool worker = false;
+    };
+    // Bound every ownership scan and refuse roster overflow explicitly.
+    std::array<OwnedHandle, 256> handles{};
+    decltype(&CreateThread) create_thread = nullptr;
+    decltype(&CreateSemaphoreA) create_semaphore_a = nullptr;
+    decltype(&CreateSemaphoreW) create_semaphore_w = nullptr;
+    decltype(&CloseHandle) close_handle = nullptr;
+};
+WindowsNativeState& WindowsNative() {
+    static WindowsNativeState state;
+    return state;
+}
+bool CaptureWindowsNative() {
+    const auto& state = WindowsNative();
+    return GetCurrentThreadId() == state.owner && state.active;
+}
+void RecordWindowsHandle(HANDLE handle, bool worker) {
+    if (handle == nullptr || !CaptureWindowsNative()) {
+        return;
+    }
+    auto& state = WindowsNative();
+    for (auto& slot : state.handles) {
+        if (slot.handle == nullptr) {
+            slot = {handle, worker};
+            if (worker) {
+                ++state.created;
+            } else {
+                ++state.acquired;
+            }
+            return;
+        }
+    }
+    Require(false);
+}
+bool RefuseWindowsCreation(bool worker) {
+    if (!CaptureWindowsNative()) {
+        return false;
+    }
+    auto& state = WindowsNative();
+    const unsigned attempt = worker ? ++state.launches : ++state.semaphores;
+    if (attempt != (worker ? state.fail_launch : state.fail_semaphore)) {
+        return false;
+    }
+    ++state.failures;
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return true;
+}
+HANDLE WINAPI StartupCreateThread(LPSECURITY_ATTRIBUTES attributes,
+                                  SIZE_T stack_size,
+                                  LPTHREAD_START_ROUTINE entry,
+                                  LPVOID argument,
+                                  DWORD flags,
+                                  LPDWORD identifier) {
+    if (RefuseWindowsCreation(true)) {
+        return nullptr;
+    }
+    HANDLE handle =
+        WindowsNative().create_thread(attributes, stack_size, entry, argument, flags, identifier);
+    RecordWindowsHandle(handle, true);
+    return handle;
+}
+HANDLE WINAPI StartupCreateSemaphoreA(LPSECURITY_ATTRIBUTES attributes,
+                                      LONG initial,
+                                      LONG maximum,
+                                      LPCSTR name) {
+    if (RefuseWindowsCreation(false)) {
+        return nullptr;
+    }
+    HANDLE handle = WindowsNative().create_semaphore_a(attributes, initial, maximum, name);
+    RecordWindowsHandle(handle, false);
+    return handle;
+}
+HANDLE WINAPI StartupCreateSemaphoreW(LPSECURITY_ATTRIBUTES attributes,
+                                      LONG initial,
+                                      LONG maximum,
+                                      LPCWSTR name) {
+    if (RefuseWindowsCreation(false)) {
+        return nullptr;
+    }
+    HANDLE handle = WindowsNative().create_semaphore_w(attributes, initial, maximum, name);
+    RecordWindowsHandle(handle, false);
+    return handle;
+}
+BOOL WINAPI StartupCloseHandle(HANDLE handle) {
+    auto& state = WindowsNative();
+    if (CaptureWindowsNative()) {
+        for (auto& slot : state.handles) {
+            if (slot.handle == handle) {
+                if (slot.worker) {
+                    // A closed worker must already have terminated, including
+                    // when startup fails after earlier successful launches.
+                    Require(WaitForSingleObject(handle, 0) == WAIT_OBJECT_0);
+                }
+                const BOOL result = state.close_handle(handle);
+                Require(result != FALSE);
+                if (slot.worker) {
+                    ++state.joined;
+                } else {
+                    ++state.closed;
+                }
+                slot = {};
+                return result;
+            }
+        }
+    }
+    return state.close_handle(handle);
+}
+
+template<class Function>
+Function ResolveWindowsFunction(HMODULE module, const char* name) {
+    const FARPROC address = GetProcAddress(module, name);
+    Require(address != nullptr);
+    Function function = nullptr;
+    static_assert(sizeof(function) == sizeof(address));
+    std::memcpy(&function, &address, sizeof(function));
+    return function;
+}
+
+class ScopedWindowsImports {
+public:
+    ScopedWindowsImports() {
+        auto& state = WindowsNative();
+        const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        Require(kernel != nullptr);
+        state.create_thread =
+            ResolveWindowsFunction<decltype(state.create_thread)>(kernel, "CreateThread");
+        state.create_semaphore_a =
+            ResolveWindowsFunction<decltype(state.create_semaphore_a)>(kernel, "CreateSemaphoreA");
+        state.create_semaphore_w =
+            ResolveWindowsFunction<decltype(state.create_semaphore_w)>(kernel, "CreateSemaphoreW");
+        state.close_handle =
+            ResolveWindowsFunction<decltype(state.close_handle)>(kernel, "CloseHandle");
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+        Require(snapshot != INVALID_HANDLE_VALUE);
+        MODULEENTRY32W module{};
+        module.dwSize = static_cast<DWORD>(sizeof(module));
+        Require(Module32FirstW(snapshot, &module) != FALSE);
+        unsigned modules = 0;
+        do {
+            // Bound module traversal as well as the total patched import slots.
+            Require(++modules <= 256);
+            PatchModule(module.hModule);
+        } while (Module32NextW(snapshot, &module) != FALSE);
+        Require(GetLastError() == ERROR_NO_MORE_FILES);
+        Require(state.close_handle(snapshot) != FALSE && m_count != 0);
+    }
+    ~ScopedWindowsImports() {
+        Require(!WindowsNative().active);
+        while (m_count != 0) {
+            const auto& patch = m_patches[--m_count];
+            Replace(patch.slot, patch.original);
+        }
+    }
+    ScopedWindowsImports(const ScopedWindowsImports&) = delete;
+    ScopedWindowsImports& operator=(const ScopedWindowsImports&) = delete;
+
+private:
+    struct ImportPatch {
+        ULONG_PTR* slot = nullptr;
+        ULONG_PTR original = 0;
+    };
+    // Fixed storage bounds installation and restoration; no hook allocates.
+    std::array<ImportPatch, 1024> m_patches{};
+    std::size_t m_count = 0;
+    // Cap total descriptor and thunk visits across all loaded modules.
+    std::size_t m_scanned = 0;
+
+    static void Replace(ULONG_PTR* slot, ULONG_PTR replacement) {
+        DWORD prior = 0;
+        Require(VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &prior) != FALSE);
+        InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot),
+                                   reinterpret_cast<PVOID>(replacement));
+        DWORD ignored = 0;
+        Require(VirtualProtect(slot, sizeof(*slot), prior, &ignored) != FALSE);
+    }
+    void PatchModule(HMODULE module) {
+        auto* base = reinterpret_cast<unsigned char*>(module);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        Require(dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        Require(nt->Signature == IMAGE_NT_SIGNATURE);
+        const DWORD image_size = nt->OptionalHeader.SizeOfImage;
+        const auto& imports = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (imports.VirtualAddress == 0) {
+            return;
+        }
+        Require(imports.VirtualAddress < image_size &&
+                imports.Size <= image_size - imports.VirtualAddress);
+        const auto* descriptors =
+            reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
+        // Loader-validated images still get explicit image-size bounds on scans.
+        for (std::size_t index = 0; index < imports.Size / sizeof(*descriptors); ++index) {
+            Require(++m_scanned <= 262144);
+            const auto& descriptor = descriptors[index];
+            if (descriptor.Name == 0) {
+                return;
+            }
+            Require(descriptor.FirstThunk < image_size);
+            auto* thunks = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor.FirstThunk);
+            const std::size_t count = (image_size - descriptor.FirstThunk) / sizeof(*thunks);
+            for (std::size_t entry = 0; entry < count && thunks[entry].u1.Function != 0; ++entry) {
+                Require(++m_scanned <= 262144);
+                auto* slot = reinterpret_cast<ULONG_PTR*>(&thunks[entry].u1.Function);
+                const auto& state = WindowsNative();
+                ULONG_PTR replacement = 0;
+                if (*slot == reinterpret_cast<ULONG_PTR>(state.create_thread)) {
+                    replacement = reinterpret_cast<ULONG_PTR>(&StartupCreateThread);
+                } else if (module == GetModuleHandleW(nullptr) &&
+                           *slot == reinterpret_cast<ULONG_PTR>(state.create_semaphore_a)) {
+                    replacement = reinterpret_cast<ULONG_PTR>(&StartupCreateSemaphoreA);
+                } else if (module == GetModuleHandleW(nullptr) &&
+                           *slot == reinterpret_cast<ULONG_PTR>(state.create_semaphore_w)) {
+                    replacement = reinterpret_cast<ULONG_PTR>(&StartupCreateSemaphoreW);
+                } else if (*slot == reinterpret_cast<ULONG_PTR>(state.close_handle)) {
+                    replacement = reinterpret_cast<ULONG_PTR>(&StartupCloseHandle);
+                }
+                if (replacement != 0) {
+                    Require(m_count < m_patches.size());
+                    m_patches[m_count++] = {slot, *slot};
+                    Replace(slot, replacement);
+                }
+            }
+        }
+        Require(false);
+    }
+};
+
+void BeginWindowsAccounting(unsigned fail_launch = 0, unsigned fail_semaphore = 0) {
+    auto& state = WindowsNative();
+    Require(!state.active && state.created == state.joined && state.acquired == state.closed);
+    state.launches = 0;
+    state.fail_launch = fail_launch;
+    state.semaphores = 0;
+    state.fail_semaphore = fail_semaphore;
+    state.failures = 0;
+    state.created = 0;
+    state.joined = 0;
+    state.acquired = 0;
+    state.closed = 0;
+    state.active = true;
+}
+void EndWindowsAccounting() {
+    auto& state = WindowsNative();
+    Require(state.created == state.joined && state.acquired == state.closed);
+    for (const auto& slot : state.handles) {
+        Require(slot.handle == nullptr);
+    }
+    state.active = false;
+}
+
+void WindowsPoolLaunchFailures() {
+    InitializeAllocators();
+    {
+        ScopedWindowsImports imports;
+        // Three requested workers make partial creation reachable even on a
+        // single-core host, independently of application CPU auto-detection.
+        for (unsigned failure : {1U, 2U}) {
+            BeginWindowsAccounting(failure);
+            Arm(0, false, false);
+            bool caught = false;
+            try {
+                JPH::JobSystemThreadPool pool(2048, 8, 3);
+            } catch (const std::system_error&) {
+                caught = true;
+            }
+            Disarm();
+            Require(caught && WindowsNative().failures == 1 &&
+                    WindowsNative().launches == failure && WindowsNative().created == failure - 1);
+            EndWindowsAccounting();
+            Require(Outstanding() == 0);
+        }
+    }
+    std::_Exit(0);
+}
+#endif
+
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
 struct RuntimeAllocationState {
     // Exclusive child-process hook custody. The fixed 4096-entry roster bounds
@@ -1304,6 +1603,11 @@ void ForgetRuntimeBlock(void* block) {
         // including on rollback from logging after the pool has been built.
         Require(Native().active);
         Require(Native().created.load() == Native().joined.load());
+#endif
+#if defined(_WIN32)
+        if (CaptureWindowsNative()) {
+            Require(WindowsNative().created == WindowsNative().joined);
+        }
 #endif
         Require(JPH::Factory::sInstance != nullptr);
         if (block == state.physics) {
@@ -1466,6 +1770,75 @@ void RequireUnpublished(ApplicationPhysics& physics) {
     physics.update(0.0F);
     physics.shutdown();
 }
+
+#if defined(_WIN32) && !defined(JPH_DISABLE_CUSTOM_ALLOCATOR)
+void WindowsApplicationCreationFailures(bool workers) {
+    Log::Init();
+    InitializeAllocators();
+    {
+        ScopedWindowsImports imports;
+        ScopedRuntimeHooks hooks;
+        hooks.state.observe = true;
+        ApplicationPhysics physics;
+        // Warm process-static RTTI before retaining the allocation baseline. Only
+        // per-attempt resources must disappear; registration keeps static storage.
+        BeginWindowsAccounting();
+        physics.startup();
+        Require(physics.is_started());
+        physics.shutdown();
+        EndWindowsAccounting();
+        const auto baseline = hooks.state.blocks;
+        const unsigned measured = workers ? WindowsNative().launches : WindowsNative().semaphores;
+        Require(measured > 0 && measured <= WindowsNative().handles.size());
+        const unsigned attempts = workers ? 2 : measured;
+        for (unsigned attempt = 1; attempt <= attempts; ++attempt) {
+            // First and last worker refusals cover empty and partially built pools
+            // without repeating startup for every CPU on large Windows hosts.
+            const unsigned failure = workers && attempt == 2 ? measured : attempt;
+            Arm(0, false, false);
+            BeginWindowsAccounting(workers ? failure : 0, workers ? 0 : failure);
+            bool caught = false;
+            try {
+                physics.startup();
+            } catch (const std::system_error& error) {
+                // Thread CRTs translate the Win32 error to their own errno. Jolt's
+                // semaphore constructor preserves the original system error code.
+                caught = workers || (error.code().category() == std::system_category() &&
+                                     error.code().value() == ERROR_NOT_ENOUGH_MEMORY);
+            }
+            Require(caught && WindowsNative().failures == 1);
+            Require((workers ? WindowsNative().launches : WindowsNative().semaphores) == failure);
+            if (workers) {
+                Require(WindowsNative().created == failure - 1);
+            } else {
+                Require(WindowsNative().acquired == failure - 1 && WindowsNative().created == 0);
+            }
+            RequireUnpublished(physics);
+            EndWindowsAccounting();
+            Disarm();
+            Require(Outstanding() == 0);
+            Require(JPH::Factory::sInstance == nullptr &&
+                    JPH::PhysicsMaterial::sDefault == nullptr);
+            Require(hooks.state.physics == nullptr && hooks.state.temp == nullptr &&
+                    hooks.state.blocks == baseline);
+            hooks.RequireInstalled();
+            // The same object must reacquire the released lease and publish a
+            // complete runtime after each distinct native creation refusal.
+            Arm(0, false, false);
+            BeginWindowsAccounting();
+            physics.startup();
+            Require(physics.is_started());
+            physics.shutdown();
+            EndWindowsAccounting();
+            Disarm();
+            Require(Outstanding() == 0);
+            Require(JPH::Factory::sInstance == nullptr &&
+                    JPH::PhysicsMaterial::sDefault == nullptr && hooks.state.blocks == baseline);
+        }
+    }
+    std::_Exit(0);
+}
+#endif
 
 // Initialize the real logger before installing hooks or arming any refusal.
 // Log and the registry retain its console and periodic workers across all
@@ -1916,6 +2289,17 @@ void ApplicationLogRollbackAndDestructor() {
 TEST(JoltStartup, ApplicationRepeatedStartupShutdownKeepsAllocatorCustody) {
     ASSERT_EXIT(RepeatedApplicationLifecycle(), ::testing::ExitedWithCode(0), "");
 }
+#if defined(_WIN32) && !defined(JPH_DISABLE_CUSTOM_ALLOCATOR)
+TEST(JoltStartup, WindowsFirstAndLaterWorkerCreationFailureJoinsAcquiredWorkers) {
+    ASSERT_EXIT(WindowsPoolLaunchFailures(), ::testing::ExitedWithCode(0), "");
+}
+TEST(JoltStartup, WindowsApplicationWorkerCreationFailureReleasesRuntimeAndAllowsRetry) {
+    ASSERT_EXIT(WindowsApplicationCreationFailures(true), ::testing::ExitedWithCode(0), "");
+}
+TEST(JoltStartup, WindowsApplicationSemaphoreCreationFailureReleasesRuntimeAndAllowsRetry) {
+    ASSERT_EXIT(WindowsApplicationCreationFailures(false), ::testing::ExitedWithCode(0), "");
+}
+#endif
 TEST(JoltStartup, ApplicationLoggingFailureJoinsBeforeDependenciesAndAllowsRetry) {
     ASSERT_EXIT(ApplicationLogRollbackAndDestructor(), ::testing::ExitedWithCode(0), "");
 }
