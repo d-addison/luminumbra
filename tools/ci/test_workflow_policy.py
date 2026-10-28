@@ -915,6 +915,18 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
             self.assertIn("tools/ci/" + suite, inventory)
 
+    def test_msvc_configure_keeps_dependency_compiles_cacheable(self):
+        # ccache cannot cache precompiled-header or /Zi compiles; the lane already
+        # embeds symbols through its own global flags.
+        ci = jobs(self.workflows["ci.yml"])
+        msvc, = [step for step in steps(ci["windows-msvc"]) if step.startswith("      - name: Configure, build, and test\n")]
+        run = value(msvc, "run", 8)
+        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n", run)
+        self.assertIn("-DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `\n", run)
+        self.assertIn("'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF'", run)
+        for name in ("linux", "tidy-shard", "fast-compile"):
+            self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
+
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
@@ -925,7 +937,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin the selected Python, partitioned local checks, render failure symbols,
             # shard-2-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "d6164af56312ee3cff2821ee21ebc4b5cb487a9b86ea1722f29ee9f3df9f75c8",
+            "windows-msvc": "24aecc163c8c0c25d30de33d3524b33c1fe397a07f5a46066460a754125f306a",
             # Pin the selected Python, render failure symbols and verbose compiler cache statistics in UCRT64.
             "windows-ucrt64": "fdde3c6e5bf5132120ba644424e20409bea34466d94c4f932704a1c74a712896",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
