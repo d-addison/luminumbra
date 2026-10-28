@@ -937,9 +937,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin the selected Python, partitioned local checks, render failure symbols,
             # Python contracts across both shards and verbose compiler cache statistics.
-            "windows-msvc": "87572310c9cd22eb5e8dd7686928dde80f099582499b0ae0e37dc4edb9062bc3",
+            "windows-msvc": "1cdc4ef78a910c41f423a72c269383a0a8c1c9d2e7ac7a87a2863881fa926daa",
             # Pin the selected Python, render failure symbols and verbose compiler cache statistics in UCRT64.
-            "windows-ucrt64": "fdde3c6e5bf5132120ba644424e20409bea34466d94c4f932704a1c74a712896",
+            "windows-ucrt64": "e34be8ee7202bdbb2f91a288e495b40b0f4b7daf3e2b4efac6d23b4568fce75e",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
             "windows-msvc-result": "7cb8e2dee5b9bb09f199b5a76f966525fc56c9a6de415e1d15c6d776f98d1c03",
             "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",

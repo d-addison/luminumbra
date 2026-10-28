@@ -142,6 +142,23 @@
       ]
     },
     {
+      "id": "ci.compiler-cache-budget",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "MSVC and UCRT64 compiler caches use 1200M each. The seven compiler lanes total 4.15 GB per branch; main/devel's newest generations total 8.3 GB, within the 9.5 GB repository cleanup budget, allowing obsolete generations outside the grace window to be retired. 1.7 GB of the 10 GB repository limit remains for other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the 9.5 GB budget cause cleanup to warn and skip deletion. Frequent devel pushes and rare main pushes can still require free least-recently-used eviction at the repository limit; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_cache_retention.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.asan-fast-lane",
       "source": "docs/development.md#continuous-integration",
       "statement": "Ready pull requests needing native validation run ChangedTranslationUnitsContract and OfflineDependenciesContract before three ASan shards with 75-minute job deadlines. Fixture groups and each required parity and ambient receipt suite stay together; timing observations and CTest COST hints balance deterministic placement. Ordered qualification records cover all three producers with matching binary digests and exactly one ambient receipt. A failed fast lane skips all three shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved.",
