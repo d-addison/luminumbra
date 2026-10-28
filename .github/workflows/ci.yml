@@ -118,7 +118,7 @@ jobs:
           # Inspect both snapshots so deleted platform code still opts in.
           # Unknown history or unreadable content keeps qualification enabled.
           needs_ucrt64=true
-          windows_pattern='_WIN32|WIN32|__MINGW32__|__MINGW64__|_MSC_VER|MSYS|[Mm]in[Gg][Ww]|[Ww]indows'
+          windows_pattern='_WIN32|WIN32|WIN64|__MINGW32__|__MINGW64__|_MSC_VER|_M_X64|_M_AMD64|MSYS|[Mm]in[Gg][Ww]|[Ww]indows'
           if [ "$CI_EVENT" = pull_request ] && [ -n "$CI_BASE_SHA" ] && [ -n "$CI_HEAD_SHA" ]; then
             changed_paths=$(mktemp)
             trap 'rm -f -- "$changed_paths"' EXIT

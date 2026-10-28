@@ -967,7 +967,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
-            "changes": "5ede01fa894d623e3c154f04bed732dffa11359fffe4bbd4442f8c8a0baca19b",
+            "changes": "8adfa7fc6d75019f708d5b74c7178664d32a7da70693834044e34fb6f5b7ee13",
             # Require all three offline-dependency partitions in local-check evidence.
             "linux": "449d5b0b5082349470a9e065221f45694d7bfdc473cd476e0ff07bb13ef8e170",
             "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
@@ -2597,7 +2597,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             ("data/binary.dat", b"\x00shared\xff\n", False),
             ("data/binary.dat", b"\x00_WIN32\xff\n", True),
         )
-        markers = ("_WIN32", "WIN32", "__MINGW32__", "__MINGW64__", "_MSC_VER", "MSYS",
+        markers = ("_WIN32", "WIN32", "_WIN64", "WIN64", "__MINGW32__", "__MINGW64__", "_MSC_VER",
+                   "_M_X64", "_M_AMD64", "MSYS",
                    "MinGW", "Mingw", "mingw", "minGW", "Windows", "windows")
         paths += tuple(("src/luminumbra_common/core/FilesystemPath.cpp", marker.encode(), True)
                        for marker in markers)
