@@ -28,9 +28,9 @@ constexpr int FloorDiv(int a, int b) noexcept {
 
 constexpr std::uint16_t
 SaturatingAdd16(std::uint16_t v, std::uint32_t add, std::uint32_t& clipped) noexcept {
-    const std::uint32_t sum = static_cast<std::uint32_t>(v) + add;
+    const std::uint64_t sum = static_cast<std::uint64_t>(v) + add;
     if (sum > 0xFFFFu) {
-        clipped += sum - 0xFFFFu;
+        clipped += static_cast<std::uint32_t>(sum - 0xFFFFu);
         return 0xFFFFu;
     }
     return static_cast<std::uint16_t>(sum);
