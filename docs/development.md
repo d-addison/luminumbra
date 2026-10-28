@@ -266,8 +266,9 @@ The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
 aggregates with valid dependencies; invalid dependencies still reach an explicit
 failure step. They reject drafts, missing draft metadata, cancellations and
 missing or unsuccessful expected producers. GCC and MSVC retain their Python-only
-route; UCRT64 runs on ready native PR routes, every main/devel push, and every manual
-dispatch. Devel pushes seed its trusted compiler cache. The existing draft
+route; UCRT64 runs on every main/devel push, every manual dispatch, every ready PR into
+`main`, and ready PRs into `devel` that change Windows-sensitive paths or carry
+the `windows-proof` label. Devel pushes seed its trusted compiler cache. The existing draft
 guard and job limit remain in place. Manual native qualification captures use a
 single full-suite producer, explicitly distinguished from two-shard evidence. Their existing
 binary-bound manifests, report bytes and qualification artifact paths remain

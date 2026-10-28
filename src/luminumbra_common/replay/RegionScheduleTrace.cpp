@@ -1,9 +1,10 @@
 #include "RegionScheduleTrace.h"
 
+#include "persistence/SavedJsonAdmission.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
+#include "persistence/WorldSaveService.h"
 #include "world/WorldClock.h"
 
-#include <fstream>
 #include <nlohmann/json.hpp>
 
 namespace Luminumbra::Replay {
@@ -30,10 +31,13 @@ bool WriteRegionScheduleTrace(const std::filesystem::path& replay,
     }
     nlohmann::json value{{"schema", kSchema}, {"ticks", ticks}};
     value["checksum"] = Persistence::StableChecksum(value.dump());
-    std::ofstream out(replay.string() + ".regions.json", std::ios::binary);
-    out << value.dump() << '\n';
-    out.close();
-    if (!out) {
+    std::string bytes;
+    if (!Persistence::BoundedJsonDump(value, kMaxTraceBytes - 1, bytes))
+        return false;
+    bytes += '\n';
+    auto path = replay;
+    path += ".regions.json";
+    if (!Persistence::WorldSaveService::write_file_durably(path, bytes)) {
         error = "Cannot write region schedule trace.";
         return false;
     }
@@ -46,15 +50,18 @@ bool ReadRegionScheduleTrace(const std::filesystem::path& replay,
                              std::string& error) {
     error = "Corrupt region schedule trace.";
     try {
-        const auto path = replay.string() + ".regions.json";
-        if (!std::filesystem::exists(path)) {
+        if (expected_ticks > kMaxTraceTicks)
+            return false;
+        auto path = replay;
+        path += ".regions.json";
+        nlohmann::json value;
+        bool missing = false;
+        if (!Persistence::ReadSavedJson(path, kMaxTraceBytes, value, missing, false))
+            return false;
+        if (missing) {
             error = "Missing region schedule trace.";
             return false;
         }
-        if (expected_ticks > kMaxTraceTicks || std::filesystem::file_size(path) > kMaxTraceBytes)
-            return false;
-        std::ifstream in(path, std::ios::binary);
-        auto value = nlohmann::json::parse(in);
         if (!value.is_object() || !value.contains("schema") || !value["schema"].is_string())
             return false;
         const auto schema = value["schema"].get<std::string>();

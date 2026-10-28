@@ -1,5 +1,6 @@
 #include "TerrainPresetLoader.h"
 #include "core/Profiler.h"
+#include "persistence/SavedJsonAdmission.h"
 
 #include <algorithm>
 #include <array>
@@ -7,7 +8,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -473,19 +473,20 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     LUMIN_PROFILE_ZONE_N("File preset load");
     TerrainPresetLoadResult result;
 
-    std::ifstream file(preset_path);
-    if (!file.is_open()) {
-        result.errors.push_back("failed to open world preset: " +
-                                Filesystem::GenericUtf8PathString(preset_path));
-        return result;
-    }
-
     nlohmann::json data;
-    try {
-        data = nlohmann::json::parse(file);
-    } catch (const nlohmann::json::exception& e) {
-        result.errors.push_back("failed to parse world preset JSON '" +
-                                Filesystem::GenericUtf8PathString(preset_path) + "': " + e.what());
+    bool missing = false;
+    Persistence::SavedJsonFailure failure = Persistence::SavedJsonFailure::None;
+    if (!Persistence::ReadSavedJson(preset_path,
+                                    Persistence::SavedInputLimits::kPresetBytes,
+                                    data,
+                                    missing,
+                                    false,
+                                    &failure) ||
+        missing) {
+        const bool unavailable = missing || failure == Persistence::SavedJsonFailure::Unreadable;
+        result.errors.push_back((unavailable ? "failed to open world preset: "
+                                             : "failed to parse world preset JSON: ") +
+                                Filesystem::GenericUtf8PathString(preset_path));
         return result;
     }
 
@@ -847,18 +848,16 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                std::string& json_text,
                                std::string& error) {
     LUMIN_PROFILE_ZONE_N("File preset override load");
-    std::ifstream file(preset_path);
-    if (!file) {
-        error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
+    nlohmann::json document;
+    bool missing = false;
+    if (!Persistence::ReadSavedJson(
+            preset_path, Persistence::SavedInputLimits::kPresetBytes, document, missing, false) ||
+        missing) {
+        error = "cannot read preset override within compatibility limits: " +
+                Filesystem::GenericUtf8PathString(preset_path);
         return false;
     }
     try {
-        const auto document = nlohmann::json::parse(file);
-        if (file.bad()) {
-            error =
-                "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
-            return false;
-        }
         const auto validated = LoadTerrainPresetFromJson(
             document, data_root, Filesystem::GenericUtf8PathString(preset_path));
         if (!validated.ok) {

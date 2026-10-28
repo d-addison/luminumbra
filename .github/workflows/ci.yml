@@ -741,7 +741,8 @@ jobs:
           # Developer-shell setup can change PATH; retain the selected runtime.
           Set-Alias -Name python -Value $pythonExecutable
           # Preserve Release optimization and retain embedded compiler symbols
-          # plus the linked PDB for render-child failure evidence.
+          # plus the linked PDB for render-child failure evidence. Dependency
+          # precompiled headers and Jolt's /Zi are disabled so ccache can cache them.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
@@ -750,6 +751,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
             -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `
             '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
@@ -890,10 +892,10 @@ jobs:
 
   windows-ucrt64:
     name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
-    # Main/devel pushes seed the cache; manual dispatches and ready PRs with
-    # Windows paths or the windows-proof label provide on-demand qualification.
+    # Main/devel pushes seed the cache; manual dispatches, every ready PR into main
+    # and ready PRs with Windows paths or the windows-proof label qualify on demand.
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true'))) }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true'))) }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -1355,7 +1357,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')) }}
+          CI_ENABLED: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')) }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"

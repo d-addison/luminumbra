@@ -73,13 +73,13 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                              .read_text(encoding="utf-8"))
         self.assertIn("Luminumbra::Client::RenameUserPreset(src,dst,newDisplayName)", self.client)
         self.assertIn("WorldSaveService::rename_file_durably("
-                      "source,destination,original,preset.dump(2))", writer)
+                      "source,destination,original,serialized)", writer)
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
         rename = service[service.index("boolWorldSaveService::rename_file_durably("):]
         rename = rename[:rename.index("boolWorldSaveService::remove_file_and_staging(")]
         self.assertIn("{constSaveGuardguard;", rename)
-        self.assertLess(rename.index("contents.str()!=expected_bytes"),
+        self.assertLess(rename.index("contents!=expected_bytes"),
                         rename.index("ReclaimAbandonedStaging(destination)"))
         self.assertLess(rename.index("std::filesystem::equivalent(source,destination,error)"),
                         rename.index("WriteFileDurably(destination,bytes,destination,errors,&published_identity)"))
@@ -195,12 +195,46 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("Writer::write_file_durably(", self.client[start:end])
         self.assertIn("Writer::create_file_durably(", self.client[start:end])
         self.assertNotIn("std::ofstream", self.client[start:end])
-        self.assertLess(self.client[start:end].index("in.close();"),
+        self.assertLess(self.client[start:end].index("ReadSavedJson("),
                         self.client[start:end].index("Writer::write_file_durably("))
         settings = compact_cpp((ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
                                .read_text(encoding="utf-8"))
         save = settings[settings.index("boolSystemConfig::SaveUserOverlay("):]
         self.assertIn("WorldSaveService::write_file_durably(path,serialized)", save)
+
+    def test_saved_preset_consumers_share_admission_before_recursive_work(self):
+        for start_name, end_name, output in (
+                ("g_uiManager->SetWorldParamGetter(", "g_uiManager->SetWorldPresetSaver(",
+                 "ResolveTerrainPresetDefaults(j)"),
+                ("g_uiManager->SetWorldPresetSaver(", "g_uiManager->SetWorldPresetList(",
+                 "BuildKnobResolvedPreset(base,params)"),
+                ("g_uiManager->SetWorldPresetList(", "g_uiManager->SetWorldPresetExists(",
+                 'j.value("name",stem)')):
+            start = self.client.index(start_name)
+            body = self.client[start:self.client.index(end_name, start)]
+            self.assertLess(body.index("ReadSavedJson("), body.index(output))
+            self.assertIn("SavedInputLimits::kPresetBytes", body)
+            self.assertNotIn("std::ifstream", body)
+        start = self.client.index("g_uiManager->SetWorldPresetSaver(")
+        saver = self.client[start:self.client.index("g_uiManager->SetWorldPresetList(", start)]
+        self.assertLess(saver.index("displayName.size()>"), saver.index('saved["name"]=displayName'))
+        self.assertLess(saver.index("BoundedJsonDump("), saver.index("Writer::write_file_durably("))
+        self.assertIn("nlohmann::json::parse(saved.preset_json)", self.client)
+        self.assertNotIn("std::ifstreaminput(saved.preset_path", self.client)
+        menu = compact_cpp((ROOT / "src/luminumbra_client/app/MenuScreens.cpp").read_text())
+        self.assertLess(menu.index("ReadSavedJson("), menu.index("BuildKnobResolvedPreset(base,"))
+        preset = compact_cpp((ROOT / "src/luminumbra_client/world/WorldgenOverride.cpp").read_text())
+        rename = preset[preset.index("boolRenameUserPreset("):preset.index("CustomPresetResultBuildCustomPreset(")]
+        self.assertLess(rename.index("display_name.size()>"), rename.index('preset["name"]=display_name'))
+        self.assertLess(rename.index("JsonDepthAllowed(original)"), rename.index("json::parse(original)"))
+        self.assertLess(rename.index("BoundedJsonDump("), rename.index("rename_file_durably("))
+        admission = self.admission[:self.admission.index("HelloMsgRuntimeHelloFrom(")]
+        self.assertLess(admission.index("JsonDepthAllowed(bytes)"), admission.index("json::parse(bytes"))
+        self.assertIn("ReadSavedJson(", admission)
+        self.assertEqual(self.admission.count("!ReadPresetInput(options,"), 2)
+        trace = compact_cpp((ROOT / "src/luminumbra_common/replay/RegionScheduleTrace.cpp").read_text())
+        self.assertIn("ReadSavedJson(path,kMaxTraceBytes,value,missing,false)", trace)
+        self.assertLess(trace.index("BoundedJsonDump("), trace.index("write_file_durably(path,bytes)"))
 
     def test_overlay_failure_regression_reaches_the_owned_staging_writer(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -296,7 +330,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         save = service[start:end]
         self.assertIn("constautostaging=save_dir/path.filename();", save)
         self.assertLess(save.index("ReclaimAbandonedStaging(staging);"),
-                        save.index("if(snapshot.entities.empty())"))
+                        save.index("if(m_empty)"))
         self.assertIn("WriteFileDurably(path,", save)
         self.assertIn(",staging,errors)", save)
 
@@ -336,8 +370,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertLess(sequence.index(capture), ownership)
         for operation in ("ClockConfigurationCompatible(save_dir)",
                           "validate_save(save_dir)",
-                          "SavedPresetCompatible(save_dir)", "service.save_world(",
-                          ".save_dirty_chunks(", "save_plant_entities(", "SaveEnergyFieldRecord(",
+                          "SavedPresetCompatible(save_dir)", "prepared_chunks.prepare(",
+                          "prepared_chunks.publish(", "prepared_plants.publish(", "write_file_durably(energy_path,energy_bytes)",
                           "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
                           "m_activeRegionLedger.mark_saved(",
                           "chunk->clear_voxel_data_dirty()"):
@@ -348,11 +382,30 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         for name in ("save_metadata", "save_metadata_and_active_regions", "save_plant_entities",
                      "save_active_regions", "upsert_container_records", "save_dirty_chunks",
-                     "write_snapshot", "write_file_durably", "remove_file_and_staging",
+                     "write_file_durably", "remove_file_and_staging",
                      "create_file_durably", "rename_file_durably"):
             start = service.index("WorldSaveService::" + name + "(")
             body = service.index("{", start)
             self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)
+        plant_publish = service.index("boolWorldSaveService::PreparedPlantWrite::publish(")
+        plant_body = service.index("{", plant_publish)
+        self.assertTrue(service[plant_body:].startswith("{constSaveGuardguard;"))
+        # The prepared records retain ownership from validation through publication.
+        data = service[service.index("structWorldSaveService::PreparedWorldWrite::Data{"):
+                       service.index("WorldSaveService::PreparedWorldWrite::PreparedWorldWrite()")]
+        self.assertIn("SaveOwnershipownership;", data)
+        prepare = service[service.index("boolWorldSaveService::PreparedWorldWrite::prepare("):
+                          service.index("boolWorldSaveService::PreparedWorldWrite::publish(")]
+        self.assertLess(prepare.index("std::make_unique<Data>()"),
+                        prepare.index("validate_save(save_dir"))
+        self.assertLess(prepare.index("std::make_unique<Data>()"),
+                        prepare.index("ReadRegionFile("))
+        self.assertIn("m_data=std::move(candidate);", prepare)
+        publish = service[service.index("boolWorldSaveService::PreparedWorldWrite::publish("):]
+        self.assertLess(publish.index("autoprepared=std::move(m_data);"),
+                        publish.index("WriteRegionFile("))
+        self.assertLess(publish.index("WriteRegionFile("),
+                        publish.index("WriteWorldManifest("))
         self.assertIn("std::recursive_mutex&SaveMutex()", service)
         self.assertIn("m_lock(SaveMutex(),std::defer_lock)", service)
         self.assertIn("m_lock.lock();", service)
@@ -370,12 +423,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
     def test_energy_empty_and_nonempty_saves_share_owned_cleanup(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
                               .read_text(encoding="utf-8"))
-        start = session.index("boolGameSession::SaveEnergyFieldRecord(")
-        end = session.index("std::stringGameSession::ComputeAetherStateSubHash", start)
+        start = session.index("boolGameSession::SaveWorldStateToImpl(")
+        end = session.index("boolGameSession::LoadWorldState()", start)
         energy = session[start:end]
-        self.assertIn('WorldSaveService::remove_file_and_staging(save_dir/"aether_state.efs")',
+        self.assertIn('WorldSaveService::remove_file_and_staging(energy_path)',
                       energy)
-        self.assertIn('WorldSaveService::write_file_durably(save_dir/"aether_state.efs",record)',
+        self.assertIn('WorldSaveService::write_file_durably(energy_path,energy_bytes)',
                       energy)
         self.assertNotIn("fs::remove(", energy)
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -407,7 +460,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
     def test_empty_plant_roster_checks_removal_error(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
-        start = service.index("if(snapshot.entities.empty()){")
+        start = service.index("if(m_empty){")
         end = service.index("returnFlushRemovalDirectory(path,errors);", start)
         empty_roster = service[start:end]
         self.assertIn("std::filesystem::remove(path,ec);if(ec){", empty_roster)

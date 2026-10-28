@@ -77,7 +77,8 @@ UCRT_ROUTE = (
     "(github.event_name == 'push' && (github.ref == 'refs/heads/devel' || "
     "github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || "
     "(github.event_name == 'pull_request' && "
-    "(contains(github.event.pull_request.labels.*.name, 'windows-proof') || "
+    "(github.base_ref == 'main' || "
+    "contains(github.event.pull_request.labels.*.name, 'windows-proof') || "
     "needs.changes.outputs.needs_ucrt64 == 'true'))"
 )
 SERVER_ROUTE = (
@@ -964,6 +965,18 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
             self.assertIn("tools/ci/" + suite, inventory)
 
+    def test_msvc_configure_keeps_dependency_compiles_cacheable(self):
+        # ccache cannot cache precompiled-header or /Zi compiles; the lane already
+        # embeds symbols through its own global flags.
+        ci = jobs(self.workflows["ci.yml"])
+        msvc, = [step for step in steps(ci["windows-msvc"]) if step.startswith("      - name: Configure, build, and test\n")]
+        run = value(msvc, "run", 8)
+        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n", run)
+        self.assertIn("-DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `\n", run)
+        self.assertIn("'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF'", run)
+        for name in ("linux", "tidy-shard", "fast-compile"):
+            self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
+
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
@@ -974,12 +987,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
             # Pin the selected Python, partitioned local checks, render failure symbols,
             # shard-2-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "d6164af56312ee3cff2821ee21ebc4b5cb487a9b86ea1722f29ee9f3df9f75c8",
+            "windows-msvc": "24aecc163c8c0c25d30de33d3524b33c1fe397a07f5a46066460a754125f306a",
             # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
-            "windows-ucrt64": "475b35c1d8356efbdbf991f97bafdb7476e06013816aec49b01fcfc7e79dcef2",
+            "windows-ucrt64": "d2167ced1e5ba1dd3aa4f4c643b58df1258dee037889eaff382640ad4239e7c9",
             "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
-            "windows-ucrt64-result": "e58190335cc5128211dd96e2622415097d44861c42e63a3bedc25075d0f418d6",
+            "windows-ucrt64-result": "46f807d6a092ea8db0a2fa09e489a236ce354e23969f7d7c1f68e7b8dfa3bc58",
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
             "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
@@ -2538,7 +2551,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 (event == "push" and branch in ("main", "devel"))
                 or event == "workflow_dispatch"
                 or (event == "pull_request" and
-                    (label.lower() == "windows-proof" or paths.lower() == "true"))
+                    (branch == "main" or label.lower() == "windows-proof" or paths.lower() == "true"))
             )
             expected = not cancelled and (event != "pull_request" or draft is False) and eligible
             def evaluate(condition):
@@ -2547,6 +2560,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     repr(label.lower() == "windows-proof"))
                 for key, replacement in (
                         ("github.event_name", event), ("github.ref_name", branch),
+                        ("github.base_ref", branch),
                         ("github.ref", f"refs/heads/{branch}"),
                         ("github.event.pull_request.draft", draft),
                         ("needs.changes.outputs.needs_cpp", cpp),
