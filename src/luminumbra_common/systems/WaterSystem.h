@@ -270,7 +270,9 @@ public:
      * @param chunk The chunk to resize
      * @param new_level The new detail level
      */
-    void ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
+    // False leaves the chunk unchanged; incomplete grids remain ineligible for
+    // simulation, seams and external water edits until valid state is supplied.
+    bool ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
 
 private:
     // (water performance contract) The float render-mirror sim (dispatch_simulation_jobs /
