@@ -1,6 +1,7 @@
 """Path gate coverage, rename safety, and standalone Python runner contracts."""
 
 from pathlib import Path
+from itertools import product
 import json
 import os
 import re
@@ -299,7 +300,9 @@ class PathGateTests(unittest.TestCase):
             condition = re.search(r"^    if: (.*)$", body, re.MULTILINE)[1]
             expression = condition.removeprefix("${{ ").removesuffix(" }}")
             # Missing/failed classifier output is represented by the empty string.
-            for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
+            for event, action, base_changed in product(
+                    ("pull_request", "push", "schedule", "workflow_dispatch"),
+                    ("synchronize", "edited"), (False, True)):
                 for draft in (True, False, None):
                     for cpp in ("true", "false", ""):
                         for cancelled in (False, True):
@@ -316,7 +319,11 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled and ready and (
                                     route == "ready-python" or cpp != "false"
                                 )
-                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
+                            expected = expected and (workflow != "ci" or event != "pull_request"
+                                                     or action != "edited" or base_changed)
+                            actual = expression.replace("github.event.action", repr(action)).replace(
+                                "github.event.changes.base", repr(base_changed))
+                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), actual).replace(
                                 "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
                             ).replace("!cancelled()", repr(not cancelled)).replace(
                                 "always()", "True"
@@ -329,7 +336,8 @@ class PathGateTests(unittest.TestCase):
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
                             with self.subTest(workflow=workflow, job=job, event=event,
-                                              draft=draft, cpp=cpp, cancelled=cancelled):
+                                              draft=draft, cpp=cpp, cancelled=cancelled,
+                                              action=action, base_changed=base_changed):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
 
     def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):

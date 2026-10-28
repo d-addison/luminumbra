@@ -64,6 +64,26 @@ GUARDED = {
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
+CI_ACTIVE_EVENT = (
+    "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base"
+)
+CI_METADATA_SUFFIX = (
+    "${{ github.event_name == 'pull_request' && github.event.action == 'edited' && "
+    "!github.event.changes.base && ' (metadata edit)' || '' }}"
+)
+
+
+def ci_event_condition(condition=None):
+    return "${{ " + (f"({CI_ACTIVE_EVENT}) && ({condition})" if condition else CI_ACTIVE_EVENT) + " }}"
+
+
+def render_edit_context(expression, action="synchronize", changes=None):
+    # Actions treats objects (including {}) as truthy; missing properties are ''.
+    base = changes.get("base", "") if isinstance(changes, dict) else ""
+    return expression.replace("github.event.action", repr(action)).replace(
+        "github.event.changes.base", repr(True if isinstance(base, dict) else base))
+
+
 ASAN_MINIMUM_TESTS = 2320
 ASAN_REQUIRED_TESTS = (
     "ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows",
@@ -744,7 +764,7 @@ def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None
     evaluation it is the current job's cancellation, which can still be false
     when a job condition kept it running during workflow cancellation.
     """
-    expression = (expression or "success()").removeprefix("${{ ").removesuffix(" }}")
+    expression = render_edit_context(expression or "success()").removeprefix("${{ ").removesuffix(" }}")
     if failed is None:
         failed = "failure" in dependencies.values()
     status = {"always": True, "cancelled": cancelled, "failure": failed,
@@ -754,10 +774,12 @@ def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None
                                lambda match: repr(status[match[1]]), expression)
     expression = re.sub(r"needs\.([\w-]+)\.result",
                         lambda match: repr(dependencies[match[1]]), expression)
+    expression = expression.replace("github.event_name", repr("pull_request"))
     expression = re.sub(r"!(?!=)", "not ", expression)
-    expression = expression.replace("&&", " and ").replace("||", " or ")
+    expression = expression.replace("== false", "== False").replace("&&", " and ").replace("||", " or ")
     return bool((count or status["success"]) and
-                eval(expression, {"__builtins__": {}}, {}))
+                eval(expression, {"__builtins__": {}, "contains": lambda items, item:
+                                  item.lower() in [entry.lower() for entry in items]}, {}))
 
 
 def guarded_jobs(workflows):
@@ -900,10 +922,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     def test_fast_lane_runs_drafts_on_a_standard_runner_with_its_own_bound(self):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
-        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
+        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy" + CI_METADATA_SUFFIX)
         self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
         self.assertEqual(value(fast, "timeout-minutes", 4), "20")
-        self.assertIsNone(value(fast, "if", 4))
+        self.assertEqual(value(fast, "if", 4), ci_event_condition())
         self.assertIsNone(value(fast, "needs", 4))
         self.assertNotIn("draft", fast)
         self.assertNotIn("continue-on-error", fast)
@@ -978,25 +1000,25 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
 
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
-        # Freeze existing routing, limits, required names and authoritative gates.
+        # Pin base-edit admission and check names along with existing limits and gates.
         expected = {
-            "changes": "8adfa7fc6d75019f708d5b74c7178664d32a7da70693834044e34fb6f5b7ee13",
+            "changes": "4ad09fa893c78aef7e7aeb3c44fd0f95f0628d176f81db59190168a059f67070",
             # Require all three offline-dependency partitions in local-check evidence.
-            "linux": "449d5b0b5082349470a9e065221f45694d7bfdc473cd476e0ff07bb13ef8e170",
-            "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
-            "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
+            "linux": "306cf8a35ba0bf836205559a40ea0d9d1da3bdd08b28f2b0291787b698223494",
+            "gns-compile-probe": "7add7cbd1528a989a68922e779bf47e1bd867d8812e911ea6c0261dcf6762057",
+            "diligent-rhi": "dcd14e3c82e44abaa18c301cb39cad12a342fd23f13dbe2fef729ce1c46d73a8",
             # Pin the selected Python, partitioned local checks, render failure symbols,
             # shard-2-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "24aecc163c8c0c25d30de33d3524b33c1fe397a07f5a46066460a754125f306a",
+            "windows-msvc": "60c67513d6f09d80eb5bda649358e30b85b689facac1f21d7ef1fe9e783e985c",
             # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
-            "windows-ucrt64": "d2167ced1e5ba1dd3aa4f4c643b58df1258dee037889eaff382640ad4239e7c9",
-            "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
-            "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
-            "windows-ucrt64-result": "46f807d6a092ea8db0a2fa09e489a236ce354e23969f7d7c1f68e7b8dfa3bc58",
-            "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
-            "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
-            "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
-            "public-tree": "f9f59910f6674d861330ee21b21acdf61043b00dfee998939f8c59564cdd58e2",
+            "windows-ucrt64": "145effb9917c9168b3ebb5c71f9c69af41b400c5f1f4c76fa1f88a19a8129067",
+            "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
+            "windows-msvc-result": "7879cf68d41d20f3783d401d6dbee7a546707b6030f1244f487b2b75557acfaa",
+            "windows-ucrt64-result": "77d886a2ced9838873bf9804f30da90fc9bf2a4da437d78e0433e370e79d1e19",
+            "lint": "b32b7f25c8c59c2cdc664382725f86838f8aef9328f8cee52fd0741ba41b86e0",
+            "tidy-shard": "53d7432d5fec3526d1f32296223f8a28541b584c3b3d5039ac8a2f9476a4a104",
+            "tidy": "771a907ee610dfff3fb01bf35c7a34fe5fdf8b5300ab92dbcbbe813ea6ebc949",
+            "public-tree": "fac1e5b341a1fd73c12fffb8c215e3560f904a9302af168f82e70c5b35ab7b36",
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertEqual(set(actual), set(expected) | {"fast-compile"})
@@ -1094,7 +1116,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 pr = re.split(r"\n  (?=\S)", workflow.split("  pull_request:\n", 1)[1], maxsplit=1)[0]
                 self.assertEqual(
                     value(pr, "types", 4),
-                    ("[opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]"
+                    ("[opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]"
                      if filename == "ci.yml" else
                      "[opened, synchronize, reopened, ready_for_review, converted_to_draft]"),
                 )
@@ -1103,7 +1125,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
     def test_guard_runs_first_under_existing_check_name_without_draft_job_skip(self):
         for filename, job_id, check_name, job in guarded_jobs(self.workflows):
             with self.subTest(workflow=filename, job=job_id):
-                self.assertEqual(value(job, "name", 4), check_name)
+                self.assertEqual(value(job, "name", 4), check_name + (CI_METADATA_SUFFIX if filename == "ci.yml" and job_id != "linux" else ""))
                 self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
                 self.assertEqual(value(job, "needs", 4),
                                  "[changes, fast-lane, asan-shard]" if job_id == "asan" else
@@ -1124,7 +1146,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         "toJSON(github.event.pull_request.draft) != 'false' || "
                         "needs.fast-lane.result == 'success')"
                     )
-                self.assertEqual(value(job, "if", 4), "${{ " + condition + " }}")
+                self.assertEqual(value(job, "if", 4), ci_event_condition(condition) if filename == "ci.yml" else "${{ " + condition + " }}")
                 self.assertIsNone(value(job, "continue-on-error", 4))
                 guard = steps(job)[0]
                 self.assertTrue(guard.startswith("      - name: Reject draft pull requests\n"))
@@ -1206,12 +1228,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             with self.subTest(job=job_id):
                 self.assertEqual(value(ci[job_id], "needs", 4), "changes")
                 self.assertEqual(value(ci[job_id], "if", 4),
-                                 "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ") }}")
+                                 ci_event_condition("!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ")"))
         self.assertEqual(value(ci["windows-msvc"], "needs", 4), "changes")
-        self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ !cancelled() && (" + READY + ") }}")
+        self.assertEqual(value(ci["windows-msvc"], "if", 4), ci_event_condition("!cancelled() && (" + READY + ")"))
         self.assertEqual(value(ci["tidy"], "needs", 4), "[changes, tidy-shard]")
-        self.assertEqual(value(ci["tidy"], "if", 4), "${{ (!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ") }}")
-        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ !cancelled() && " + f"({READY}) && ({UCRT_ROUTE})" + " }}")
+        self.assertEqual(value(ci["tidy"], "if", 4), ci_event_condition("(!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ")"))
+        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), ci_event_condition("!cancelled() && " + f"({READY}) && ({UCRT_ROUTE})"))
         perf = jobs(self.workflows["performance.yml"])
         self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
         self.assertEqual(
@@ -1220,7 +1242,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}",
         )
         for job in (ci["lint"], ci["public-tree"]):
-            self.assertIsNone(value(job, "if", 4))
+            self.assertEqual(value(job, "if", 4), ci_event_condition())
 
     def test_asan_fast_lane_runs_exact_registered_stdlib_contracts(self):
         fast = jobs(self.workflows["asan.yml"])["fast-lane"]
@@ -1329,7 +1351,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             for job_id, name in names.items():
                 with self.subTest(workflow=filename, job=job_id):
-                    self.assertEqual(value(jobs(workflow)[job_id], "name", 4), name)
+                    self.assertEqual(value(jobs(workflow)[job_id], "name", 4),
+                                     name + (CI_METADATA_SUFFIX if filename == "ci.yml" else ""))
 
     def test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence(self):
         workflow = self.workflows["asan.yml"]
@@ -1449,11 +1472,11 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(value(producer, "runs-on", 4), runner)
                 self.assertIn(title + " full qualification", value(producer, "name", 4))
                 self.assertIn(title + " shard {0}/2", value(producer, "name", 4))
-                self.assertEqual(value(aggregate, "name", 4), title)
-                self.assertEqual(value(aggregate, "if", 4), "${{ !cancelled() || " + aggregate_invalid_expression(job_id) + " }}")
+                self.assertEqual(value(aggregate, "name", 4), title + CI_METADATA_SUFFIX)
+                self.assertEqual(value(aggregate, "if", 4), ci_event_condition("!cancelled() || " + aggregate_invalid_expression(job_id)))
                 self.assertEqual(value(aggregate, "needs", 4), f"[changes, {job_id}]")
                 self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
-                self.assertEqual(self.workflows["ci.yml"].count("    name: " + title + "\n"), 1)
+                self.assertEqual(self.workflows["ci.yml"].count("    name: " + title + CI_METADATA_SUFFIX + "\n"), 1)
                 self.assertIsNone(value(producer, "continue-on-error", 4))
                 self.assertIsNone(value(aggregate, "continue-on-error", 4))
                 for command in ("plan", "run"):
@@ -1596,7 +1619,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
     def test_ucrt64_producer_and_aggregate_enable_all_push_and_manual_routes(self):
         blocks = jobs(self.workflows["ci.yml"])
         producer = value(blocks["windows-ucrt64"], "if", 4)
-        self.assertEqual(producer, "${{ !cancelled() && (" + READY + ") && (" + UCRT_ROUTE + ") }}")
+        self.assertEqual(producer, ci_event_condition("!cancelled() && (" + READY + ") && (" + UCRT_ROUTE + ")"))
         aggregate = next(step for step in steps(blocks["windows-ucrt64-result"])
                          if "name: Require expected producers and route" in step)
         self.assertEqual(value(aggregate, "CI_ENABLED", 10), "${{ " + UCRT_ROUTE + " }}")
@@ -2227,7 +2250,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     @staticmethod
     def aggregate_condition(expression, shard_id, cancelled, changes, shard, event="pull_request", step=False):
-        expression = expression.removeprefix("${{ ").removesuffix(" }}")
+        expression = render_edit_context(expression).removeprefix("${{ ").removesuffix(" }}")
         status = {"always": True, "cancelled": cancelled,
                   "success": not cancelled and (step or changes == shard == "success"),
                   "failure": not step and "failure" in (changes, shard)}
@@ -2555,7 +2578,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             )
             expected = not cancelled and (event != "pull_request" or draft is False) and eligible
             def evaluate(condition):
-                actual = condition.replace("!cancelled()", repr(not cancelled)).replace(
+                actual = render_edit_context(condition).replace("!cancelled()", repr(not cancelled)).replace(
                     "contains(github.event.pull_request.labels.*.name, 'windows-proof')",
                     repr(label.lower() == "windows-proof"))
                 for key, replacement in (
@@ -2833,8 +2856,17 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for filename, workflow in workflows.items():
             with self.subTest(workflow=filename):
-                self.assertEqual(value(workflow, "group", 2), group)
-                self.assertEqual(value(workflow, "cancel-in-progress", 2), cancellation)
+                expected_group = group
+                expected_cancellation = cancellation
+                if filename == "ci.yml":
+                    expected_group = group.replace("${{ ", "${{ (github.event_name == 'pull_request' && "
+                                                   "github.event.action == 'edited' && !github.event.changes.base) && "
+                                                   "format('{0}-metadata-{1}', github.workflow, github.run_id) || ", 1)
+                    expected_cancellation = cancellation.replace(
+                        "${{ ", "${{ !(github.event_name == 'pull_request' && github.event.action == 'edited' && "
+                        "!github.event.changes.base) && ", 1)
+                self.assertEqual(value(workflow, "group", 2), expected_group)
+                self.assertEqual(value(workflow, "cancel-in-progress", 2), expected_cancellation)
 
     def test_policy_suite_is_part_of_cheap_inventory_check(self):
         inventory = jobs(self.workflows["ci.yml"])["public-tree"]
@@ -2860,6 +2892,130 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     comments[path.name] = matches[0]
         self.assertEqual(set(comments), expected)
         self.assertEqual(len(set(comments.values())), 1, comments)
+
+
+class WorkflowBaseEditPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        cls.blocks = jobs(cls.workflow)
+
+    @staticmethod
+    def context(*, event="pull_request", action="edited", changes=None, base="main",
+                draft=False, labels=(), paths="false", cpp="true", result="success", run_id=1):
+        # Fixed workflow contexts only; no filesystem, clock or external service.
+        return {
+            "github.event_name": event, "github.event.action": action,
+            "github.event.changes.base": (True if isinstance(changes, dict)
+                                          and isinstance(changes.get("base"), dict)
+                                          else (changes or {}).get("base", "")),
+            "github.base_ref": base, "github.event.pull_request.draft": draft,
+            "github.event.pull_request.labels.*.name": labels,
+            "github.ref": "refs/pull/example/merge" if event == "pull_request" else f"refs/heads/{base}",
+            "github.workflow": "CI", "github.run_id": run_id, "github.sha": "same-sha",
+            "matrix.shard": 1, "inputs.qualification_capture": False,
+            "needs.changes.outputs.needs_ucrt64": paths,
+            "needs.changes.outputs.needs_cpp": cpp,
+            **{f"needs.{job}.result": result for job in (
+                "changes", "linux", "windows-msvc", "windows-ucrt64", "tidy-shard")},
+        }
+
+    @staticmethod
+    def render(expression, context):
+        # Match whole property paths, so github.ref cannot consume github.ref_name.
+        return re.sub(r"\b(?:github|needs|matrix|inputs)\.[\w.*-]+",
+                      lambda match: repr(context[match[0]]), expression)
+
+    @classmethod
+    def expression(cls, expression, context):
+        expression = cls.render(expression.removeprefix("${{ ").removesuffix(" }}"), context)
+        expression = re.sub(r"!(?!=)", "not ", expression)
+        expression = expression.replace("== false", "== False")
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        return eval(expression, {"__builtins__": {}, "format": str.format,
+                                 "contains": lambda items, item: item.lower() in
+                                 [entry.lower() for entry in items]})
+
+    @classmethod
+    def name(cls, job, context):
+        return re.sub(r"\$\{\{ .*? \}\}",
+                      lambda match: str(cls.expression(match[0], context)), value(job, "name", 4))
+
+    @classmethod
+    def admitted(cls, job, context, cancelled=False):
+        rendered = cls.render(value(job, "if", 4) or "success()", context)
+        return evaluate_condition(rendered, {}, cancelled=cancelled)
+
+    def test_edited_without_base_change_skips_every_job_and_uses_distinct_names(self):
+        ignored = (None, {}, {"title": {"from": "old"}}, {"body": {"from": ""}},
+                   {"unknown": {}}, {"base": None}, {"base": ""}, {"base": False})
+        # At most 14 jobs x 8 payloads x 6 dependency results x 2 cancellations.
+        # Even failed/unknown dependencies must not revive an aggregate on edits.
+        normal = self.context(action="synchronize")
+        for changes, result, cancelled in product(
+                ignored, ("success", "failure", "cancelled", "skipped", "", "unknown"), (False, True)):
+            context = self.context(changes=changes, result=result)
+            for job_id, job in self.blocks.items():
+                with self.subTest(job=job_id, changes=changes, result=result, cancelled=cancelled):
+                    self.assertFalse(self.admitted(job, context, cancelled))
+                    self.assertNotEqual(self.name(job, context), self.name(job, normal))
+                    self.assertTrue(self.name(job, context).endswith(" (metadata edit)"))
+
+    def test_edited_base_change_preserves_normal_ready_draft_and_path_routing(self):
+        pr = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        self.assertIn("edited", value(pr, "types", 4).strip("[]").split(", "))
+        # 14 jobs x 2 base payloads x 2 bases x 3 drafts x 3 path outputs x 2 cancellations.
+        for changes, base, draft, paths, cancelled in product(
+                ({"base": {}}, {"base": {"ref": {"from": "devel"}}}),
+                ("main", "devel"), (False, True, None), ("true", "false", ""), (False, True)):
+            context = self.context(changes=changes, base=base, draft=draft, paths=paths)
+            normal = {**context, "github.event.action": "synchronize"}
+            for job_id, job in self.blocks.items():
+                with self.subTest(job=job_id, changes=changes, base=base, draft=draft,
+                                  paths=paths, cancelled=cancelled):
+                    self.assertEqual(self.admitted(job, context, cancelled), self.admitted(job, normal, cancelled))
+                    self.assertEqual(self.name(job, context), self.name(job, normal))
+        context = self.context(changes={"base": {}}, paths="true")
+        self.assertEqual([job_id for job_id, job in self.blocks.items() if self.admitted(job, context)],
+                         list(self.blocks))
+
+    def test_metadata_edit_concurrency_is_unique_and_cannot_cancel_validation(self):
+        group = value(self.workflow, "group", 2)
+        cancellation = value(self.workflow, "cancel-in-progress", 2)
+        normal = self.context(action="synchronize")
+        normal_group = self.expression(group, normal)
+        self.assertEqual(normal_group, "CI-refs/pull/example/merge")
+        self.assertIs(self.expression(cancellation, normal), True)
+        for changes in (None, {}, {"title": {}}, {"body": {}}, {"base": None}, {"base": ""}):
+            groups = []
+            for run_id in (1, 2):
+                context = self.context(changes=changes, run_id=run_id)
+                groups.append(self.expression(group, context))
+                self.assertNotEqual(groups[-1], normal_group)
+                self.assertIs(self.expression(cancellation, context), False)
+            self.assertNotEqual(*groups)
+        for changes in ({"base": {}}, {"base": {"ref": {"from": "devel"}}}):
+            context = self.context(changes=changes)
+            self.assertEqual(self.expression(group, context), normal_group)
+            self.assertIs(self.expression(cancellation, context), True)
+        for event, base, expected in (("push", "devel", "CI-refs/heads/devel-push"),
+                                      ("push", "main", "CI-refs/heads/main-same-sha-1"),
+                                      ("workflow_dispatch", "main", "CI-manual-1")):
+            context = self.context(event=event, base=base)
+            self.assertEqual(self.expression(group, context), expected)
+            self.assertIs(self.expression(cancellation, context), False)
+
+    def test_retarget_to_main_runs_ucrt64_without_label_or_sensitive_paths(self):
+        context = self.context(changes={"base": {"ref": {"from": "devel"}}}, paths="false", cpp="false")
+        producer, aggregate = self.blocks["windows-ucrt64"], self.blocks["windows-ucrt64-result"]
+        gate = next(step for step in steps(aggregate) if "name: Require expected producers and route\n" in step)
+        for paths in ("false", "", "unknown"):
+            for job in (producer, aggregate):
+                self.assertTrue(self.admitted(job, {**context, "needs.changes.outputs.needs_ucrt64": paths}))
+            self.assertTrue(self.expression(value(gate, "CI_ENABLED", 10), context))
+        self.assertFalse(self.admitted(producer, {**context, "github.base_ref": "devel"}))
+        self.assertFalse(self.admitted(producer, {**context, "github.event.changes.base": ""}))
+        self.assertFalse(self.admitted(aggregate, {**context, "github.event.changes.base": ""}))
 
 
 class WorkflowCacheCleanupPolicyTests(unittest.TestCase):
@@ -2953,6 +3109,10 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
                 # trusted classifier must still match every sibling exactly.
                 if filename == "ci.yml":
                     self.assertEqual(classifier.count("      - name: Classify UCRT64 paths\n"), 1)
+                    self.assertEqual(value(classifier, "name", 4), "Classify changed paths" + CI_METADATA_SUFFIX)
+                    self.assertEqual(value(classifier, "if", 4), ci_event_condition())
+                    classifier = classifier.replace(CI_METADATA_SUFFIX, "", 1).replace(
+                        "    if: " + ci_event_condition() + "\n", "", 1)
                     classifier = classifier.replace(
                         "      needs_ucrt64: ${{ steps.ucrt64.outputs.needs_ucrt64 }}\n", "", 1
                     ).split("\n      - name: Classify UCRT64 paths\n", 1)[0]
@@ -3131,6 +3291,7 @@ POLICY_CASE_PARTITIONS = {
     POLICY_ROUTE_CASE: "9",
 }
 POLICY_CLASS_PARTITIONS = {
+    "WorkflowBaseEditPolicyTests": "0",
     "WorkflowDraftPolicyTests": "0",
     "WorkflowExpressionPolicyTests": "0",
     "WorkflowCacheCleanupPolicyTests": "0",
@@ -3548,6 +3709,12 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 "test_policy_suite_is_part_of_cheap_inventory_check",
                 "test_freeze_audit_comment_is_identical_in_every_workflow",
             ),
+            "WorkflowBaseEditPolicyTests": (
+                "test_edited_without_base_change_skips_every_job_and_uses_distinct_names",
+                "test_edited_base_change_preserves_normal_ready_draft_and_path_routing",
+                "test_metadata_edit_concurrency_is_unique_and_cannot_cancel_validation",
+                "test_retarget_to_main_runs_ucrt64_without_label_or_sensitive_paths",
+            ),
             "WorkflowCacheCleanupPolicyTests": (
                 "test_only_cache_writer_completions_trigger_serialized_cleanup",
                 "test_completion_list_covers_every_cache_saving_workflow",
@@ -3565,7 +3732,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
         for name, methods in expected.items():
             with self.subTest(test_class=name):
                 self.assertLessEqual(set(methods), set(unittest.defaultTestLoader.getTestCaseNames(getattr(module, name))))
-        self.assertEqual(sum(map(len, expected.values())), 72)
+        self.assertEqual(sum(map(len, expected.values())), 76)
 
     def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
         module = sys.modules[__name__]

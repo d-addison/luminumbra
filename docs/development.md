@@ -359,8 +359,15 @@ No new required-check configuration is needed.
 Marking a pull request ready for review triggers the full checks on its current
 head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
-branch and path filters still apply. Maintainers must not merge until the
-`ready_for_review` run's required checks are green on the current head, and must
+branch and path filters still apply. CI also listens for `labeled`, `unlabeled`,
+and `edited`. Only `edited` events with `github.event.changes.base` present run
+normal CI, so retargeting to main runs mandatory Windows/UCRT64 validation.
+Title/body edits skip every CI job before runner allocation, use unique
+non-cancelling concurrency groups, and give skipped checks a ` (metadata edit)`
+suffix. This keeps their skipped results separate from required check names on
+the same SHA. A pre-job dependency skip alone would still emit skipped checks
+under those required names. Other workflows retain their existing event types.
+Maintainers must not merge until the `ready_for_review` run's required checks are green on the current head, and must
 wait again after any head update. This repository does not implement a separate
 merge gate. The external campaign gate (`campaign_control.py land`, outside this
 repository) requires actual `SUCCESS` for required checks on the exact head,
@@ -418,9 +425,10 @@ Authoring service implementation and native probes require builds.
 The public-tree job also runs SDF documentation lint so doc-only edits retain that
 CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 
-Required job names and workflow PR triggers remain present for every PR. Native
-lanes depend directly on the always-running classifier. The clang-tidy aggregate
-also depends on the shards and reports their result, including routed skips.
+Required job names remain present for admitted validation events. CI metadata
+edits use the distinct skipped names described above. Native lanes depend
+directly on the classifier, which runs for every admitted validation event. The
+clang-tidy aggregate also depends on the shards and reports their result, including routed skips.
 Workflow cancellation stops aggregates with valid dependencies; invalid
 dependencies reach an explicit failure step. Linux/GCC and Windows/MSVC select their native or Python
 steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
@@ -450,8 +458,8 @@ does not grant a heavy exemption. Failures still
 report failure; `success` here describes an executed check that passes. Devel push
 columns describe runs that reach execution, subject to batching below.
 Windows/UCRT64 runs on main/devel pushes and every manual dispatch as well as
-ready native PR routes, retaining its draft and path gates. Devel pushes seed
-the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
+every ready PR into main; ready PRs into devel retain label and path admission.
+Drafts retain their existing guards. Devel pushes seed the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
 cache also saves on these trusted pushes. It shares the workflow-wide devel
 push concurrency group described below. The paired server comparison retains
 its main-bound ready PR and eligible main/devel push routing, with the same path
@@ -473,7 +481,9 @@ pushes. Main pushes and manual dispatches, including qualification captures, hav
 non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
 supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
-runs. Authoring PR runs retain their independent, non-cancelling behaviour.
+runs. CI title/body edit events use isolated non-cancelling groups and leave
+in-flight validation untouched. Authoring PR runs retain their independent,
+non-cancelling behaviour.
 The authoring workflow keeps its existing path triggers. The diagnostic
 `ucrt-attribution.yml` workflow is not a required check. Its devel PR triggers
 retain their existing paths: the attribution workflow,

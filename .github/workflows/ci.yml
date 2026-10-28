@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -33,9 +33,11 @@ concurrency:
   # descendants; only their own successful rerun or an explicit resolution
   # can resolve them.
   # Main pushes and manual runs (including qualification captures) have isolated
-  # groups and never cancel. PR ref grouping/cancellation stays unchanged.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
+  # groups and never cancel. PR runs share workflow/ref and cancel older runs,
+  # except edited events without changes.base: these use a unique, non-cancelling
+  # group so title/body edits cannot interrupt validation on the same PR ref.
+  group: ${{ (github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base) && format('{0}-metadata-{1}', github.workflow, github.run_id) || github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ !(github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base) && github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
 
 env:
   QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -44,11 +46,16 @@ env:
   CTEST_PARALLEL_LEVEL: "4"
 
 jobs:
+  # Only base edits enter normal CI routing. All jobs reject other edited events
+  # before allocating runners. Their distinct metadata-edit check names prevent
+  # skipped duplicates from satisfying or replacing required checks on this SHA.
+  # A pre-job/needs skip alone would still publish the original required names.
   # Required Linux/GCC and Windows/MSVC jobs run native or standalone Python
   # tests on ready PRs. Other heavy jobs skip via this gate, with no needs chain.
   # !cancelled() and != false keep missing/failed classification on the build path.
   changes:
-    name: Classify changed paths
+    name: Classify changed paths${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -156,10 +163,10 @@ jobs:
   # Drafts cannot merge. ready_for_review reruns these jobs on the same head;
   # maintainers must wait for that run's required checks to pass before merging.
   linux:
-    name: ${{ matrix.shard == 0 && 'Linux / GCC full qualification' || format('Linux / GCC shard {0}/2', matrix.shard) }}
+    name: ${{ matrix.shard == 0 && 'Linux / GCC full qualification' || format('Linux / GCC shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     # The required-name aggregate and the producer guard both reject drafts.
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled()) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -386,9 +393,9 @@ jobs:
           retention-days: 30
 
   gns-compile-probe:
-    name: GNS transport / compile probe
+    name: GNS transport / compile probe${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     # Building GameNetworkingSockets from source (FetchContent + protobuf
     # codegen) is several minutes on top of the project build, well past the
@@ -436,9 +443,9 @@ jobs:
         run: ctest --test-dir build/gns-probe --no-tests=error -R '^ProfilerSourceContract$' --output-on-failure
 
   diligent-rhi:
-    name: Diligent RHI / software GL
+    name: Diligent RHI / software GL${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -543,9 +550,9 @@ jobs:
           retention-days: 14
 
   windows-msvc:
-    name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}
+    name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: windows-2025
     timeout-minutes: 90
     strategy:
@@ -891,11 +898,11 @@ jobs:
           retention-days: 30
 
   windows-ucrt64:
-    name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
+    name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     # Main/devel pushes seed the cache; manual dispatches, every ready PR into main
     # and ready PRs with Windows paths or the windows-proof label qualify on demand.
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true'))) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')))) }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -1146,11 +1153,11 @@ jobs:
           retention-days: 30
 
   linux-result:
-    name: Linux / GCC
+    name: Linux / GCC${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, linux]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() || needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1242,11 +1249,11 @@ jobs:
           retention-days: 30
 
   windows-msvc-result:
-    name: Windows / MSVC
+    name: Windows / MSVC${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, windows-msvc]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() || needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1320,11 +1327,11 @@ jobs:
           retention-days: 30
 
   windows-ucrt64-result:
-    name: Windows / MSYS2 UCRT64
+    name: Windows / MSYS2 UCRT64${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, windows-ucrt64]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() || needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1398,7 +1405,8 @@ jobs:
           retention-days: 30
 
   lint:
-    name: Format changed files
+    name: Format changed files${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -1415,7 +1423,8 @@ jobs:
 
   fast-compile:
     # Advisory during warning and duration calibration; never a required gate.
-    name: Fast compile / GCC + clang-tidy
+    name: Fast compile / GCC + clang-tidy${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -1492,9 +1501,9 @@ jobs:
           fi
 
   tidy-shard:
-    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3
+    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     # The gate analyses 458 translation units across src/, test/ and tools/ plus
     # their first-party headers. Three standard hosted runners partition that
@@ -1553,11 +1562,11 @@ jobs:
 
   tidy:
     # Report the required result on uncancelled ready runs, including routed skips.
-    name: Static analysis / clang-tidy
+    name: Static analysis / clang-tidy${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, tidy-shard]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ (!cancelled() || needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && ((!cancelled() || needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1583,7 +1592,8 @@ jobs:
           fi
 
   public-tree:
-    name: Public tree / inventory honesty
+    name: Public tree / inventory honesty${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
