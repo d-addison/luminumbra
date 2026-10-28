@@ -18,8 +18,10 @@
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -361,6 +363,48 @@ TEST(FarLodPersistence, AsyncBytesMatchSynchronousIncludingOrderedSameTileWrites
     ASSERT_TRUE(std::filesystem::exists(asynchronous.path() / relative));
     EXPECT_EQ(Bytes(asynchronous.path() / relative), Bytes(synchronous.path() / relative));
     ExpectNoTemps(asynchronous.path());
+}
+
+TEST(FarLodPersistence, FirstWorkerSaveAndFlushCompleteWithinBoundedWait) {
+    // Run in a child so a lock regression fails promptly without joining a
+    // deadlocked worker during test cleanup. No native test timeout is raised.
+    ASSERT_EXIT(
+        {
+            {
+                const SaveDirectory world;
+                const auto params = Luminumbra::Test::SyntheticTerrainParams();
+                Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+                bool completed = false;
+                {
+                    AsyncFarLodStore writer;
+                    const auto revision = authority.far_lod_authority_revision();
+                    if (!writer.enqueue(
+                            world.path(), Tile(FarLodTier::F1, 100), &authority, revision) ||
+                        !writer.enqueue(
+                            world.path(), Tile(FarLodTier::F2, 200), &authority, revision))
+                        std::_Exit(1);
+                    // Two tiles bound the workload; the deadline bounds polling and
+                    // terminates even if a worker re-acquires a non-recursive lock.
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                    while (writer.diagnostics().pending != 0 &&
+                           std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::yield();
+                    if (writer.diagnostics().pending != 0)
+                        std::_Exit(2);
+                    writer.flush();
+                    writer.close();
+                    const auto result = writer.diagnostics();
+                    completed = result.saved == 2 && result.failed == 0 && result.closed;
+                }
+                // Leave the fixture scope before successful exit to remove its files.
+                if (!completed)
+                    std::_Exit(3);
+            }
+            std::_Exit(0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
 }
 
 TEST(FarLodPersistence, QueuedTilesRecheckAuthorityAfterAcquiringPersistenceOwnership) {

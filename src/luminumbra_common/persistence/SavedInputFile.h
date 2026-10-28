@@ -67,6 +67,8 @@ public:
     }
 
     [[nodiscard]] bool length(std::uint64_t& size) const {
+        if (!m_location_admitted)
+            return false;
 #if defined(_WIN32)
         BY_HANDLE_FILE_INFORMATION information{};
         LARGE_INTEGER length{};
@@ -104,7 +106,7 @@ public:
 
     [[nodiscard]] bool
     read_exact(char* destination, std::size_t size, const std::stop_token& stop = {}) const {
-        if (stop.stop_requested())
+        if (!m_location_admitted || stop.stop_requested())
             return false;
         constexpr std::size_t kReadBlockSize = std::size_t{64} * 1024;
         std::size_t offset = 0;
@@ -142,7 +144,7 @@ public:
     }
 
     [[nodiscard]] bool at_end(const std::stop_token& stop = {}) const {
-        if (stop.stop_requested())
+        if (!m_location_admitted || stop.stop_requested())
             return false;
         char trailing = 0;
 #if defined(_WIN32)
@@ -155,6 +157,10 @@ public:
     }
 
 private:
+    // Conventional saved-region inputs must resolve within their owning save
+    // root. Verification is against the open payload, before any bytes are read.
+    bool is_within_save_root() const;
+
     // Lock before opening; the destructor closes the handle before releasing it.
     detail::FilePublicationReadGuard m_publication;
     std::filesystem::path m_path;
@@ -184,6 +190,7 @@ private:
     int m_descriptor = -1;
 #endif
     bool m_missing = false;
+    bool m_location_admitted = true;
 };
 
 } // namespace Luminumbra::Persistence

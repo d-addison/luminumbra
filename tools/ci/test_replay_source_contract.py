@@ -690,6 +690,31 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(reader.index("stop.stop_requested()"), reader.index("::ReadFile("))
         self.assertLess(reader.index("stop.stop_requested()"), reader.index("::read("))
 
+    def test_far_tile_authority_check_and_publication_share_one_ownership(self):
+        source = read_source("src/luminumbra_common/world/FarLodStore.cpp")
+        worker = source.split("void AsyncFarLodStore::run()", 1)[1]
+        self.assertNotIn("SaveOwnership", worker)
+        tile = self.function(source, "save_tile", "FarLodStore::")
+        self.assertEqual(tile.count("SaveOwnership ownership;"), 1)
+        self.assertLess(tile.index("SaveOwnership ownership;"),
+                        tile.index("authority->far_lod_authority_revision()"))
+        self.assertLess(tile.index("authority->far_lod_authority_revision()"),
+                        tile.index("upsert_container_records("))
+        self.assertRegex(tile, r"upsert_container_records\(\s*ownership, region_file,")
+        persistence = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        owned = persistence.split(
+            "bool WorldSaveService::upsert_container_records(const SaveOwnership&", 1)[1].split(
+                "void WorldSaveService::set_interrupt_before_region_replace_for_testing", 1)[0]
+        for recursive_guard in ("SaveGuard ", "SaveOwnership ", "RegionFileWriteGuard "):
+            self.assertNotIn(recursive_guard, owned)
+        self.assertIn("WriteRegionFile(region_file, raw_records, errors)", owned)
+        native = read_source("test/rendering/far_lod_persistence_test.cpp")
+        bounded = native.split("FirstWorkerSaveAndFlushCompleteWithinBoundedWait)", 1)[1].split(
+            "TEST(FarLodPersistence, QueuedTilesRecheckAuthority", 1)[0]
+        for contract in ("ASSERT_EXIT(", "std::chrono::steady_clock::now() < deadline",
+                         "std::_Exit(2)", "writer.flush()", "writer.close()"):
+            self.assertIn(contract, bounded)
+
     def test_saved_input_budgets_precede_allocations_and_publication(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         region = source.split("bool ReadRegionFile(", 1)[1].split("bool AdmitRegionWrite(", 1)[0]
@@ -769,7 +794,14 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         reader = read_source("src/luminumbra_common/persistence/SavedInputFile.h")
         self.assertIn("LeafSymlinks leaf_symlinks = LeafSymlinks::Refuse", reader)
         constructor = self.function(source, "SavedInputFile", "SavedInputFile::")
-        self.assertEqual(constructor.count("leaf_symlinks == LeafSymlinks::Refuse"), 2)
+        self.assertEqual(constructor.count("leaf_symlinks == LeafSymlinks::Refuse"), 4)
+        self.assertIn("m_missing = MissingSavedInputAncestorsAreValid(m_path);", constructor)
+        self.assertIn("m_location_admitted = is_within_save_root();", constructor)
+        location = self.function(source, "is_within_save_root", "SavedInputFile::")
+        for verification in ("::GetFinalPathNameByHandleW(", "OpenResolvedSavedInput(resolved)",
+                             "actual.st_dev == expected.st_dev", "actual.st_ino == expected.st_ino"):
+            self.assertIn(verification, location)
+        self.assertIn("!m_location_admitted", reader)
         self.assertLess(rename.index("input.read(contents, expected_bytes.size())"),
                         rename.index("ReclaimAbandonedStaging("))
 

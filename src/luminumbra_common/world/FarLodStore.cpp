@@ -532,7 +532,13 @@ u64 FarLodStore::tile_record_id(FarLodTier tier, i32 rx, i32 rz) {
     return Chunk::calculate_id(IVec3(rx, static_cast<int>(tier), rz));
 }
 
-bool FarLodStore::save_tile(const FarLodTile& tile, std::vector<std::string>* errors) const {
+bool FarLodStore::save_tile(const FarLodTile& tile,
+                            std::vector<std::string>* errors,
+                            const Systems::SHIELD_WorldSystem* authority,
+                            u64 authority_revision) const {
+    const Persistence::WorldSaveService::SaveOwnership ownership;
+    if (authority && authority->far_lod_authority_revision() != authority_revision)
+        return false;
     if (!Persistence::WorldSaveService::validate_save(m_save_dir, errors))
         return false;
     std::string validation_error;
@@ -598,7 +604,8 @@ bool FarLodStore::save_tile(const FarLodTile& tile, std::vector<std::string>* er
 
     const std::filesystem::path region_file =
         Persistence::WorldSaveService::region_file_path(m_save_dir, tile.rx, tile.rz);
-    return Persistence::WorldSaveService::upsert_container_records(region_file, {record}, errors);
+    return Persistence::WorldSaveService::upsert_container_records(
+        ownership, region_file, {record}, errors);
 }
 
 bool FarLodStore::decode_payload(const std::string& payload,
@@ -833,14 +840,10 @@ void AsyncFarLodStore::run() {
         }
         bool saved = false;
         try {
-            // Validate after acquiring the same ownership as the chunk writers,
-            // and retain it through publication. A newer world save (including
-            // a partially failed save) bumps authority before releasing it, so
-            // an older queued tile cannot overwrite that durable authority.
-            const Persistence::WorldSaveService::SaveOwnership ownership;
-            if (!save.authority ||
-                save.authority->far_lod_authority_revision() == save.authority_revision)
-                saved = FarLodStore(save.save_dir).save_tile(save.tile);
+            // save_tile checks the captured revision under its single ownership
+            // and passes that ownership through the record merge/publication.
+            saved = FarLodStore(save.save_dir)
+                        .save_tile(save.tile, nullptr, save.authority, save.authority_revision);
         } catch (const std::exception&) {
             // Derived bytes are a cache. Failure never invalidates live geometry
             // or escapes the worker; shutdown still drains all accepted work.

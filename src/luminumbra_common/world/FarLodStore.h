@@ -233,7 +233,12 @@ public:
                                FarLodTile& out_tile,
                                std::vector<std::string>* errors = nullptr);
 
-    bool save_tile(const FarLodTile& tile, std::vector<std::string>* errors = nullptr) const;
+    // A supplied authority is checked after taking persistence ownership, which
+    // is retained through publication. Null admits an unconditional tile.
+    bool save_tile(const FarLodTile& tile,
+                   std::vector<std::string>* errors = nullptr,
+                   const Systems::SHIELD_WorldSystem* authority = nullptr,
+                   u64 authority_revision = 0) const;
 
     // Loads the (tier, region) tile. Pristine tiles are regenerable cache: a
     // params_hash mismatch is a clean miss (returns false, no error) so the

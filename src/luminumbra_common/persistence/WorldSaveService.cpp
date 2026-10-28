@@ -9,6 +9,7 @@
 #include "SavedInputLimits.h"
 #include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
+#include "core/CaptureContentPaths.h"
 #include "core/FilesystemPath.h"
 #include "luminumbra/core/Types.h"
 #include "world/ActiveRegionLedger.h"
@@ -140,6 +141,10 @@ std::size_t waiting_file_publishers_for_testing(const std::filesystem::path& pat
     return RegionFileSyncFor(path).waiting_publishers.load(std::memory_order_acquire);
 }
 } // namespace detail
+namespace {
+bool MissingSavedInputAncestorsAreValid(const std::filesystem::path& path);
+}
+
 SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks leaf_symlinks)
     : m_publication(path)
     , m_path(path) {
@@ -176,9 +181,13 @@ SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks l
 #else
     const bool opened = m_descriptor >= 0;
 #endif
+    if (!opened && m_missing && leaf_symlinks == LeafSymlinks::Refuse)
+        m_missing = MissingSavedInputAncestorsAreValid(m_path);
     if (opened) {
         if (const auto observer = detail::ReadObserverForTesting().load(std::memory_order_acquire))
             observer(m_path, true);
+        if (leaf_symlinks == LeafSymlinks::Refuse)
+            m_location_admitted = is_within_save_root();
     }
 }
 
@@ -259,6 +268,101 @@ constexpr std::size_t kRecordHeaderSize = 18;
 
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
+
+// Discovery may follow a directory link only within the resolved save root.
+// Payload leaves still use no-follow, same-handle type/length/read admission.
+// Missing directories are quiet; a present dangling link or wrong type is not.
+enum class PersistenceDirectory {
+    Missing,
+    Present,
+    Invalid
+};
+
+bool IsSaveDescendant(const std::filesystem::path& target, const std::filesystem::path& root) {
+    auto component = target.begin();
+    // Both resolved paths are bounded to 32767 native characters, bounding this walk.
+    for (const auto& expected : root) {
+        if (component == target.end() || !Filesystem::PathSpellingEqual(*component, expected))
+            return false;
+        ++component;
+    }
+    return component != target.end();
+}
+
+PersistenceDirectory InspectPersistenceDirectory(const std::filesystem::path& path,
+                                                 const std::filesystem::path& save_root) {
+    if (path.native().size() > 32767 || save_root.native().size() > 32767)
+        return PersistenceDirectory::Invalid;
+    std::error_code error;
+    const auto leaf = std::filesystem::symlink_status(path, error);
+    if (leaf.type() == std::filesystem::file_type::not_found &&
+        (!error || error == std::errc::no_such_file_or_directory))
+        return PersistenceDirectory::Missing;
+    if (error)
+        return PersistenceDirectory::Invalid;
+    if (std::filesystem::is_directory(leaf))
+        return PersistenceDirectory::Present;
+    if (!std::filesystem::is_symlink(leaf) || !std::filesystem::is_directory(path, error) || error)
+        return PersistenceDirectory::Invalid;
+    const auto root = Filesystem::WeaklyCanonicalPath(
+        save_root.empty() ? std::filesystem::path(".") : save_root, error);
+    if (error)
+        return PersistenceDirectory::Invalid;
+    const auto target = Filesystem::WeaklyCanonicalPath(path, error);
+    if (error || root.native().size() > 32767 || target.native().size() > 32767)
+        return PersistenceDirectory::Invalid;
+    return IsSaveDescendant(target, root) ? PersistenceDirectory::Present
+                                          : PersistenceDirectory::Invalid;
+}
+
+bool MissingSavedInputAncestorsAreValid(const std::filesystem::path& path) {
+    const auto directory = path.parent_path();
+    if (directory.filename() != kRegionDirectoryName ||
+        directory.parent_path().filename() != kChunksDirectoryName)
+        return true;
+    const auto save_root = directory.parent_path().parent_path();
+    // A missing payload beneath an escaping/dangling directory link is a
+    // refusal, not an optional miss. Ordinary missing directories stay quiet.
+    return InspectPersistenceDirectory(directory.parent_path(), save_root) !=
+               PersistenceDirectory::Invalid &&
+           InspectPersistenceDirectory(directory, save_root) != PersistenceDirectory::Invalid;
+}
+
+#if !defined(_WIN32)
+int OpenResolvedSavedInput(const std::filesystem::path& resolved) {
+#if defined(O_PATH)
+    constexpr int directory_access = O_PATH;
+#elif defined(O_SEARCH)
+    constexpr int directory_access = O_SEARCH;
+#else
+    constexpr int directory_access = O_RDONLY;
+#endif
+    constexpr int directory_flags = directory_access | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+    int descriptor = ::open(resolved.root_path().c_str(), directory_flags);
+    if (descriptor < 0)
+        return -1;
+    try {
+        const auto relative = resolved.relative_path();
+        // The caller bounds resolved to 32767 native characters before this walk.
+        for (auto component = relative.begin(); component != relative.end(); ++component) {
+            auto next = component;
+            ++next;
+            const int flags = next == relative.end()
+                                  ? O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                                  : directory_flags;
+            const int child = ::openat(descriptor, component->c_str(), flags);
+            ::close(descriptor);
+            descriptor = child;
+            if (descriptor < 0)
+                return -1;
+        }
+    } catch (...) {
+        ::close(descriptor);
+        throw;
+    }
+    return descriptor;
+}
+#endif
 
 struct FileIdentity {
 #if defined(_WIN32)
@@ -1452,6 +1556,55 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
 } // namespace
 
+bool SavedInputFile::is_within_save_root() const {
+    const auto directory = m_path.parent_path();
+    if (directory.filename() != kRegionDirectoryName ||
+        directory.parent_path().filename() != kChunksDirectoryName)
+        return true;
+    if (m_path.native().size() > 32767)
+        return false;
+    std::error_code error;
+    const auto save_root = directory.parent_path().parent_path();
+    const auto root = Filesystem::WeaklyCanonicalPath(
+        save_root.empty() ? std::filesystem::path(".") : save_root, error);
+    if (error || root.native().size() > 32767)
+        return false;
+#if defined(_WIN32)
+    // Final names come from this payload's owning handle, including junctions
+    // and short-name aliases. The fixed buffer covers the extended-path bound.
+    std::array<wchar_t, 32768> buffer{};
+    const DWORD resolved_length = ::GetFinalPathNameByHandleW(
+        m_handle, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED);
+    if (resolved_length == 0 || resolved_length >= buffer.size())
+        return false;
+    std::wstring spelling(buffer.data(), resolved_length);
+    if (spelling.starts_with(LR"(\\?\UNC\)"))
+        spelling = LR"(\\)" + spelling.substr(8);
+    else if (spelling.starts_with(LR"(\\?\)"))
+        spelling.erase(0, 4);
+    const std::filesystem::path resolved(std::move(spelling));
+#else
+    struct stat actual {};
+    if (::fstat(m_descriptor, &actual) != 0 || !S_ISREG(actual.st_mode))
+        return false;
+    const auto resolved = std::filesystem::canonical(m_path, error);
+    if (error || resolved.native().size() > 32767 || !IsSaveDescendant(resolved, root))
+        return false;
+    // The canonical spelling alone cannot authorize a read. Open its components
+    // without links and compare identities to the original payload descriptor.
+    const int checked = OpenResolvedSavedInput(resolved);
+    if (checked < 0)
+        return false;
+    struct stat expected {};
+    const bool matches = ::fstat(checked, &expected) == 0 && S_ISREG(expected.st_mode) &&
+                         actual.st_dev == expected.st_dev && actual.st_ino == expected.st_ino;
+    ::close(checked);
+    if (!matches)
+        return false;
+#endif
+    return IsSaveDescendant(resolved, root);
+}
+
 WorldSaveService::SaveOwnership::SaveOwnership()
     : m_lock(SaveMutex(), std::defer_lock) {
     if (!m_lock.try_lock()) {
@@ -2222,6 +2375,13 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
                                                 const std::vector<ContainerRecord>& records,
                                                 std::vector<std::string>* errors) {
     const SaveGuard guard;
+    return upsert_container_records(guard, region_file, records, errors);
+}
+
+bool WorldSaveService::upsert_container_records(const SaveOwnership&,
+                                                const std::filesystem::path& region_file,
+                                                const std::vector<ContainerRecord>& records,
+                                                std::vector<std::string>* errors) {
     // A conventional region destination belongs to a save; validate its calendar
     // before creating directories or replacing raw far-LOD records.
     const auto parent = region_file.parent_path();
@@ -2233,7 +2393,6 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
             return false;
     }
     try {
-        const detail::RegionFileWriteGuard transaction(region_file);
         std::vector<RegionRecord> raw_records;
         if (!ReadRegionFile(region_file, raw_records, errors, {}, true))
             return false;
@@ -2551,6 +2710,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                            ? "corrupt world metadata: invalid JSON"
                            : "corrupt world metadata: unreadable or non-regular input")
                     : "Saved-input admission refused: unreadable or oversized world metadata.");
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
         if (!metadata_missing) {
             if (!metadata.is_object())
                 return reject("corrupt world metadata: expected an object");
@@ -2585,22 +2746,26 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             std::filesystem::exists(chunks_dir / kWorldStateBackupFileName)) {
             return reject(kObsoleteWorldMessage);
         }
-        const auto chunks_status = std::filesystem::symlink_status(chunks_dir);
-        if (!std::filesystem::exists(chunks_status))
+        const auto chunks_status = InspectPersistenceDirectory(chunks_dir, save_dir);
+        if (chunks_status == PersistenceDirectory::Missing)
             return false;
-        if (!std::filesystem::is_directory(chunks_status))
+        if (chunks_status == PersistenceDirectory::Invalid)
             return reject("corrupt world persistence directory: " +
                           Filesystem::GenericUtf8PathString(chunks_dir));
         for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
-            if (entry.path() != region_dir ||
-                !std::filesystem::is_directory(std::filesystem::symlink_status(entry.path())))
+            if (entry.path() != region_dir || InspectPersistenceDirectory(entry.path(), save_dir) !=
+                                                  PersistenceDirectory::Present)
                 return reject("corrupt or unknown world persistence artifact: " +
                               Filesystem::GenericUtf8PathString(entry.path()));
         }
-        if (!std::filesystem::exists(region_dir))
+        const auto region_status = InspectPersistenceDirectory(region_dir, save_dir);
+        if (region_status == PersistenceDirectory::Missing)
             return false;
+        if (region_status == PersistenceDirectory::Invalid)
+            return reject("corrupt world persistence directory: " +
+                          Filesystem::GenericUtf8PathString(region_dir));
         std::vector<std::filesystem::path> region_files;
         bool present = false;
         for (const auto& entry : std::filesystem::directory_iterator(region_dir)) {
@@ -2650,6 +2815,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                            ? "corrupt world manifest: invalid JSON"
                            : "corrupt world manifest: unreadable or non-regular input")
                     : "Saved-input admission refused: unreadable or oversized world manifest.");
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
         if (!manifest_missing) {
             if (manifest.is_object() && manifest.contains("schema") &&
                 manifest.at("schema").is_string()) {
@@ -2691,6 +2858,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             std::vector<RegionRecord> records;
             if (!ReadRegionFile(path, records, &errors, stop))
                 return reject("");
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
             for (const auto& record : records) {
                 if (stop.stop_requested())
                     return reject("Saved-world validation cancelled.");
@@ -2726,12 +2895,16 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                      world::WorldClock{0, world::WorldCalendar::Legacy()},
                                      stop))
                 return reject("");
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
             if (std::filesystem::exists(active_regions_path(save_dir))) {
                 world::WorldClock clock;
                 bool required = false;
                 if (!read_clock_metadata(
                         save_dir, clock, required, &errors, nullptr, nullptr, nullptr, stop))
                     return reject("");
+                if (stop.stop_requested())
+                    return reject("Saved-world validation cancelled.");
                 if (ledger.header_tick() > clock.tick())
                     return reject(world::ActiveRegionLedger::kCorruptMessage);
             }
@@ -2741,6 +2914,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             return reject("Saved-world validation cancelled.");
         if (!load_plant_entities(plants, save_dir, &errors, stop))
             return reject("");
+        // The last payload reader has closed. Cancellation at that boundary
+        // must discard the staged chunks just like cancellation during a read.
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
         return true;
     } catch (const std::exception& e) {
         return reject(std::string("corrupt or unreadable world persistence: ") + e.what());

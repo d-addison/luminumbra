@@ -221,6 +221,13 @@ public:
                                          const std::vector<ContainerRecord>& records,
                                          std::vector<std::string>* errors = nullptr);
 
+    // Compose a record update with an authority check under existing ownership.
+    // The token must remain on its acquiring thread through publication.
+    static bool upsert_container_records(const SaveOwnership& ownership,
+                                         const std::filesystem::path& region_file,
+                                         const std::vector<ContainerRecord>& records,
+                                         std::vector<std::string>* errors = nullptr);
+
     // Read-only diagnostic of the staging filename base used by region/manifest
     // writers, before the unique temporary suffix. Region members stage in the
     // save root outside strict scans when the original suffix is chunks/region.

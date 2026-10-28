@@ -600,8 +600,8 @@ TEST(WorldSaveService, RegionStagingRetainsSymlinkParentTraversalWithoutFilesyst
 TEST(WorldSaveService, SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAncestors) {
     const TempSaveDir fixture("symlink_region_staging");
     const auto save_root = fixture.path() / "save";
-    const auto outside = fixture.path() / "outside";
-    const auto regions = outside / "regions";
+    const auto storage = save_root / "storage";
+    const auto regions = storage / "regions";
     const auto target = regions / "worldA";
     std::filesystem::create_directories(target);
     std::filesystem::create_directories(save_root / "chunks");
@@ -627,12 +627,12 @@ TEST(WorldSaveService, SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAnce
     };
     // Two ancestors bound this pass. Old timestamps detect even transient temp
     // creation when elevated privileges bypass the read-only permissions.
-    const auto old_time = std::filesystem::last_write_time(outside) - std::chrono::hours(24);
-    std::filesystem::last_write_time(outside, old_time);
+    const auto old_time = std::filesystem::last_write_time(storage) - std::chrono::hours(24);
+    std::filesystem::last_write_time(storage, old_time);
     std::filesystem::last_write_time(regions, old_time);
-    const auto outside_time = std::filesystem::last_write_time(outside);
+    const auto storage_time = std::filesystem::last_write_time(storage);
     const auto regions_time = std::filesystem::last_write_time(regions);
-    const ReadOnlyDirectory protect_outside(outside);
+    const ReadOnlyDirectory protect_storage(storage);
     const ReadOnlyDirectory protect_regions(regions);
 
     const auto region = WorldSaveService::region_file_path(save_root, 0, 0);
@@ -669,7 +669,7 @@ TEST(WorldSaveService, SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAnce
     ASSERT_TRUE(service.load_world(loaded, save_root, errors));
     EXPECT_EQ(service.world_hash(loaded), changed_hash);
     EXPECT_TRUE(errors.empty());
-    EXPECT_EQ(std::filesystem::last_write_time(outside), outside_time);
+    EXPECT_EQ(std::filesystem::last_write_time(storage), storage_time);
     EXPECT_EQ(std::filesystem::last_write_time(regions), regions_time);
     // The isolated fixture has three chunks, a manifest and five directories;
     // default iteration does not follow the region symlink.
