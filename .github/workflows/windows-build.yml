@@ -154,8 +154,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       # One Windows shard is enough: the contracts do not depend on the shard's test partition.
+      # Shard 2 carries them because its test partition is the shorter one.
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
+        if: ${{ matrix.shard != 1 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
@@ -265,7 +266,8 @@ jobs:
           Set-Alias -Name python -Value $pythonExecutable
           python -I -B tools/ci/windows_runner_preflight.py --lane native
           # Preserve Release optimization and retain embedded compiler symbols
-          # plus the linked PDB for render-child failure evidence.
+          # plus the linked PDB for render-child failure evidence. Dependency
+          # precompiled headers and Jolt's /Zi are disabled so ccache can cache them.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
@@ -274,6 +276,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
             -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `
             '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
@@ -326,7 +329,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
         continue-on-error: true
         shell: pwsh
-        run: ccache -s
+        run: ccache -s -v
       - name: Clean compiler cache on disk
         if: ${{ matrix.shard == 1 && always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
@@ -540,7 +543,7 @@ jobs:
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
         shell: msys2 {0}
-        run: ccache -s || true
+        run: ccache -s -v || true
       - name: Clean compiler cache on disk
         if: ${{ matrix.shard == 1 && always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true

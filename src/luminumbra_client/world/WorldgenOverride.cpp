@@ -5,10 +5,8 @@
 #include <cstddef>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <ios>
 #include <limits>
-#include <sstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -16,6 +14,7 @@
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -80,24 +79,26 @@ bool IntegerMatches(const nlohmann::json& base, long long value) {
 bool RenameUserPreset(const std::filesystem::path& source,
                       const std::filesystem::path& destination,
                       const std::string& display_name) {
+    if (display_name.size() > Persistence::SavedInputLimits::kPresetBytes)
+        return false;
     try {
         std::string original;
         {
-            std::ifstream input(source, std::ios::binary);
-            if (!input)
+            const Persistence::SavedInputFile input(source);
+            if (!input.read(original, Persistence::SavedInputLimits::kPresetBytes) ||
+                !Persistence::SavedInputLimits::JsonDepthAllowed(original))
                 return false;
-            std::ostringstream contents;
-            contents << input.rdbuf();
-            if (input.bad() || contents.bad())
-                return false;
-            original = contents.str();
         }
         auto preset = nlohmann::json::parse(original);
         if (!preset.is_object())
             return false;
         preset["name"] = display_name.empty() ? std::string("Custom") : display_name;
+        std::string serialized;
+        if (!Persistence::BoundedJsonDump(
+                preset, Persistence::SavedInputLimits::kPresetBytes, serialized, 2, false))
+            return false;
         return Persistence::WorldSaveService::rename_file_durably(
-            source, destination, original, preset.dump(2));
+            source, destination, original, serialized);
     } catch (const std::exception&) {
         return false;
     }

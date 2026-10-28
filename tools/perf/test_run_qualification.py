@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import runpy
 import shutil
 import stat
 import subprocess
@@ -26,7 +27,6 @@ import plan_qualification as planner
 import qualification_matrix as matrix_lib
 import run_qualification as rq
 import validate_render_capture as capture_checker
-from check_gl_debug_log import MAX_FILE_BYTES
 
 MATRIX_PATH = planner.DEFAULT_MATRIX
 FIXTURE_PATH = Path(__file__).resolve().parent / 'fixtures' / 'adapter-mismatch.v3.json'
@@ -221,7 +221,118 @@ def index_of(results, cell_id):
     return next(index for index, result in enumerate(results) if result['id'] == cell_id)
 
 
+def run_python_fixture(command, *, scripts, cwd, env, stdout, stderr, timeout,
+                       check, input=b''):
+    """Run only explicitly selected fixture scripts without interpreter startup.
+
+    Keep the actual script, arguments, files and checker assertions. Callers opt
+    in only when testing qualification logic; process/CLI controls still spawn.
+    """
+    assert len(command) >= 2
+    assert rq.runner.resolve_path(command[0]) == rq.runner.resolve_path(sys.executable)
+    index = 1
+    while command[index] in ('-I', '-B'):
+        index += 1
+        assert index < len(command)
+    assert Path(command[index]).resolve() in scripts
+    assert stderr == subprocess.STDOUT and not check and timeout > 0
+    assert env.get('FAKE_CLIENT_MODE') != 'hang'
+    previous = Path.cwd()
+    output = io.StringIO(newline=os.linesep)
+    with mock.patch.object(sys, 'argv', command[index:]), \
+            mock.patch.dict(os.environ, env, clear=True), \
+            mock.patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(input), encoding='utf-8')), \
+            contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        try:
+            os.chdir(cwd)
+            try:
+                runpy.run_path(command[index], run_name='__main__')
+                code = 0
+            except SystemExit as error:
+                code = error.code
+        finally:
+            os.chdir(previous)
+            stdout.write(output.getvalue().encode('utf-8'))
+    return subprocess.CompletedProcess(command, code)
+
+
+class PythonFixtureTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.script = self.root / 'fixture.py'
+        self.output = io.BytesIO()
+        self.kwargs = dict(scripts={self.script}, cwd=self.root,
+                           env=dict(os.environ, FIXTURE_VALUE='child', FAKE_CLIENT_MODE='ok'),
+                           stdout=self.output, stderr=subprocess.STDOUT, timeout=10,
+                           check=False, input=b'input\r\n\xff')
+        self.state = (Path.cwd(), dict(os.environ), sys.argv, sys.stdin, sys.stdout, sys.stderr)
+
+    def assert_restored(self):
+        self.assertEqual(Path.cwd(), self.state[0])
+        self.assertEqual(dict(os.environ), self.state[1])
+        for actual, previous in zip((sys.argv, sys.stdin, sys.stdout, sys.stderr), self.state[2:]):
+            self.assertIs(actual, previous)
+
+    def test_fixture_matches_subprocess_output_exit_and_restores_state(self):
+        self.script.write_text(
+            'import os, sys\n'
+            'print(ascii((os.getcwd(), os.environ["FIXTURE_VALUE"], sys.argv[1:], '
+            'sys.stdin.buffer.read())), flush=True)\n'
+            'print("stderr", file=sys.stderr)\n'
+            'sys.exit(int(sys.argv[-1]))\n', encoding='utf-8')
+        for code in (0, 3):
+            with self.subTest(code=code):
+                command = [sys.executable, '-I', '-B', str(self.script), str(code)]
+                kwargs = {key: value for key, value in self.kwargs.items()
+                          if key not in ('scripts', 'stdout')}
+                expected = subprocess.run(command, stdout=subprocess.PIPE, **kwargs)
+                self.output.seek(0)
+                self.output.truncate()
+                actual = run_python_fixture(command, **self.kwargs)
+                self.assertEqual(actual.returncode, expected.returncode)
+                self.assertEqual(self.output.getvalue(), expected.stdout)
+                self.assert_restored()
+
+    def test_fixture_exception_restores_state(self):
+        self.script.write_text('raise RuntimeError("fixture failure")\n', encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+            run_python_fixture([sys.executable, str(self.script)], **self.kwargs)
+        self.assert_restored()
+
+    def test_fixture_refuses_unknown_commands_and_process_cases(self):
+        commands = ([], [sys.executable], [sys.executable, '-I', '-B'],
+                    [sys.executable, str(self.root / 'unknown.py')],
+                    [str(self.root / 'unknown-python'), str(self.script)])
+        for command in commands:
+            with self.subTest(command=command), self.assertRaises(AssertionError):
+                run_python_fixture(command, **self.kwargs)
+        for overrides in ({'check': True}, {'stderr': subprocess.PIPE}, {'timeout': 0},
+                          {'env': dict(self.kwargs['env'], FAKE_CLIENT_MODE='hang')}):
+            with self.subTest(overrides=overrides), self.assertRaises(AssertionError):
+                run_python_fixture([sys.executable, str(self.script)],
+                                   **dict(self.kwargs, **overrides))
+        self.assert_restored()
+
+
 class RunnerTestBase(unittest.TestCase):
+    # Borrow class fixtures unless a test edits them or needs client-relative paths.
+    local_runtime = False
+    local_matrix = False
+    real_checker_processes = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(directory.cleanup)
+        cls.shared = Path(directory.name).resolve()
+        cls.make_runtime(cls.shared)
+        (cls.shared / 'fake_client.py').write_text(FAKE_CLIENT, encoding='utf-8')
+        (cls.shared / 'fake_checker.py').write_text(FAKE_CHECKER, encoding='utf-8')
+        cls.shared_matrix = cls.write_matrix(cls.shared, with_poses=True)
+
     def setUp(self):
         def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
             return subprocess.run(command, **kwargs)
@@ -233,15 +344,35 @@ class RunnerTestBase(unittest.TestCase):
         # Match the runner's canonical output paths when the temporary directory
         # uses a Windows short name or a macOS directory alias.
         self.tmp = Path(self.directory.name).resolve()
-        self.fake_client = self.tmp / 'fake_client.py'
-        self.fake_client.write_text(FAKE_CLIENT, encoding='utf-8')
-        self.make_runtime(self.tmp)
-        self.fake_checker = self.tmp / 'fake_checker.py'
-        self.fake_checker.write_text(FAKE_CHECKER, encoding='utf-8')
+        self.runtime_root = self.tmp if self.local_runtime else self.shared
+        if self.local_runtime:
+            self.make_runtime(self.tmp)
+            (self.tmp / 'fake_client.py').write_text(FAKE_CLIENT, encoding='utf-8')
+            (self.tmp / 'fake_checker.py').write_text(FAKE_CHECKER, encoding='utf-8')
+        self.fake_client = self.runtime_root / 'fake_client.py'
+        self.fake_checker = self.runtime_root / 'fake_checker.py'
         self.out = self.tmp / 'out'
-        self.matrix_path = self.write_matrix(with_poses=True)
+        self.matrix_path = (self.write_matrix(self.tmp, with_poses=True) if self.local_matrix
+                            else self.shared_matrix)
+        self.fixture_scripts = {self.fake_client, self.fake_checker,
+                                Path(capture_checker.__file__).resolve(),
+                                Path(rq.__file__).with_name('check_gl_debug_log.py').resolve()}
+        self.real_scripts = set()
+        if self.real_checker_processes:
+            self.real_scripts.add(Path(capture_checker.__file__).resolve())
+        self.spawn = subprocess.run
 
-    def make_runtime(self, root):
+        def run_fixture(command, **kwargs):
+            if any(str(script) in command for script in self.real_scripts):
+                return self.spawn(command, **kwargs)
+            return run_python_fixture(command, scripts=self.fixture_scripts, **kwargs)
+
+        fixture_patch = mock.patch.object(rq.subprocess, 'run', side_effect=run_fixture)
+        fixture_patch.start()
+        self.addCleanup(fixture_patch.stop)
+
+    @staticmethod
+    def make_runtime(root):
         for name in rq.RUNTIME_SENTINELS:
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,13 +381,14 @@ class RunnerTestBase(unittest.TestCase):
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_bytes((planner.ROOT / 'data/common/systems.json').read_bytes())
 
-    def write_matrix(self, with_poses):
+    @staticmethod
+    def write_matrix(root, with_poses):
         matrix = json.loads(MATRIX_PATH.read_text(encoding='utf-8'))
         if with_poses:
             for workload in matrix['workloads']:
                 if workload['kind'] == 'fixed_view':
                     workload['pose'] = dict(POSE)
-        path = self.tmp / 'matrix.json'
+        path = root / 'matrix.json'
         path.write_text(json.dumps(matrix, indent=2), encoding='utf-8')
         return path
 
@@ -295,6 +427,39 @@ class RunnerTestBase(unittest.TestCase):
         path = self.tmp / 'performance-build.json'
         path.write_text(json.dumps(document), encoding='utf-8')
         return path
+
+
+class FixtureReuseTests(unittest.TestCase):
+    def test_setup_builds_runtime_once_and_keeps_mutable_matrices_separate(self):
+        class Fixtures(RunnerTestBase):
+            pass
+
+        with mock.patch.object(Fixtures, 'make_runtime', wraps=Fixtures.make_runtime) as build:
+            Fixtures.setUpClass()
+            self.addCleanup(Fixtures.doClassCleanups)
+            first, second = Fixtures(), Fixtures()
+            first.local_matrix = True
+            for case in (first, second):
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+            self.assertEqual(build.call_count, 1)
+        self.assertEqual(first.runtime_root, second.runtime_root)
+        self.assertEqual(first.fake_client, second.fake_client)
+        self.assertEqual(first.fake_checker, second.fake_checker)
+        self.assertNotEqual(first.tmp, second.tmp)
+        self.assertNotEqual(first.matrix_path, second.matrix_path)
+        self.assertEqual(second.matrix_path, Fixtures.shared_matrix)
+        with mock.patch.object(subprocess, 'Popen', side_effect=AssertionError(
+                'fixture dispatch started an interpreter')) as spawn:
+            result = rq.subprocess.run(
+                [sys.executable, str(second.fake_client)], cwd=second.tmp,
+                env={'FAKE_CLIENT_MODE': 'exit3'}, stdout=io.BytesIO(),
+                stderr=subprocess.STDOUT, timeout=10, check=False)
+        self.assertEqual(result.returncode, 3)
+        spawn.assert_not_called()
+        original = second.matrix_path.read_bytes()
+        first.matrix_path.write_bytes(b'changed')
+        self.assertEqual(second.matrix_path.read_bytes(), original)
 
 
 class DryRunTests(RunnerTestBase):
@@ -344,7 +509,7 @@ class FullMatrixTests(RunnerTestBase):
         self.assertEqual(sources, {'3840x1600': 'matrix', '3440x1440': 'undeclared'})
         self.assertIn('pass 28', out)
         self.assertTrue((self.out / 'cells' / f'{SURFACE_CELL}.verdict.json').is_file())
-        systems_config = rq.runner.resolve_path(self.tmp / 'data/common/systems.json')
+        systems_config = rq.runner.resolve_path(self.runtime_root / 'data/common/systems.json')
         receipts = list((self.out / 'cells').glob('*.process.json'))
         self.assertEqual(len(receipts), 28)
         for path in receipts:
@@ -356,7 +521,7 @@ class FullMatrixTests(RunnerTestBase):
                     value = command[command.index(option) + 1]
                     self.assertTrue(Path(value).is_absolute())
                     self.assertEqual(receipt[option[2:].replace('-', '_')], value)
-                self.assertEqual(Path(receipt['runtime_root']), self.tmp.resolve())
+                self.assertEqual(Path(receipt['runtime_root']), self.runtime_root.resolve())
                 save_root = Path(receipt['save_root'])
                 self.assertEqual(save_root, self.out.resolve() / 'work' /
                                  path.name.removesuffix('.process.json') / 'storage')
@@ -384,6 +549,14 @@ class FullMatrixTests(RunnerTestBase):
 
 
 class SelectionTests(RunnerTestBase):
+    local_matrix = True
+
+    def setUp(self):
+        self.local_runtime = self._testMethodName in (
+            'test_bare_python_filename_resolves_from_caller_cwd',
+            'test_relative_paths_resolve_from_caller_cwd')
+        super().setUp()
+
     def test_missing_expected_traversal_digest_exits_2_without_launch(self):
         matrix = matrix_lib.load_matrix(self.matrix_path)
         entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'surface-flight')
@@ -641,6 +814,7 @@ class ProcessFailureTests(RunnerTestBase):
         return cell
 
     def test_checker_floor_failure_is_fail_and_exit_1(self):
+        self.real_scripts.add(self.fake_checker)
         cell = self.assert_cell('fail', 'floor', {'FAKE_CHECKER_EXIT': '4'})
         self.assertEqual(cell['verdict']['floor']['verdict'], 'fail')
 
@@ -660,6 +834,7 @@ class ProcessFailureTests(RunnerTestBase):
                          {'FAKE_CHECKER_VERDICT': 'disagree'})
 
     def test_client_exit_3_is_process_failed(self):
+        self.real_scripts.add(self.fake_client)
         self.assert_cell('process_failed', 'exit 3', {'FAKE_CLIENT_MODE': 'exit3'})
 
     def test_client_without_artifact_is_process_failed(self):
@@ -667,6 +842,7 @@ class ProcessFailureTests(RunnerTestBase):
                          {'FAKE_CLIENT_MODE': 'noartifact'})
 
     def test_hang_times_out_and_writes_receipt(self):
+        self.real_scripts.add(self.fake_client)
         self.assert_cell('process_failed', 'timed_out', {'FAKE_CLIENT_MODE': 'hang'},
                          '--timeout-seconds', '1')
         receipt = json.loads((self.out / 'cells' / f'{SURFACE_CELL}.process.json')
@@ -686,6 +862,7 @@ class ProcessFailureTests(RunnerTestBase):
         self.assertEqual(receipt['timeout_seconds'], 1)
 
     def test_missing_client_is_spawn_failed(self):
+        self.make_runtime(self.tmp)
         args = ['--client', str(self.tmp / 'missing-client'), '--out-dir', str(self.out),
                 '--matrix', str(self.matrix_path), '--checker', str(self.fake_checker),
                 '--only', SURFACE_CELL]
@@ -739,17 +916,20 @@ class CaptureBindingTests(RunnerTestBase):
 class ArtifactHandlingTests(RunnerTestBase):
     def test_capture_readers_refuse_over_capacity_without_truncating(self):
         path = self.tmp / 'oversized-capture.json'
-        # Sparse input exercises the real capacity without allocating its payload.
-        with path.open('wb') as output:
-            output.write(b'{}')
-            output.truncate(rq.MAX_CAPTURE_BYTES + 1)
-        for reader in (rq.read_capture_bytes, rq.capture_file_sha256,
-                       lambda path: rq.debug_json(path, capture=True)):
-            with self.subTest(reader=reader), self.assertRaisesRegex(
-                    rq.UsageError, f'capture evidence exceeds {rq.MAX_CAPTURE_BYTES} byte cap'):
-                reader(path)
-        self.assertIsNone(rq.read_json_object(path, capture=True))
-        self.assertEqual(path.stat().st_size, rq.MAX_CAPTURE_BYTES + 1)
+        # A small patched capacity keeps the file real on every platform; extending a
+        # file to the production capacity zero-fills hundreds of MiB on Windows.
+        bound = 16 * 1024
+        with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
+            with path.open('wb') as output:
+                output.write(b'{}')
+                output.write(b' ' * (bound + 1 - 2))
+            for reader in (rq.read_capture_bytes, rq.capture_file_sha256,
+                           lambda path: rq.debug_json(path, capture=True)):
+                with self.subTest(reader=reader), self.assertRaisesRegex(
+                        rq.UsageError, f'capture evidence exceeds {bound} byte cap'):
+                    reader(path)
+            self.assertIsNone(rq.read_json_object(path, capture=True))
+            self.assertEqual(path.stat().st_size, bound + 1)
 
     def test_capture_byte_boundary_and_growth_are_bounded(self):
         path = self.tmp / 'growing-capture.json'
@@ -808,13 +988,15 @@ class ArtifactHandlingTests(RunnerTestBase):
             with self.assertRaisesRegex(rq.UsageError, 'capture evidence changed while opening'):
                 rq.read_capture_bytes(path)
 
+    # Keep the depth-overflow input below the patched byte cap.
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 256)
     def test_json_object_readers_share_regular_file_byte_and_depth_bounds(self):
         path = self.tmp / 'bounded-evidence.json'
         path.write_bytes(b'\xef\xbb\xbf{"value": 1}')
         self.assertEqual(rq.read_json_object(path), {'value': 1})
         for payload in (b'[]', b'', b'{', b'\xff', b'{"value":1}\0ignored',
                         b'[' * 65 + b']' * 65,
-                        b'{"value":"' + b'x' * MAX_FILE_BYTES + b'"}'):
+                        b'{}' + b' ' * (rq.MAX_FILE_BYTES - 1)):
             with self.subTest(size=len(payload)):
                 path.write_bytes(payload)
                 self.assertIsNone(rq.read_json_object(path))
@@ -877,6 +1059,7 @@ class ArtifactHandlingTests(RunnerTestBase):
                          'old')
 
     def test_lumin_variables_are_not_seen_by_client(self):
+        self.real_scripts.add(self.fake_client)
         env = {'FAKE_CLIENT_MODE': 'dumpenv', 'LUMIN_GL_DEBUG': '1',
                'LUMINUMBRA_TEST_FLAG': '1'}
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL), env=env)[0], 0)
@@ -885,6 +1068,7 @@ class ArtifactHandlingTests(RunnerTestBase):
         self.assertIs(artifact['saw_lumin_env'], False)
 
     def test_client_settings_are_redirected_into_out_dir(self):
+        self.real_scripts.add(self.fake_client)
         env = {'FAKE_CLIENT_MODE': 'dumpenv'}
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL), env=env)[0], 0)
         artifact = json.loads((self.out / 'cells' / f'{SURFACE_CELL}.json')
@@ -1360,9 +1544,10 @@ class HostEvidenceTests(RunnerTestBase):
                 self.assert_previous_pair()
                 self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_oversized_staged_host_refuses_without_modifying_pair(self):
         content = json.dumps(self.host).encode('utf-8')
-        self.staged_host.write_bytes(content + b' ' * (MAX_FILE_BYTES + 1 - len(content)))
+        self.staged_host.write_bytes(content + b' ' * (rq.MAX_FILE_BYTES + 1 - len(content)))
         with mock.patch.object(rq, 'run_cells') as launch:
             code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2, err)
@@ -1387,9 +1572,11 @@ class HostEvidenceTests(RunnerTestBase):
         self.staged_host.write_text(json.dumps(self.host), encoding='utf-8-sig')
         self.assertEqual(json.loads(rq.load_host_record(self.staged_host)), self.host)
 
+    # Ordinary process receipts must also fit this shared host/receipt bound.
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_host_reads_accept_exact_byte_cap(self):
         content = json.dumps(self.host).encode('utf-8')
-        payload = content + b' ' * (MAX_FILE_BYTES - len(content))
+        payload = content + b' ' * (rq.MAX_FILE_BYTES - len(content))
         self.staged_host.write_bytes(payload)
         self.assertEqual(json.loads(rq.load_host_record(self.staged_host)), self.host)
         host_path = self.out / 'host.json'
@@ -1398,19 +1585,20 @@ class HostEvidenceTests(RunnerTestBase):
         self.assertEqual(code, 0, err)
         self.assert_current_host()
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_non_ascii_host_near_cap_publishes_and_round_trips(self):
         self.host['extra'] = ''
         empty = json.dumps(self.host, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-        self.host['extra'] = 'é' * ((MAX_FILE_BYTES - len(empty) - 1) // 2)
+        self.host['extra'] = 'é' * ((rq.MAX_FILE_BYTES - len(empty) - 1) // 2)
         content = json.dumps(self.host, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
         self.staged_host.write_bytes(content)
-        self.assertLessEqual(len(content), MAX_FILE_BYTES)
-        self.assertGreaterEqual(len(content), MAX_FILE_BYTES - 2)
+        self.assertLessEqual(len(content), rq.MAX_FILE_BYTES)
+        self.assertGreaterEqual(len(content), rq.MAX_FILE_BYTES - 2)
         code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
         self.assertEqual(code, 0, err)
         host_path = self.out / 'host.json'
         published = host_path.read_bytes()
-        self.assertLessEqual(len(published), MAX_FILE_BYTES)
+        self.assertLessEqual(len(published), rq.MAX_FILE_BYTES)
         self.assertIn('é'.encode('utf-8'), published)
         self.assert_current_host()
         # Use the published record as both staged input and the previous host.
@@ -1423,12 +1611,13 @@ class HostEvidenceTests(RunnerTestBase):
         self.assertEqual(code, 0, err)
         self.assertFalse(host_path.exists())
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_serialized_host_over_cap_refuses_before_execution(self):
         self.host['extra'] = ''
         empty = json.dumps(self.host, separators=(',', ':')).encode('utf-8')
-        self.host['extra'] = 'x' * (MAX_FILE_BYTES - len(empty))
+        self.host['extra'] = 'x' * (rq.MAX_FILE_BYTES - len(empty))
         content = json.dumps(self.host, separators=(',', ':')).encode('utf-8')
-        self.assertEqual(len(content), MAX_FILE_BYTES)
+        self.assertEqual(len(content), rq.MAX_FILE_BYTES)
         self.staged_host.write_bytes(content)
         # The terminating newline makes the published record exceed the cap.
         with mock.patch.object(rq, 'run_cells') as launch:
@@ -1439,6 +1628,7 @@ class HostEvidenceTests(RunnerTestBase):
         self.assert_previous_pair()
         self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_host_growth_after_stat_is_bounded(self):
         original_fstat = os.fstat
         for candidate in (self.staged_host, self.out / 'host.json'):
@@ -1450,7 +1640,7 @@ class HostEvidenceTests(RunnerTestBase):
                     info = original_fstat(descriptor)
                     if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
                         with candidate.open('ab') as output:
-                            output.write(b' ' * (MAX_FILE_BYTES + 1 - info.st_size))
+                            output.write(b' ' * (rq.MAX_FILE_BYTES + 1 - info.st_size))
                     return info
 
                 with mock.patch.object(os, 'fstat', side_effect=fstat), \
@@ -1464,10 +1654,11 @@ class HostEvidenceTests(RunnerTestBase):
                 self.assertFalse((self.out / rq.LOCK_NAME).exists())
                 candidate.write_text(json.dumps(self.host), encoding='utf-8')
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 1024)
     def test_oversized_previous_host_refuses_hostful_and_hostless_runs(self):
         host_path = self.out / 'host.json'
         with host_path.open('wb') as output:
-            output.truncate(MAX_FILE_BYTES + 1)
+            output.truncate(rq.MAX_FILE_BYTES + 1)
         for hostful in (False, True):
             with self.subTest(hostful=hostful):
                 argv = self.host_argv if hostful else self.argv
@@ -1476,7 +1667,7 @@ class HostEvidenceTests(RunnerTestBase):
                 self.assertEqual(code, 2, err)
                 self.assertIn('byte cap', err)
                 launch.assert_not_called()
-                self.assertEqual(host_path.stat().st_size, MAX_FILE_BYTES + 1)
+                self.assertEqual(host_path.stat().st_size, rq.MAX_FILE_BYTES + 1)
                 self.assertEqual((self.out / rq.QUALIFICATION_NAME).read_bytes(),
                                  self.previous_qualification)
                 self.assertEqual(list(self.out.glob('*.prev-*')), [])
@@ -1523,12 +1714,15 @@ class HostEvidenceTests(RunnerTestBase):
 
 
 class RuntimeRootTests(RunnerTestBase):
+    local_runtime = True
+
     def test_package_root_is_independent_of_output_and_working_directory(self):
         package = self.tmp / 'package'
         self.make_runtime(package)
         client = package / 'bin/client.py'
         client.parent.mkdir()
         client.write_text(FAKE_CLIENT, encoding='utf-8')
+        self.fixture_scripts.add(client.resolve())
         checkout = self.tmp / 'checkout'
         self.make_runtime(checkout)
         previous = Path.cwd()
@@ -1601,6 +1795,8 @@ class RuntimeRootTests(RunnerTestBase):
 
 
 class SystemsConfigTests(RunnerTestBase):
+    local_runtime = True
+
     def setUp(self):
         super().setUp()
         (self.tmp / 'data/common/systems.json').unlink()
@@ -1649,6 +1845,8 @@ class SystemsConfigTests(RunnerTestBase):
 
 
 class ClientIdentityTests(RunnerTestBase):
+    local_runtime = True
+
     def receipt(self):
         return rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
 
@@ -1745,6 +1943,7 @@ class ClientIdentityTests(RunnerTestBase):
                     self.assertFalse((self.out / 'cells' / f'{SURFACE_CELL}.check.log').exists())
 
     def test_script_receipt_hashes_client_separately_from_interpreter(self):
+        self.real_scripts.add(self.fake_client)
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
         receipt = self.receipt()
         self.assertEqual(receipt['binary_sha256'], rq.runner.file_sha256(sys.executable))
@@ -1758,6 +1957,7 @@ class ClientIdentityTests(RunnerTestBase):
         self.assertIn('client_not_native_build', document['render_floor_qualified_reasons'])
 
     def test_client_code_changed_during_execution_is_refused(self):
+        self.real_scripts.add(self.fake_client)
         before = rq.runner.file_sha256(self.fake_client)
         code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL),
                                    env={'FAKE_CLIENT_MODE': 'selfchange'})
@@ -1767,9 +1967,12 @@ class ClientIdentityTests(RunnerTestBase):
         self.assertFalse(receipt['client']['sha256_verified'])
         self.assertNotEqual(before, rq.runner.file_sha256(self.fake_client))
         self.assertIn('client SHA-256', self.load_qualification()['cells'][0]['reason'])
+        self.assertEqual((self.shared / 'fake_client.py').read_text(encoding='utf-8'), FAKE_CLIENT)
 
 
 class MatrixIdentityTests(RunnerTestBase):
+    local_matrix = True
+
     def test_identical_copy_of_committed_matrix_is_still_custom(self):
         self.matrix_path.write_bytes(MATRIX_PATH.read_bytes())
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
@@ -1796,7 +1999,23 @@ class MatrixIdentityTests(RunnerTestBase):
 
 
 class RealCheckerTests(RunnerTestBase):
-    def positive_control(self):
+    real_checker_processes = True
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        for workload in matrix['workloads']:
+            if workload['kind'] == 'fixed_view':
+                workload['pose'] = dict(POSE)
+        data, matrix = cls.positive_documents(matrix)
+        cls.positive_fixture = cls.shared / 'positive-control.json'
+        cls.positive_fixture.write_text(json.dumps(data), encoding='utf-8')
+        cls.positive_matrix = cls.shared / 'positive-matrix.json'
+        cls.positive_matrix.write_text(json.dumps(matrix), encoding='utf-8')
+
+    @staticmethod
+    def positive_documents(matrix):
         """Use the committed measurement fixture with a matching adapter/report pose.
 
         All timing samples/distributions remain exactly the committed fixture's.
@@ -1804,7 +2023,6 @@ class RealCheckerTests(RunnerTestBase):
         """
         data = json.loads(FIXTURE_PATH.read_text(encoding='utf-8'))
         data['adapter']['renderer'] = RENDERER
-        matrix = matrix_lib.load_matrix(self.matrix_path)
         display = next(item for item in matrix['displays'] if item['id'] == '3840x1600')
         data.update(width=display['width'], height=display['height'],
                     internal_width=display['width'], internal_height=display['height'])
@@ -1831,13 +2049,14 @@ class RealCheckerTests(RunnerTestBase):
                                   'u_inverseView': inverse,
                                   'u_sun.direction': [math.sin(0.04 * 2 * math.pi),
                                                       -math.cos(0.04 * 2 * math.pi), 0]}})
-        fixture = self.tmp / 'positive-control.json'
-        fixture.write_text(json.dumps(data), encoding='utf-8')
         matrix.update(warmup_frames=data['warmup_frames'],
                       fixed_view_measured_frames=data['frames'])
         matrix_lib.validate_matrix(matrix)
-        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
-        return fixture, FOREST_CELL
+        return data, matrix
+
+    def positive_control(self):
+        self.matrix_path = self.positive_matrix
+        return self.positive_fixture, FOREST_CELL
 
     def test_real_checker_and_runner_accept_committed_fixture_positive_control(self):
         fixture, cell_id = self.positive_control()
@@ -1886,6 +2105,31 @@ class RealCheckerTests(RunnerTestBase):
 
 
 class BuildManifestTests(RealCheckerTests):
+    # The real checker CLI controls run in RealCheckerTests and the native
+    # qualifying control below. Inherited reconciliation cases reuse its code.
+    real_checker_processes = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.native_image = cls.shared / ('native-client.exe' if os.name == 'nt'
+                                         else 'native-client')
+        # One immutable real image for all evidence variants. Only the identity
+        # mutation control needs a private copy; this image is never executed.
+        shutil.copy2(sys.executable, cls.native_image)
+        cls.native_image.chmod(0o755)
+
+    def test_positive_fixture_reuse_performs_no_writes(self):
+        with mock.patch.object(Path, 'write_text') as text, \
+                mock.patch.object(Path, 'write_bytes') as binary:
+            first = self.positive_control()
+            second = self.positive_control()
+        self.assertEqual(first, second)
+        self.assertEqual(first, (self.positive_fixture, FOREST_CELL))
+        self.assertEqual(self.matrix_path, self.positive_matrix)
+        text.assert_not_called()
+        binary.assert_not_called()
+
     def test_invalid_manifests_refused_before_run(self):
         path = self.write_build_manifest(self.fake_client)
         valid = rq.read_json_object(path)
@@ -1929,9 +2173,11 @@ class BuildManifestTests(RealCheckerTests):
     def test_suffixless_script_is_never_a_native_build(self):
         client = self.tmp / 'renamed-client'
         client.write_text(FAKE_CLIENT, encoding='utf-8')
+        self.fixture_scripts.add(client.resolve())
         client.chmod(0o755)
         path = self.write_build_manifest(client)
-        args = self.argv('--only', SURFACE_CELL, '--build-manifest', str(path))
+        args = self.argv('--only', SURFACE_CELL, '--build-manifest', str(path),
+                         '--runtime-root', str(self.runtime_root))
         args[1] = str(client)
         original_run = subprocess.run
 
@@ -1963,18 +2209,25 @@ class BuildManifestTests(RealCheckerTests):
     def test_native_image_with_script_suffix_is_refused(self):
         for suffix in ('.cmd', '.bat', '.py', '.sh', '.ps1'):
             with self.subTest(suffix=suffix):
-                client = self.tmp / ('client' + suffix)
-                shutil.copy2(sys.executable, client)
-                client.chmod(0o755)
-                self.assertFalse(rq.native_executable(client))
+                client = self.native_image.with_suffix(suffix)
+                self.native_image.rename(client)
+                try:
+                    self.assertFalse(rq.native_executable(client))
+                finally:
+                    client.rename(self.native_image)
 
     def native_control(self, manifest_mode='match', mutate=False, capture_mode='private',
                        receipt_defect=None, mutate_checked_capture=False, debug_mode='pass',
-                       capture_bytes=None, debug_capture_bytes=None):
-        # Copy an existing native binary; never compile or claim GPU performance.
-        client = self.tmp / ('native-client.exe' if os.name == 'nt' else 'native-client')
-        shutil.copy2(sys.executable, client)
-        client.chmod(0o755)
+                       capture_bytes=None, debug_capture_bytes=None, real_checkers=False):
+        client = self.native_image
+        if mutate:
+            client = self.tmp / self.native_image.name
+            shutil.copy2(self.native_image, client)
+        runtime_root = self.runtime_root
+        if debug_mode == 'config':
+            # Only this variant edits runtime data; leave the class fixture intact.
+            runtime_root = self.tmp / 'changed-runtime'
+            self.make_runtime(runtime_root)
         path = self.write_build_manifest(client)
         if manifest_mode == 'mismatch':
             document = rq.read_json_object(path)
@@ -1999,7 +2252,7 @@ class BuildManifestTests(RealCheckerTests):
                     data = json.loads(target.read_bytes())
                     declaration = Path(argv[argv.index('--declare-render-overrides') + 1])
                     declared = json.loads(declaration.read_bytes())
-                    self.assertEqual(declared, {'cli:--systems-config': str(self.tmp / 'data/common/systems.json'),
+                    self.assertEqual(declared, {'cli:--systems-config': str(runtime_root / 'data/common/systems.json'),
                                                 'env:LUMIN_GL_DEBUG': '1'})
                     data['debug_overrides'] = {'active': declared, 'declared': declared}
                     if debug_mode == 'schema':
@@ -2057,8 +2310,8 @@ class BuildManifestTests(RealCheckerTests):
                         output.write(b'changed')
                 return subprocess.CompletedProcess(argv, 0)
 
-            # Only native client execution is simulated. Receipt retention/hashing and
-            # the real checker subprocess execute normally.
+            # Only native client execution is simulated here. Receipt retention and
+            # hashing execute normally; checker scripts run below.
             with mock.patch.object(rq.runner.subprocess, 'run', side_effect=emit_capture):
                 result = original(command, **kwargs)
             if receipt_defect is not None:
@@ -2066,13 +2319,17 @@ class BuildManifestTests(RealCheckerTests):
                 receipt.update(receipt_defect)
                 kwargs['receipt_path'].write_text(json.dumps(receipt), encoding='utf-8')
             if kwargs['environment'].get('LUMIN_GL_DEBUG') == '1':
-                malformed = {'receipt-list': b'[]', 'receipt-partial': b'{',
-                             'receipt-large': b'{"value":"' + b'x' * MAX_FILE_BYTES + b'"}'}
+                malformed = {'receipt-list': b'[]', 'receipt-partial': b'{'}
+                if debug_mode == 'receipt-large':
+                    # Keep a valid receipt so only the byte guard can refuse it.
+                    payload = kwargs['receipt_path'].read_bytes()
+                    self.assertLessEqual(len(payload), rq.MAX_FILE_BYTES)
+                    malformed[debug_mode] = payload + b' ' * (rq.MAX_FILE_BYTES + 1 - len(payload))
                 if debug_mode in malformed:
                     kwargs['receipt_path'].write_bytes(malformed[debug_mode])
             return result
 
-        args = self.argv('--only', cell_id, checker=False)
+        args = self.argv('--only', cell_id, '--runtime-root', str(runtime_root), checker=False)
         args[1] = str(client)
         if manifest_mode != 'missing':
             args += ['--build-manifest', str(path)]
@@ -2081,7 +2338,7 @@ class BuildManifestTests(RealCheckerTests):
         def checker_command(*command_args, **kwargs):
             command = original_checker(*command_args, **kwargs)
             if debug_mode == 'config':
-                with (self.tmp / 'data/common/systems.json').open('ab') as output:
+                with (runtime_root / 'data/common/systems.json').open('ab') as output:
                     output.write(b'\n')
             if mutate_checked_capture:
                 # Whitespace preserves every parsed field and verdict, but changes ownership.
@@ -2089,15 +2346,26 @@ class BuildManifestTests(RealCheckerTests):
                     output.write(b'\n')
             return command
 
-        with mock.patch.object(rq.runner, 'run_process', side_effect=native_process), \
+        # These cases test evidence reconciliation, using the actual checker code
+        # without repeatedly starting Python. The qualifying control retains both
+        # checker subprocesses, including the debug checker's binary stdin pipe.
+        scripts = {Path(capture_checker.__file__).resolve(),
+                   Path(rq.__file__).with_name('check_gl_debug_log.py').resolve()}
+        checker_context = (mock.patch.object(rq.subprocess, 'run', self.spawn) if real_checkers else
+                           mock.patch.object(rq.subprocess, 'run', side_effect=
+                               lambda command, **kwargs: run_python_fixture(
+                                   command, scripts=scripts, **kwargs)))
+        with checker_context, \
+                mock.patch.object(rq.runner, 'run_process', side_effect=native_process), \
                 mock.patch.object(rq, 'check_command', side_effect=checker_command):
             code, _, _ = self.run_main(args)
         document = self.load_qualification()
         receipt = rq.read_json_object(self.out / 'cells' / f'{cell_id}.process.json')
         return code, document['cells'][0], receipt
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_measured_and_debug_captures_over_host_cap_are_accepted(self):
-        size = MAX_FILE_BYTES + 1
+        size = rq.MAX_FILE_BYTES + 1
         code, cell, _ = self.native_control(capture_bytes=size)
         self.assertEqual(code, 0)
         self.assertEqual(cell['state'], 'pass')
@@ -2106,7 +2374,7 @@ class BuildManifestTests(RealCheckerTests):
         for suffix in ('.json', '.artifact.json', '.debug.artifact.json'):
             path = self.out / 'cells' / (cell['id'] + suffix)
             self.assertEqual(path.stat().st_size, size)
-            with self.assertRaisesRegex(rq.UsageError, f'host evidence exceeds {MAX_FILE_BYTES} byte cap'):
+            with self.assertRaisesRegex(rq.UsageError, f'host evidence exceeds {rq.MAX_FILE_BYTES} byte cap'):
                 rq.read_host_bytes(path)
             self.assertIsNone(rq.read_json_object(path))
         self.assertTrue(cell['client']['native_build'])
@@ -2114,7 +2382,7 @@ class BuildManifestTests(RealCheckerTests):
         self.assertTrue(cell['checker_canonical'])
 
     def test_over_capacity_captures_fail_closed_with_clear_reason(self):
-        bound = 1024 * 1024
+        bound = 16 * 1024
         with mock.patch.object(rq, 'MAX_CAPTURE_BYTES', bound):
             code, cell, _ = self.native_control(capture_bytes=bound + 1)
             self.assertEqual(code, 1)
@@ -2132,7 +2400,7 @@ class BuildManifestTests(RealCheckerTests):
             self.assertFalse(rq.cell_qualifies(cell))
 
     def test_manifest_bound_native_control_can_qualify(self):
-        code, cell, receipt = self.native_control()
+        code, cell, receipt = self.native_control(real_checkers=True)
         self.assertEqual(code, 0)
         self.assertEqual(cell['state'], 'pass')
         self.assertTrue(cell['checker_canonical'])
@@ -2161,7 +2429,12 @@ class BuildManifestTests(RealCheckerTests):
         self.assertTrue(document['render_floor_qualified'])
         self.assertFalse(document['expanded_qualified'])
 
+    @mock.patch.object(rq, 'MAX_FILE_BYTES', 16384)
     def test_separate_debug_pass_requires_installed_clean_matching_evidence(self):
+        fixture_before = self.positive_fixture.read_bytes()
+        copy_patch = mock.patch.object(shutil, 'copy2', wraps=shutil.copy2)
+        copies = copy_patch.start()
+        self.addCleanup(copy_patch.stop)
         for mode in ('missing', 'error', 'malformed', 'unreadable', 'no-capture',
                      'wrongadapter', 'timeout', 'spawn', 'exit', 'partialcapture',
                      'emptycapture', 'deepcapture', 'config', 'schema', 'kind',
@@ -2176,6 +2449,8 @@ class BuildManifestTests(RealCheckerTests):
                 self.assertIsNotNone(cell['gl_debug']['reason'])
                 self.assertFalse(rq.gl_debug_passes(cell['gl_debug'], cell['client']))
                 self.assertFalse(rq.cell_qualifies(cell))
+        copies.assert_not_called()
+        self.assertEqual(self.positive_fixture.read_bytes(), fixture_before)
 
     def test_debug_pass_cannot_change_measured_capture_or_retention(self):
         for mode in ('measured-artifact', 'measured-retained'):
@@ -2237,6 +2512,7 @@ class BuildManifestTests(RealCheckerTests):
                 self.assertEqual(cell['client']['reason'], reason)
 
     def test_native_binary_changed_during_run_is_refused(self):
+        shared_digest = rq.runner.file_sha256(self.native_image)
         code, cell, receipt = self.native_control(mutate=True)
         self.assertEqual(code, 1)
         self.assertEqual(cell['state'], 'process_failed')
@@ -2245,6 +2521,7 @@ class BuildManifestTests(RealCheckerTests):
         self.assertTrue(receipt['evidence_errors'])
         self.assertFalse(receipt['client']['sha256_verified'])
         self.assertFalse(receipt['client']['native_build'])
+        self.assertEqual(rq.runner.file_sha256(self.native_image), shared_digest)
 
 
 class AggregateTests(unittest.TestCase):

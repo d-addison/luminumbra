@@ -40,6 +40,7 @@
 #include "core/FilesystemPath.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -197,6 +198,42 @@ TEST_F(UserPresetPersistence, InvalidSourceAndPublicationFailurePreserveExisting
     ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, blocked, ""));
     EXPECT_EQ(nlohmann::json::parse(Read(blocked)).at("name"), "Custom");
     EXPECT_FALSE(fs::exists(source));
+}
+
+TEST_F(UserPresetPersistence, RenameAdmitsInputAndOutputBeforePublication) {
+    using namespace Luminumbra::Persistence;
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    const auto nested = [](std::size_t depth) {
+        return R"({"extension":)" + std::string(depth - 1, '[') + "0" +
+               std::string(depth - 1, ']') + "}";
+    };
+    ASSERT_NO_FATAL_FAILURE(Write(source, nested(SavedInputLimits::kJsonNestingDepth)));
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Accepted"));
+    EXPECT_FALSE(fs::exists(source));
+    const auto before = Read(destination);
+    auto oversized = std::string("{}");
+    oversized.resize(SavedInputLimits::kPresetBytes + 1, ' ');
+    for (const auto& bytes : {nested(SavedInputLimits::kJsonNestingDepth + 1), oversized}) {
+        ASSERT_NO_FATAL_FAILURE(Write(source, bytes));
+        EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, source, "Refused"));
+        EXPECT_EQ(Read(source), bytes);
+        EXPECT_EQ(Read(destination), before);
+        ExpectNoStaging();
+    }
+    const auto overhead = nlohmann::json{{"name", ""}}.dump(2).size();
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Original"})"));
+    std::string display_name(SavedInputLimits::kPresetBytes - overhead, 'x');
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, source, display_name));
+    EXPECT_EQ(Read(source).size(), SavedInputLimits::kPresetBytes);
+    const auto accepted = Read(source);
+    display_name += 'x';
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, source, display_name));
+    display_name.resize(SavedInputLimits::kPresetBytes + 1, 'x');
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, source, display_name));
+    EXPECT_EQ(Read(source), accepted);
+    EXPECT_EQ(Read(destination), before);
+    ExpectNoStaging();
 }
 
 TEST_F(UserPresetPersistence, AliasedDestinationKeepsThePublishedPreset) {

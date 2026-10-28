@@ -1,4 +1,5 @@
 #include "WorldPersistenceRoundtrip.h"
+#include "SavedInputLimits.h"
 
 #include "../HashCheckpoint.h"
 #include "../core/Log.h"
@@ -766,6 +767,12 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors) {
+    if (!SavedInputLimits::JsonDepthAllowed(json_text)) {
+        errors.push_back(
+            "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
+        out_state.clear();
+        return false;
+    }
     try {
         const nlohmann::json snapshot = nlohmann::json::parse(json_text);
         if (snapshot.at("schema").get<std::string>() != kSnapshotSchema) {
@@ -814,6 +821,11 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
 
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors) {
+    if (!SavedInputLimits::JsonDepthAllowed(chunk_json)) {
+        errors.push_back(
+            "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
+        return false;
+    }
     try {
         return ValidateChunkFormatObject(nlohmann::json::parse(chunk_json), errors);
     } catch (const std::exception& e) {

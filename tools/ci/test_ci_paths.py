@@ -243,7 +243,7 @@ class PathGateTests(unittest.TestCase):
                          "Run standalone Python contracts (including CTest-registered suites)"):
                 condition = body.split(f"      - name: {step}\n", 1)[1].splitlines()[0].strip()
                 expression = condition.removeprefix("if: ${{ ").removesuffix(" }}")
-                # Windows runs the contracts once, on shard 1 (and the shard-0 qualification capture).
+                # Windows runs the contracts once, on shard 2 (and the shard-0 qualification capture).
                 shard_bound = job == "windows-msvc" and step.startswith("Run standalone")
                 for shard in (0, 1, 2) if shard_bound else (1,):
                     for cpp, python, expected in (("true", "true", True), ("false", "true", True),
@@ -253,7 +253,7 @@ class PathGateTests(unittest.TestCase):
                             "needs.changes.outputs.needs_python", repr(python)
                         ).replace("matrix.shard", repr(shard)).replace("||", "or").replace("&&", "and")
                         with self.subTest(job=job, step=step, shard=shard, cpp=cpp, python=python):
-                            self.assertEqual(eval(actual, {"__builtins__": {}}), expected and shard != 2)
+                            self.assertEqual(eval(actual, {"__builtins__": {}}), expected and (shard != 1 or not shard_bound))
             self.assertIn("route: ${{ steps.route.outputs.route }}", body)
             self.assertIn("tools/ci/ci_paths.py python-tests", body)
             self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', body)

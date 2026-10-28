@@ -520,9 +520,14 @@ private:
                               WorldStateSaveReport* report,
                               bool full_snapshot,
                               bool write_metadata);
+    bool PrepareWorldMetadataTo(const std::filesystem::path& save_dir,
+                                bool full_metadata,
+                                std::string& bytes) const;
     bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
     struct LoadedWorldState;
-    bool ReadWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
+    bool ReadWorldStateFrom(const std::filesystem::path& save_dir,
+                            LoadedWorldState& state,
+                            bool resetting_clock = false);
     void AdoptWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
@@ -607,7 +612,6 @@ private:
     void InitializeEnergyFieldState();
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
-    bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
     void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
     bool m_finiteHydrologyEnabled = true;

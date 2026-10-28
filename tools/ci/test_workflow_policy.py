@@ -1142,6 +1142,19 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
             self.assertIn("tools/ci/" + suite, inventory)
 
+    def test_msvc_configure_keeps_dependency_compiles_cacheable(self):
+        # ccache cannot cache precompiled-header or /Zi compiles; the lane already
+        # embeds symbols through its own global flags.
+        ci = jobs(self.workflows["ci.yml"])
+        msvc, = [step for step in steps(jobs(self.workflows["windows-build.yml"])["windows-msvc"])
+                 if step.startswith("      - name: Configure, build, and test\n")]
+        run = value(msvc, "run", 8)
+        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n", run)
+        self.assertIn("-DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `\n", run)
+        self.assertIn("'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF'", run)
+        for name in ("linux", "tidy-shard", "fast-compile"):
+            self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
+
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
@@ -1166,10 +1179,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Retain whole-job pins after moving the full Windows coverage out of CI.
         expected = {
             "changes": "c882d6171357b4472c24e205e1e93b2b0a2712bf4e2ed67e9ad5f4ea039cf562",
-            "windows-msvc": "7a8d069840e9a95647364af4e0fd8e02d07aff87691916ef2410fe1dd38eb885",
-            "windows-ucrt64": "92b6d1af93a4d136cac3c4f8d67b1b83b4fb5afc4203b2688a282b4a0b404490",
+            "windows-msvc": "c100060dca160c3e9db0f48fc878e3a6120aeba4bd2df6c092c8674f064645ba",
+            "windows-ucrt64": "f3a1f1a4bfa85656b95032c45a210796a903f2d3d05adbc403ea108abde8b2b1",
             "windows-msvc-result": "a212096dd9efb66e4ecabc0f6277352ab2555108773ff10582850f6ed0a094a6",
-            "windows-ucrt64-result": "5597bedc462917a7fd156d0d5f663ef58bced4bb91b5763911db585a1973c204",
+            "windows-ucrt64-result": "682f739420657b81ca698dbd27b3f6dd703bc28e5159c8181cb22f69c5f58396",
         }
         actual = jobs(self.workflows["windows-build.yml"])
         self.assertEqual(set(actual), set(expected))
