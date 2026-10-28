@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -417,3 +419,121 @@ TEST(AetherEmitterDeterminism, MultiChannelIndependence) {
 }
 
 } // namespace
+
+namespace {
+std::string EnergyPages(std::size_t count, int channels = 1) {
+    std::string record = "EFS1 " + std::to_string(channels) + " 8\n";
+    for (std::size_t page = 0; page < count; ++page)
+        record += "P " + std::to_string(page) + " 0 0:1\n";
+    return record;
+}
+} // namespace
+
+TEST(AetherEmitterDeterminism, EnergyCompatibilityChannelsAndPagesAreAdmittedBeforeMutation) {
+    using namespace luminumbra::fields;
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRecord("EFS1 16 8\nP 0 0 4095:65535\n", 0));
+    const auto original = field.CanonicalBytes();
+    EXPECT_FALSE(field.DeserializeRecord("EFS1 17 8\nP 0 0 4096:1\n", 0));
+    EXPECT_EQ(field.CanonicalBytes(), original);
+    ASSERT_TRUE(field.DeserializeRecord(EnergyPages(kEnergyReadPages), 0));
+    EXPECT_EQ(field.page_count(), kEnergyReadPages);
+    const auto accepted = field.CanonicalBytes();
+    EXPECT_FALSE(field.DeserializeRecord(EnergyPages(kEnergyReadPages + 1), 0));
+    EXPECT_EQ(field.CanonicalBytes(), accepted);
+}
+
+TEST(AetherEmitterDeterminism, EnergyWriterRefusalIsReadOnlyAndEveryWrittenRecordReloads) {
+    using namespace luminumbra::fields;
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRecord(EnergyPages(kEnergyWritePages, kEnergyRecordChannels), 0));
+    EnergyFieldState reloaded;
+    ASSERT_TRUE(reloaded.DeserializeRecord(field.SerializeRecord(0), 0));
+    EXPECT_EQ(reloaded.CanonicalBytes(), field.CanonicalBytes());
+    ASSERT_TRUE(field.DeserializeRecord(EnergyPages(kEnergyWritePages + 1), 0));
+    const auto original = field.CanonicalBytes();
+    EXPECT_THROW(static_cast<void>(field.SerializeRecord(0)), std::length_error);
+    EXPECT_EQ(field.CanonicalBytes(), original);
+    EnergyFieldState too_many_channels(kEnergyRecordChannels + 1);
+    EXPECT_THROW(static_cast<void>(too_many_channels.SerializeRecord(0)), std::length_error);
+}
+
+TEST(AetherEmitterDeterminism, EnergyRecordBytesAcceptExactLimitAndRefuseOneMoreBeforeParsing) {
+    using namespace luminumbra::fields;
+    // Whitespace padding leaves the historical record and cadence unchanged.
+    std::string record = "EFS1 16 8";
+    record.resize(kEnergyReadRecordBytes - 1, ' ');
+    record += '\n';
+    EXPECT_TRUE(EnergyFieldState::AdmitRecord(record));
+    record += ' ';
+    EXPECT_FALSE(EnergyFieldState::AdmitRecord(record));
+    EnergyFieldState field;
+    EXPECT_FALSE(field.DeserializeRecord(record, 0));
+    EXPECT_EQ(field.page_count(), 0u);
+}
+
+TEST(AetherEmitterDeterminism, EnergyMalformedControlsAndPartialNumbersFailClosed) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRecord("EFS1 2 8\nP 0 0 0:20\n", 0));
+    const auto original = field.CanonicalBytes();
+    for (const auto* record : {"EFS1 2 8 ignored\n",
+                               "EFS1 2 8\nP 0 0 0:1junk\n",
+                               "EFS1 2 8\nP 0 0 0:1:2\n",
+                               "EFS1 2 8\nP 0 0 -1:1\n",
+                               "EFS1 2 8\nP 0 0 0:1\nP 0 0 1:1\n"}) {
+        EXPECT_FALSE(field.DeserializeRecord(record, 0)) << record;
+        EXPECT_EQ(field.CanonicalBytes(), original);
+    }
+    EXPECT_FALSE(field.DeserializeRecord("EFS1 2 8\n", std::numeric_limits<std::uint64_t>::max()));
+}
+
+TEST(AetherEmitterDeterminism, LargestEnergyWriterEncodingFitsItsDerivedByteLimitAndReloads) {
+    using namespace luminumbra::fields;
+    std::string cells;
+    for (std::size_t index = 0; index < 256u * kEnergyRecordChannels; ++index)
+        cells += " " + std::to_string(index) + ":65535";
+    std::string record = "EFS1 16 8\n";
+    record.reserve(kEnergyWriteRecordBytes);
+    for (std::size_t page = 0; page < kEnergyWritePages; ++page) {
+        const int coordinate = std::numeric_limits<int>::min() + static_cast<int>(page);
+        record += "P " + std::to_string(coordinate) + " -2147483648" + cells + "\n";
+    }
+    ASSERT_EQ(record.size(), kEnergyWriteRecordBytes);
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRecord(record, 0));
+    EXPECT_EQ(field.SerializeRecord(0), record);
+    // The first extra page is refused before the writer could exceed its derived byte maximum.
+    record += "P 0 0 0:1\n";
+    ASSERT_TRUE(field.DeserializeRecord(record, 0));
+    EXPECT_THROW(static_cast<void>(field.SerializeRecord(0)), std::length_error);
+}
+
+TEST(AetherEmitterDeterminism, EnergyWriterCountsOnlyPagesRemainingAfterFrozenDecay) {
+    using namespace luminumbra::fields;
+    for (const bool excess_decays : {false, true}) {
+        SCOPED_TRACE(excess_decays);
+        // All pages are frozen outside the active window. Exactly the excess
+        // page has value 1 in the successful case; one firing decays it to zero.
+        std::string record = "EFS1 1 8\n";
+        for (std::size_t page = 0; page <= kEnergyWritePages; ++page)
+            record += "P " + std::to_string(page + 100) +
+                      " 0 0:" + (excess_decays && page == kEnergyWritePages ? "1\n" : "65535\n");
+        EnergyFieldState field;
+        ASSERT_TRUE(field.DeserializeRecord(record, 0));
+        field.SetAnchorCell(0, 0);
+        field.Tick(kEnergyCadenceTicks);
+        ASSERT_EQ(field.page_count(), kEnergyWritePages + 1);
+        const auto before = field.CanonicalBytes();
+        if (excess_decays) {
+            const auto bytes = field.SerializeRecord(kEnergyCadenceTicks);
+            EXPECT_EQ(field.page_count(), kEnergyWritePages);
+            EnergyFieldState loaded;
+            ASSERT_TRUE(loaded.DeserializeRecord(bytes, 0));
+            EXPECT_EQ(loaded.page_count(), kEnergyWritePages);
+        } else {
+            EXPECT_THROW(static_cast<void>(field.SerializeRecord(kEnergyCadenceTicks)),
+                         std::length_error);
+            EXPECT_EQ(field.CanonicalBytes(), before);
+        }
+    }
+}

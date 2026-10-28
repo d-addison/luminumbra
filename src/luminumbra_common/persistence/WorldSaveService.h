@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
@@ -82,10 +83,29 @@ public:
     static bool save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+    // Own the admitted encoding so a compound save serializes plants once,
+    // before any payload writes. Empty snapshots retain stale-file retirement.
+    class PreparedPlantWrite {
+    public:
+        PreparedPlantWrite() = default;
+        PreparedPlantWrite(const PreparedPlantWrite&) = delete;
+        PreparedPlantWrite& operator=(const PreparedPlantWrite&) = delete;
+        bool prepare(const Ecs::EntityRegistrySnapshot& snapshot,
+                     std::vector<std::string>* errors = nullptr);
+        bool publish(const std::filesystem::path& save_dir,
+                     std::vector<std::string>* errors = nullptr) const;
+
+    private:
+        // Bounded by SavedInputLimits::kPlantFileBytes during preparation.
+        std::string m_bytes;
+        bool m_prepared = false;
+        bool m_empty = true;
+    };
     // A missing file is a clean miss: out is emptied, returns true.
     static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    const std::stop_token& stop = {});
 
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
@@ -98,8 +118,9 @@ public:
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
-                                    const world::WorldClock& absent_clock = world::WorldClock{
-                                        0, world::WorldCalendar::Legacy()});
+                                    const world::WorldClock& absent_clock =
+                                        world::WorldClock{0, world::WorldCalendar::Legacy()},
+                                    const std::stop_token& stop = {});
     // Content-only projection region_content_v2: live over parked over durable records flagged
     // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
@@ -156,7 +177,8 @@ public:
                                     std::vector<std::string>* errors = nullptr,
                                     std::optional<Vec3>* ambient_anchor = nullptr,
                                     std::optional<world::WorldCalendar>* render_calendar = nullptr,
-                                    std::size_t* water_sim_cursor = nullptr);
+                                    std::size_t* water_sim_cursor = nullptr,
+                                    const std::stop_token& stop = {});
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
@@ -277,6 +299,33 @@ public:
     // The hook runs while save ownership is held; nullptr disables it.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
+    // Preparation retains process save ownership through publication or destruction.
+    // Inputs must remain stable while preparing; publication reuses compressed records.
+    // Publication consumes the preparation, including on failure.
+    // dirty_only selects every resident chunk in a dirty region, and no others.
+    class PreparedWorldWrite {
+    public:
+        PreparedWorldWrite();
+        ~PreparedWorldWrite();
+        PreparedWorldWrite(const PreparedWorldWrite&) = delete;
+        PreparedWorldWrite& operator=(const PreparedWorldWrite&) = delete;
+        bool prepare(const WorldStreamingState& state,
+                     const std::filesystem::path& save_dir,
+                     bool dirty_only,
+                     std::vector<std::string>* errors = nullptr);
+        bool publish(std::vector<std::string>* errors = nullptr,
+                     std::size_t* regions_written = nullptr);
+
+    private:
+        struct Data;
+        std::unique_ptr<Data> m_data;
+    };
+    static bool admit_metadata_bytes(const std::string& bytes,
+                                     std::vector<std::string>* errors = nullptr);
+    static bool prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                       std::string& bytes,
+                                       std::vector<std::string>* errors = nullptr);
+
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in
     // errors when provided) if the snapshot could not be written.
@@ -313,16 +362,6 @@ public:
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors = nullptr,
                                            bool acknowledge_dirty = true) const;
-
-private:
-    // The single v2 write seam: serializes the given chunks into LMR1 region
-    // files, merging with on-disk records, and refreshes the world manifest.
-    // regions_written receives the
-    // number of region files rewritten when provided.
-    bool write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
-                        const std::filesystem::path& save_dir,
-                        std::vector<std::string>* errors,
-                        std::size_t* regions_written = nullptr) const;
 };
 
 } // namespace Luminumbra::Persistence

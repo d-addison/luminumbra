@@ -233,7 +233,13 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
                               ("LoadWorldStateFrom", "state")):
             with self.subTest(method=method):
                 loading = body(session, f"bool GameSession::{method}(")
-                refusal = loading.split(f", {state})) {{", 1)[1].split("return false;", 1)[0]
+                match = re.search(
+                    rf"if \(!ReadWorldStateFrom\([^;]*,\s*{state}(?:,\s*true)?\)\) \{{",
+                    loading,
+                )
+                self.assertIsNotNone(match)
+                refusal = loading[match.end():].split("return false;", 1)[0]
+                refusal = body(refusal, f"if (!{state}.input_refused)")
                 self.assertIn("++m_worldRevision;", refusal)
                 self.assertLess(refusal.index("++m_worldRevision;"),
                                 refusal.index("m_worldSystem->clear_world("))

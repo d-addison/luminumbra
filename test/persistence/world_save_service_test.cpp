@@ -7,6 +7,7 @@
 
 #include "core/FilesystemPath.h"
 #include "luminumbra/core/Types.h"
+#include "persistence/SavedInputFile.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -19,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +35,7 @@
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -1173,7 +1176,7 @@ TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirecto
     }
 }
 
-TEST(WorldSaveService, DirectLegacySnapshotsKeepMetadataAboveCatalogSizeLimit) {
+TEST(WorldSaveService, DirectLegacySnapshotsKeepLargeMetadata) {
     const TempSaveDir destination("large_metadata");
     const nlohmann::json metadata = {{"container_version", 2},
                                      {"extension", std::string(std::size_t{1024} * 1024u, 'x')}};
@@ -1535,3 +1538,38 @@ TEST(WorldSaveService, SupportedCalendarWritesNormalizeOnlyOnSuccessfulExplicitS
         }
     }
 }
+
+#ifndef _WIN32
+TEST(WorldSaveService, SavedInputReadRetriesInterruptionsForPayloadAndEofOnly) {
+    using Luminumbra::Persistence::detail::ReadSavedInputRetryingInterrupt;
+    for (const auto final_result : {ssize_t{0}, ssize_t{1}, ssize_t{-1}}) {
+        int attempts = 0;
+        const auto result = ReadSavedInputRetryingInterrupt([&] {
+            ++attempts;
+            if (attempts <= 2) {
+                errno = EINTR;
+                return ssize_t{-1};
+            }
+            errno = EIO;
+            return final_result;
+        });
+        EXPECT_EQ(result, final_result);
+        EXPECT_EQ(attempts, 3);
+    }
+}
+TEST(WorldSaveService, SavedInputReadCancellationStopsAnInterruptedRetry) {
+    using Luminumbra::Persistence::detail::ReadSavedInputRetryingInterrupt;
+    std::stop_source cancellation;
+    int attempts = 0;
+    const auto result = ReadSavedInputRetryingInterrupt(
+        [&] {
+            ++attempts;
+            cancellation.request_stop();
+            errno = EINTR;
+            return ssize_t{-1};
+        },
+        cancellation.get_token());
+    EXPECT_EQ(result, -1);
+    EXPECT_EQ(attempts, 1);
+}
+#endif
