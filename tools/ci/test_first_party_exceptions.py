@@ -80,6 +80,10 @@ class FirstPartyExceptionsTests(unittest.TestCase):
                 compiler = compiler_path(language)
                 compiler_id = 'MSVC' if compiler.name.lower() == 'cl.exe' else (
                     'Clang' if 'clang' in compiler.name else 'GNU')
+                # The generated commands are never executed, so the POSIX policy case
+                # simulates a GNU toolchain even where only cl.exe is installed.
+                if compiler_id == 'MSVC' and not msvc:
+                    compiler_id = 'GNU'
                 preamble += [f'set(CMAKE_{language}_COMPILER "{compiler.as_posix()}")',
                              f'set(CMAKE_{language}_COMPILER_ID {compiler_id})',
                              f'set(CMAKE_{language}_COMPILER_ID_RUN TRUE)',
