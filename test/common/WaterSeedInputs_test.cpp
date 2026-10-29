@@ -1458,6 +1458,145 @@ TEST(WaterSeedInputs, LegacyFloatPairMigratesTogetherAndThenSteps) {
     EXPECT_NE(chunk.water_depth_mm, before);
 }
 
+TEST(WaterSeedInputs, SameResolutionLegacyFloatsMigrateAtLoadAndDirectResize) {
+    for (const int resolution : {8, 16}) {
+        for (const bool direct : {false, true}) {
+            SeedFixture fixture;
+            fixture.water().SetSimResolution(resolution);
+            fixture.tick();
+            auto& chunk = *fixture.chunks().begin()->second;
+            const auto cells = static_cast<std::size_t>(resolution * resolution);
+            chunk.water_bed_mm.clear();
+            chunk.water_depth_mm.clear();
+            chunk.water_edge_flux.clear();
+            chunk.water_level_data.assign(cells, 1000.0f);
+            chunk.water_flow_data.assign(cells, Vec2(2.0f, -3.0f));
+            if (direct) {
+                ASSERT_TRUE(fixture.water().ResizeSimulationGrid(
+                    chunk, static_cast<Systems::WaterDetailLevel>(resolution)));
+            } else {
+                ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+            }
+            ASSERT_EQ(chunk.water_bed_mm.size(), cells);
+            ASSERT_EQ(chunk.water_depth_mm.size(), cells);
+            EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * cells, 0));
+            for (std::size_t index = 0; index < cells; ++index) {
+                EXPECT_NEAR(chunk.water_level_data[index], 1000.0f, 0.002f);
+                EXPECT_GT(chunk.water_depth_mm[index], 0);
+                EXPECT_EQ(chunk.water_flow_data[index], Vec2(2.0f, -3.0f));
+            }
+            const auto beds = chunk.water_bed_mm;
+            const auto depths = chunk.water_depth_mm;
+            ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 0u);
+            EXPECT_EQ(chunk.water_bed_mm, beds);
+            EXPECT_EQ(chunk.water_depth_mm, depths);
+            fixture.water().SetHydrology(true, 3, 1);
+            chunk.is_water_sleeping.store(false);
+            fixture.tick();
+            EXPECT_EQ(fixture.water().cells_stepped_last_update(), cells);
+            EXPECT_NE(chunk.water_depth_mm, depths);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, SameResolutionLegacyFloatsMigrateDuringLiveUpdate) {
+    SeedFixture fixture;
+    fixture.tick();
+    auto& chunk = *fixture.chunks().begin()->second;
+    const auto cells = chunk.water_level_data.size();
+    chunk.water_bed_mm.clear();
+    chunk.water_depth_mm.clear();
+    chunk.water_edge_flux.clear();
+    chunk.water_level_data.assign(cells, 1000.0f);
+    chunk.water_flow_data.clear();
+    chunk.is_water_sleeping.store(false);
+    fixture.tick();
+    EXPECT_EQ(chunk.water_bed_mm.size(), cells);
+    EXPECT_EQ(chunk.water_depth_mm.size(), cells);
+    EXPECT_EQ(fixture.water().cells_stepped_last_update(), cells);
+}
+
+TEST(WaterSeedInputs, LegacyMissingOrShortSurfaceKeepsAvailableFlow) {
+    for (const std::size_t surface_cells : {0u, 3u}) {
+        for (const std::size_t flow_cells : {0u, 4u}) {
+            SeedFixture fixture;
+            fixture.water().SetSimResolution(8);
+            fixture.tick();
+            auto& chunk = *fixture.chunks().begin()->second;
+            chunk.current_water_resolution.store(2);
+            chunk.water_bed_mm.clear();
+            chunk.water_depth_mm.clear();
+            chunk.water_edge_flux.clear();
+            chunk.water_level_data.assign(surface_cells, 1000.0f);
+            chunk.water_flow_data.assign(flow_cells, Vec2(2.0f, -3.0f));
+            ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+            ASSERT_EQ(chunk.water_depth_mm.size(), 64u);
+            ASSERT_EQ(chunk.water_flow_data.size(), 64u);
+            for (std::size_t index = 0; index < 64; ++index) {
+                const float terrain = chunk.water_sim_terrain_height[index];
+                const auto depth = std::max(0L, std::lround((SEA_LEVEL - terrain) * 1000.0f));
+                EXPECT_EQ(chunk.water_depth_mm[index], depth);
+                EXPECT_EQ(chunk.water_flow_data[index],
+                          flow_cells == 0 ? Vec2(0.0f) : Vec2(2.0f, -3.0f));
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, LegacySurfaceMigrationDefaultsOnlyMissingFlowSamples) {
+    for (const int old_res : {2, 8, 16, 32}) {
+        for (const int new_res : {8, 16}) {
+            const auto old_cells = static_cast<std::size_t>(old_res * old_res);
+            for (const auto flow_cells :
+                 {std::size_t{0}, std::size_t{1}, old_cells - 1, old_cells}) {
+                SeedFixture fixture;
+                fixture.water().SetSimResolution(new_res);
+                fixture.tick();
+                auto& chunk = *fixture.chunks().begin()->second;
+                chunk.current_water_resolution.store(old_res);
+                chunk.water_bed_mm.clear();
+                chunk.water_depth_mm.clear();
+                chunk.water_edge_flux.clear();
+                chunk.water_level_data.resize(old_cells);
+                for (int z = 0; z < old_res; ++z)
+                    for (int x = 0; x < old_res; ++x)
+                        chunk.water_level_data[static_cast<std::size_t>(z * old_res + x)] =
+                            1000.0f + static_cast<float>(64 * z + x);
+                chunk.water_flow_data.assign(flow_cells, Vec2(2.0f, -3.0f));
+                ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+                ASSERT_EQ(chunk.water_level_data.size(),
+                          static_cast<std::size_t>(new_res * new_res));
+                ASSERT_EQ(chunk.water_flow_data.size(), chunk.water_level_data.size());
+                for (int z = 0; z < new_res; ++z) {
+                    for (int x = 0; x < new_res; ++x) {
+                        const double sx = static_cast<double>(x * (old_res - 1)) / (new_res - 1);
+                        const double sz = static_cast<double>(z * (old_res - 1)) / (new_res - 1);
+                        const int x0 = static_cast<int>(sx);
+                        const int z0 = static_cast<int>(sz);
+                        const double fx = sx - x0;
+                        const double fz = sz - z0;
+                        const auto available = [&](int ix, int iz) {
+                            return static_cast<std::size_t>(iz * old_res + ix) < flow_cells ? 1.0
+                                                                                            : 0.0;
+                        };
+                        const int x1 = std::min(x0 + 1, old_res - 1);
+                        const int z1 = std::min(z0 + 1, old_res - 1);
+                        const double weight = (1 - fx) * (1 - fz) * available(x0, z0) +
+                                              fx * (1 - fz) * available(x1, z0) +
+                                              (1 - fx) * fz * available(x0, z1) +
+                                              fx * fz * available(x1, z1);
+                        const auto index = static_cast<std::size_t>(z * new_res + x);
+                        EXPECT_NEAR(chunk.water_level_data[index], 1000.0 + sx + 64 * sz, 0.003);
+                        EXPECT_GT(chunk.water_depth_mm[index], 0);
+                        EXPECT_NEAR(chunk.water_flow_data[index].x, 2 * weight, 0.00001);
+                        EXPECT_NEAR(chunk.water_flow_data[index].y, -3 * weight, 0.00001);
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(WaterSeedInputs, WorldWaterProbesRefuseUnsupportedResolutionBeforeSizeArithmetic) {
     SeedFixture fixture;
     fixture.tick();
