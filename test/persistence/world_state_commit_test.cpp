@@ -186,9 +186,9 @@ protected:
         EXPECT_EQ(reader.GetWorldSystem(), previous_system);
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
         const auto retained = reader.GetWorldSystem()->snapshot_streamed_chunks();
-        // Catalog refusals precede the state readers and retain the old world.
-        // SDF and scheduler checks run after preflight; all snapshot refusals clear.
-        if (load_path == 0 || failure == LoadFailure::Sdf || failure == LoadFailure::Scheduler) {
+        // Direct snapshot failures retain their fatal-state contract. Candidate
+        // opens preserve the live world even when final state validation refuses.
+        if (load_path == 0) {
             EXPECT_TRUE(retained.empty());
             const auto refused_export = root / "refused-export";
             EXPECT_FALSE(reader.SaveWorldStateTo(refused_export));
