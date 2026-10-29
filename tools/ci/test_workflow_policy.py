@@ -96,7 +96,8 @@ ASAN_MERGE_COMMAND = ('python3 tools/ci/ctest_shards.py merge --profile asan --d
                       '--reason "$CI_HEAVY_REASON"')
 UCRT_CLASSIFICATION = (
     "needs.changes.outputs.needs_cpp != 'false' || "
-    "(github.event_name == 'pull_request' && github.base_ref == 'main')"
+    "(github.event_name == 'pull_request' && (github.base_ref == 'main' || "
+    "contains(github.event.pull_request.labels.*.name, 'windows-proof')))"
 )
 UCRT_ROUTE = (
     "(github.event_name == 'push' && (github.ref == 'refs/heads/devel' || "
@@ -1018,10 +1019,10 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             # shard-1-only Python contracts and verbose compiler cache statistics.
             "windows-msvc": "417e0b31c5bede0076e48e3b6e9da528e30f529c3fd92017be9ba3f7519bcee9",
             # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
-            "windows-ucrt64": "e062bc566e6220e653ee96f6d85cd1494206802d3971d58f95f62a20b31a59c4",
+            "windows-ucrt64": "7f44d5762b7ceb7c096fab1f31478c3c930bdb6829365ce83f4ead0921799eeb",
             "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
             "windows-msvc-result": "8ed308a876a2cabec06a4083fcf87981cdb572e2cf32cbab65aefd327d4e5073",
-            "windows-ucrt64-result": "34a33c1e0bcb8212b01f3803ccf6798f6c37c8d1d66c575df6b9148e1cb2dc80",
+            "windows-ucrt64-result": "dd4646d859c3451f01ae7cf328337256ca30e26a86ee97efd66518f2b2625b96",
             "lint": "b32b7f25c8c59c2cdc664382725f86838f8aef9328f8cee52fd0741ba41b86e0",
             "tidy-shard": "53d7432d5fec3526d1f32296223f8a28541b584c3b3d5039ac8a2f9476a4a104",
             "tidy": "771a907ee610dfff3fb01bf35c7a34fe5fdf8b5300ab92dbcbbe813ea6ebc949",
@@ -2674,7 +2675,7 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                 or (event == "pull_request" and
                     (branch == "main" or label.lower() == "windows-proof" or paths.lower() == "true"))
             )
-            native = cpp != "false" or (event == "pull_request" and branch == "main")
+            native = cpp != "false" or (event == "pull_request" and (branch == "main" or label.lower() == "windows-proof"))
             expected = not cancelled and native and (event != "pull_request" or draft is False) and eligible
             def evaluate(condition):
                 actual = render_edit_context(condition).replace("!cancelled()", repr(not cancelled)).replace(
@@ -2766,7 +2767,7 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
             for job_id in ("windows-msvc", "windows-ucrt64"):
                 gate = next(step for step in steps(ci[job_id + "-result"])
                             if "name: Require expected producers and route" in step)
-                for index, (base, (cpp, python, classification, result)) in enumerate(product(("main", "devel"), (
+                for index, (base, label, (cpp, python, classification, result)) in enumerate(product(("main", "devel"), (False, True), (
                         ("false", "false", "success", "skipped"),
                         ("false", "false", "failure", "skipped"),
                         ("false", "false", "", "skipped"),
@@ -2777,12 +2778,15 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                         # MSVC keeps running the Python contracts on a Python-only change.
                         ("false", "true", "success", "success"),
                         ("false", "true", "success", "skipped")))):
-                    native = (cpp != "false" or (python != "false" if job_id == "windows-msvc" else base == "main"))
+                    # UCRT64 is on demand for a PR: main-bound or windows-proof labelled, even for
+                    # confirmed non-C++ changes. Otherwise this grid has no UCRT64 path match.
+                    native = (cpp != "false" or python != "false") if job_id == "windows-msvc" else (
+                        base == "main" or label)
                     accepted = classification == "success" and result == ("success" if native else "skipped")
                     enabled = value(gate, "CI_ENABLED", 10).replace(
                         "github.base_ref", repr(base)).replace(
                         "github.ref", repr("refs/heads/main")).replace(
-                        "contains(github.event.pull_request.labels.*.name, 'windows-proof')", "True").replace(
+                        "contains(github.event.pull_request.labels.*.name, 'windows-proof')", repr(label)).replace(
                         "needs.changes.outputs.needs_ucrt64", repr("false")).replace(
                         "needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                         "needs.changes.outputs.needs_python", repr(python)).replace("github.event_name", repr("pull_request"))
@@ -2799,7 +2803,8 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                                                  CI_QUALIFICATION="false", CI_ENABLED=enabled,
                                                  GITHUB_STEP_SUMMARY=(Path(directory) / f"summary-{job_id}-{index}").as_posix()),
                                              capture_output=True, timeout=10)
-                    with self.subTest(job=job_id, base=base, cpp=cpp, python=python, classification=classification, result=result):
+                    with self.subTest(job=job_id, base=base, label=label, cpp=cpp, python=python,
+                                      classification=classification, result=result):
                         self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
                         if accepted and result == "skipped":
                             self.assertIn(b"skipped", process.stdout)
