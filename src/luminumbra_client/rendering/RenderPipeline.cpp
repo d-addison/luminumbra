@@ -1292,6 +1292,8 @@ RenderPipeline::set_far_world_cave_policy(std::optional<World::FarCaveMode> requ
 
 void RenderPipeline::prepare_world_swap() {
     m_far_world->PrepareWorldSwap();
+    m_waterfall_pass->destroy_geometry();
+    m_particle_pass->clear_waterfall_spray();
     ++m_far_world_epoch;
     m_frame_prepared.valid = false;
     m_taau_pass->invalidate_history();

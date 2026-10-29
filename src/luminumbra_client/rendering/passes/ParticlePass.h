@@ -171,6 +171,16 @@ public:
     std::size_t live_particle_count() const {
         return m_live_count;
     }
+    // Render-only diagnostic copy in pool order, bounded by kMaxInstances.
+    // Reports ownership and motion without exposing mutable particle storage.
+    struct LiveParticleState {
+        glm::vec3 pos{0.0f};
+        glm::vec3 vel{0.0f};
+        float age = 0.0f;
+        float lifetime = 1.0f;
+        uint32_t emitter_index = 0;
+    };
+    std::vector<LiveParticleState> live_particle_states() const;
     // the instance count update prepared for this
     // frame, exposed so RenderPipeline::capture_particle_parity can assert
     // execute's return value (the relocated stat source) without friending the
@@ -232,6 +242,8 @@ public:
                                  const glm::vec3& plunge_pos,
                                  float drop_height,
                                  float channel_width);
+    // Remove waterfall emitters and their mist while preserving other emitter handles.
+    void clear_waterfall_spray();
 
     // per-frame WIND velocity (world-space; horizontal XZ carried in
     // x/z, y usually 0) sampled by the client from the  wind field / replicated

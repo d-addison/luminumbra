@@ -51,6 +51,56 @@ class UploadBudgetWiring(unittest.TestCase):
         python_tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
         self.assertIn('"test/rendering/test_upload_budget_wiring.py"', python_tests)
 
+    def test_waterfall_replacement_clears_sites_and_spray_before_empty_site_return(self):
+        source = read(RENDERING / "passes/WaterfallPass.cpp")
+        destroy = compact(body(source, "void WaterfallPass::destroy_geometry()"))
+        self.assertIn("m_sites.clear();", destroy)
+        self.assertEqual(brace_depth(destroy, destroy.index("m_sites.clear();")), 0)
+        prepare = compact(body(source, "void WaterfallPass::prepare("))
+        query = prepare.index("waterfall_sites(world)")
+        empty = prepare.index("if (sites.empty())")
+        self.assertLess(prepare.index("destroy_geometry();"), query)
+        self.assertLess(prepare.index("particle_pass->clear_waterfall_spray();"), query)
+        self.assertLess(query, empty)
+        self.assertLess(empty, prepare.index("particle_pass->add_waterfall_spray("))
+        self.assertIn("particle_pass->clear_waterfall_spray();",
+                      body(prepare, "if (particle_pass)"))
+        swap = body(self.pipeline, "void RenderPipeline::prepare_world_swap()")
+        self.assertIn("m_waterfall_pass->destroy_geometry();", swap)
+        self.assertIn("m_particle_pass->clear_waterfall_spray();", swap)
+        entry = body(self.main, "auto finish_world_entry =")
+        self.assertIn("renderPipeline.prepare_waterfalls(*world_system);", entry)
+        forward = body(self.pipeline, "void RenderPipeline::prepare_waterfalls(")
+        self.assertIn("m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);",
+                      forward)
+        preview = read(ROOT / "src/luminumbra_client/world/WorldgenPreview.cpp")
+        self.assertIn("pipeline.prepare_world_swap();", preview)
+
+    def test_waterfall_spray_cleanup_preserves_other_emitter_handles_and_indices(self):
+        source = read(RENDERING / "passes/ParticlePass.cpp")
+        add = body(source, "uint32_t ParticlePass::add_waterfall_spray(")
+        self.assertIn("spray.waterfall_spray = true;", add)
+        self.assertLess(add.index("if (id == kInvalidEmitter)"),
+                        add.index("spray.waterfall_spray = true;"))
+        clear = compact(body(source, "void ParticlePass::clear_waterfall_spray()"))
+        self.assertIn("std::array<std::size_t, kMaxEmitters> remap{};", clear)
+        self.assertIn("remap[index] = kNoSplashEmitter;", clear)
+        self.assertIn("remap[index] = kept;", clear)
+        self.assertIn("m_active_emitters[kept] = std::move(m_active_emitters[index]);", clear)
+        self.assertIn("particle.alive = false;", clear)
+        self.assertIn("m_live_count = 0;", clear)
+        self.assertIn("++m_live_count;", clear)
+        self.assertIn("particle.emitter_index = static_cast<uint32_t>(mapped);", clear)
+        self.assertIn("m_splash_emitter_index = remap[m_splash_emitter_index];", clear)
+        self.assertIn("m_active_emitters.resize(kept);", clear)
+        self.assertIn("m_descriptors.clear();", clear)
+        self.assertIn("m_frame_instance_count = 0;", clear)
+        self.assertNotIn("clear_emitters()", clear)
+        self.assertNotIn("m_next_emitter_id =", clear)
+        native = read(ROOT / "test/rendering/particle_determinism_test.cpp")
+        self.assertIn("WaterfallReplacementPreservesOtherEmitterHandles", native)
+        self.assertIn("particle_determinism_test", read(ROOT / "test/CMakeLists.txt"))
+
     def test_both_live_backends_use_policy_and_include_preparation(self):
         self.assertIn("manage_mesh_gpu_resources<false>", self.pipeline)
         self.assertIn("manage_mesh_gpu_resources<true>", self.pipeline)
@@ -712,6 +762,38 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("TruncatedIndexFlushFailureAndCompleteStreamAreDistinct", native)
         gl_native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
         self.assertIn("UnwritableReportImageInvalidScanAndCompleteOutput", gl_native)
+
+    def test_legacy_water_migrates_at_equal_resolution(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        migration = compact(body(source, "std::size_t WaterSystem::MigrateChunksToSimResolution("))
+        self.assertIn("== m_sim_resolution && HasCompleteIntegerWaterGrid(*cp, m_sim_resolution)",
+                      migration)
+        resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
+        self.assertIn("new_resolution == current_resolution && "
+                      "!(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())", resize)
+        update = compact(body(source, "void WaterSystem::update("))
+        self.assertIn("chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()",
+                      update)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for regression in ("SameResolutionLegacyFloatsMigrateAtLoadAndDirectResize",
+                           "SameResolutionLegacyFloatsMigrateDuringLiveUpdate"):
+            self.assertIn(regression, native)
+
+    def test_legacy_surface_migration_does_not_require_flow(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
+        self.assertIn("const bool can_interpolate_surface = old_water_levels.size() >= old_cell_count;",
+                      resize)
+        surface = compact(body(resize, "if (can_interpolate_surface)"))
+        self.assertIn("chunk.water_level_data[idx] =", surface)
+        self.assertNotIn("flow", surface)
+        flow = compact(body(resize, "const auto flow_at ="))
+        self.assertIn("index < old_flow_data.size() ? old_flow_data[index] : Vec2(0.0f)", flow)
+        for corner in ("x0, z0", "x1, z0", "x0, z1", "x1, z1"):
+            self.assertIn(f"flow_at({corner})", resize)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        self.assertIn("LegacySurfaceMigrationDefaultsOnlyMissingFlowSamples", native)
+        self.assertIn("LegacyMissingOrShortSurfaceKeepsAvailableFlow", native)
 
     def test_water_migration_preserves_both_integer_grids_without_float_feedback(self):
         source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")

@@ -47,6 +47,7 @@ void WaterfallPass::destroy_geometry() {
     m_adopted_spray = 0;
     m_replace_spray = false;
     m_sheet_sites.clear();
+    m_sites.clear();
     m_geometry_built = false;
 }
 
