@@ -417,7 +417,7 @@ TEST_F(WorldEntryFilesystem, JournalEntryReloadAndExportRetainCalendarAndWaterCu
     jobs.shutdown();
 }
 
-TEST_F(WorldEntryFilesystem, FatalStagedReadChangesRevisionAndDisablesEverySavePath) {
+TEST_F(WorldEntryFilesystem, StagedReadRefusalKeepsCandidateOpensLiveAndTearsDownSnapshotRead) {
     InstallPresets();
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
@@ -449,9 +449,15 @@ TEST_F(WorldEntryFilesystem, FatalStagedReadChangesRevisionAndDisablesEverySaveP
         EXPECT_FALSE(loaded);
         EXPECT_NE(reader.GetWorldOpenError().find("persisted region scheduler differs"),
                   std::string::npos);
-        EXPECT_NE(reader.WorldRevision(), revision);
+        // Candidate opens keep the live world when final state validation
+        // refuses; only the direct snapshot read tears it down.
+        if (path == 2) {
+            EXPECT_NE(reader.WorldRevision(), revision);
+            EXPECT_FALSE(reader.LoadWorldState());
+        } else {
+            EXPECT_EQ(reader.WorldRevision(), revision);
+        }
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
-        EXPECT_FALSE(reader.LoadWorldState());
         EXPECT_FALSE(reader.SaveWorld());
         EXPECT_FALSE(reader.SaveWorldState());
         EXPECT_FALSE(reader.SaveWorldStateTo(root / "refused-export", nullptr, true));
