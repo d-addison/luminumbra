@@ -1069,6 +1069,91 @@ struct ScopedFarGl {
 };
 } // namespace
 
+TEST(FarLodPersistence, SaveFenceCompletesAcceptedWritesAndRetainsBindingAndDeferredUploads) {
+    const ScopedFarGl gl;
+    const SaveDirectory save;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    const Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(save.path());
+    far.wait_for_accepted_cache_writes(); // empty writer queue
+    far.wait_for_world_readers();         // no readers yet
+    const Vec3 camera(256, 100, 256);
+    far.update(world, camera);
+    jobs.wait(jobs.dispatch_batch({[] {
+    }}));
+    far.update(world, camera);
+    ASSERT_GT(far.stats().integration_uploads_deferred, 0u);
+    const auto resident = far.stats().regions_resident;
+    far.wait_for_accepted_cache_writes();
+    // The fence returns only after every accepted tile has reached its captured path.
+    // Dispatch admits at most kMaxBuildDispatchesPerFrame writes in this first batch.
+    std::size_t regions = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(save.path()))
+        if (entry.path().extension() == ".lmr")
+            ++regions;
+    EXPECT_EQ(regions, Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    FarLodTile loaded;
+    ASSERT_TRUE(
+        FarLodStore(save.path())
+            .load_tile(FarLodTier::F1, 0, 0, ComputeTerrainParamsHash(params, 1337), loaded));
+    EXPECT_FALSE(loaded.height_q.empty());
+    ExpectNoTemps(save.path());
+    EXPECT_EQ(far.stats().regions_resident, resident);
+    far.wait_for_world_readers(); // reader completion also retains unpublished results
+    // Resuming the identical world must integrate retained deferred work. An
+    // unbound world instead discards it and dispatches a fresh first batch.
+    far.update(world, camera);
+    EXPECT_GT(far.stats().builds_integrated_ok, 0u);
+    EXPECT_EQ(far.stats().tile_save_failures, 0u);
+    far.shutdown();
+    jobs.shutdown();
+}
+
+TEST(FarLodPersistence, SaveFenceFinishesFailedWritesWithoutDiscardingDeferredUploads) {
+    const ScopedFarGl gl;
+    const SaveDirectory save;
+    const auto blocked = save.path() / "blocked";
+    ASSERT_TRUE(std::filesystem::create_directory(blocked));
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    const Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(blocked);
+    const Vec3 camera(256, 100, 256);
+    far.update(world, camera);
+    jobs.wait(jobs.dispatch_batch({[] {
+    }}));
+    // Finish successful reads before making the captured destination unwritable.
+    // The completed batch is accepted for persistence only by the following update.
+    ASSERT_TRUE(std::filesystem::remove(blocked));
+    {
+        std::ofstream output(blocked);
+        output << "regular file prevents cache directory creation";
+        ASSERT_TRUE(output.good());
+    }
+    far.update(world, camera);
+    ASSERT_GT(far.stats().integration_uploads_deferred, 0u);
+    far.wait_for_accepted_cache_writes();
+    far.update(world, camera);
+    EXPECT_GT(far.stats().builds_integrated_ok, 0u);
+    EXPECT_GE(far.stats().tile_save_failures, Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    EXPECT_TRUE(std::filesystem::is_regular_file(blocked));
+    far.shutdown();
+    jobs.shutdown();
+}
+
 TEST(FarLodPersistence, ProductionWorldSwapFlushesSavesEvenWhenUploadsAreDeferred) {
     const ScopedFarGl gl;
 

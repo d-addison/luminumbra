@@ -554,6 +554,39 @@ TEST(FarWorldRenderer, UploadedDrawMetadataAndSynchronousBorrowing) {
     EXPECT_EQ(owner.State().draws, 1u);
 }
 
+TEST(FarWorldRenderer, SaveFencePreservesBindingOwnershipAndDraws) {
+    Owner owner;
+    ASSERT_TRUE(owner.WaitSettled(Request()));
+    auto& renderer = owner.Renderer();
+    renderer.BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    const auto* residency = renderer.Residency();
+    const auto epoch = renderer.world_epoch();
+    const auto live = owner.State().live;
+    const auto deletes = owner.State().deletes;
+    owner.State().ownership_bound = true;
+    renderer.WaitForAcceptedCacheWrites();
+    EXPECT_TRUE(owner.State().ownership_bound);
+    EXPECT_EQ(renderer.Residency(), residency);
+    EXPECT_EQ(renderer.world_epoch(), epoch);
+    EXPECT_EQ(owner.State().live, live);
+    EXPECT_EQ(owner.State().deletes, deletes);
+    owner.State().ownership_bound = false;
+    EXPECT_EQ(renderer
+                  .Submit({0, 0, 0},
+                          [&](const auto&) {
+                              EXPECT_THROW(renderer.WaitForAcceptedCacheWrites(), std::logic_error);
+                              return true;
+                          })
+                  .draws,
+              1u);
+    std::thread foreign(
+        [&] { EXPECT_THROW(renderer.WaitForAcceptedCacheWrites(), std::logic_error); });
+    foreign.join();
+    renderer.PrepareWorldSwap();
+    EXPECT_NO_THROW(renderer.WaitForAcceptedCacheWrites()); // no binding or accepted writes
+}
+
 TEST(FarWorldRenderer, WorldSwapDrainsBeforeAuthorityMemoryDriverAndContextRelease) {
     Owner owner;
     ASSERT_TRUE(owner.WaitSettled(Request()));
@@ -1890,6 +1923,54 @@ TEST(FarWorldHandoffRenderer, EveryTierAndProfileCapturesInTheBoundMemoryDomain)
             }
         }
     }
+}
+
+TEST(FarWorldHandoffRenderer, SaveFencePreservesBindingOwnershipAndDraws) {
+    JobSystem jobs;
+    jobs.startup(1);
+    DriverState state;
+    FarWorldHandoffRenderer renderer;
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    EXPECT_NO_THROW(renderer.WaitForAcceptedCacheWrites()); // no binding or accepted writes
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits()));
+    const std::array inputs{RendererHandoffInput(renderer, {5, 0, 0}, 1, true)};
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, inputs)));
+    std::uint64_t frame = 0;
+    ASSERT_TRUE(RendererHandoffWait([&] {
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16ULL * 1024 * 1024});
+        return renderer.Handoff()->State().serving_serial == 1;
+    }));
+    renderer.BeginLiveOwnership(frame);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    const auto* handoff = renderer.Handoff();
+    const auto live = state.live;
+    const auto deletes = state.deletes;
+    state.ownership_bound = true;
+    renderer.WaitForAcceptedCacheWrites();
+    EXPECT_TRUE(state.ownership_bound);
+    ASSERT_EQ(renderer.Handoff(), handoff);
+    EXPECT_EQ(renderer.Handoff()->State().serving_serial, 1u);
+    EXPECT_EQ(state.live, live);
+    EXPECT_EQ(state.deletes, deletes);
+    state.ownership_bound = false;
+    EXPECT_EQ(renderer
+                  .Submit({0, 0, 0},
+                          [&](const auto&) {
+                              EXPECT_THROW(renderer.WaitForAcceptedCacheWrites(), std::logic_error);
+                              return true;
+                          })
+                  .draws,
+              1u);
+    std::thread foreign(
+        [&] { EXPECT_THROW(renderer.WaitForAcceptedCacheWrites(), std::logic_error); });
+    foreign.join();
+    renderer.Shutdown();
+    jobs.shutdown();
 }
 
 TEST(FarWorldHandoffRenderer, SameFrameOwnershipAndSubmitExceptionRestoreBindings) {

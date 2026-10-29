@@ -252,7 +252,7 @@ static std::string KeyDisplayLabel(int key) {
 // the cheap half). Capture/scenario runs compute synchronously so frame-1
 // content is unchanged. TEARDOWN CONTRACT: the job's callbacks hold a raw
 // SHIELD_WorldSystem* — every world transition (CreateWorld / session reset)
-// MUST DrainWorldDressing first, exactly like DrainBackgroundWorldScan above.
+// MUST wait for the dressing job first; discard its results only after adoption.
 struct WorldDressingPending {
     const void* world = nullptr; // identity guard: consume only for the world computed
     Luminumbra::Client::WorldDressingResult result;
@@ -2532,7 +2532,18 @@ int main(int argc, char* argv[]) {
         DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     };
 
+    auto wait_for_world_entry_readers = [&]() {
+        renderPipeline.wait_for_world_readers();
+        WaitForBackgroundWorldScan(jobSystem);
+        jobSystem.wait(s_worldDressingHandle);
+    };
+
     auto entry_world_revision = gameSession->WorldRevision();
+    auto finish_world_replacement = [&]() {
+        // An open can refuse before adoption. Preserve the still-live world's visuals/results.
+        if (gameSession->WorldRevision() != entry_world_revision)
+            prepare_world_entry();
+    };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
         const auto& detail = gameSession->GetWorldOpenError();
@@ -2791,8 +2802,10 @@ int main(int argc, char* argv[]) {
             refuse_world_entry(asset_error, false);
             return;
         }
-        prepare_world_entry();
-        if (!gameSession->CreateWorld(name, seed, worldType, customPtr)) {
+        wait_for_world_entry_readers();
+        const bool created = gameSession->CreateWorld(name, seed, worldType, customPtr);
+        finish_world_replacement();
+        if (!created) {
             refuse_world_entry("Could not create this world. Check the save location and preset.");
             return;
         }
@@ -2836,10 +2849,11 @@ int main(int argc, char* argv[]) {
                 return;
             }
         }
-        // Verify the snapshot before draining or changing the current world.
-        prepare_world_entry();
+        // Verify the snapshot before waiting for readers or changing the current world.
+        wait_for_world_entry_readers();
         const bool loaded = snapshot ? gameSession->LoadWorldFrom(id, snapshot->root())
                                      : gameSession->LoadWorld(id);
+        finish_world_replacement();
         if (!loaded) {
             refuse_world_entry("Could not load this world.");
             return;
@@ -3298,8 +3312,8 @@ int main(int argc, char* argv[]) {
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
-                // Complete accepted cache writes before saving authoritative state.
-                prepare_world_entry();
+                // Complete accepted cache writes without dismantling the live world.
+                renderPipeline.wait_for_accepted_far_tile_writes();
                 if (!gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -3745,15 +3759,14 @@ int main(int argc, char* argv[]) {
                                    !HasCommandLineFlag(argc, argv, "--no-menu-backdrop") &&
                                    gameStateManager.GetCurrentState() == GameState::MAIN_MENU;
         if (want_backdrop) {
-            renderPipeline.prepare_world_swap();
             // Use a deterministic golden-hour mountain vista behind the menu:
             // fixed seed, camera, dusk time-of-day, and cloud cover.
-            // drain any in-flight  scan before replacing the world.
-            DrainBackgroundWorldScan(jobSystem);
-            // same contract for the world-dressing placement job.
-            DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
-            if (gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains") &&
-                gameSession->LoadWorldState()) {
+            entry_world_revision = gameSession->WorldRevision();
+            wait_for_world_entry_readers();
+            const bool created =
+                gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains");
+            finish_world_replacement();
+            if (created && gameSession->LoadWorldState()) {
                 // Prepare the fixed vantage before publishing the backdrop as ready.
                 if (auto* ws = gameSession->GetWorldSystem();
                     ws && gameSession->GetPhysicsSystem() &&
@@ -4140,7 +4153,7 @@ int main(int argc, char* argv[]) {
                 break;
             }
             case WorldEntryStage::DrainReaders:
-                prepare_world_entry();
+                wait_for_world_entry_readers();
                 break;
             case WorldEntryStage::OpenWorld: {
                 const bool opened =
@@ -4156,6 +4169,7 @@ int main(int argc, char* argv[]) {
                         : (entry_load_snapshot
                                ? gameSession->LoadWorldFrom(request.id, entry_load_snapshot->root())
                                : gameSession->LoadWorld(request.id));
+                finish_world_replacement();
                 if (!opened) {
                     refuse_world_entry(
                         request.create
@@ -4463,7 +4477,7 @@ int main(int argc, char* argv[]) {
                     [&](bool main_menu) {
                         if (!session_persistence_allowed())
                             return Measurement::ActionResult{false, 0};
-                        prepare_world_entry();
+                        renderPipeline.wait_for_accepted_far_tile_writes();
                         const bool saved = gameSession->SaveWorld();
                         if (saved) {
                             benchmark_loaded_snapshot.reset();

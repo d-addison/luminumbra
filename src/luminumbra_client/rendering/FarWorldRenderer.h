@@ -109,6 +109,9 @@ public:
     const FarWorldDiagnosticSnapshot& Diagnostic() const noexcept {
         return diagnostic_;
     }
+    // Wait only for accepted persistent cache writes; retain binding and render state.
+    // This backend currently has no persistent cache writer.
+    void WaitForAcceptedCacheWrites();
     void PrepareWorldSwap();
     void Shutdown();
     // Publication is independent of the culler. The pipeline feeds every prepared

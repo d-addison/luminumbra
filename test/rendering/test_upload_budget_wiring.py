@@ -51,6 +51,89 @@ class UploadBudgetWiring(unittest.TestCase):
         python_tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
         self.assertIn('"test/rendering/test_upload_budget_wiring.py"', python_tests)
 
+    def test_save_fence_preserves_current_world_until_quit_save_succeeds(self):
+        quit_action = body(self.main, '} else if (act == "quit")')
+        save = quit_action.index("if (!gameSession->SaveWorld())")
+        fence = "renderPipeline.wait_for_accepted_far_tile_writes();"
+        self.assertIn(fence, quit_action[:save])
+        self.assertIn("return;", body(quit_action, "if (!gameSession->SaveWorld())"))
+        failure = body(quit_action, "if (!gameSession->SaveWorld())")
+        self.assertNotIn("prepare_world_entry()", failure)
+        cleanup = quit_action.index("prepare_world_entry();")
+        self.assertGreater(cleanup, save + len("if (!gameSession->SaveWorld())") + len(failure))
+        self.assertEqual(quit_action.count("prepare_world_entry();"), 1)
+        for destructive in ("prepare_world_entry()", "prepare_world_swap()",
+                            "DrainWorldDressing(", "DrainBackgroundWorldScan("):
+            self.assertNotIn(destructive, quit_action[:save])
+        benchmark = body(self.main, "[&](bool main_menu)")
+        self.assertIn(fence, benchmark[:benchmark.index("gameSession->SaveWorld()")])
+        cleanup_scope = body(benchmark, "if (saved && main_menu)")
+        self.assertIn("prepare_world_entry();", cleanup_scope)
+        self.assertEqual(benchmark.count("prepare_world_entry();"), 1)
+        forward = compact(body(self.pipeline, "void RenderPipeline::wait_for_accepted_far_tile_writes()"))
+        self.assertEqual(forward, "m_far_world->WaitForAcceptedCacheWrites(); "
+                         "if (m_farlod) m_farlod->wait_for_accepted_cache_writes();")
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        self.assertEqual(compact(body(legacy, "void FarLodSystem::wait_for_accepted_cache_writes()")),
+                         "m_tile_saves.flush();")
+        for backend, check in (("FarWorldRenderer", "CheckOwner();"),
+                               ("FarWorldHandoffRenderer", "Guard const guard(*this);")):
+            source = read(RENDERING / (backend + ".cpp"))
+            wait = body(source, "void " + backend + "::WaitForAcceptedCacheWrites()")
+            self.assertEqual(compact(re.sub(r"//[^\n]*", "", wait)), check)
+
+    def test_fallible_world_open_waits_without_discarding_until_revision_changes(self):
+        wait = compact(body(self.main, "auto wait_for_world_entry_readers ="))
+        self.assertEqual(wait, "renderPipeline.wait_for_world_readers(); "
+                         "WaitForBackgroundWorldScan(jobSystem); jobSystem.wait(s_worldDressingHandle);")
+        cleanup = body(self.main, "auto finish_world_replacement =")
+        guard = "if (gameSession->WorldRevision() != entry_world_revision)"
+        self.assertIn(guard, cleanup)
+        self.assertEqual(compact(cleanup.split(guard, 1)[1]), "prepare_world_entry();")
+        # Both outcomes use the same revision predicate: refusal before adoption
+        # preserves state; success and a failure after adoption both retire it.
+        expression = re.search(r"if \((.*)\)", cleanup).group(1)
+        expression = expression.replace("gameSession->WorldRevision()", "current")
+        for previous, current, expected in ((7, 7, False), (7, 8, True)):
+            self.assertEqual(eval(expression, {"__builtins__": {}},
+                                  dict(current=current, entry_world_revision=previous)), expected)
+        for signature, call, outcome in (
+                ("auto start_world_creation =", "gameSession->CreateWorld(", "if (!created)"),
+                ("auto start_world_load =", "gameSession->LoadWorldFrom(", "if (!loaded)")):
+            opening = body(self.main, signature)
+            self.assertNotIn("prepare_world_entry();", opening)
+            self.assertLess(opening.index("wait_for_world_entry_readers();"), opening.index(call))
+            self.assertLess(opening.index(call), opening.index("finish_world_replacement();"))
+            self.assertLess(opening.index("finish_world_replacement();"), opening.index(outcome))
+        stages = body(self.main, "auto run_entry_stage =")
+        readers = stages.split("case WorldEntryStage::DrainReaders:", 1)[1].split(
+            "case WorldEntryStage::OpenWorld:", 1)[0]
+        self.assertIn("wait_for_world_entry_readers();", readers)
+        self.assertNotIn("prepare_world_entry();", readers)
+        opening = stages.split("case WorldEntryStage::OpenWorld:", 1)[1].split(
+            "case WorldEntryStage::RestoreState:", 1)[0]
+        self.assertLess(opening.index("gameSession->LoadWorld(request.id)"),
+                        opening.index("finish_world_replacement();"))
+        self.assertLess(opening.index("finish_world_replacement();"), opening.index("if (!opened)"))
+        backdrop = body(self.main, "if (want_backdrop)")
+        self.assertLess(backdrop.index("wait_for_world_entry_readers();"),
+                        backdrop.index("gameSession->CreateTransientWorld("))
+        self.assertLess(backdrop.index("finish_world_replacement();"), backdrop.index("if (created"))
+        pipeline_wait = body(self.pipeline, "void RenderPipeline::wait_for_world_readers()")
+        self.assertIn("m_farlod->wait_for_world_readers();", pipeline_wait)
+        self.assertIn("m_far_world->WaitForAcceptedCacheWrites();", pipeline_wait)
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        legacy_wait = body(legacy, "void FarLodSystem::wait_for_world_readers()")
+        self.assertIn("m_job_system->wait(handle);", legacy_wait)
+        self.assertIn("wait_for_accepted_cache_writes();", legacy_wait)
+        for destructive in ("m_world =", "m_epoch", "m_pending.clear()", "m_ready_builds.clear()",
+                            "m_shared->completed.clear()"):
+            self.assertNotIn(destructive, legacy_wait)
+        scan = read(ROOT / "src/luminumbra_client/app/CaveFlourishes.cpp")
+        scan_wait = body(scan, "void WaitForBackgroundWorldScan(")
+        self.assertIn("jobs.wait(state.handle);", scan_wait)
+        self.assertNotIn("state.scan.reset()", scan_wait)
+
     def test_waterfall_replacement_clears_sites_and_spray_before_empty_site_return(self):
         source = read(RENDERING / "passes/WaterfallPass.cpp")
         destroy = compact(body(source, "void WaterfallPass::destroy_geometry()"))

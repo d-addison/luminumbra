@@ -354,9 +354,13 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
             'SetGameState(window, gameStateManager, GameState::MAIN_MENU)', 1)[0]
         self.assertLess(pause.index("if (!session_persistence_allowed())"),
                         pause.index("prepare_world_entry();"))
-        self.assertLess(pause.index("prepare_world_entry();"), pause.index("SaveWorld()"))
+        self.assertLess(pause.index("renderPipeline.wait_for_accepted_far_tile_writes();"),
+                        pause.index("SaveWorld()"))
+        self.assertGreater(pause.index("prepare_world_entry();"), pause.index("SaveWorld()"))
         benchmark = source.split("[&](bool main_menu) {", 1)[1].split("[&](bool reload)", 1)[0]
-        self.assertLess(benchmark.index("prepare_world_entry();"), benchmark.index("SaveWorld()"))
+        self.assertLess(benchmark.index("renderPipeline.wait_for_accepted_far_tile_writes();"),
+                        benchmark.index("SaveWorld()"))
+        self.assertGreater(benchmark.index("prepare_world_entry();"), benchmark.index("if (saved && main_menu)"))
         boot = source.split("const bool wrote_metrics = runtime_boot_recorder.write_artifacts();", 1)[1]
         self.assertLess(boot.index("prepare_world_entry();"), boot.index("clear_world(nullptr)"))
         viewer = (ROOT / "src/luminumbra_client/debug/WorldGenViewer.cpp").read_text(encoding="utf-8")
