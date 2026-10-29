@@ -7,7 +7,7 @@ This is deliberately scoped to their current YAML layout, not a YAML parser.
 The 72-case baseline launched 772 subprocesses on POSIX; aggregate cancellation,
 ASan admission and Bash syntax cases accounted for 340, 210 and 79 launches.
 Windows qualification exhausted the suite's 30-second CTest deadline without
-per-case timings. Twelve disjoint registrations isolate those workloads and keep
+per-case timings. Thirteen disjoint registrations isolate those workloads and keep
 each 30-second deadline. Each selected case reports elapsed time so a slow case
 remains visible. Native per-case qualification is still required; local timings
 do not establish that every Windows case fits its deadline. Direct invocation
@@ -3410,7 +3410,7 @@ def policy_route_results(cases, workers):
 
 # Keep launch-heavy cases separate without changing any case or subtest.
 # Selection scans the finite unittest roster once; no subprocess is started here.
-POLICY_PARTITIONS = tuple(str(index) for index in range(12))
+POLICY_PARTITIONS = tuple(str(index) for index in range(13))
 POLICY_ROUTE_CASE = "WorkflowDraftPolicyTests.test_native_aggregates_preserve_route_checks"
 POLICY_CASE_PARTITIONS = {
     "WorkflowDraftPolicyTests.test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies": "1",
@@ -3420,6 +3420,7 @@ POLICY_CASE_PARTITIONS = {
     "WorkflowShellDiagnosticTests.test_actual_windows_probe_refuses_other_identities_despite_msystem": "7",
     "WorkflowDraftPolicyTests.test_bootstrap_pins_full_events_main_prs_and_missing_or_invalid_outputs": "8",
     POLICY_ROUTE_CASE: "9",
+    "WorkflowUcrtClassifierPolicyTests.test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty": "12",
 }
 POLICY_CLASS_PARTITIONS = {
     "WorkflowBaseEditPolicyTests": "0",
@@ -3902,7 +3903,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "-1", "12", "01", "0/12", None, 0):
+        for invalid in ("", "-1", "13", "01", "0/13", None, 0):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 policy_partition_suite(loader, module, invalid)
         complete = list(policy_cases(loader.loadTestsFromModule(module)))
@@ -3924,7 +3925,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_unassigned_classes_and_invalid_mapping_targets(self):
         module = sys.modules[__name__]
         for mapping in (POLICY_CLASS_PARTITIONS, POLICY_CASE_PARTITIONS):
-            for invalid in ("", "12", "unknown", None, 0):
+            for invalid in ("", "13", "unknown", None, 0):
                 with self.subTest(mapping=list(mapping), invalid=invalid), patch.dict(
                         mapping, {next(iter(mapping)): invalid}):
                     with self.assertRaisesRegex(ValueError, "invalid policy partition mapping"):
@@ -3951,8 +3952,10 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 "test_ucrt64_content_classifier_fails_open_on_git_errors",
                 "test_ucrt64_classifier_fixtures_use_portable_subprocesses",
                 "test_windows_docs_skip_precedes_checkout_and_keeps_unknown_classification_native",
-                "test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty",
                 "test_windows_standalone_contract_step_runs_once_on_shard_one_and_full_capture",
+            }),
+            "12": ("WorkflowUcrtClassifierPolicyTests", {
+                "test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty",
             }),
         }
         for partition, (name, methods) in groups.items():
@@ -3971,6 +3974,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             ("7", "test_actual_windows_probe_refuses_other_identities_despite_msystem"),
             ("8", "test_bootstrap_pins_full_events_main_prs_and_missing_or_invalid_outputs"),
             ("9", "test_native_aggregates_preserve_route_checks"),
+            ("12", "test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty"),
         ):
             with self.subTest(partition=partition):
                 cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
@@ -4023,7 +4027,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 self.assertEqual(policy_main(["--partition", partition, "--list-tests"]), 0)
                 expected = policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in policy_cases(expected)])
-        for argv in (["--partition"], ["--partition", "12"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", "13"], ["--partition", "01"],
                      ["--partition", "0", "--partition", "1"], ["--list-tests"],
                      ["--partition", "0", "WorkflowShellTests"], ["--partition", "0", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
