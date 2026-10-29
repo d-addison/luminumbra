@@ -1016,8 +1016,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             "gns-compile-probe": "7add7cbd1528a989a68922e779bf47e1bd867d8812e911ea6c0261dcf6762057",
             "diligent-rhi": "dcd14e3c82e44abaa18c301cb39cad12a342fd23f13dbe2fef729ce1c46d73a8",
             # Pin the selected Python, partitioned local checks, render failure symbols,
-            # shard-1-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "417e0b31c5bede0076e48e3b6e9da528e30f529c3fd92017be9ba3f7519bcee9",
+            # shard-2-only Python contracts and verbose compiler cache statistics.
+            "windows-msvc": "53c849e631b54685a007c22df4644ffa6424968b6bedb76d0156fd03bba13a14",
             # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
             "windows-ucrt64": "7f44d5762b7ceb7c096fab1f31478c3c930bdb6829365ce83f4ead0921799eeb",
             "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
@@ -2809,7 +2809,7 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                         if accepted and result == "skipped":
                             self.assertIn(b"skipped", process.stdout)
 
-    def test_windows_standalone_contract_step_runs_once_on_shard_one_and_full_capture(self):
+    def test_windows_standalone_contract_step_runs_once_on_shard_two_and_full_capture(self):
         ci = jobs(self.workflows["ci.yml"])
         step = next(step for step in steps(ci["windows-msvc"])
                     if "name: Run standalone Python contracts" in step)
@@ -2820,7 +2820,7 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                 condition = value(step, "if", 8).replace("matrix.shard", repr(shard)).replace(
                     "needs.changes.outputs.needs_cpp", repr(cpp)).replace("needs.changes.outputs.needs_python", repr(python))
                 with self.subTest(shard=shard, cpp=cpp, python=python):
-                    self.assertEqual(evaluate_condition(condition, {}), python != "false" and shard != 2)
+                    self.assertEqual(evaluate_condition(condition, {}), python != "false" and shard != 1)
         linux_step = next(step for step in steps(ci["linux"]) if "name: Run standalone Python contracts" in step)
         self.assertEqual(value(linux_step, "run", 8), "python3 -B tools/ci/ci_paths.py python-tests")
 
@@ -3963,7 +3963,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 "test_ucrt64_content_classifier_fails_open_on_git_errors",
                 "test_ucrt64_classifier_fixtures_use_portable_subprocesses",
                 "test_windows_docs_skip_precedes_checkout_and_keeps_unknown_classification_native",
-                "test_windows_standalone_contract_step_runs_once_on_shard_one_and_full_capture",
+                "test_windows_standalone_contract_step_runs_once_on_shard_two_and_full_capture",
             }),
             "12": ("WorkflowUcrtClassifierPolicyTests", {
                 "test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty",
