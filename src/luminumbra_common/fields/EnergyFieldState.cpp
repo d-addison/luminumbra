@@ -1,7 +1,18 @@
 #include "EnergyFieldState.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <map>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace luminumbra::fields {
 
@@ -17,9 +28,9 @@ constexpr int FloorDiv(int a, int b) noexcept {
 
 constexpr std::uint16_t
 SaturatingAdd16(std::uint16_t v, std::uint32_t add, std::uint32_t& clipped) noexcept {
-    const std::uint32_t sum = static_cast<std::uint32_t>(v) + add;
+    const std::uint64_t sum = static_cast<std::uint64_t>(v) + add;
     if (sum > 0xFFFFu) {
-        clipped += sum - 0xFFFFu;
+        clipped += static_cast<std::uint32_t>(sum - 0xFFFFu);
         return 0xFFFFu;
     }
     return static_cast<std::uint16_t>(sum);
@@ -427,7 +438,14 @@ std::string EnergyFieldState::SerializeRecord(std::uint64_t save_tick) {
     // Normalize: bring EVERY page current through the completed firings, so
     // the record is a pure snapshot and last-step bookkeeping restarts at zero
     // on load (frozen-page ages collapse into the values themselves).
-    NormalizeAllPages();
+    if (m_channels > kEnergyRecordChannels)
+        throw std::length_error(
+            "Saved-input admission refused: energy channel/page compatibility limit.");
+    auto normalized = *this;
+    normalized.NormalizeAllPages();
+    if (normalized.m_pages.size() > kEnergyWritePages)
+        throw std::length_error(
+            "Saved-input admission refused: energy channel/page compatibility limit.");
 
     // Ticks remaining until the next cadence firing — the epoch-rebase
     // quantity (-4): load restores the phase from it so the next
@@ -436,9 +454,11 @@ std::string EnergyFieldState::SerializeRecord(std::uint64_t save_tick) {
     const std::uint64_t remaining =
         m_next_fire_tick > save_tick ? m_next_fire_tick - save_tick : kEnergyCadenceTicks;
 
+    if (remaining > kEnergyCadenceTicks)
+        throw std::length_error("Saved-input admission refused: invalid energy cadence phase.");
     std::ostringstream out;
     out << "EFS1 " << m_channels << ' ' << remaining << '\n';
-    for (const auto& [key, page] : m_pages) {
+    for (const auto& [key, page] : normalized.m_pages) {
         int px = 0, pz = 0;
         UnpackCellKey(key, px, pz);
         out << 'P' << ' ' << px << ' ' << pz;
@@ -449,7 +469,11 @@ std::string EnergyFieldState::SerializeRecord(std::uint64_t save_tick) {
         }
         out << '\n';
     }
-    return out.str();
+    auto bytes = out.str();
+    if (bytes.size() > kEnergyWriteRecordBytes)
+        throw std::length_error("Saved-input admission refused: energy byte compatibility limit.");
+    m_pages = std::move(normalized.m_pages);
+    return bytes;
 }
 
 void EnergyFieldState::ResetEmptyAtTick(std::uint64_t tick) {
@@ -459,13 +483,83 @@ void EnergyFieldState::ResetEmptyAtTick(std::uint64_t tick) {
     m_next_fire_tick = tick + (kEnergyCadenceTicks - tick % kEnergyCadenceTicks);
 }
 
+namespace {
+// from_chars requires the entire token and never accepts signs for unsigned
+// values. No substrings, locale conversion, or proportional temporary buffers.
+template<typename T>
+bool ReadEnergyNumber(std::string_view token, T& result) {
+    const auto parsed = std::from_chars(token.data(), token.data() + token.size(), result);
+    return parsed.ec == std::errc{} && parsed.ptr == token.data() + token.size();
+}
+
+bool TakeEnergyToken(std::string_view& line, std::string_view& token) {
+    const auto start = line.find_first_not_of(" \t\r");
+    if (start == std::string_view::npos) {
+        line = {};
+        return false;
+    }
+    line.remove_prefix(start);
+    const auto end = line.find_first_of(" \t\r");
+    token = line.substr(0, end);
+    line.remove_prefix(token.size());
+    return true;
+}
+} // namespace
+
+bool EnergyFieldState::AdmitRecord(const std::string& record) {
+    if (record.size() > kEnergyReadRecordBytes)
+        return false;
+    std::string_view remaining_lines(record);
+    auto take_line = [&remaining_lines]() {
+        const auto end = remaining_lines.find('\n');
+        const auto line = remaining_lines.substr(0, end);
+        remaining_lines.remove_prefix(line.size() + (end != std::string_view::npos ? 1 : 0));
+        return line;
+    };
+    auto header = take_line();
+    std::string_view token;
+    int channels = 0;
+    std::uint64_t phase = 0;
+    if (!TakeEnergyToken(header, token) || token != "EFS1" || !TakeEnergyToken(header, token) ||
+        !ReadEnergyNumber(token, channels) || channels < 1 || channels > kEnergyRecordChannels ||
+        !TakeEnergyToken(header, token) || !ReadEnergyNumber(token, phase) || phase < 1 ||
+        phase > kEnergyCadenceTicks || TakeEnergyToken(header, token))
+        return false;
+    std::size_t pages = 0;
+    while (!remaining_lines.empty()) {
+        auto line = take_line();
+        if (line.empty())
+            continue;
+        if (++pages > kEnergyReadPages || !TakeEnergyToken(line, token) || token != "P")
+            return false;
+        int coordinate = 0;
+        for (int axis = 0; axis < 2; ++axis) {
+            if (!TakeEnergyToken(line, token) || !ReadEnergyNumber(token, coordinate))
+                return false;
+        }
+        while (TakeEnergyToken(line, token)) {
+            const auto colon = token.find(':');
+            std::size_t index = 0;
+            unsigned value = 0;
+            if (colon == std::string_view::npos ||
+                !ReadEnergyNumber(token.substr(0, colon), index) ||
+                !ReadEnergyNumber(token.substr(colon + 1), value) ||
+                index >= 256u * static_cast<std::size_t>(channels) || value == 0 || value > 65535u)
+                return false;
+        }
+    }
+    return true;
+}
+
 bool EnergyFieldState::DeserializeRecord(const std::string& record, std::uint64_t load_tick_base) {
+    if (!AdmitRecord(record))
+        return false;
     std::istringstream in(record);
     std::string magic;
     int channels = 0;
     std::uint64_t remaining = 0;
     if (!(in >> magic >> channels >> remaining) || magic != "EFS1" || channels < 1 ||
-        remaining < 1 || remaining > kEnergyCadenceTicks) {
+        channels > kEnergyRecordChannels || remaining < 1 || remaining > kEnergyCadenceTicks) {
         return false;
     }
     std::map<std::int64_t, Page> pages;
@@ -501,9 +595,12 @@ bool EnergyFieldState::DeserializeRecord(const std::string& record, std::uint64_
                 return false;
             page.values[idx] = static_cast<std::uint16_t>(val);
         }
-        pages.emplace(PackPageKey(px, pz), std::move(page));
+        if (!pages.emplace(PackPageKey(px, pz), std::move(page)).second)
+            return false;
     }
 
+    if (remaining > std::numeric_limits<std::uint64_t>::max() - load_tick_base)
+        return false;
     m_channels = channels;
     m_pages = std::move(pages);
     m_pending.clear();

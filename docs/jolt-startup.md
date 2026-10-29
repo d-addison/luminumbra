@@ -77,6 +77,8 @@ Failure selects Abort, wakes and joins started workers, releases heads even with
 zero created workers, and propagates the exception. Startup-only gate storage
 survives each worker's last access and notification. Successful job scheduling,
 queue references and capture release retain their existing behavior.
+The pool's default constructor is defined in the library translation unit so
+consumers do not instantiate its default callback lambdas during LTO linking.
 
 Successful application settings remain 10 MiB temporary storage, 10240 bodies
 with body-mutex argument 0, 10240 body pairs and contacts, two layers, 2048 jobs,
@@ -98,8 +100,13 @@ Profiling configurations exercise the real layer-name callback and worker profil
 Linux tests interpose actual pthread_create with EAGAIN and sem_init with ENOSPC,
 count successful creates/joins and track acquired/destroyed semaphore identities.
 The launch test reaches libstdc++ through exported ELF interposition rather than
-assuming a global-new failure is an OS launch failure. Windows launch injection
-requires an independently established MSVC/UCRT boundary and is not supplied.
+assuming a global-new failure is an OS launch failure. Windows child-process tests
+replace resolved CreateThread imports across loaded modules, including CRT DLLs,
+and CreateSemaphoreA/W imports in the executable. They inject native creation
+refusals, verify worker termination before handle closure and dependency release,
+and check semaphore closure, unpublished application state, allocation rollback,
+lease release and successful retry. Windows execution under MSVC and UCRT64
+remains pending; import interception must observe each selected refusal to pass.
 Custom-allocator-disabled builds exercise global-new siblings, but deterministic
 null injection into their direct malloc-backed raw allocations remains pending.
 

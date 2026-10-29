@@ -13,6 +13,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import capture_sim_budget as capture
 from fixture_hash import fixture_hash
 from test_fixture_hash import (ROOTED_REFERENCES, ESCAPING_REFERENCES,

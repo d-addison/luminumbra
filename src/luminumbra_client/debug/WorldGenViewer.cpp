@@ -88,6 +88,9 @@ void WorldGenViewer::DrawContents(Systems::SHIELD_WorldSystem* main_world_system
                 main_world_system->set_params(m_params);
                 main_world_system->set_seed(m_seed);
                 main_world_system->regenerate_all_chunks(nullptr); // Pass physics system if needed
+                // The swap retires old far terrain even when settings are unchanged;
+                // restore the live world's waterfall geometry and spray afterward.
+                pipeline.prepare_waterfalls(*main_world_system);
             }
         }
         ImGui::EndDisabled();

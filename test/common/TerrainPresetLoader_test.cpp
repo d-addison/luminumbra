@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/world/BiomeTable.h"
 #include "luminumbra_common/world/StructurePlacement.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -1375,6 +1376,49 @@ TEST(TerrainPresetLoaderTest, ExplicitOverridePreservesHistoricalTerrain) {
     EXPECT_EQ(historical.params.biome_table_path, LoadTerrainPreset(path).params.biome_table_path);
     EXPECT_NE(historical.params.island_mask_enabled,
               LoadTerrainPreset(PresetDir() / "default.json").params.island_mask_enabled);
+}
+
+TEST(TerrainPresetLoaderTest, FileAndOverrideAdmissionShareDepthAndByteBoundaries) {
+    using namespace Luminumbra::Persistence;
+    const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("preset-admission-");
+    const auto path = directory / "preset.json";
+    const auto check = [&path](const std::string& bytes, bool accepted) {
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            ASSERT_TRUE(output.good());
+            output << bytes;
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_EQ(LoadTerrainPreset(path, {}).ok, accepted);
+        std::string text = "unchanged";
+        std::string error;
+        EXPECT_EQ(Luminumbra::world::LoadTerrainPresetOverride(path, {}, text, error), accepted);
+        EXPECT_EQ(error.empty(), accepted);
+        if (!accepted)
+            EXPECT_EQ(text, "unchanged");
+    };
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    nlohmann::json extension = 0;
+    for (std::size_t depth = 1; depth < SavedInputLimits::kJsonNestingDepth; ++depth)
+        extension = nlohmann::json::array({std::move(extension)});
+    preset["extension"] = extension;
+    check(preset.dump(), true);
+    preset["extension"] = nlohmann::json::array({std::move(extension)});
+    check(preset.dump(), false);
+    std::string padded = kMinimalPreset;
+    padded.resize(SavedInputLimits::kPresetBytes, ' ');
+    check(padded, true);
+    padded += ' ';
+    check(padded, false);
+    fs::remove(path);
+    fs::create_directory(path);
+    std::string text = "unchanged";
+    std::string error;
+    EXPECT_FALSE(LoadTerrainPreset(path, {}).ok);
+    EXPECT_FALSE(Luminumbra::world::LoadTerrainPresetOverride(path, {}, text, error));
+    EXPECT_EQ(text, "unchanged");
+    std::error_code cleanup_error;
+    fs::remove_all(directory, cleanup_error);
 }
 
 TEST(TerrainPresetLoaderTest, ExplicitOverrideRefusesInvalidFilesWithoutChangingText) {

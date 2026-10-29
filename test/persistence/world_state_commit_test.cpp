@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -185,9 +186,9 @@ protected:
         EXPECT_EQ(reader.GetWorldSystem(), previous_system);
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
         const auto retained = reader.GetWorldSystem()->snapshot_streamed_chunks();
-        // Catalog refusals precede the state readers and retain the old world.
-        // SDF and scheduler checks run after preflight; all snapshot refusals clear.
-        if (load_path == 0 || failure == LoadFailure::Sdf || failure == LoadFailure::Scheduler) {
+        // Direct snapshot failures retain their fatal-state contract. Candidate
+        // opens preserve the live world even when final state validation refuses.
+        if (load_path == 0) {
             EXPECT_TRUE(retained.empty());
             const auto refused_export = root / "refused-export";
             EXPECT_FALSE(reader.SaveWorldStateTo(refused_export));
@@ -353,6 +354,33 @@ TEST_P(WorldStateCommit, IncrementalZeroCursorPreservesAbsentMetadataAndUpdatesE
             ASSERT_NO_FATAL_FAILURE(CheckIncrementalZeroCursor(canonical, dirty));
         }
     }
+}
+
+TEST_P(WorldStateCommit, MetadataOnlySaveCreatesFreshDestinationAfterAdmission) {
+    GameSession session;
+    Configure(session);
+    session.SetAetherStateEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Metadata only", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(root / "absent-snapshot"));
+    ASSERT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    session.GetWorldSystem()->SetWaterSimWindowCursor(19);
+    const auto destination = root / "fresh-metadata";
+    ASSERT_FALSE(fs::exists(destination));
+    ASSERT_TRUE(session.SaveWorldStateTo(destination));
+    EXPECT_EQ(Metadata(destination).at("waterSimCursor"), 19u);
+    EXPECT_EQ(fs::exists(WorldSaveService::world_manifest_path(destination)), GetParam());
+    EXPECT_FALSE(fs::exists(destination / "aether_state.efs"));
+    if (!GetParam()) {
+        EXPECT_FALSE(Metadata(destination).contains("renderCalendar"));
+        EXPECT_FALSE(fs::exists(destination / "chunks"));
+        EXPECT_FALSE(fs::exists(destination / "preset.json"));
+    }
+    // A malformed metadata destination still refuses before creating siblings.
+    const auto refused = root / "refused-metadata";
+    fs::create_directories(refused / "world_info.json");
+    EXPECT_FALSE(session.SaveWorldStateTo(refused));
+    EXPECT_TRUE(fs::is_empty(refused / "world_info.json"));
+    EXPECT_EQ(std::distance(fs::directory_iterator(refused), fs::directory_iterator{}), 1);
 }
 
 TEST_P(WorldStateCommit, RefusedLoadsClearResidentChunksWithoutPublishingStagedMembers) {

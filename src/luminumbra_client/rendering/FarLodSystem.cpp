@@ -971,18 +971,26 @@ u64 FarLodSystem::region_key(int rx, int rz) {
     return (static_cast<u64>(static_cast<u32>(rx)) << 32) | static_cast<u64>(static_cast<u32>(rz));
 }
 
-void FarLodSystem::wait_for_builds() {
+void FarLodSystem::wait_for_accepted_cache_writes() {
+    m_tile_saves.flush();
+}
+
+void FarLodSystem::wait_for_world_readers() {
     if (m_job_system) {
         for (const JobHandle& handle : m_inflight_handles) {
             m_job_system->wait(handle);
         }
     }
     m_inflight_handles.clear();
-    // Builds and ready uploads not yet accepted for persistence are cancelled.
-    // Already accepted saves are flushed to their captured paths below.
+    wait_for_accepted_cache_writes();
+}
+
+void FarLodSystem::wait_for_builds() {
+    wait_for_world_readers();
+    // The reader fence flushed accepted saves to their captured paths.
+    // Discard pending builds and ready uploads; accepted writes are already complete.
     m_pending.clear();
     m_ready_builds.clear();
-    m_tile_saves.flush();
     LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
     m_shared->completed.clear();
 }
@@ -1103,7 +1111,8 @@ void FarLodSystem::queue_completed_saves() {
         if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed) {
             // The owner is the sole producer; after the capacity check the
             // consumer can only free slots. Moving transfers all tile arrays.
-            if (!m_tile_saves.enqueue(result.save_dir, std::move(result.tile))) {
+            if (!m_tile_saves.enqueue(
+                    result.save_dir, std::move(result.tile), m_world, result.authority_revision)) {
                 LUMIN_PROFILE_LOCK(
                     std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
                 m_shared->completed.push_front(std::move(result));

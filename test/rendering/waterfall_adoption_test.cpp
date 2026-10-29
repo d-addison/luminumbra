@@ -232,12 +232,22 @@ TEST(WaterfallAdoption, SameSeedAndEpochWithDifferentPresetResurveysSites) {
     ASSERT_EQ(wet_world.water_epoch(), dry_world.water_epoch());
 
     WaterfallPass pass;
-    const auto wet_geometry = pass.build_geometry(wet_world);
+    auto wet_geometry = pass.build_geometry(wet_world);
     ASSERT_FALSE(wet_geometry.sites.empty());
-    const auto dry_geometry = pass.build_geometry(dry_world);
+    ASSERT_EQ(pass.waterfall_cache().cached_world_count(), 1u);
+    const auto* wet_sites = &pass.waterfall_sites(wet_world);
+    pass.begin_adoption(std::move(wet_geometry));
+    EXPECT_EQ(pass.waterfall_cache().cached_world_count(), 1u);
+    EXPECT_EQ(&pass.waterfall_sites(wet_world), wet_sites);
+    auto dry_geometry = pass.build_geometry(dry_world);
     EXPECT_TRUE(dry_geometry.sites.empty());
     EXPECT_TRUE(dry_geometry.vertices.empty());
+    ASSERT_EQ(pass.waterfall_cache().cached_world_count(), 1u);
+    pass.begin_adoption(std::move(dry_geometry));
+    EXPECT_EQ(pass.waterfall_cache().cached_world_count(), 1u);
     EXPECT_TRUE(pass.waterfall_sites(dry_world).empty());
+    pass.destroy_geometry();
+    EXPECT_EQ(pass.waterfall_cache().cached_world_count(), 0u);
 }
 
 TEST(WaterfallAdoption, RepeatedLoadCyclesReplaceSprayAndKeepOtherEmitters) {

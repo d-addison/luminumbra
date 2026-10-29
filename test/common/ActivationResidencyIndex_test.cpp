@@ -147,6 +147,69 @@ TEST(ActivationResidencyIndex, EveryContentVersionInvalidatesItsSpan) {
     EXPECT_EQ(index.counters().span_cache_hits, 42u);
 }
 
+TEST(ActivationResidencyIndex, TravelReclaimsColumnsAfterResidencyAndWantedRemoval) {
+    Index index;
+    const auto sampler = [](int, int) {
+        return Index::SurfaceSpan{};
+    };
+    // Fixture bound: 128 columns, two residents and two wanted entries per stop.
+    // Exercise both removal orders, including a cache-only sampled column.
+    for (int x = 0; x < 128; ++x) {
+        SCOPED_TRACE(x);
+        const auto lower = std::make_shared<Chunk>(IVec3(x, 0, 0));
+        const auto upper = std::make_shared<Chunk>(IVec3(x, 1, 0));
+        const std::vector<Candidate> wanted{
+            Candidate{.coords = lower->get_coords(), .surface = true},
+            Candidate{.coords = upper->get_coords(), .surface = true}};
+        (void)index.surface_span(x, 0, sampler);
+        (void)index.surface_span(x, 1, sampler);
+        index.replace_wanted(wanted);
+        ASSERT_EQ(index.columns().size(), 1u);
+        index.insert(lower);
+        index.insert(upper);
+        index.erase(*lower);
+        EXPECT_EQ(index.columns().size(), 1u);
+        EXPECT_EQ(index.resident_columns().size(), 1u);
+        ExpectPending(index, wanted, {upper->get_id()});
+        if (x % 2 == 0) {
+            index.erase(*upper);
+            EXPECT_EQ(index.columns().size(), 1u);
+            EXPECT_TRUE(index.resident_columns().empty());
+            ExpectPending(index, wanted, {});
+            index.replace_wanted({});
+        } else {
+            index.replace_wanted({});
+            EXPECT_EQ(index.columns().size(), 1u);
+            index.erase(*upper);
+        }
+        EXPECT_TRUE(index.columns().empty());
+        EXPECT_TRUE(index.resident_columns().empty());
+        EXPECT_TRUE(index.pending().empty());
+        EXPECT_EQ(index.surface_pending(), 0u);
+        // A repeated removal must not recreate a column or stale cache key.
+        index.erase(*upper);
+        index.replace_wanted({});
+        EXPECT_TRUE(index.columns().empty());
+        index.clear_dirty_columns();
+    }
+    // Reset/replacement must forget both resident and cache-only bookkeeping.
+    const auto adopted = std::make_shared<Chunk>(IVec3(-1, 0, 0));
+    index.insert(adopted);
+    index.content_changed(adopted->get_coords());
+    (void)index.surface_span(-2, 0, sampler);
+    index.replace_wanted({Candidate{.coords = IVec3(-2, 0, 0)}});
+    index.clear();
+    EXPECT_TRUE(index.columns().empty());
+    EXPECT_TRUE(index.resident_columns().empty());
+    EXPECT_TRUE(index.pending().empty());
+    EXPECT_TRUE(index.dirty_columns().empty());
+    index.insert(adopted);
+    index.replace_wanted({});
+    ASSERT_EQ(index.columns().size(), 1u);
+    index.erase(*adopted);
+    EXPECT_TRUE(index.columns().empty());
+}
+
 Index::SurfaceSpan FullScanSpan(const SHIELD_WorldSystem& world, int x, int z) {
     const float base_x = static_cast<float>(x * CHUNK_SIZE_X);
     const float base_z = static_cast<float>(z * CHUNK_SIZE_Z);

@@ -96,16 +96,6 @@ private:
     std::size_t m_pos = 0;
 };
 
-// Frames a payload as [u8 type][u32 len][payload].
-std::vector<std::uint8_t> Frame(ReplMessageType type, const std::vector<std::uint8_t>& payload) {
-    std::vector<std::uint8_t> out;
-    out.reserve(5 + payload.size());
-    PutU8(out, static_cast<std::uint8_t>(type));
-    PutU32(out, static_cast<std::uint32_t>(payload.size()));
-    out.insert(out.end(), payload.begin(), payload.end());
-    return out;
-}
-
 // Validates the frame header + type and returns a cursor positioned at the payload.
 bool OpenFrame(const std::vector<std::uint8_t>& frame, ReplMessageType expected, Cursor& cursor) {
     std::uint8_t type = 0;
@@ -121,13 +111,17 @@ bool OpenFrame(const std::vector<std::uint8_t>& frame, ReplMessageType expected,
 
 std::vector<std::uint8_t> EncodeUsercmd(const UsercmdMsg& m) {
     std::vector<std::uint8_t> p;
+    // Fixed wire size: five envelope bytes and nineteen payload bytes.
+    p.reserve(5 + kUsercmdPayloadBytes);
+    PutU8(p, static_cast<std::uint8_t>(ReplMessageType::Usercmd));
+    PutU32(p, static_cast<std::uint32_t>(kUsercmdPayloadBytes));
     PutU64(p, m.tick);
     PutU32(p, m.player_id);
     PutI16(p, m.move_x);
     PutI16(p, m.move_z);
     PutI16(p, m.yaw_mrad);
     PutU8(p, m.action_bits);
-    return Frame(ReplMessageType::Usercmd, p);
+    return p;
 }
 
 std::optional<std::size_t> SnapshotEncodedSize(std::size_t entity_count,
@@ -203,9 +197,14 @@ EncodeSnapshot(const SnapshotMsg& m,
 
 std::vector<std::uint8_t> EncodeAck(const AckMsg& m) {
     std::vector<std::uint8_t> p;
+    // Fixed wire size: five envelope bytes, one u32 and one u64.
+    constexpr std::uint32_t payload_bytes = 12;
+    p.reserve(5 + payload_bytes);
+    PutU8(p, static_cast<std::uint8_t>(ReplMessageType::Ack));
+    PutU32(p, payload_bytes);
     PutU32(p, m.snapshot_seq);
     PutU64(p, m.usercmd_tick);
-    return Frame(ReplMessageType::Ack, p);
+    return p;
 }
 
 bool PeekReplMessageType(const std::vector<std::uint8_t>& frame, ReplMessageType& out_type) {

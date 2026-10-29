@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -3359,4 +3360,42 @@ TEST(LockstepSessionTest, CleanDisconnect) {
     EXPECT_EQ(ra.outcome, net::TickOutcome::PeerDisconnected);
     EXPECT_TRUE(a.Status().peer_disconnected);
     EXPECT_FALSE(a.Status().desynced) << "a clean disconnect must NOT be reported as a desync";
+}
+
+// Recorder setup is diagnostics only: a refused open never blocks the handshake
+// or the ticks, and the status names the failing step with its OS error.
+TEST(LockstepSessionTest, RecorderSetupRefusalNamesTheFailingStepInReplayError) {
+    const auto blocker = LockstepTempDir() / "recorder-refusal.parent";
+    {
+        std::ofstream file(blocker, std::ios::binary);
+        ASSERT_TRUE(file.is_open());
+        file << "not a directory";
+        ASSERT_TRUE(file.good());
+    }
+    const auto dump = blocker / "sub" / "desync.lrec1";
+    auto [local, peer] = net::MakeLoopbackPair();
+    const auto config = MakeConfig(0, 1);
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    session.SetDumpPath(dump.string());
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    std::error_code expected_error;
+    fs::create_directories(dump.parent_path(), expected_error);
+    ASSERT_TRUE(expected_error);
+    const std::string error = session.Status().replay_error;
+    EXPECT_TRUE(error.starts_with("recorder setup failed: create-parent: '")) << error;
+    EXPECT_NE(error.find("(" + std::string(expected_error.category().name()) + " " +
+                         std::to_string(expected_error.value()) + ")"),
+              std::string::npos)
+        << error;
+    EXPECT_LT(error.size(),
+              std::string("recorder setup failed: ").size() +
+                  replay::BoundedReplayRecorder::kOpenRefusalBytes);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    EXPECT_EQ(world.tick, 1u);
+    EXPECT_EQ(session.Status().replay_error, error);
+    EXPECT_FALSE(fs::exists(dump));
+    ASSERT_TRUE(fs::remove(blocker));
 }

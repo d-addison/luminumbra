@@ -7,6 +7,9 @@ import unittest
 
 import numpy as np
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import inspect_terrain_aovs as aovs
 
 

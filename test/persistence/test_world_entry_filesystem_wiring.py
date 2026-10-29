@@ -27,82 +27,170 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
     def setUp(self):
         self.journal = (PERSISTENCE / "CreatedWorldArtifacts.h").read_text(encoding="utf-8")
 
-    def test_retention_opens_by_id_and_directories_release_the_named_creation_handle(self):
+    def test_retention_uses_an_explicit_volume_and_releases_the_named_creation_handle(self):
         retention = body(self.journal, "static ScopedFile duplicate_file(")
-        self.assertIn("::OpenFileById(", retention)
-        self.assertNotRegex(retention, r"::(?:CreateFileW|ReOpenFile|DuplicateHandle)\(")
+        self.assertIn("::OpenFileById(volume.get(),", retention)
+        self.assertNotRegex(retention, r"::(?:ReOpenFile|DuplicateHandle)\(")
+        self.assertIn("VOLUME_NAME_GUID | FILE_NAME_NORMALIZED", retention)
+        self.assertRegex(retention, r"const ScopedFile volume\(\s*::CreateFileW\(volume_path.c_str\(\),")
+        self.assertIn("volume_path.resize(separator)", retention)
+        self.assertIn("volume.get() == INVALID_HANDLE_VALUE", retention)
+        self.assertIn("length == 0 || length >= volume_name.size()", retention)
+        self.assertIn("separator == std::wstring::npos", retention)
+        self.assertIn("Unknown world artifact retention identity.", retention)
         self.assertIn("ExtendedFileIdType", retention)
         creation = body(self.journal, "void create_owned_directory(")
         windows = creation.split("#else", 1)[0]
         self.assertRegex(windows, r"recorded\.retained\s*=\s*duplicate_file\(")
 
-    def test_publication_binds_identity_and_detects_same_link_noop_before_claiming_target(self):
+    def test_publication_binds_source_identity_before_exclusive_link_creation(self):
         publication = body(self.journal, "void publish_windows(")
-        binding = publication.index("const ScopedFile bound(")
-        rename = publication.index("::SetFileInformationByHandle(")
+        binding = publication.index("ScopedFile bound(")
+        link = publication.index("Detail::WindowsPublishWithoutReplacement(")
         identity = publication.index("identity_from(bound.get())")
         self.assertLess(binding, identity)
-        self.assertLess(identity, rename)
+        self.assertLess(identity, link)
         self.assertNotIn("FILE_SHARE_DELETE", publication[binding:identity])
-        self.assertIn("const auto published_name = handle_path(bound.get());", publication[rename:])
-        self.assertIn("published_name == original_name", publication[rename:])
-        self.assertIn("ERROR_ALREADY_EXISTS", publication[rename:])
+        self.assertIn("bound.release(), source.path, destination", publication[link:])
         caller = body(self.journal, "void publish_file(")
         self.assertLess(caller.index("publish_windows("), caller.index("target.identity ="))
 
-    def test_publication_checks_source_retirement_even_if_the_handle_name_changes(self):
-        publication = body(self.journal, "void publish_windows(")
-        rename = publication.index("::SetFileInformationByHandle(")
-        inspect = publication.index("Detail::WindowsRenameSourceRetirementError(source.path)")
-        self.assertLess(rename, inspect)
-        self.assertLess(inspect, publication.index("published_name != destination"))
-        retirement = body(self.journal, "inline DWORD WindowsRenameSourceRetirementError(")
-        self.assertIn("::CreateFileW(source.c_str()", retirement)
-        self.assertIn("remaining != INVALID_HANDLE_VALUE", retirement)
-        self.assertIn("ERROR_ALREADY_EXISTS", retirement)
-        self.assertIn("error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : error", retirement)
+    def test_publication_checks_source_retirement_and_retains_verified_cleanup_ownership(self):
+        publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        link = publication.index("::CreateHardLinkW(")
+        retire = publication.index("original.get(), FileDispositionInfo")
+        self.assertLess(link, retire)
+        self.assertLess(retire, publication.index("original.reset();"))
+        self.assertLess(publication.index("WindowsVacantPublicationNameError(original_name)"),
+                        publication.index("return linked.release();"))
+        self.assertIn("retirement_error != ERROR_SUCCESS", publication)
+        journal = body(self.journal, "void publish_windows(")
+        recovery = journal[journal.index("catch (const Detail::WindowsPublicationRecoveryError&") :]
+        self.assertIn("if (error.verified_link())", recovery)
+        self.assertIn("target.identity = source.identity", recovery)
+        self.assertIn("throw;", recovery)
+
+    def test_every_windows_exclusive_publication_uses_atomic_link_creation_and_exact_counts(self):
+        publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        vacant = publication.index("WindowsVacantPublicationNameError(bound_destination)")
+        before = publication.index("WindowsPublicationLinkCount(original.get()) != 1")
+        link = publication.index("::CreateHardLinkW(")
+        two = publication.index("WindowsPublicationLinkCount(original.get()) != 2")
+        verified = publication.index("verified_link = true")
+        retire = publication.index("original.get(), FileDispositionInfo")
+        one = publication.index("WindowsPublicationLinkCount(linked.get()) != 1")
+        self.assertLess(vacant, link)
+        self.assertLess(before, link)
+        self.assertLess(link, two)
+        self.assertLess(two, verified)
+        self.assertLess(verified, retire)
+        self.assertLess(retire, one)
+        self.assertLess(one, publication.index("return linked.release();"))
+        self.assertIn("vacancy != ERROR_SUCCESS", publication[vacant:link])
+        self.assertIn("supported same-volume hard links", publication[link:two])
+        self.assertNotRegex(publication, r"::(?:MoveFileExW|ReplaceFileW)\(|FileRenameInfo")
+        self.assertIn("retained_info.nFileIndexLow != published_info.nFileIndexLow", publication)
+        check = body(self.journal, "inline DWORD WindowsVacantPublicationNameError(")
+        for token in ("::CreateFileW(destination.c_str()", "FILE_READ_ATTRIBUTES",
+                      "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE",
+                      "FILE_FLAG_OPEN_REPARSE_POINT", "occupant != INVALID_HANDLE_VALUE",
+                      "return ERROR_ALREADY_EXISTS", "error == ERROR_FILE_NOT_FOUND"):
+            self.assertIn(token, check)
+        count = body(self.journal, "inline DWORD WindowsPublicationLinkCount(")
+        self.assertIn("FileStandardInfo", count)
+        self.assertIn("info.NumberOfLinks == 0", count)
+        recovery = body(self.journal, "inline void WindowsRestorePublicationSource(")
+        self.assertIn("link->ReplaceIfExists = FALSE", recovery)
+        self.assertIn('"NtSetInformationFile"', recovery)
+        self.assertNotRegex(recovery, r"::(?:DeleteFileW|MoveFileExW)\(")
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
-        self.assertIn("Detail::WindowsRenameSourceRetirementError(temp)", writer)
-        self.assertIn("Detail::WindowsRenameSourceRetirementError(m_temp)", writer)
+        self.assertEqual(writer.count("Detail::WindowsPublishWithoutReplacement("), 2)
+        promotion = body(writer, "bool promote_seed(")
+        self.assertEqual(writer.count("::MoveFileExW("), 1)
+        self.assertIn("::MoveFileExW(m_path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)",
+                      promotion)
+        self.assertNotIn("MOVEFILE_REPLACE_EXISTING", promotion)
+        self.assertNotIn("::MoveFileExW(", writer.replace(promotion, ""))
+        for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):
+            publishing = body(writer, marker).split("#else", 1)[0]
+            linking = publishing.index("Detail::WindowsPublishWithoutReplacement(")
+            flush = publishing.index("::FlushFileBuffers(", linking)
+            self.assertLess(linking, flush)
+            binding = publishing.index("::CreateFileW(")
+            self.assertNotIn("FILE_SHARE_DELETE", publishing[binding:linking])
+
+    def test_windows_link_collisions_cover_preexisting_and_late_aliases(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")
-        self.assertIn("UnreadablePublicationSourceNeverClaimsTheDestination", native)
-        self.assertIn("RefusedPublicationNeverClaimsARacingHardLinkToTheSource", native)
+        opening = body(native[native.rindex("HANDLE WINAPI Open("):], "HANDLE WINAPI Open(")
+        binding = opening.index("(access & DELETE) != 0")
+        collision = opening.index("active->boundary == Boundary::PublicationLinkedOccupant",
+                                  binding)
+        self.assertLess(collision, opening.index("BeforePublish(path, active->target)", binding))
+        self.assertLess(collision, opening.index("return ::CreateFileW("))
+        hook = body(native, "bool BeforePublish(")
+        self.assertIn("std::filesystem::create_hard_link(source, destination)", hook)
+        self.assertIn("EXPECT_TRUE(std::filesystem::equivalent(source, destination))", hook)
+        regression = body(native, "TEST_F(CreatedWorldCleanup, "
+                          "RefusedPublicationNeverClaimsARacingHardLinkToTheSource)")
+        self.assertLess(regression.index("std::filesystem::equivalent(temp, destination)"),
+                        regression.index("artifacts.rollback()"))
+        late = body(native, "TEST_F(CreatedWorldCleanup, "
+                    "LinkCreationAfterTheVacancyCheckIsNeverOverwrittenOrClaimed)")
+        for token in ("ERROR_ALREADY_EXISTS", "EXPECT_FALSE(Race().publication_completed)",
+                      "std::filesystem::equivalent(temp, destination)",
+                      'EXPECT_EQ(Read(temp), "owned bytes\\n")', "artifacts.rollback()"):
+            self.assertIn(token, late)
+        self.assertIn("#define CreateHardLinkW NativeRace::Link", native)
+        link = body(native[native.rindex("BOOL WINAPI Link("):], "BOOL WINAPI Link(")
+        self.assertLess(link.index("BeforePublish("), link.index("::CreateHardLinkW("))
 
-    def test_native_rename_name_comes_from_bound_parent_and_has_checked_storage(self):
+    def test_native_link_names_come_from_bound_parents_and_have_checked_lengths(self):
         publication = body(self.journal, "void publish_windows(")
         self.assertIn("handle_path(parent.get()) / target.path.filename()", publication)
         self.assertLess(publication.index("destination.make_preferred()"),
-                        publication.index("destination.native()"))
-        self.assertLess(publication.index("name.size() > 32767"),
-                        publication.index("std::vector<std::byte> storage"))
+                        publication.index("Detail::WindowsPublishWithoutReplacement("))
+        linking = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        self.assertLess(linking.index("bound_destination.native().size() > 32767"),
+                        linking.index("::CreateHardLinkW("))
+        self.assertIn("original_name = WindowsPublicationPath(original.get())", linking)
         parent = body(self.journal, "ScopedFile bind_publication_parent(")
         self.assertIn("identity_from(parent.get()) != find_artifact(path).identity", parent)
         self.assertNotIn("FILE_SHARE_DELETE", parent)
         for artifact in ("source", "target"):
             self.assertIn(f"bind_publication_parent({artifact}.path.parent_path())", publication)
 
-    def test_native_rename_record_includes_an_explicit_uncounted_terminator(self):
-        publication = body(self.journal, "void publish_windows(")
-        compact = re.sub(r"\s+", " ", publication)
-        self.assertIn("offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t)", compact)
-        self.assertIn("rename_info->FileNameLength = static_cast<DWORD>(name_bytes);", compact)
-        terminator = "rename_info->FileName[name.size()] = L'\\0';"
-        self.assertIn(terminator, publication)
-        self.assertLess(publication.index(terminator),
-                        publication.index("::SetFileInformationByHandle("))
+    def test_native_link_recovery_record_has_bounded_counted_storage(self):
+        recovery = body(self.journal, "inline void WindowsRestorePublicationSource(")
+        compact = re.sub(r"\s+", " ", recovery)
+        self.assertIn("offsetof(LinkInformation, FileName) + name_bytes", compact)
+        self.assertIn("link->FileNameLength = static_cast<ULONG>(name_bytes);", compact)
+        self.assertLess(recovery.index("win32_name.size() > 32767"),
+                        recovery.index("std::vector<std::byte> storage"))
+        self.assertIn("std::memcpy(link->FileName, name.data(), name_bytes)", recovery)
+        # CreateHardLinkW consumes the paths' own null-terminated wide strings;
+        # publication no longer constructs a variable-sized rename record.
+        linking = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        self.assertIn("::CreateHardLinkW(bound_destination.c_str(), original_name.c_str(), nullptr)",
+                      linking)
+        self.assertNotIn("FILE_RENAME_INFO", linking)
 
-    def test_publication_requires_the_exact_destination_before_claiming_ownership(self):
-        publication = body(self.journal, "void publish_windows(")
-        rename = publication.index("::SetFileInformationByHandle(")
-        self.assertIn("published_name != destination", publication[rename:])
-        self.assertIn("ERROR_INVALID_DATA", publication[rename:])
+    def test_publication_requires_the_exact_destination_and_rolls_back_through_its_handle(self):
+        publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
+        self.assertIn("WindowsPublicationPath(linked.get()) != bound_destination", publication)
+        self.assertIn("ERROR_INVALID_DATA", publication)
+        recovery = publication[publication.index("catch (const std::exception& error)"):]
+        self.assertIn("WindowsRestorePublicationSource(linked.get(), original_name)", recovery)
+        self.assertIn("linked.get(), FileDispositionInfo", recovery)
+        self.assertNotRegex(recovery, r"::(?:DeleteFileW|MoveFileExW)\(")
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")
-        self.assertIn("UnexpectedPublicationNameNeverClaimsTheDestination", native)
-        self.assertIn("PublicationPreservesExactLeafNamesAcrossRenameBufferLengths", native)
-        self.assertIn("EXPECT_LT(length_in_chars, capacity);", native)
-        self.assertIn("EXPECT_EQ(rename_info->FileName[length_in_chars], L'\\0');", native)
+        self.assertIn("RefusedPublicationInspectionRestoresSourceAndRetiresOnlyTheCreatedLink", native)
+        for fault in ("PublicationFinalNameMismatch", "PublicationSourceInspectionFailure",
+                      "PublicationDestinationIdentityUnknown", "PublicationSourceUnlinkDenied"):
+            self.assertIn(fault, native)
+        self.assertIn("PublicationPreservesExactLeafNamesAcrossHardLinkPathLengths", native)
+        self.assertIn("InterruptedLinkedPublicationRetainsBothNamesUntilRollbackCanRetry", native)
 
     def test_posix_publication_verifies_the_quarantined_entry_before_descriptor_relative_move(self):
         self.assertIn("publish_posix(source, target);", body(self.journal, "void publish_file("))
@@ -122,11 +210,11 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         for source in (self.journal, writer, session):
             self.assertNotRegex(source, r"\.(?:string|generic_string)\(")
             self.assertIn("Filesystem::GenericUtf8PathString(", source)
-        self.assertIn('const fs::path worldPath = GetSaveRootPath() / "worlds/saves" / worldId;',
+        self.assertIn('const fs::path worldPath = options.save_root / "worlds/saves" / worldId;',
                       session)
         reclaim = body(writer, "std::size_t ReclaimAbandonedStaging(")
         self.assertIn("destination.filename().native()", reclaim)
-        self.assertIn("entry.path().filename().native()", reclaim)
+        self.assertIn("StagingNameHasPrefix(entry.path().filename(), prefix)", reclaim)
 
     def test_journal_metadata_keeps_calendar_normalization_and_serialized_writers(self):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
@@ -144,17 +232,29 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
                      "save_active_regions(ledger, clock, save_dir, errors, artifacts)"):
             self.assertEqual(paired.count(call), 2)
 
-    def test_fatal_snapshot_refusals_change_revision_on_every_load_path(self):
+    def test_snapshot_refusals_keep_the_live_world_or_change_revision_when_it_is_torn_down(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
-        for method, state in (("LoadWorld", "loaded"), ("LoadWorldFrom", "loaded"),
-                              ("LoadWorldStateFrom", "state")):
+        preparation = body(session, "GameSession::PrepareWorldLoad(")
+        self.assertIn("ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop)",
+                      preparation)
+        self.assertNotIn("ResetWorldSystems();", preparation)
+        self.assertLess(preparation.index("ReadPreparedWorldState("),
+                        preparation.index("prepared->ready = true;"))
+        for method in ("LoadWorld", "LoadWorldFrom"):
             with self.subTest(method=method):
                 loading = body(session, f"bool GameSession::{method}(")
-                refusal = loading.split(f", {state})) {{", 1)[1].split("return false;", 1)[0]
-                self.assertIn("++m_worldRevision;", refusal)
-                self.assertLess(refusal.index("++m_worldRevision;"),
-                                refusal.index("m_worldSystem->clear_world("))
-                self.assertIn("m_worldUsable = false;", refusal)
+                self.assertIn("AdoptPreparedWorld(PrepareWorldLoad(", loading)
+                self.assertNotIn("ResetWorldSystems();", loading)
+        with self.subTest(method="LoadWorldStateFrom"):
+            loading = body(session, "bool GameSession::LoadWorldStateFrom(")
+            match = re.search(r"if \(!ReadWorldStateFrom\([^;]*,\s*state\)\) \{", loading)
+            self.assertIsNotNone(match)
+            refusal = loading[match.end():].split("return false;", 1)[0]
+            refusal = body(refusal, "if (!state.input_refused)")
+            self.assertIn("++m_worldRevision;", refusal)
+            self.assertLess(refusal.index("++m_worldRevision;"),
+                            refusal.index("m_worldSystem->clear_world("))
+            self.assertIn("m_worldUsable = false;", refusal)
 
     def test_async_persistence_keeps_refusal_latches_and_checks_optional_in_adoption(self):
         machine = (ROOT / "src/luminumbra_client/world/WorldEntry.h").read_text(encoding="utf-8")
@@ -203,17 +303,27 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertIn("entry_worker_error.empty() && benchmark_v4 &&", validation)
         self.assertIn("!entry_request->create", validation)
         self.assertRegex(validation, r"std::make_unique<Measurement::VerifiedSaveSnapshot>\(\s*"
-                         r"save_directory, saved_digest, entry_request->id\)")
+                         r"save_directory, saved_digest, entry_request->id, stop\)")
         self.assertLess(validation.index("jobSystem.wait(entry_cpu_job)"),
                         validation.index("if (!error.empty())"))
         self.assertIn('std::string("Could not schedule world validation.")', validation)
         opening = stages.split("case WorldEntryStage::OpenWorld:", 1)[1].split(
             "case WorldEntryStage::RestoreState:", 1)[0]
-        self.assertIn("gameSession->LoadWorldFrom(request.id, entry_load_snapshot->root())", opening)
-        self.assertIn("gameSession->LoadWorld(request.id)", opening)
+        self.assertIn("gameSession->AdoptPreparedWorld(", opening)
+        for inline_io in ("LoadWorld(", "LoadWorldFrom(", "CreateWorld("):
+            self.assertNotIn(inline_io, opening)
+        self.assertIn("options = gameSession->CaptureWorldPreparationOptions()", validation)
+        self.assertIn("stop = entry_stop.get_token()", validation)
+        self.assertIn("options.save_root = entry_load_snapshot->root()", validation)
+        for prepare in ("PrepareWorldLoad(", "PrepareWorldCreation("):
+            self.assertGreater(validation.index(prepare), validation.index("jobSystem.dispatch_batch("))
         self.assertLess(opening.index("return WorldEntryResult::Failed;"),
                         opening.index("benchmark_loaded_snapshot = std::move(entry_load_snapshot)"))
         drain = body(source, "auto drain_entry =")
+        self.assertLess(drain.index("entry_stop.request_stop()"),
+                        drain.index("jobSystem.wait(entry_cpu_job)"))
+        self.assertLess(drain.index("jobSystem.wait(entry_cpu_job)"),
+                        drain.index("entry_prepared_world.reset()"))
         self.assertLess(drain.index("jobSystem.wait(entry_cpu_job)"),
                         drain.index("entry_load_snapshot.reset()"))
         self.assertLess(drain.index("prepare_world_entry()"),
@@ -224,13 +334,21 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         stages = body(source, "auto run_entry_stage =")
         restoration = stages.split("case WorldEntryStage::RestoreState:", 1)[1].split(
             "case WorldEntryStage::PrepareWaterfalls:", 1)[0]
-        self.assertIn("!request.create ||", restoration)
+        self.assertIn("if (!request.create)", restoration)
         self.assertIn("scenario_config.persistence_roundtrip_smoke() &&", restoration)
         self.assertIn('scenario_config.persistence_phase == "load" &&', restoration)
         self.assertIn("!scenario_config.persistence_session_dir.empty()", restoration)
-        self.assertIn("gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir)",
-                      restoration)
-        self.assertIn("gameSession->LoadWorldState()", restoration)
+        self.assertIn("? scenario_config.persistence_session_dir", restoration)
+        self.assertIn(": gameSession->GetWorldSaveDir()", restoration)
+        self.assertIn("options = gameSession->CaptureWorldPreparationOptions()", restoration)
+        self.assertIn("stop = entry_stop.get_token()", restoration)
+        self.assertLess(restoration.index("jobSystem.dispatch_batch("),
+                        restoration.index("::PrepareWorldState("))
+        self.assertLess(restoration.index("::PrepareWorldState("),
+                        restoration.index("return WorldEntryResult::Pending;"))
+        self.assertLess(restoration.index("jobSystem.wait(entry_cpu_job)"),
+                        restoration.index("gameSession->AdoptPreparedWorld("))
+        self.assertNotIn("gameSession->LoadWorldState", restoration)
         self.assertRegex(restoration, r"if \(!restored\) \{[^}]*return WorldEntryResult::Failed;")
         activation = stages.split("case WorldEntryStage::Activate:", 1)[1]
         self.assertRegex(activation, r"if \(benchmark_v4 && request.create\)\s*"
@@ -263,9 +381,13 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
             'SetGameState(window, gameStateManager, GameState::MAIN_MENU)', 1)[0]
         self.assertLess(pause.index("if (!session_persistence_allowed())"),
                         pause.index("prepare_world_entry();"))
-        self.assertLess(pause.index("prepare_world_entry();"), pause.index("SaveWorld()"))
+        self.assertLess(pause.index("renderPipeline.wait_for_accepted_far_tile_writes();"),
+                        pause.index("SaveWorld()"))
+        self.assertGreater(pause.index("prepare_world_entry();"), pause.index("SaveWorld()"))
         benchmark = source.split("[&](bool main_menu) {", 1)[1].split("[&](bool reload)", 1)[0]
-        self.assertLess(benchmark.index("prepare_world_entry();"), benchmark.index("SaveWorld()"))
+        self.assertLess(benchmark.index("renderPipeline.wait_for_accepted_far_tile_writes();"),
+                        benchmark.index("SaveWorld()"))
+        self.assertGreater(benchmark.index("prepare_world_entry();"), benchmark.index("if (saved && main_menu)"))
         boot = source.split("const bool wrote_metrics = runtime_boot_recorder.write_artifacts();", 1)[1]
         self.assertLess(boot.index("prepare_world_entry();"), boot.index("clear_world(nullptr)"))
         viewer = (ROOT / "src/luminumbra_client/debug/WorldGenViewer.cpp").read_text(encoding="utf-8")
@@ -282,20 +404,30 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(
             encoding="utf-8")
         capture = body(source, "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
-        self.assertRegex(capture, r"if \(!chunk \|\| chunk->get_state\(\) == ChunkState::Loading \|\|")
-        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
-                        capture.index("chunk->sdf_data.size()"))
-        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
-                        capture.index("chunk->material_data.size()"))
-        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
+        published = body(source, "bool HasPublishedFarLodSdf(")
+        self.assertIn("chunk && chunk->get_state() != Luminumbra::ChunkState::Loading &&", published)
+        self.assertLess(published.index("chunk->get_state()"),
+                        published.index("chunk->sdf_data.size()"))
+        self.assertLess(published.index("chunk->get_state()"),
+                        published.index("chunk->material_data.size()"))
+        self.assertLess(capture.index("if (!HasPublishedFarLodSdf(chunk.get()))"),
                         capture.index("chunk->capture_far_lod_sdf("))
+        current = body(source, "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(")
+        self.assertIn("m_activation_index.columns()", current)
+        self.assertIn("snapshot.min_chunk_coords.x + dx", current)
+        self.assertIn("snapshot.min_chunk_coords.y + dz", current)
+        self.assertIn("HasPublishedFarLodSdf(chunk.get())", current)
+        self.assertIn("return published_sdfs == captured_resident_sdfs;", current)
         native = (ROOT / "test/rendering/far_lod_persistence_test.cpp").read_text(encoding="utf-8")
-        self.assertIn("CapturesWaitForGenerationPublication", native)
+        for name in ("CapturesWaitForGenerationPublication",
+                     "SnapshotFreshnessCoversNewPublicationsAndPreservesEvictedPayloads",
+                     "PublicationAfterCaptureRefusesTilePersistence"):
+            self.assertIn("TEST(FarLodPersistence, " + name + ")", native)
 
     def test_native_regressions_and_legacy_fault_discrimination_remain_registered(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
             encoding="utf-8")
-        for api in ("MoveFileExW", "ReOpenFile", "DuplicateHandle", "OpenFileById",
+        for api in ("MoveFileExW", "CreateHardLinkW", "ReOpenFile", "DuplicateHandle", "OpenFileById",
                     "SetFileInformationByHandle"):
             self.assertIn(f"#define {api} NativeRace::", native)
         cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")

@@ -258,7 +258,8 @@ private:
     // settings.rml support: populate widgets from the bridge on load, and push a single
     // changed widget's value back through the bridge live.
     // gallery.rml: populate the grid with the player's real captures (newest first),
-    // each thumbnail loaded from data/ui/captures/cap_<N>.tga written at shutter time.
+    // Live photos require completed image, thumbnail and verdict outputs; authored
+    // fixture sources continue to enumerate flat cap_<N>.tga thumbnails.
     void PopulateGallery(Rml::ElementDocument* document);
     void PopulateSettingsForm(Rml::ElementDocument* document);
     void PopulateGraphicsForm(Rml::ElementDocument* document);

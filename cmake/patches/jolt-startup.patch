@@ -139,7 +139,10 @@
 +#endif
 +};
 +
-@@ -56 +75,6 @@
+@@ -45,0 +65,2 @@
++JobSystemThreadPool::JobSystemThreadPool() = default;
++
+@@ -56 +77,6 @@
 -		inNumThreads = thread::hardware_concurrency() - 1;
 +	{
 +		uint hardware_threads = thread::hardware_concurrency();
@@ -147,7 +150,7 @@
 +			AllocationFailed();
 +		inNumThreads = hardware_threads > 0? int(hardware_threads - 1) : 0;
 +	}
-@@ -58,17 +82,47 @@
+@@ -58,17 +84,47 @@
 -	// If no threads are requested we're done
 -	if (inNumThreads == 0)
 -		return;
@@ -212,29 +215,29 @@
 +		throw;
 +	}
 +#endif
-@@ -86,3 +139,0 @@
+@@ -86,3 +141,0 @@
 -	if (mThreads.empty())
 -		return;
 -
-@@ -91 +142,2 @@
+@@ -91 +144,2 @@
 -	mSemaphore.Release((uint)mThreads.size());
 +	if (!mThreads.empty())
 +		mSemaphore.Release((uint)mThreads.size());
-@@ -94,3 +146,3 @@
+@@ -94,3 +148,3 @@
 -	for (thread &t : mThreads)
 -		if (t.joinable())
 -			t.join();
 +	for (size_t index = 0; index < mThreads.size(); ++index)
 +		if (mThreads[index].joinable())
 +			mThreads[index].join();
-@@ -115 +167,2 @@
+@@ -115 +169,2 @@
 -	Free(mHeads);
 +	if (mHeads != nullptr)
 +		Free(mHeads);
-@@ -309 +362 @@
+@@ -309 +364 @@
 -void JobSystemThreadPool::ThreadMain(int inThreadIndex)
 +void JobSystemThreadPool::ThreadMain(int inThreadIndex, StartupState &ioStartup)
-@@ -323,4 +376,36 @@
+@@ -323,4 +378,36 @@
 -	JPH_PROFILE_THREAD_START(name);
 -
 -	// Call the thread init function
@@ -275,10 +278,10 @@
 +		ioStartup.mChanged.notify_all();
 +		// No access, including notification, after this lock releases.
 +	}
-@@ -330 +415 @@
+@@ -330 +417 @@
 -	while (!mQuit)
 +	while (run && !mQuit)
-@@ -359,3 +444,7 @@
+@@ -359,3 +446,7 @@
 -	mThreadExitFunction(inThreadIndex);
 -
 -	JPH_PROFILE_THREAD_END();
@@ -291,6 +294,9 @@
 +	}
 --- a/Jolt/Core/JobSystemThreadPool.h
 +++ b/Jolt/Core/JobSystemThreadPool.h
+@@ -33 +33 @@
+-							JobSystemThreadPool() = default;
++							JobSystemThreadPool();
 @@ -66 +66,2 @@
 -	void					ThreadMain(int inThreadIndex);
 +	struct StartupState;

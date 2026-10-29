@@ -46,8 +46,7 @@ endif()
 FetchContent_Declare(RmlUi
   SOURCE_DIR "${_rmlui_population}"
   BINARY_DIR "${_rmlui_expected_binary}"
-  DOWNLOAD_COMMAND "${_rmlui_python}" -I -B "${_rmlui_helper}"
-    download --root "${CMAKE_BINARY_DIR}"
+  DOWNLOAD_COMMAND ""
   UPDATE_COMMAND ""
   PATCH_COMMAND ""
   SOURCE_SUBDIR "rmlui-population-only-${_rmlui_identity}")
@@ -55,6 +54,15 @@ FetchContent_MakeAvailable(RmlUi)
 if(NOT rmlui_SOURCE_DIR STREQUAL _rmlui_population OR
    NOT rmlui_BINARY_DIR STREQUAL _rmlui_expected_binary)
   message(FATAL_ERROR "RmlUi population substituted an unexpected directory")
+endif()
+# Keep the exact bootstrap interpreter out of generated CMake source strings.
+# Population remains owned and empty; delivery still precedes verification and
+# upstream configuration, including when fully disconnected.
+execute_process(COMMAND "${_rmlui_python}" -I -B "${_rmlui_helper}"
+  download --root "${CMAKE_BINARY_DIR}" ${_rmlui_disconnected}
+  RESULT_VARIABLE _rmlui_downloaded)
+if(NOT _rmlui_downloaded EQUAL 0)
+  message(FATAL_ERROR "RmlUi source delivery failed before upstream configuration")
 endif()
 execute_process(COMMAND "${_rmlui_python}" -I -B "${_rmlui_helper}"
   verify --root "${CMAKE_BINARY_DIR}"

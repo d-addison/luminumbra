@@ -98,6 +98,7 @@ public:
         auto& column = ensure_column(coords.x, coords.z);
         column.residents.insert_or_assign(chunk->get_id(), chunk);
         m_resident_columns.insert(column_key(coords.x, coords.z));
+        m_nonresident_columns.erase(column_key(coords.x, coords.z));
         if (const auto it = m_wanted.find(chunk->get_id()); it != m_wanted.end())
             remove_pending(it->second);
         m_dirty_columns.insert(column_key(coords.x, coords.z));
@@ -109,8 +110,15 @@ public:
         const auto key = column_key(coords.x, coords.z);
         if (const auto it = m_columns.find(key); it != m_columns.end()) {
             it->second.residents.erase(chunk.get_id());
-            if (it->second.residents.empty())
+            if (it->second.residents.empty()) {
                 m_resident_columns.erase(key);
+                if (m_wanted_columns.contains(key)) {
+                    m_nonresident_columns.insert(key);
+                } else {
+                    m_nonresident_columns.erase(key);
+                    m_columns.erase(it);
+                }
+            }
         }
         if (const auto it = m_wanted.find(chunk.get_id()); it != m_wanted.end())
             add_pending(it->second);
@@ -123,14 +131,26 @@ public:
     // On unchanged inputs, insert/erase maintain the missing ordered set directly.
     void replace_wanted(const std::vector<Candidate>& candidates) {
         m_wanted.clear();
+        m_wanted_columns.clear();
         m_pending.clear();
         m_surface_pending = 0;
         for (const auto& candidate : candidates) {
             const auto id = Chunk::calculate_id(candidate.coords);
             m_wanted.emplace(id, candidate);
+            m_wanted_columns.insert(column_key(candidate.coords.x, candidate.coords.z));
             const auto it = m_columns.find(column_key(candidate.coords.x, candidate.coords.z));
             if (it == m_columns.end() || !it->second.residents.contains(id))
                 add_pending(candidate);
+        }
+        // Only visit nonresident cache entries, bounded by the previous and
+        // current sampled footprints; never rescan resident chunks here.
+        for (auto it = m_nonresident_columns.begin(); it != m_nonresident_columns.end();) {
+            if (!m_wanted_columns.contains(*it)) {
+                m_columns.erase(*it);
+                it = m_nonresident_columns.erase(it);
+            } else {
+                ++it;
+            }
         }
         ++m_counters.index_updates;
     }
@@ -170,8 +190,10 @@ public:
     void clear() {
         m_columns.clear();
         m_resident_columns.clear();
+        m_nonresident_columns.clear();
         m_dirty_columns.clear();
         m_wanted.clear();
+        m_wanted_columns.clear();
         m_pending.clear();
         m_surface_pending = 0;
         ++m_counters.index_updates;
@@ -183,6 +205,7 @@ private:
         if (inserted) {
             it->second.x = x;
             it->second.z = z;
+            m_nonresident_columns.insert(column_key(x, z));
         }
         return it->second;
     }
@@ -197,8 +220,10 @@ private:
 
     std::unordered_map<u64, Column> m_columns;
     std::unordered_set<u64> m_resident_columns;
+    std::unordered_set<u64> m_nonresident_columns;
     std::unordered_set<u64> m_dirty_columns;
     std::unordered_map<ChunkID, Candidate> m_wanted;
+    std::unordered_set<u64> m_wanted_columns;
     std::set<Candidate, Priority> m_pending;
     std::size_t m_surface_pending = 0;
     Counters m_counters;

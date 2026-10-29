@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <optional>
 
 #include "../ServerCliOptions.h"
@@ -11,6 +10,7 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -18,6 +18,26 @@
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+
+namespace {
+bool ReadPresetInput(const ServerCliOptions& options,
+                     const std::filesystem::path& path,
+                     nlohmann::json& source) {
+    namespace Persistence = Luminumbra::Persistence;
+    if (options.preset_json_override) {
+        const auto& bytes = *options.preset_json_override;
+        if (bytes.size() > Persistence::SavedInputLimits::kPresetBytes ||
+            !Persistence::SavedInputLimits::JsonDepthAllowed(bytes))
+            return false;
+        source = nlohmann::json::parse(bytes, nullptr, false);
+        return !source.is_discarded();
+    }
+    bool missing = false;
+    return Persistence::ReadSavedJson(
+               path, Persistence::SavedInputLimits::kPresetBytes, source, missing, false) &&
+           !missing;
+}
+} // namespace
 
 Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     namespace fs = std::filesystem;
@@ -38,14 +58,9 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     hello.system_config_identity = session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{});
     try {
         nlohmann::json source;
-        if (options.preset_json_override) {
-            source = nlohmann::json::parse(*options.preset_json_override);
-        } else {
-            std::ifstream input(root / "worlds/atlas/presets" / (options.preset + ".json"));
-            if (!input)
-                return hello;
-            source = nlohmann::json::parse(input);
-        }
+        if (!ReadPresetInput(
+                options, root / "worlds/atlas/presets" / (options.preset + ".json"), source))
+            return hello;
         const auto preset = Luminumbra::world::LoadTerrainPresetFromJson(
             Luminumbra::world::ResolveEffectivePreset(
                 source, Luminumbra::world::TerrainPresetUse::NewWorld),
@@ -117,18 +132,16 @@ ReplayRunnerConfigFrom(const ServerCliOptions& options,
         identity_session.SetRegionSchedulerConfig(*config.region_scheduler);
     try {
         nlohmann::json source;
-        if (options.preset_json_override) {
-            source = nlohmann::json::parse(*options.preset_json_override);
-        } else {
+        std::filesystem::path preset_path;
+        if (!options.preset_json_override) {
             const auto validation = Luminumbra::world::GameSession::ValidateWorldConfig(
                 options.root, header.preset, {});
             if (!validation.ok)
                 return std::nullopt;
-            std::ifstream input(validation.preset_path);
-            if (!input)
-                return std::nullopt;
-            source = nlohmann::json::parse(input);
+            preset_path = validation.preset_path;
         }
+        if (!ReadPresetInput(options, preset_path, source))
+            return std::nullopt;
         // Exactly two supported resolutions, historical first. Never substitute
         // an arbitrary hash or rewrite an explicit selector to obtain a match.
         for (const auto use : {TerrainPresetUse::Historical, TerrainPresetUse::NewWorld}) {

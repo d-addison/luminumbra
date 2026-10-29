@@ -1,8 +1,10 @@
 #include "SavedWorldCatalog.h"
 
 #include "RegionFileWriteGuard.h"
+#include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
+#include "core/FilesystemPath.h"
 #include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
 
@@ -12,7 +14,6 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <stop_token>
@@ -37,7 +38,8 @@ bool HasFrozenPreset(const std::string& name) {
 bool ResolveSavedPreset(const fs::path& runtime_root,
                         const fs::path& save,
                         const nlohmann::json& metadata,
-                        SavedWorld& result) {
+                        SavedWorld& result,
+                        const std::stop_token& stop) {
     const bool requires_embedded = metadata.contains("presetFormat");
     if (requires_embedded && (!metadata.at("presetFormat").is_number_integer() ||
                               metadata.at("presetFormat") != kSavedPresetFormat)) {
@@ -45,7 +47,19 @@ bool ResolveSavedPreset(const fs::path& runtime_root,
         return false;
     }
     const auto embedded = save / "preset.json";
-    const bool has_embedded = fs::exists(embedded);
+    nlohmann::json embedded_json;
+    bool embedded_missing = false;
+    if (!ReadSavedJson(embedded,
+                       SavedInputLimits::kPresetBytes,
+                       embedded_json,
+                       embedded_missing,
+                       false,
+                       nullptr,
+                       stop)) {
+        result.error = "Saved-input admission refused: invalid embedded world preset.";
+        return false;
+    }
+    const bool has_embedded = !embedded_missing;
     if (requires_embedded && !has_embedded) {
         result.error = "World preset is unavailable: required embedded preset.json is missing.";
         return false;
@@ -59,14 +73,38 @@ bool ResolveSavedPreset(const fs::path& runtime_root,
                                                                     : "worlds/atlas/presets";
     result.preset_path =
         has_embedded ? embedded : runtime_root / presets / (result.metadata.worldType + ".json");
-    const auto preset = world::LoadTerrainPreset(result.preset_path, runtime_root / "data");
+    if (!has_embedded) {
+        bool missing = false;
+        SavedJsonFailure failure = SavedJsonFailure::None;
+        if (!ReadSavedJson(result.preset_path,
+                           SavedInputLimits::kPresetBytes,
+                           embedded_json,
+                           missing,
+                           false,
+                           &failure,
+                           stop) ||
+            missing) {
+            const bool unavailable = missing || failure == SavedJsonFailure::Unreadable;
+            result.error = (unavailable ? "failed to open world preset: "
+                                        : "failed to parse world preset JSON: ") +
+                           Filesystem::GenericUtf8PathString(result.preset_path);
+            return false;
+        }
+    }
+    // Validate, hash and later boot from the same admitted bytes.
+    const auto preset =
+        world::LoadTerrainPresetFromJson(embedded_json,
+                                         runtime_root / "data",
+                                         Filesystem::GenericUtf8PathString(result.preset_path),
+                                         World::ReadWorldgenSymlinkStatus,
+                                         World::ReadWorldgenFile,
+                                         stop);
     if (!preset.ok) {
         result.error =
             preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
         return false;
     }
-    std::ifstream input(result.preset_path);
-    result.preset_json = nlohmann::json::parse(input).dump();
+    result.preset_json = embedded_json.dump();
     if (metadata.contains("presetIdentity") &&
         (!metadata.at("presetIdentity").is_string() ||
          metadata.at("presetIdentity").get<std::string>() != StableChecksum(result.preset_json))) {
@@ -104,20 +142,19 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             return result;
         const auto metadata_path = save / "world_info.json";
         nlohmann::json json;
-        {
-            const detail::FilePublicationReadGuard read(metadata_path);
-            if (!fs::is_regular_file(metadata_path))
-                return result;
-            // Bound metadata to 1 MiB before parsing.
-            constexpr auto kMaxMetadataBytes = std::uintmax_t{1024} * 1024;
-            if (fs::file_size(metadata_path) > kMaxMetadataBytes) {
-                result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
-                return result;
-            }
-            std::ifstream input(metadata_path);
-            if (!input)
-                return result;
-            json = nlohmann::json::parse(input);
+        bool missing = false;
+        const bool readable = ReadSavedJson(
+            metadata_path, SavedInputLimits::kMetadataBytes, json, missing, true, nullptr, stop);
+        if (stop.stop_requested()) {
+            result.error = "Saved-world validation cancelled.";
+            return result;
+        }
+        if (missing)
+            return result;
+        if (!readable || !AdmitMetadata(json)) {
+            result.error = "Corrupt world metadata: unreadable or exceeds the 2 MiB limit or text "
+                           "compatibility limits.";
+            return result;
         }
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
@@ -148,7 +185,8 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                                                    &errors,
                                                    nullptr,
                                                    &result.render_calendar,
-                                                   &result.water_sim_cursor)) {
+                                                   &result.water_sim_cursor,
+                                                   stop)) {
             result.error = errors.empty() ? "Corrupt world metadata." : errors.front();
             return result;
         }
@@ -156,8 +194,15 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             result.error = "Corrupt world metadata: invalid world type.";
             return result;
         }
-        if (!ResolveSavedPreset(runtime_root, save, json, result))
+        if (!ResolveSavedPreset(runtime_root, save, json, result, stop)) {
+            if (stop.stop_requested())
+                result.error = "Saved-world validation cancelled.";
             return result;
+        }
+        if (stop.stop_requested()) {
+            result.error = "Saved-world validation cancelled.";
+            return result;
+        }
         result.error.clear();
     } catch (const nlohmann::json::exception& e) {
         result.error = std::string("Corrupt world metadata: ") + e.what();
@@ -192,6 +237,11 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
             if (entry.is_directory() || entry.is_symlink())
                 result.worlds.push_back(
                     InspectSavedWorld(root, runtime_root, entry.path().filename().string(), stop));
+        }
+        if (stop.stop_requested()) {
+            result.worlds.clear();
+            result.error = "Saved-world validation cancelled.";
+            return result;
         }
         std::sort(result.worlds.begin(), result.worlds.end(), [](const auto& a, const auto& b) {
             if (a.metadata.creationTime != b.metadata.creationTime)

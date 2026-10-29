@@ -32,6 +32,9 @@ public:
     FarWorldSubmitStats Submit(const std::array<double, 3>& camera, const FarWorldPrepareDraw&);
     const FarVolumeHandoff* Handoff() const;
     const FarWorldHandoffDiagnosticSnapshot& Diagnostic() const;
+    // Wait only for accepted persistent cache writes; retain binding and render state.
+    // This backend currently has no persistent cache writer.
+    void WaitForAcceptedCacheWrites();
     void PrepareWorldSwap();
     void Shutdown();
 

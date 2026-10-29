@@ -466,7 +466,9 @@ finalization returns failure and writes `<dump destination>.incomplete` with the
 first failed tick and a clear reason. Sink failures use the same policy. Recorder
 progress and failure never change simulation outcomes, input scheduling, hashes,
 or session pacing. `LockstepStatus::replay_error` reports a detected recorder
-failure without performing tick-path logging. `FlushReplayRecorder` is an explicit blocking persistence
+failure without performing tick-path logging; a refused recorder open appends
+the recorder's fixed-size `OpenRefusal()` text (the failing setup step, a path
+tail, and the OS error). `FlushReplayRecorder` is an explicit blocking persistence
 barrier; it is not part of `PumpTick`. Desync finalization and shutdown drain all
 accepted work before finalizing or removing working files. Complete artifacts
 keep the existing paths, wire bytes, checkpoint cutoff, and incremental FNV-1a

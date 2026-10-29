@@ -22,6 +22,7 @@ import os
 import re
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -975,12 +976,12 @@ class DeliveryRefusals(unittest.TestCase):
     def test_root_tree_equivalence_oracle_survives_singleton_brace_expansion(self):
         original = M.run_command
         queries = []
-        def native_parent_glob(directory, argv, environment, input_bytes=None):
+        def native_parent_glob(directory, argv, environment, input_bytes=None, *, cancellation=None):
             converted = [re.sub(r"\{([^,{}]*)\}", r"\1", arg)
                          if '"' not in subprocess.list2cmdline([arg]) else arg for arg in argv]
             if "--format=%T" in argv:
                 queries.append(directory)
-            return original(directory, converted, environment, input_bytes)
+            return original(directory, converted, environment, input_bytes, cancellation=cancellation)
         with mock.patch.object(M, "run_command", side_effect=native_parent_glob):
             self.test_root_tree_query_is_equivalent_for_root_and_nested_working_directories()
         self.assertEqual(len(queries), 2)
@@ -990,13 +991,13 @@ class DeliveryRefusals(unittest.TestCase):
         with self.small_git_source() as (source, spec, nested):
             original = M.run_command
             queries = []
-            def native_parent_glob(directory, argv, environment, input_bytes=None):
+            def native_parent_glob(directory, argv, environment, input_bytes=None, *, cancellation=None):
                 # Model only unquoted singleton braces at the native/MSYS boundary.
                 # The executable remains real Git; this does not qualify Windows.
                 converted = [re.sub(r"\{([^,{}]*)\}", r"\1", arg)
                              if '"' not in subprocess.list2cmdline([arg]) else arg for arg in argv]
                 queries.append((argv[-1], converted[-1]))
-                return original(directory, converted, environment, input_bytes)
+                return original(directory, converted, environment, input_bytes, cancellation=cancellation)
             self.assertEqual(subprocess.list2cmdline(["HEAD^{tree}"]), "HEAD^{tree}")
             with mock.patch.object(M, "run_command", side_effect=native_parent_glob):
                 with self.assertRaises(M.Refusal):
@@ -1134,6 +1135,11 @@ class DeliveryRefusals(unittest.TestCase):
         cmake = (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8", errors="strict")
         self.assertLess(cmake.index("preflight --root"), cmake.index("FetchContent_Declare(RmlUi"))
         self.assertLess(cmake.index("FetchContent_MakeAvailable(RmlUi)"), cmake.index("verify --root"))
+        self.assertLess(cmake.index("FetchContent_MakeAvailable(RmlUi)"), cmake.index("download --root"))
+        self.assertLess(cmake.index("download --root"), cmake.index("verify --root"))
+        self.assertIn('DOWNLOAD_COMMAND ""', cmake)
+        self.assertIn('download --root "${CMAKE_BINARY_DIR}" ${_rmlui_disconnected}', cmake)
+        self.assertIn('if(NOT _rmlui_downloaded EQUAL 0)', cmake)
         self.assertLess(cmake.index("verify --root"), cmake.index("add_subdirectory("))
         self.assertIn('NOT "${FETCHCONTENT_SOURCE_DIR_RMLUI}" STREQUAL ""', cmake)
         self.assertIn('PROPERTY __FETCHCONTENT_MAKEAVAILABLE_SERIAL_PROVIDER SET', cmake)
@@ -1504,6 +1510,36 @@ class PairedWorkflowInitialization(unittest.TestCase):
         separator = chr(92) if os.name == "nt" else "/"
         return type(build)(str(build) + separator + "foreign")
 
+    def foreign_file_snapshot(self, build, foreign):
+        # Directory enumeration may choose another Windows namespace spelling.
+        # Bind the exact leaf and inode independently, never compare spellings.
+        root_info = os.lstat(build)
+        self.assertTrue(M.ordinary(root_info, True))
+        with os.scandir(build) as entries:
+            entry = next(entries, None)
+            self.assertIsNotNone(entry)
+            self.assertEqual(entry.name, foreign.name)
+            self.assertIsNone(next(entries, None))
+        before = os.lstat(foreign)
+        self.assertTrue(M.ordinary(before))
+        self.assertEqual(before.st_nlink, 1)
+        fd = os.open(foreign, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                     getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            self.assertTrue(M.ordinary(opened))
+            self.assertEqual(opened.st_nlink, 1)
+            self.assertEqual((opened.st_dev, opened.st_ino), (before.st_dev, before.st_ino))
+            # Nine bytes bound the read and detect trailing fixture data.
+            payload = stream.read(9)
+            self.assertEqual(payload, b"preserve")
+            after = os.lstat(foreign)
+            self.assertTrue(M.ordinary(after))
+            self.assertEqual(after.st_nlink, 1)
+            self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
+        return (root_info.st_dev, root_info.st_ino, entry.name,
+                before.st_dev, before.st_ino, before.st_mode, before.st_nlink, payload)
+
     def test_foreign_fixture_path_matches_native_enumeration_spelling(self):
         class SlashPath(str):
             def __truediv__(self, child):
@@ -1516,8 +1552,47 @@ class PairedWorkflowInitialization(unittest.TestCase):
         build.mkdir()
         foreign = self.foreign_fixture_path(build)
         foreign.write_bytes(b"preserve")
-        self.assertEqual(list(build.iterdir()), [foreign])
+        snapshot = self.foreign_file_snapshot(build, foreign)
+        self.assertEqual(snapshot, self.foreign_file_snapshot(build, foreign))
         self.assertEqual(foreign.read_bytes(), b"preserve")
+
+    def test_foreign_file_oracle_refuses_namespace_identity_type_links_and_bytes_changes(self):
+        build = self.root / "oracle"
+        build.mkdir()
+        foreign = build / "foreign"
+        foreign.write_bytes(b"preserve")
+        snapshot = self.foreign_file_snapshot(build, foreign)
+        # Overwriting this inode must fail even when every identity field matches.
+        foreign.write_bytes(b"modified")
+        try:
+            with self.assertRaises(AssertionError):
+                self.foreign_file_snapshot(build, foreign)
+        finally:
+            foreign.write_bytes(b"preserve")
+        self.assertEqual(self.foreign_file_snapshot(build, foreign), snapshot)
+        for mutation in ("rename", "extra", "replace", "directory", "link", "bytes"):
+            with self.subTest(mutation=mutation):
+                backup = build / "backup"
+                foreign.rename(backup)
+                try:
+                    if mutation == "directory":
+                        foreign.mkdir()
+                    elif mutation == "link":
+                        os.link(backup, foreign)
+                    elif mutation != "rename":
+                        foreign.write_bytes(b"modified" if mutation == "bytes" else b"preserve")
+                    if mutation not in ("rename", "extra", "link"):
+                        # Keep the old inode alive outside enumeration, preventing reuse.
+                        backup.rename(self.root / "backup")
+                    with self.assertRaises(AssertionError):
+                        self.assertEqual(self.foreign_file_snapshot(build, foreign), snapshot)
+                finally:
+                    if foreign.is_dir():
+                        foreign.rmdir()
+                    elif os.path.lexists(foreign):
+                        foreign.unlink()
+                    (backup if backup.exists() else self.root / "backup").rename(foreign)
+                self.assertEqual(self.foreign_file_snapshot(build, foreign), snapshot)
 
     def test_base_initialization_refusals_stop_before_configure(self):
         manifest = self.root / "base/vendor/rmlui/rmlui-6.1-source.json"
@@ -1539,10 +1614,11 @@ class PairedWorkflowInitialization(unittest.TestCase):
         build.mkdir(parents=True)
         foreign = self.foreign_fixture_path(build)
         foreign.write_bytes(b"preserve")
+        snapshot = self.foreign_file_snapshot(build, foreign)
         result = self.run_workflow()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls(), [])
-        self.assertEqual(list(build.iterdir()), [foreign])
+        self.assertEqual(self.foreign_file_snapshot(build, foreign), snapshot)
         self.assertEqual(foreign.read_bytes(), b"preserve")
         self.assertFalse((self.root / "build/head").exists())
 
@@ -1556,8 +1632,9 @@ class BootstrapInterpreterBinding(unittest.TestCase):
             '  message(FATAL_ERROR "RmlUi requires an absolute bootstrap Python3_EXECUTABLE")\n'
             'endif()\n'
             'file(TO_CMAKE_PATH "${Python3_EXECUTABLE}" _rmlui_python)\n', cmake)
-        commands = re.findall(r'(?:execute_process\(COMMAND|DOWNLOAD_COMMAND)\s+([^\n]+)', cmake)
+        commands = re.findall(r'execute_process\(COMMAND\s+([^\n]+)', cmake)
         self.assertEqual(commands, ['"${_rmlui_python}" -I -B "${_rmlui_helper}"'] * 3)
+        self.assertIn('DOWNLOAD_COMMAND ""', cmake)
         self.assertLess(cmake.index('file(TO_CMAKE_PATH'), cmake.index('execute_process('))
 
     def setUp(self):
@@ -1777,6 +1854,7 @@ class HostedConfigurationContracts(unittest.TestCase):
         expected_argv = [str(executable.resolve()), "-c", "core.autocrlf=false",
                          "-c", "core.safecrlf=false", "-c", "core.hooksPath=" + os.devnull,
                          "-c", "core.fsmonitor=false", "-c", "protocol.file.allow=never",
+                         "-c", "maintenance.auto=false", "-c", "gc.auto=0",
                          "-C", str(source), "fetch", "--depth=1", "https://source.invalid", "revision"]
         output = b"captured-output"
         for proxy_environment in ({}, proxies):
@@ -1796,7 +1874,7 @@ class HostedConfigurationContracts(unittest.TestCase):
                     expected = {key.upper(): value for key, value in base.items()}
                     expected.update(forced)
                     expected.update(proxy_environment)
-                    command.assert_called_once_with(source, expected_argv, expected, payload)
+                    command.assert_called_once_with(source, expected_argv, expected, payload, cancellation=None)
 
     def test_dependency_configuration_keeps_the_original_shared_option_order(self):
         vendor = (ROOT / "vendor/CMakeLists.txt").read_text(encoding="utf-8", errors="strict")
@@ -2087,6 +2165,10 @@ class OwnedCommandLifetime(unittest.TestCase):
         return details
 
     def command(self, mode, input_bytes=None):
+        with M.CommandCancellation() as cancellation:
+            return self.owned_command(mode, input_bytes, cancellation)
+
+    def owned_command(self, mode, input_bytes, cancellation):
         if mode == "storage":
             # The real 8192-entry limit stays unchanged. Prepare the fixed bulk
             # input before timing shutdown; the live descendant adds the last
@@ -2129,7 +2211,8 @@ class OwnedCommandLifetime(unittest.TestCase):
         def run():
             try:
                 with mock.patch.object(M.subprocess, "Popen", side_effect=launch):
-                    result.append(M.git(self.root, "--version", input_bytes=input_bytes))
+                    result.append(M.git(self.root, "--version", input_bytes=input_bytes,
+                                        cancellation=cancellation))
             except BaseException as error:
                 errors.append(error)
             finally:
@@ -2587,6 +2670,267 @@ class OwnedCommandLifetime(unittest.TestCase):
         with mock.patch.object(M.subprocess, "Popen", side_effect=AssertionError("must not launch")):
             with self.assertRaisesRegex(M.Refusal, "input bound"):
                 M.git(self.root, "--version", input_bytes=b"x" * 22656)
+
+
+class CommandCancellationContract(unittest.TestCase):
+    def test_worker_without_owner_refuses_before_spawn(self):
+        errors = []
+        def run():
+            try:
+                M.run_command(Path("unused"), [sys.executable], dict(os.environ))
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(M.subprocess, "Popen") as launch:
+            worker = threading.Thread(target=run)
+            worker.start()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], M.Refusal)
+        self.assertIn("main-thread owner", str(errors[0]))
+        launch.assert_not_called()
+
+    def test_owner_closes_admission_restores_handlers_and_forwards_once(self):
+        calls = []
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        def handler(signum, frame):
+            self.assertEqual(owner.active, 0)
+            self.assertFalse(owner.open)
+            self.assertIs(signal.getsignal(signal.SIGTERM), handler)
+            calls.append(signum)
+        signal.signal(signal.SIGTERM, handler)
+        try:
+            with M.CommandCancellation() as owner:
+                owner.record(signal.SIGTERM, None)
+                owner.record(signal.SIGINT, None)
+                with self.assertRaisesRegex(M.Refusal, "cancelled"), owner.command():
+                    self.fail("cancelled owner admitted a command")
+            self.assertEqual(calls, [signal.SIGTERM])
+            with self.assertRaisesRegex(M.Refusal, "cancelled"), owner.command():
+                self.fail("closed owner admitted a command")
+            self.assertIs(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
+        finally:
+            for sig, callback in previous.items():
+                signal.signal(sig, callback)
+
+    def test_registration_failure_restores_prior_handlers(self):
+        native = signal.signal
+        before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        for failed in before:
+            with self.subTest(signal=failed):
+                owner = M.CommandCancellation()
+                def install(sig, callback):
+                    if sig == failed and callback == owner.record:
+                        raise OSError("registration denied")
+                    return native(sig, callback)
+                with mock.patch.object(M.signal, "signal", side_effect=install):
+                    with self.assertRaisesRegex(OSError, "registration denied"):
+                        with owner:
+                            self.fail("registration failure admitted a scope")
+                for sig, callback in before.items():
+                    self.assertIs(signal.getsignal(sig), callback)
+
+    def test_each_restoration_failure_retains_custody_and_attempts_other_handler(self):
+        native = signal.signal
+        for failed in (signal.SIGINT, signal.SIGTERM):
+            for error_type in (OSError, KeyboardInterrupt):
+                with self.subTest(signal=failed, error=error_type):
+                    before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+                    owner = M.CommandCancellation()
+                    owner.__enter__()
+                    attempted = []
+                    def restore(sig, callback):
+                        attempted.append(sig)
+                        if sig == failed:
+                            raise error_type("restore denied")
+                        return native(sig, callback)
+                    primary = ValueError("original failure")
+                    try:
+                        with mock.patch.object(M.signal, "signal", side_effect=restore):
+                            with self.assertRaisesRegex(M.Refusal, "original failure.*\\n.*restore denied") as raised:
+                                owner.__exit__(type(primary), primary, None)
+                        self.assertIs(raised.exception.__cause__, primary)
+                        self.assertEqual(attempted, [signal.SIGINT, signal.SIGTERM])
+                        self.assertEqual(owner.handlers, {failed: before[failed]})
+                        self.assertFalse(owner.open)
+                    finally:
+                        owner.__exit__(None, None, None)
+                        for sig, callback in before.items():
+                            self.assertEqual(signal.getsignal(sig), callback)
+
+    def test_registration_rollback_attempts_both_handlers_and_preserves_failure(self):
+        native = signal.signal
+        before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        owner = M.CommandCancellation()
+        restored = []
+        def install(sig, callback):
+            if callback == owner.record:
+                if sig == signal.SIGTERM:
+                    raise OSError("registration denied")
+            else:
+                restored.append(sig)
+                if sig == signal.SIGINT:
+                    raise KeyboardInterrupt("rollback interrupted")
+            return native(sig, callback)
+        try:
+            with mock.patch.object(M.signal, "signal", side_effect=install):
+                with self.assertRaisesRegex(M.Refusal, "registration denied.*\\n.*rollback interrupted") as raised:
+                    owner.__enter__()
+            self.assertIsInstance(raised.exception.__cause__, OSError)
+            self.assertEqual(restored, [signal.SIGINT, signal.SIGTERM])
+            self.assertEqual(owner.handlers, {signal.SIGINT: before[signal.SIGINT]})
+        finally:
+            owner.__exit__(None, None, None)
+        for sig, callback in before.items():
+            self.assertEqual(signal.getsignal(sig), callback)
+
+    def test_pending_signal_survives_restoration_failure_and_forwards_after_recovery(self):
+        native = signal.signal
+        previous = signal.getsignal(signal.SIGTERM)
+        calls = []
+        handler = lambda signum, frame: calls.append(signum)
+        native(signal.SIGTERM, handler)
+        owner = M.CommandCancellation()
+        try:
+            owner.__enter__()
+            owner.record(signal.SIGTERM, None)
+            def restore(sig, callback):
+                if sig == signal.SIGINT:
+                    raise OSError("restore denied")
+                return native(sig, callback)
+            with mock.patch.object(M.signal, "signal", side_effect=restore):
+                with self.assertRaisesRegex(M.Refusal, "restore denied"):
+                    owner.__exit__(None, None, None)
+            self.assertEqual(calls, [])
+            self.assertEqual(owner.pending[:2], (signal.SIGTERM, None))
+            owner.__exit__(None, None, None)
+            self.assertEqual(calls, [signal.SIGTERM])
+            self.assertEqual(owner.handlers, {})
+            self.assertIsNone(owner.pending)
+        finally:
+            owner.restore_handlers()
+            native(signal.SIGTERM, previous)
+
+    def test_ignored_signal_and_nested_owner_restore_on_error(self):
+        before = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            with self.assertRaisesRegex(OSError, "scope failure"), M.CommandCancellation() as outer:
+                self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+                with M.CommandCancellation():
+                    pass
+                self.assertEqual(signal.getsignal(signal.SIGINT), outer.record)
+                raise OSError("scope failure")
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGTERM, before)
+
+    def test_scope_exit_cancels_registered_worker_before_restoring_handlers(self):
+        registered, stopped = threading.Event(), threading.Event()
+        errors = []
+        def run():
+            try:
+                with owner.command():
+                    registered.set()
+                    while True:
+                        owner.check()
+                        stopped.wait(0.001)
+            except M.Refusal as error:
+                errors.append(str(error))
+            finally:
+                stopped.set()
+        with M.CommandCancellation() as owner:
+            worker = threading.Thread(target=run)
+            worker.start()
+            self.assertTrue(registered.wait(2))
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(errors, ["Git command cancelled"])
+        self.assertEqual(owner.active, 0)
+
+    def test_termination_retires_main_and_worker_trees_before_forwarding(self):
+        if os.name != "posix":
+            # Windows' real job shutdown remains covered by OwnedCommandLifetime;
+            # TerminateProcess bypasses Python signal handlers on that platform.
+            self.test_owner_closes_admission_restores_handlers_and_forwards_once()
+            return
+        for mode in ("main", "worker"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve(strict=True)
+                source = root / "source"
+                source.mkdir()
+                script = root / "owner.py"
+                script.write_text(textwrap.dedent('''\
+                    import importlib.util, os, signal, subprocess, sys, threading, time
+                    from pathlib import Path
+                    loader = importlib.util.spec_from_file_location("source_helper", sys.argv[1])
+                    module = importlib.util.module_from_spec(loader)
+                    loader.loader.exec_module(module)
+                    root = Path(sys.argv[2])
+                    witness = os.dup(sys.stdout.fileno())
+                    launch = module.subprocess.Popen
+                    def popen(*args, **kwargs):
+                        kwargs['pass_fds'] = (witness,)
+                        return launch(*args, **kwargs)
+                    module.subprocess.Popen = popen
+                    # This child has an independent four-second lifetime even
+                    # when testing an implementation that leaks its entire tree.
+                    writer = "import os,time; print('writer-ready',flush=True); time.sleep(4)"
+                    leader = ("import subprocess,sys,time; "
+                              "subprocess.Popen([sys.executable,'-I','-B','-c',sys.argv[1]], "
+                              "pass_fds=(int(sys.argv[2]),)); "
+                              "time.sleep(4)")
+                    native_read = module.os.read
+                    def read(fd, count):
+                        data = native_read(fd, count)
+                        if b'writer-ready' in data:
+                            print('ready', flush=True)
+                        return data
+                    module.os.read = read
+                    # Send another signal while the real cleanup waits. It must
+                    # not interrupt custody or forward termination twice.
+                    native_killpg = module.os.killpg
+                    def killpg(pid, signum):
+                        os.kill(os.getpid(), signal.SIGTERM)
+                        return native_killpg(pid, signum)
+                    module.os.killpg = killpg
+                    def run(owner=None):
+                        try:
+                            module.run_command(root / 'source',
+                                [sys.executable,'-I','-B','-c',leader,writer,str(witness)],
+                                dict(os.environ), cancellation=owner)
+                        except module.Refusal:
+                            pass
+                    if sys.argv[3] == 'main':
+                        run()
+                    else:
+                        with module.CommandCancellation() as owner:
+                            worker = threading.Thread(target=run, args=(owner,))
+                            worker.start()
+                            while worker.is_alive():
+                                worker.join(0.01)
+                    raise RuntimeError('termination was not forwarded')
+                    '''), encoding="utf-8")
+                process = subprocess.Popen([sys.executable, "-I", "-B", str(script),
+                                            str(MODULE_PATH.resolve()), str(root), mode],
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                try:
+                    lines = []
+                    reader = threading.Thread(target=lambda: lines.append(process.stdout.readline()))
+                    reader.start()
+                    reader.join(3)
+                    self.assertFalse(reader.is_alive(), "command did not reach its real output boundary")
+                    self.assertEqual(lines, [b"ready\n"])
+                    process.send_signal(signal.SIGTERM)
+                    output = process.communicate(timeout=2)[0]
+                    self.assertEqual(process.returncode, -signal.SIGTERM, output)
+                finally:
+                    # A reverted helper may leave stdout inherited by its child;
+                    # drain through that child's independent four-second bound.
+                    process.communicate(timeout=6)
+                    reader.join(2)
+                    self.assertFalse(reader.is_alive())
 
 
 class WindowsContainmentRefusal(unittest.TestCase):
