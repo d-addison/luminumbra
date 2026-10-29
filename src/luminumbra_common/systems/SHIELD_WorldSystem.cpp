@@ -94,6 +94,11 @@ constexpr std::size_t kMaxMeshingBatchesInFlight =
     static_cast<std::size_t>(kActivationPipelineLatencyTicks) + 1;
 
 namespace {
+// Persistence may supply a rejected grid; bound before multiplying or indexing.
+bool IsBoundedWaterResolution(int resolution) {
+    return resolution > 1 && resolution <= 32 && 32 % resolution == 0;
+}
+
 // All dispatches nested in one update share the same byte allowance. Explicit
 // blocking drains start a fresh bounded pass for each finite request prefix.
 class MeshingSnapshotPass {
@@ -1839,7 +1844,7 @@ bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
         if (coords.x != column.x || coords.z != column.z)
             continue;
         const int res = chunk->current_water_resolution.load(std::memory_order_relaxed);
-        if (res <= 1)
+        if (!IsBoundedWaterResolution(res))
             continue;
         const std::size_t side = static_cast<std::size_t>(res);
         if (chunk->water_bed_mm.size() != side * side ||
@@ -4487,7 +4492,8 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
         if (!c || !c->has_water_sim.load(std::memory_order_acquire))
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res)
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -4538,7 +4544,7 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_bed_mm.size()) != res * res)
+        if (!IsBoundedWaterResolution(res) || static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -4583,7 +4589,8 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res ||
             static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
@@ -4598,7 +4605,8 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float surf =
-                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] +
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
                                        c->water_depth_mm[static_cast<std::size_t>(z * res + x)]) /
                     1000.0f;
                 for (int a = 0; a < 8; ++a) {
@@ -4650,7 +4658,8 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res ||
             static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
@@ -4667,7 +4676,9 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float surf_y =
-                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] + d) /
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
+                                       d) /
                     1000.0f;
                 best_pos = Vec3(wx, surf_y, wz);
             }
@@ -4735,7 +4746,8 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return terrain;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    if (res <= 1 || static_cast<int>(c->water_level_data.size()) != res * res)
+    if (!IsBoundedWaterResolution(res) ||
+        c->water_level_data.size() < static_cast<std::size_t>(res) * static_cast<std::size_t>(res))
         return terrain;
     const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
     const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
@@ -4747,15 +4759,19 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
 }
 
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
-    // Mirrors the injection loop's precondition (has_water_sim + complete FLOAT
-    // grid). EMPIRICAL ground truth (the water-source staging hunt): water grids live on
-    // the 2.5D COLUMN's y=0 chunk regardless of the terrain sign — probe there.
+    // Match source injection: an integer pair plus all three float mirrors.
+    // Probe the 2.5D column's y=0 chunk regardless of terrain sign.
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
     const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return false;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    return res > 1 && static_cast<int>(c->water_level_data.size()) == res * res;
+    if (!IsBoundedWaterResolution(res))
+        return false;
+    const auto cells = static_cast<std::size_t>(res) * static_cast<std::size_t>(res);
+    return c->water_bed_mm.size() == cells && c->water_depth_mm.size() == cells &&
+           c->water_level_data.size() >= cells && c->water_flow_data.size() >= cells &&
+           c->water_sim_terrain_height.size() >= cells;
 }
 
 // boot-settle mode passthrough (lifts the live-play water caps during Boot only).

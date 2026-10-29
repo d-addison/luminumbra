@@ -51,6 +51,56 @@ class UploadBudgetWiring(unittest.TestCase):
         python_tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
         self.assertIn('"test/rendering/test_upload_budget_wiring.py"', python_tests)
 
+    def test_waterfall_replacement_clears_sites_and_spray_before_empty_site_return(self):
+        source = read(RENDERING / "passes/WaterfallPass.cpp")
+        destroy = compact(body(source, "void WaterfallPass::destroy_geometry()"))
+        self.assertIn("m_sites.clear();", destroy)
+        self.assertEqual(brace_depth(destroy, destroy.index("m_sites.clear();")), 0)
+        prepare = compact(body(source, "void WaterfallPass::prepare("))
+        query = prepare.index("waterfall_sites(world)")
+        empty = prepare.index("if (sites.empty())")
+        self.assertLess(prepare.index("destroy_geometry();"), query)
+        self.assertLess(prepare.index("particle_pass->clear_waterfall_spray();"), query)
+        self.assertLess(query, empty)
+        self.assertLess(empty, prepare.index("particle_pass->add_waterfall_spray("))
+        self.assertIn("particle_pass->clear_waterfall_spray();",
+                      body(prepare, "if (particle_pass)"))
+        swap = body(self.pipeline, "void RenderPipeline::prepare_world_swap()")
+        self.assertIn("m_waterfall_pass->destroy_geometry();", swap)
+        self.assertIn("m_particle_pass->clear_waterfall_spray();", swap)
+        entry = body(self.main, "auto finish_world_entry =")
+        self.assertIn("renderPipeline.prepare_waterfalls(*world_system);", entry)
+        forward = body(self.pipeline, "void RenderPipeline::prepare_waterfalls(")
+        self.assertIn("m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);",
+                      forward)
+        preview = read(ROOT / "src/luminumbra_client/world/WorldgenPreview.cpp")
+        self.assertIn("pipeline.prepare_world_swap();", preview)
+
+    def test_waterfall_spray_cleanup_preserves_other_emitter_handles_and_indices(self):
+        source = read(RENDERING / "passes/ParticlePass.cpp")
+        add = body(source, "uint32_t ParticlePass::add_waterfall_spray(")
+        self.assertIn("spray.waterfall_spray = true;", add)
+        self.assertLess(add.index("if (id == kInvalidEmitter)"),
+                        add.index("spray.waterfall_spray = true;"))
+        clear = compact(body(source, "void ParticlePass::clear_waterfall_spray()"))
+        self.assertIn("std::array<std::size_t, kMaxEmitters> remap{};", clear)
+        self.assertIn("remap[index] = kNoSplashEmitter;", clear)
+        self.assertIn("remap[index] = kept;", clear)
+        self.assertIn("m_active_emitters[kept] = std::move(m_active_emitters[index]);", clear)
+        self.assertIn("particle.alive = false;", clear)
+        self.assertIn("m_live_count = 0;", clear)
+        self.assertIn("++m_live_count;", clear)
+        self.assertIn("particle.emitter_index = static_cast<uint32_t>(mapped);", clear)
+        self.assertIn("m_splash_emitter_index = remap[m_splash_emitter_index];", clear)
+        self.assertIn("m_active_emitters.resize(kept);", clear)
+        self.assertIn("m_descriptors.clear();", clear)
+        self.assertIn("m_frame_instance_count = 0;", clear)
+        self.assertNotIn("clear_emitters()", clear)
+        self.assertNotIn("m_next_emitter_id =", clear)
+        native = read(ROOT / "test/rendering/particle_determinism_test.cpp")
+        self.assertIn("WaterfallReplacementPreservesOtherEmitterHandles", native)
+        self.assertIn("particle_determinism_test", read(ROOT / "test/CMakeLists.txt"))
+
     def test_both_live_backends_use_policy_and_include_preparation(self):
         self.assertIn("manage_mesh_gpu_resources<false>", self.pipeline)
         self.assertIn("manage_mesh_gpu_resources<true>", self.pipeline)
@@ -684,7 +734,9 @@ class UploadBudgetWiring(unittest.TestCase):
         helpers = read(RENDERING / "PixelIo.h")
         image = compact(body(pixels, "bool WritePixelBufferPpm("))
         self.assertIn("!CapturePixelBytes(width, height, 3, bytes) || pixels.size() != bytes", image)
-        self.assertIn("if (!CloseCaptureFile(output))", image)
+        self.assertIn("const bool written = WritePixelBufferPpmStream(output, width, height, pixels);", image)
+        self.assertIn("const bool closed = CloseCaptureFile(output);", image)
+        self.assertIn("if (!written || !closed)", image)
         flush = compact(body(helpers, "bool FlushCaptureStream("))
         self.assertEqual(flush, "output.flush(); return static_cast<bool>(output);")
         close = compact(body(helpers, "bool CloseCaptureFile("))
@@ -710,6 +762,301 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("TruncatedIndexFlushFailureAndCompleteStreamAreDistinct", native)
         gl_native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
         self.assertIn("UnwritableReportImageInvalidScanAndCompleteOutput", gl_native)
+
+    def test_legacy_water_migrates_at_equal_resolution(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        migration = compact(body(source, "std::size_t WaterSystem::MigrateChunksToSimResolution("))
+        self.assertIn("== m_sim_resolution && HasCompleteIntegerWaterGrid(*cp, m_sim_resolution)",
+                      migration)
+        resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
+        self.assertIn("new_resolution == current_resolution && "
+                      "!(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())", resize)
+        update = compact(body(source, "void WaterSystem::update("))
+        self.assertIn("chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()",
+                      update)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for regression in ("SameResolutionLegacyFloatsMigrateAtLoadAndDirectResize",
+                           "SameResolutionLegacyFloatsMigrateDuringLiveUpdate"):
+            self.assertIn(regression, native)
+
+    def test_legacy_surface_migration_does_not_require_flow(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
+        self.assertIn("const bool can_interpolate_surface = old_water_levels.size() >= old_cell_count;",
+                      resize)
+        surface = compact(body(resize, "if (can_interpolate_surface)"))
+        self.assertIn("chunk.water_level_data[idx] =", surface)
+        self.assertNotIn("flow", surface)
+        flow = compact(body(resize, "const auto flow_at ="))
+        self.assertIn("index < old_flow_data.size() ? old_flow_data[index] : Vec2(0.0f)", flow)
+        for corner in ("x0, z0", "x1, z0", "x0, z1", "x1, z1"):
+            self.assertIn(f"flow_at({corner})", resize)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        self.assertIn("LegacySurfaceMigrationDefaultsOnlyMissingFlowSamples", native)
+        self.assertIn("LegacyMissingOrShortSurfaceKeepsAvailableFlow", native)
+
+    def test_water_migration_preserves_both_integer_grids_without_float_feedback(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
+        self.assertIn("old_bed_mm = std::move(chunk.water_bed_mm)", resize)
+        self.assertIn("sample_mm(old_bed_mm, x, z)", resize)
+        self.assertIn("sample_mm(old_depth_mm, x, z)", resize)
+        sampler = re.sub(r"//[^\n]*", "", body(body(source, "bool WaterSystem::ResizeSimulationGrid("), "const auto sample_mm ="))
+        for forbidden in ("float", "floor", "lround"):
+            self.assertNotIn(forbidden, sampler)
+        self.assertIn("sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536)", sampler)
+        self.assertIn("new_resolution == current_resolution", resize)
+        self.assertIn("current_resolution > 32", resize)
+        self.assertIn("chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty()", resize)
+        self.assertIn("chunk.water_bed_mm.size() == old_cell_count && "
+                      "chunk.water_depth_mm.size() == old_cell_count", resize)
+        refusal = "if (!legacy_float_only && !complete_integer_pair) { return false; }"
+        self.assertIn(refusal, resize)
+        self.assertLess(resize.index(refusal), resize.index("std::move(chunk.water_level_data)"))
+        self.assertNotIn("can_interpolate_bed", resize)
+        self.assertNotIn("can_interpolate_mm", resize)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        self.assertIn("CompleteIntegerPairStepsWithAbsentOrWrongSizedFlux", native)
+        self.assertIn("LegacyFloatPairMigratesTogetherAndThenSteps", native)
+        self.assertIn("EditedChannelAndDamSurviveMigrationAndSavedContinuation", native)
+        self.assertIn("IntegerMigrationDoesNotRequireRenderMirrorsAndRefusesInvalidSourceResolution", native)
+        self.assertIn("MigratedWaterOracle(beds, old_res, new_res)", native)
+        self.assertIn("-4000, 8", native)
+        self.assertIn("4000, 8", native)
+        self.assertIn("step < 4", native)
+        registration = read(ROOT / "test/CMakeLists.txt")
+        self.assertIn("common/WaterSeedInputs_test.cpp", registration)
+        self.assertIn("rendering/FarWorldWaterGl_test.cpp", registration)
+
+    def test_rejected_water_grids_are_excluded_at_every_consumer(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        complete = body(source, 'bool HasCompleteIntegerWaterGrid(')
+        for condition in ('resolution > 32', '32 % resolution',
+                          'chunk.water_bed_mm.size() == cells',
+                          'chunk.water_depth_mm.size() == cells'):
+            self.assertIn(condition, complete)
+        self.assertNotIn('water_edge_flux', complete)
+        step = body(source, 'void StepChunkWaterFixed(')
+        self.assertIn('c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0)', step)
+        self.assertLess(step.index('!HasCompleteIntegerWaterGrid(c, res)'),
+                        step.index('c.water_edge_flux.assign('))
+        self.assertLess(step.index('c.water_edge_flux.assign('),
+                        step.index('flux[eidx]'))
+        for signature in ('std::uint64_t WaterActivityScore(', 'bool HasCompleteWaterGrid(',
+                          'void StepChunkWaterFixed(', 'void WaterSystem::update(',
+                          'int WaterSystem::EditTerrainBed('):
+            self.assertIn('HasCompleteIntegerWaterGrid(', body(source, signature))
+        update = body(source, 'void WaterSystem::update(')
+        self.assertIn('!HasCompleteIntegerWaterGrid(*chunk_ptr, GetWaterResolution(*chunk_ptr))', update)
+        self.assertLess(update.index('!HasCompleteIntegerWaterGrid(*chunk_ptr'),
+                        update.index('const bool sleeping_pre'))
+        self.assertIn('!HasCompleteIntegerWaterGrid(*A, res)', update)
+        self.assertIn('!HasCompleteIntegerWaterGrid(*B, res)', update)
+        for signature in ('f32 WaterSystem::get_water_level_at(',
+                          'Vec2 WaterSystem::get_water_flow_at(',
+                          'void WaterSystem::apply_displacement('):
+            self.assertIn('HasCompleteWaterGrid(', body(source, signature))
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for regression in ('RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits',
+                           'InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep',
+                           'WorldWaterProbesRefuseUnsupportedResolutionBeforeSizeArithmetic'):
+            self.assertIn('TEST(WaterSeedInputs, ' + regression + ')', native)
+        world = read(ROOT / 'src/luminumbra_common/systems/SHIELD_WorldSystem.cpp')
+        readiness = body(world, 'bool SHIELD_WorldSystem::debug_water_grid_at(')
+        for condition in ('c->water_bed_mm.size() == cells',
+                          'c->water_depth_mm.size() == cells',
+                          'c->water_level_data.size() >= cells',
+                          'c->water_flow_data.size() >= cells',
+                          'c->water_sim_terrain_height.size() >= cells'):
+            self.assertIn(condition, readiness)
+        self.assertNotIn('water_edge_flux', readiness)
+        self.assertIn('SourceReadinessRequiresTheSameArraysAsInjection', native)
+        for signature in ('bool SHIELD_WorldSystem::IsUnderwater(',
+                          'std::int64_t SHIELD_WorldSystem::debug_water_volume_near(',
+                          'bool SHIELD_WorldSystem::debug_lowest_land_pos(',
+                          'bool SHIELD_WorldSystem::debug_find_shoreline(',
+                          'Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(',
+                          'float SHIELD_WorldSystem::live_water_surface_at(',
+                          'bool SHIELD_WorldSystem::debug_water_grid_at('):
+            self.assertIn('IsBoundedWaterResolution(res)', body(world, signature))
+
+    def test_interactive_photos_publish_only_after_every_output_completed(self):
+        pixels = read(RENDERING / "PixelIo.cpp")
+        helpers = read(RENDERING / "PixelIo.h")
+        capture = compact(body(pixels, "int PersistPhotoCapture("))
+        files = compact(body(helpers, "bool WritePhotoCaptureFiles("))
+        self.assertIn("const bool opened = image && thumbnail && sidecar;", files)
+        self.assertIn("opened && WritePixelBufferPpmStream(image, width, height, pixels) && "
+                      "WritePixelBufferThumbnailTgaStream(thumbnail, width, height, pixels, 512);", files)
+        self.assertIn("payloads_written && image_closed && thumbnail_closed && "
+                      "WriteCaptureStream(sidecar, metadata)", files)
+        self.assertLess(files.index("const bool thumbnail_closed"), files.index("WriteCaptureStream(sidecar"))
+        for signature, parameter in (("bool WritePixelBufferPpmStream(", "output"),
+                                     ("bool WritePixelBufferThumbnailTgaStream(", "out")):
+            serializer = compact(body(pixels, signature))
+            self.assertIn("CapturePixelBytes(", serializer)
+            self.assertIn("return FlushCaptureStream(" + parameter + ");", serializer)
+        text = compact(body(helpers, "bool WriteCaptureStream("))
+        self.assertIn("output.write(text.data(), static_cast<std::streamsize>(text.size()));", text)
+        self.assertIn("return FlushCaptureStream(output);", text)
+        for artifact in ("image", "thumbnail", "sidecar"):
+            self.assertIn(f"const bool {artifact}_closed = CloseCaptureFile({artifact});", files)
+        self.assertIn("return sidecar_written && sidecar_closed && publish();", files)
+        for writer in ("WritePixelBufferPpmStream(image", "WritePixelBufferThumbnailTgaStream(thumbnail",
+                       "WriteCaptureStream(sidecar, metadata)"):
+            self.assertIn(writer, files)
+        self.assertIn('return std::filesystem::create_directory(thumbnail_dir / "complete", error);', capture)
+        self.assertIn("pixels, json, publish)) return 0;", capture)
+        self.assertIn("EXPECT_FALSE(published)", read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp"))
+        self.assertIn('if (!std::filesystem::create_directory(thumbnail_dir, error)) return 0;', capture)
+        self.assertEqual(capture.count("if (error) return 0;"), 3)
+        self.assertIn("attempt < 1024", capture)
+        self.assertNotIn("remove", capture.replace("No rollback deletes by pathname.", ""))
+        for platform_flag in ("_O_EXCL", "O_EXCL", "O_NOFOLLOW"):
+            self.assertIn(platform_flag, pixels)
+        self.assertIn("O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW", pixels)
+        self.assertIn("_O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY", pixels)
+        self.assertIn("std::fclose(file) == 0", pixels)
+        self.assertIn("std::fflush(m_file)", pixels)
+        reader = compact(body(pixels, "bool ReadCompletedPhotoCapture("))
+        self.assertIn('thumbnail_dir / "complete"', reader)
+        for artifact in ('photo_dir / "image.ppm"', 'thumbnail_dir / "thumbnail.tga"',
+                         'photo_dir / "verdict.photo.json"'):
+            self.assertIn(artifact, reader)
+        self.assertIn("sidecar.size() > buffer.size()", reader)
+        self.assertIn("count != sidecar.size()", reader)
+        self.assertIn("image.size() != expected_header.size() + bytes", reader)
+        self.assertIn("thumbnail.size() != 18 + thumb_bytes", reader)
+        overlay = compact(body(read(ROOT / "src/luminumbra_client/app/DebugOverlays.cpp"),
+                               "void UpdatePhotoCapture("))
+        self.assertIn("const bool readback_ok = ReadPhotoCapturePixels(cap_w, cap_h, px);", overlay)
+        self.assertIn("readback_ok ? photo_allocator.Persist(", overlay)
+        self.assertIn("if (saved_id > 0)", overlay)
+        self.assertIn("Photo could not be saved.", overlay)
+        gallery = compact(body(read(ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp"),
+                               "void Rml_UIManager::PopulateGallery("))
+        self.assertIn("!Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, photo.stars, legacy)", gallery)
+        self.assertIn('legacy ? ".tga" : "/thumbnail.tga"', gallery)
+        self.assertIn("parsed.ptr != digits.data() + digits.size()", gallery)
+        self.assertIn("if (ids.size() == 12) break;", gallery)
+        self.assertIn("if (entries == kMaxGalleryEntries) { candidates.clear(); break; }", gallery)
+        self.assertIn("if (ec) candidates.clear();", gallery)
+        self.assertLess(gallery.index("std::sort(candidates.begin()"), gallery.index("ReadCompletedPhotoCapture("))
+        self.assertIn("if (!ids.empty() && ids.back().id == photo.id) continue;", gallery)
+        gallery_native = read(ROOT / "test/ui/ui_smoke_test.cpp")
+        self.assertIn("kGalleryEntryBound = 65536", gallery_native)
+        self.assertIn('WriteCaptureText(thumbs / "overflow", "unrelated")', gallery_native)
+        wrapper = compact(body(read(ROOT / "src/luminumbra_client/app/WindowModeControls.cpp"),
+                               "bool WriteCaptureThumbnailTga("))
+        self.assertIn("return Luminumbra::Rendering::WritePixelBufferThumbnailTga(", wrapper)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for name in ("EveryPhotoArtifactOpenWriteFlushAndCloseFailureRefusesPublication",
+                     "PhotoDirectoriesCompletionAndUnrelatedFilesArePreserved"):
+            self.assertIn("TEST(CaptureArtifacts, " + name + ")", native)
+        self.assertIn("artifact < 3", native)
+        self.assertIn("failure < 4", native)
+
+    def test_photo_allocation_covers_history_and_bounds_header_ranges(self):
+        pixels = read(RENDERING / "PixelIo.cpp")
+        occupied = body(pixels, "bool PhotoIdOccupied(")
+        for reservation in ('photos / stamp', 'stamp + ".ppm"', 'stamp + ".photo.json"',
+                            'thumbnails / cap', 'cap + ".tga"'):
+            self.assertIn(reservation, occupied)
+        self.assertIn('symlink_status(path, error)', occupied)
+        initializer = body(pixels, "bool FindNextPhotoId(")
+        self.assertIn('for (const bool thumbnail : {false, true})', initializer)
+        self.assertIn('entries == kMaxReservationEntries', initializer)
+        self.assertIn('if (error)', initializer)
+        allocator = body(pixels, "int PhotoCaptureAllocator::Persist(")
+        self.assertIn('!m_initialized || m_root != root', allocator)
+        self.assertIn('FindNextPhotoId(root, next)', allocator)
+        self.assertIn('saved + 1', allocator)
+        overlay = body(read(ROOT / "src/luminumbra_client/app/DebugOverlays.cpp"),
+                       "void UpdatePhotoCapture(")
+        self.assertIn('photo_allocator.Persist(root_path_str, cap_w, cap_h, px, side)', compact(overlay))
+        self.assertNotIn('root_path_str, app.hud.photoMode.captures', compact(overlay))
+        reader = body(pixels, "bool ReadCompletedPhotoCapture(")
+        self.assertIn('header.size() < 11', reader)
+        self.assertLess(reader.index('header.size() < 11'), reader.index('std::from_chars('))
+        self.assertIn('parsed_width.ptr == header.data() + header.size()', reader)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for regression in ('EveryLegacyAndDirectoryReservationBlocksIdReuse',
+                           'AllocationCursorStartsBeyondHistoryAndSurvivesSessionRestarts',
+                           'AllocationUsesEveryHistoricalFormatAndRefusesUnreadableRoots',
+                           'EveryTruncatedHeaderPrefixRefusesBothCaptureFormats'):
+            self.assertIn('TEST(CaptureArtifacts, ' + regression + ')', native)
+
+    def test_gl_error_drains_exist_only_at_allowlisted_pre_work_sites(self):
+        # Resource allocation/driver inspection has existing drains outside capture.
+        # The only capture drain is immediately before interactive photo readback.
+        drain = re.compile(
+            r'while\s*\(\s*glGetError\(\)'
+            r'|for\s*\([^;]*;[^;]*glGetError\(\)'
+            r'|glGetError\(\)\s*==\s*GL_NO_ERROR\)\s*\{?\s*break;')
+        infrastructure = {
+            'src/luminumbra_client/core/HardwareInfo.cpp': 1,
+            'src/luminumbra_client/rendering/RenderResourceRegistry.cpp': 2,
+            'src/luminumbra_client/rendering/passes/ChunkGeometryPool.cpp': 2,
+        }
+        found = {}
+        for path in sorted((ROOT / 'src').rglob('*')):
+            if path.suffix not in ('.cpp', '.cc', '.h', '.hpp', '.inl', '.mm'):
+                continue
+            count = len(drain.findall(read(path)))
+            if count:
+                found[path.relative_to(ROOT).as_posix()] = count
+        for path, count in infrastructure.items():
+            self.assertEqual(found.pop(path, None), count)
+        self.assertEqual(found, {'src/luminumbra_client/app/WindowModeControls.cpp': 1})
+        readback = body(read(ROOT / 'src/luminumbra_client/app/WindowModeControls.cpp'),
+                        'bool ReadPhotoCapturePixels(')
+        self.assertEqual(readback.count('query < 8'), 2)
+        self.assertEqual(readback.count('glGetError()'), 2)
+        self.assertLess(readback.index('CapturePixelBytes('), readback.index('readback(bytes)'))
+        self.assertLess(readback.index('++stale_errors'), readback.index('glReadBuffer(GL_BACK)'))
+        self.assertIn('if (stale_errors != 0)', readback)
+        self.assertEqual(readback.count('LUMINUMBRA_CORE_WARN('), 1)
+        self.assertLess(readback.index('LUMINUMBRA_CORE_WARN('), readback.index('glReadBuffer(GL_BACK)'))
+        self.assertLess(readback.index('glReadPixels('), readback.index('bool readback_ok = true'))
+        self.assertIn('if (glGetError() != GL_NO_ERROR) {\n            readback_ok = false;', readback)
+        self.assertIn('if (readback_ok)\n                pixels.swap(readback);', readback)
+        self.assertIn('return readback_ok;', readback)
+        native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
+        for case in ('InteractivePhotoClearsStaleErrorsAndPublishesAllArtifacts',
+                     'InteractivePhotoRefusesOwnReadbackErrorsWithoutPublishingOrDeleting'):
+            self.assertIn('TEST_F(FarWorldWaterGl, ' + case + ')', native)
+
+    def test_frame_errors_survive_every_post_render_capture(self):
+        render = body(self.pipeline, 'void RenderPipeline::render_frame(')
+        self.assertNotIn('glGetError()', render)
+        scopes = [
+            (RENDERING / 'FrameScan.cpp', 'FrameScanReport ScanFrame('),
+            (RENDERING / 'SceneSurvey.cpp', 'bool RunSceneSurvey('),
+            (RENDERING / 'TerrainCoverageCapture.cpp',
+             'bool RenderPipeline::capture_terrain_coverage('),
+            (RENDERING / 'static_preview/StaticRenderer.cpp',
+             'StaticFrame StaticRenderer::Render('),
+        ]
+        for name in ('capture_frame_parity', 'capture_upscale_seam_parity',
+                     'capture_ssao_parity'):
+            scopes.append((RENDERING / 'RenderPipeline.cpp',
+                           'bool RenderPipeline::' + name + '('))
+        for path, signature in scopes:
+            with self.subTest(path=path.name, signature=signature):
+                scope = body(read(path), signature)
+                queries = list(re.finditer(r'glGetError\(\)', scope))
+                self.assertTrue(queries)
+                for query in queries:
+                    self.assertRegex(scope[query.end():], r'^\s*(?:==|!=)\s*GL_NO_ERROR')
+                self.assertNotRegex(scope, r'glGetError\(\)[\s\S]{0,40}\bbreak;')
+        native = read(ROOT / 'test/rendering/FarWorldWaterGl_test.cpp')
+        regression = body(native, 'TEST_F(FarWorldWaterGl, FrameRenderErrorsStillRefuseEveryCapture)')
+        self.assertIn('FrameRenderError failure(pipeline)', regression)
+        self.assertIn('ASSERT_GT(failure.failures(), 0u)', regression)
+        self.assertIn('EXPECT_FALSE(ScanFrame(pipeline, 9, 9, materials).ok)', regression)
+        self.assertIn('EXPECT_FALSE(pipeline.capture_terrain_coverage(', regression)
+        for name in ('capture_frame_parity', 'capture_upscale_seam_parity', 'capture_ssao_parity'):
+            self.assertRegex(compact(regression), r'EXPECT_FALSE\(\s*pipeline\.' + name + r'\(')
 
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))

@@ -20,8 +20,10 @@ Mesa3D llvmpipe **26.1.7**, and installs/updates the original MSYS2 UCRT64 packa
 remain rolling, as before. Network access for actions, packages and dependencies
 is needed on the runner. `tools/ci/windows_runner_preflight.py` verifies tools
 and names missing prerequisites before configuration; it never builds anything.
-Checkouts clean the persistent worktree. Separate 500M ccache directories live
+Checkouts clean the persistent worktree. Separate 1200M ccache directories live
 under the service account's LocalAppData, outside the worktree and job temp.
+The aggregate jobs expose the selected CPython interpreter to Bash as `python3`;
+MSVC standalone contracts enter the same x64 developer environment as the build.
 Existing 90/85-minute build and five-minute aggregate limits remain unchanged.
 
 Follow GitHub's official instructions for

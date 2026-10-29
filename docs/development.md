@@ -76,24 +76,26 @@ ctest --preset release -L manual \
 
 The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
 Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
-use 500M each. Qualification captures bypass the cache. Immutable save keys include
+use 1200M (1.2 GB) each on the daily runner's disk. Qualification captures bypass
+the cache. Hosted lanes' immutable save keys include
 the commit SHA; restores prefer the matching CMake configuration prefix where
 available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
 before saving, and cache-save failures cannot
-fail a job. Starting from the measured 1.55 GB devel generation, the two cap
-increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB:
-about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
-6 GB budget for other caches. At all seven lanes' configured caps, one generation
-per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
-package and analysis caches. These lanes use standard runners and the existing
-cache actions, with no paid cache service.
+fail a job. At the five hosted lanes' configured caps, one generation per branch totals
+400 + 600 + 250 + 250 + 250 = 1750 MB (1.75 GB), or 3.5 GB across
+main/devel, fitting within the 9.5 GB cleanup budget with 6 GB to spare. That
+leaves 6.5 GB of the repository's 10 GB cache limit for package and analysis
+caches, grace-window generations and saves in progress. Devel receives frequent pushes; main rarely
+does. Main's newest caches remain reserved even when old, so infrequent main
+pushes do not create more headroom. The hosted lanes use standard runners and the
+existing cache actions, with zero extra cache spend and no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
 scheduled runs, and manual dispatches never save caches. `cache-cleanup.yml` runs
 only after CI, AddressSanitizer or Performance observations completes for a push
-to main/devel. CI saves the Linux, Diligent, Windows MSVC/UCRT64 compiler caches,
-clang-tidy shards and MSYS2 packages; AddressSanitizer saves its compiler cache;
+to main/devel. CI saves the Linux and Diligent compiler caches and
+clang-tidy shards; AddressSanitizer saves its compiler cache;
 Performance observations saves preview and paired compiler caches (its candidate
 cache save is also covered, though qualification capture currently runs manually).
 Documentation, game-assets, Blender authoring, release and UCRT attribution do not
@@ -108,15 +110,22 @@ even when cleanup is delayed until the branch advances. The named `RECENCY_GRACE
 constant in `cache-cleanup.yml` is six hours: caches whose creation or last access
 (whichever is later) falls within that window are never deleted, preserving caches
 for queued reruns and in-flight runs, including concurrent saves. It also
-limits total repository cache storage, including package and other caches, to
-6 GB, leaving room below GitHub's 10 GB cap for saves in progress. GitHub also
-evicts old keys, but routine cleanup prevents relying on eviction at the cap.
+targets 9.5 GB total repository cache storage, including package and other caches,
+when reserved caches fit that budget. Both branches' newest compiler generations
+at the hosted caps total 3.5 GB, leaving cleanup room to retire obsolete generations outside
+the grace window. Extra protected or grace-window caches can exceed the budget
+and force cleanup to skip deletion. The 6.5 GB margin below the 10 GB
+repository limit must accommodate all other caches and grace-window generations;
+GitHub's free least-recently-used eviction can still apply at that limit. Frequent
+devel saves and the six-hour grace window can retain multiple generations;
+eviction can remove reusable caches, including main's rarely refreshed caches.
+The margin is therefore not a guarantee against cache churn.
 Cleanup uses trusted inline workflow code with no checkout or PR triggers;
 `contents: read` applies throughout and only the deletion job gets `actions: write`.
 It rechecks branch heads before deletion and deletes by cache ID so concurrent
 replacements of the same key survive. Saves in progress can temporarily add
 storage until the next cleanup; protected and grace-window caches are never deleted
-to make room. If those caches alone exceed 6 GB, cleanup warns with their size and
+to make room. If those caches alone exceed 9.5 GB, cleanup warns with their size and
 budget, skips deletion, and exits successfully. Cleanup is best-effort:
 API/auth deletion errors warn and do not fail the run; malformed input is logged
 clearly and remaining cleanup is skipped.
@@ -279,9 +288,12 @@ inventories and partition evidence are retained for 30 days. An aggregate-only
 or failed-shard rerun selects the latest attempt of each producer within the same
 run, retaining evidence from successful earlier attempts. ASan retains its
 existing overwrite-per-shard artifact contract and the same 30-day retention.
-Only shard 1 saves each lane's compiler cache; only UCRT64 shard 1 enables the
-MSYS2 package cache. The cache caps and 6 GB cleanup budget described above apply
-per lane, shared by its test shards.
+Only shard 1 saves each hosted lane's compiler cache. Daily Windows keeps its
+compiler caches on the runner's disk and disables the MSYS2 package cache. The
+compiler-cache caps described above apply per lane, shared by its test shards;
+the 9.5 GB cleanup budget covers repository-hosted caches,
+leaving 0.5 GB of the 10 GB limit beyond the budget for other caches and grace-window
+generations, so free least-recently-used eviction can still apply.
 
 The GCC aggregate checks acceptance-matrix execution after merging and validating
 the exact selected JUnit union. It also consumes unfiltered discovery and serial NetSoak
@@ -359,8 +371,16 @@ No new required-check configuration is needed.
 Marking a pull request ready for review triggers the full checks on its current
 head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
-branch and path filters still apply. Maintainers must not merge until the
-`ready_for_review` run's required checks are green on the current head, and must
+branch and path filters still apply. CI also listens for `labeled`, `unlabeled`,
+and `edited`. Only `edited` events with `github.event.changes.base` present run
+normal CI, so retargeting a ready PR to main runs Windows/UCRT64 validation even
+for confirmed non-C++ changes. Its aggregate requires successful native producers.
+Title/body edits skip every CI job before runner allocation, use unique
+non-cancelling concurrency groups, and give skipped checks a ` (metadata edit)`
+suffix. This keeps their skipped results separate from required check names on
+the same SHA. A pre-job dependency skip alone would still emit skipped checks
+under those required names. Other workflows retain their existing event types.
+Maintainers must not merge until the `ready_for_review` run's required checks are green on the current head, and must
 wait again after any head update. This repository does not implement a separate
 merge gate. The external campaign gate (`campaign_control.py land`, outside this
 repository) requires actual `SUCCESS` for required checks on the exact head,
@@ -418,9 +438,10 @@ Authoring service implementation and native probes require builds.
 The public-tree job also runs SDF documentation lint so doc-only edits retain that
 CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 
-Required job names and workflow PR triggers remain present for every PR. Native
-lanes depend directly on the always-running classifier. The clang-tidy aggregate
-also depends on the shards and reports their result, including routed skips.
+Required job names remain present for admitted validation events. CI metadata
+edits use the distinct skipped names described above. Native lanes depend
+directly on the classifier, which runs for every admitted validation event. The
+clang-tidy aggregate also depends on the shards and reports their result, including routed skips.
 Workflow cancellation stops aggregates with valid dependencies; invalid
 dependencies reach an explicit failure step. Linux/GCC selects its native or Python
 steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
@@ -449,8 +470,11 @@ does not grant a heavy exemption. Failures still
 report failure; `success` here describes an executed check that passes. Devel push
 columns describe runs that reach execution, subject to batching below.
 Windows/UCRT64 runs on main/devel pushes and every manual dispatch as well as
-ready native PR routes, retaining its draft and path gates. Devel pushes seed
-the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
+every ready PR into main; ready PRs into devel retain label and path admission.
+Every ready main-bound PR requires successful UCRT64 native producers. Other routes
+require C++ classification; unknown outputs run, and confirmed non-C++ changes skip
+even with the label or sensitive paths. Drafts retain their existing guards. Devel pushes
+seed the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
 cache also saves on these trusted pushes. It shares the workflow-wide devel
 push concurrency group described below. The paired server comparison retains
 its main-bound ready PR and eligible main/devel push routing, with the same path
@@ -472,7 +496,9 @@ pushes. Main pushes and manual dispatches, including qualification captures, hav
 non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
 supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
-runs. Authoring PR runs retain their independent, non-cancelling behaviour.
+runs. CI title/body edit events use isolated non-cancelling groups and leave
+in-flight validation untouched. Authoring PR runs retain their independent,
+non-cancelling behaviour.
 The authoring workflow keeps its existing path triggers. The diagnostic
 `ucrt-attribution.yml` workflow is not a required check. Its devel PR triggers
 retain their existing paths: the attribution workflow,

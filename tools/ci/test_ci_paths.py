@@ -1,9 +1,11 @@
 """Path gate coverage, rename safety, and standalone Python runner contracts."""
 
 from pathlib import Path
+from itertools import product
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,6 +19,7 @@ SPEC = importlib.util.spec_from_file_location("ci_paths", Path(__file__).with_na
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 from ci_shell import bash_executable
+import ctest_shards as shards
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -284,7 +287,7 @@ class PathGateTests(unittest.TestCase):
         }
         routes = (
             ("ci", "linux", "guarded-python"),
-            ("windows-build", "windows-msvc", "ready-python"),
+            ("windows-build", "windows-msvc", "ready-native-or-python"),
             ("ci", "gns-compile-probe", "ready-native"),
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
@@ -302,9 +305,11 @@ class PathGateTests(unittest.TestCase):
             condition = condition.replace("(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (", "(")
             expression = condition.removeprefix("${{ ").removesuffix(" }}")
             # Missing/failed classifier output is represented by the empty string.
-            for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
+            for event, action, base_changed in product(
+                    ("pull_request", "push", "schedule", "workflow_dispatch"),
+                    ("synchronize", "edited"), (False, True)):
                 for draft in (True, False, None):
-                    for cpp in ("true", "false", ""):
+                    for cpp, python in product(("true", "false", ""), ("true", "false", "")):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
                             if route == "required-aggregate":
@@ -315,11 +320,16 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled
                             elif route == "guarded-native":
                                 expected = not cancelled and (not ready or cpp != "false")
+                            elif route == "ready-native-or-python":
+                                # MSVC also carries the standalone Python contracts.
+                                expected = not cancelled and ready and (cpp != "false" or python != "false")
                             else:
-                                expected = not cancelled and ready and (
-                                    route == "ready-python" or cpp != "false"
-                                )
-                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
+                                expected = not cancelled and ready and cpp != "false"
+                            expected = expected and (workflow != "ci" or event != "pull_request"
+                                                     or action != "edited" or base_changed)
+                            actual = expression.replace("github.event.action", repr(action)).replace(
+                                "github.event.changes.base", repr(base_changed))
+                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), actual).replace(
                                 "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
                             ).replace("!cancelled()", repr(not cancelled)).replace(
                                 "always()", "True"
@@ -330,11 +340,71 @@ class PathGateTests(unittest.TestCase):
                             ).replace("needs.tidy-shard.result", repr("success")
                             ).replace("needs.changes.outputs.head_sha", repr("a" * 40)
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
+                                "needs.changes.outputs.needs_python", repr(python)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
                             with self.subTest(workflow=workflow, job=job, event=event,
-                                              draft=draft, cpp=cpp, cancelled=cancelled):
+                                              draft=draft, cpp=cpp, python=python, cancelled=cancelled,
+                                              action=action, base_changed=base_changed):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_ucrt64_producer_and_gate_preserve_main_prs_and_classified_routes(self):
+        workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
+        producer = re.split(r"\n  [\w-]+:\n", workflow.split("  windows-ucrt64:\n", 1)[1])[0]
+        aggregate = re.split(r"\n  [\w-]+:\n", workflow.split("  windows-ucrt64-result:\n", 1)[1])[0]
+        gate_step = aggregate.split("      - name: Require expected producers and route\n", 1)[1].split(
+            "      - name:", 1)[0]
+        condition = re.search(r"^    if: (.*)$", producer, re.MULTILINE)[1]
+        bindings = dict(re.findall(r"^          ([A-Z_]+): (.*)$", gate_step, re.MULTILINE))
+        command = shlex.split(" ".join(re.search(r"        run: >-\n((?:          .*\n)+)", gate_step)[1].splitlines()))
+        self.assertEqual(command[:3], ["python3", "tools/ci/ctest_shards.py", "gate"])
+        self.assertEqual(bindings["NEEDS_CPP"], "${{ needs.changes.outputs.needs_cpp }}")
+
+        def evaluate(expression, context):
+            expression = expression.removeprefix("${{ ").removesuffix(" }}")
+            expression = re.sub(r"\b(?:github|needs|inputs)\.[\w.*-]+",
+                                lambda match: repr(context[match[0]]), expression)
+            expression = expression.replace("!cancelled()", "True").replace("== false", "== False")
+            return eval(expression.replace("&&", "and").replace("||", "or"),
+                        {"__builtins__": {}, "contains": lambda labels, label: label in labels})
+
+        # 960 contexts x 6 classifications x 6 producer results; no subprocess per case.
+        for event, base, cpp, draft, label, paths in product(
+                ("pull_request", "push", "workflow_dispatch", "schedule"), ("main", "devel"),
+                ("true", "false", "", "unknown"), (False, True, None), (False, True),
+                ("true", "false", "", "unknown", "TRUE")):
+            enabled = cpp != "false" and event in ("pull_request", "workflow_dispatch", "schedule")
+            authorized = event != "pull_request" or label
+            ready = event != "pull_request" or draft is False
+            context = {
+                "github.event_name": event, "github.base_ref": base, "github.ref": f"refs/heads/{base}",
+                "github.event.action": "synchronize", "github.event.changes.base": "",
+                "github.event.pull_request.draft": draft,
+                "github.event.pull_request.labels.*.name": ("windows-proof",) if label else (),
+                "github.event.pull_request.head.repo.full_name": "owner/repo", "github.repository": "owner/repo",
+                "needs.changes.outputs.head_sha": "a" * 40, "needs.changes.result": "success",
+                "needs.changes.outputs.needs_cpp": cpp,
+                "inputs.qualification_capture": False,
+            }
+            with self.subTest(event=event, base=base, cpp=cpp, draft=draft, label=label, paths=paths):
+                self.assertEqual(evaluate(condition, context), enabled and ready and authorized)
+                self.assertEqual(evaluate(bindings["CI_ENABLED"], context), enabled)
+                for classification, result in product(
+                        ("success", "failure", "cancelled", "skipped", "", "unknown"),
+                        ("success", "failure", "cancelled", "skipped", "", "unknown")):
+                    inputs = {**context, "needs.changes.result": classification,
+                              "needs.windows-ucrt64.result": result}
+                    env = {key: str(evaluate(expr, inputs)).lower() if expr.startswith("${{") else expr.strip('"')
+                           for key, expr in bindings.items()}
+                    arguments = {flag.removeprefix("--"): env[argument.removeprefix("$")]
+                                 for flag, argument in zip(command[3::2], command[4::2])}
+                    accepted = (classification == "success" and ready
+                                and result == ("success" if enabled else "skipped"))
+                    if accepted:
+                        self.assertEqual(shards.gate(**arguments), "sharded" if enabled else "skipped")
+                    else:
+                        with self.assertRaises(ValueError, msg=repr(arguments)):
+                            shards.gate(**arguments)
 
     def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):
         for filename, producer, aggregate in (

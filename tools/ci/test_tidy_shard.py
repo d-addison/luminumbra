@@ -20,6 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ci_shell import bash_executable
 
 
+CI_ACTIVE_EVENT = (
+    "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base"
+)
+CI_METADATA_SUFFIX = (
+    "${{ github.event_name == 'pull_request' && github.event.action == 'edited' && "
+    "!github.event.changes.base && ' (metadata edit)' || '' }}"
+)
+
+
 BASH = bash_executable()
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("tidy_cache", REPO_ROOT / "scripts/tidy_cache.py")
@@ -279,7 +288,7 @@ class ShardWorkflowTests(unittest.TestCase):
 
     def test_three_standard_runners_keep_full_push_analysis_and_separate_caches(self):
         job = self.jobs["tidy-shard"]
-        self.assertIn("name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3\n", job)
+        self.assertIn("name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3" + CI_METADATA_SUFFIX + "\n", job)
         self.assertIn("runs-on: ubuntu-24.04\n", job)
         self.assertIn("timeout-minutes: 60\n", job)
         self.assertRegex(job, r"strategy:\n      fail-fast: false\n      matrix:\n        shard: \[1, 2, 3\]")
@@ -293,15 +302,15 @@ class ShardWorkflowTests(unittest.TestCase):
     def test_required_name_dependency_and_draft_guards(self):
         aggregate = self.jobs["tidy"]
         guard = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
-        self.assertIn("    name: Static analysis / clang-tidy\n", aggregate)
+        self.assertIn("    name: Static analysis / clang-tidy" + CI_METADATA_SUFFIX + "\n", aggregate)
         self.assertIn("    needs: [changes, tidy-shard]\n", aggregate)
-        self.assertIn("&& (" + guard + ") }}\n", aggregate)
+        self.assertIn("&& (" + guard + ")) }}\n", aggregate)
         self.assertIn("!cancelled()", aggregate)
-        self.assertIn("    if: ${{ (!cancelled() || needs.changes.result != 'success' || "
+        self.assertIn("    if: ${{ (" + CI_ACTIVE_EVENT + ") && ((!cancelled() || needs.changes.result != 'success' || "
                       "(needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) "
-                      "&& (" + guard + ") }}\n", aggregate)
+                      "&& (" + guard + ")) }}\n", aggregate)
         self.assertIn("    needs: changes\n", self.jobs["tidy-shard"])
-        self.assertIn("    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + guard + ") }}\n",
+        self.assertIn("    if: ${{ (" + CI_ACTIVE_EVENT + ") && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + guard + ")) }}\n",
                       self.jobs["tidy-shard"])
         self.assertIn("CI_PATHS_RESULT: ${{ needs.changes.result }}", aggregate)
         self.assertIn("NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}", aggregate)

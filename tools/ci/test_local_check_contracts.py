@@ -350,7 +350,7 @@ class RegistrationTests(unittest.TestCase):
         selector, = [step for step in blocks if "uses: actions/setup-python@" in step]
         self.assertEqual(policy.value(selector, "id", 8), "python")
         self.assertEqual(policy.value(selector, "uses", 8),
-                         "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+                         "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0")
         self.assertIsNone(policy.value(selector, "if", 8))
         self.assertEqual(policy.value(selector, "python-version", 10), "'3.14.8'")
         self.assertEqual(policy.value(selector, "architecture", 10), "x64")

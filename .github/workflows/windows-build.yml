@@ -66,7 +66,7 @@ jobs:
   windows-msvc:
     name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}
     needs: changes
-    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && (needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 90
     strategy:
@@ -78,7 +78,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 500M
+      CCACHE_MAXSIZE: 1200M
       # Only the main configure opts in via command-line launchers. Captures
       # and packaging must not inherit a launcher from the environment.
       CMAKE_C_COMPILER_LAUNCHER: ""
@@ -93,7 +93,7 @@ jobs:
           ref: ${{ needs.changes.outputs.head_sha }}
       - name: Select Python runtime
         id: python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14.8'
           architecture: x64
@@ -154,13 +154,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       # One Windows shard is enough: the contracts do not depend on the shard's test partition.
-      # Shard 2 carries them because its test partition is the shorter one.
+      # Shard 2 carries them: with a warm compiler cache its build and test partition is the shorter one.
       - name: Run standalone Python contracts (including CTest-registered suites)
         if: ${{ matrix.shard != 1 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
+        shell: pwsh
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
-          & "$env:CI_PYTHON_EXECUTABLE" -B tools/ci/ci_paths.py python-tests
+          $pythonExecutable = $env:CI_PYTHON_EXECUTABLE
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # Developer-shell setup can change PATH; retain the selected runtime.
+          Set-Alias -Name python -Value $pythonExecutable
+          python -B tools/ci/ci_paths.py python-tests
       - name: Verify manual qualification identity and dependencies
         id: identity
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
@@ -430,7 +441,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 500M
+      CCACHE_MAXSIZE: 1200M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -439,7 +450,7 @@ jobs:
           ref: ${{ needs.changes.outputs.head_sha }}
       - name: Select Python runtime
         id: python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14.8'
           architecture: x64
@@ -529,7 +540,7 @@ jobs:
         run: >-
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DCMAKE_C_FLAGS=-g -DCMAKE_CXX_FLAGS=-g
+          -DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
@@ -686,7 +697,7 @@ jobs:
           ref: ${{ needs.changes.outputs.head_sha }}
       - name: Select Python runtime
         id: python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14.8'
           architecture: x64
@@ -694,6 +705,17 @@ jobs:
           allow-prereleases: false
           freethreaded: false
           update-environment: true
+      - name: Expose selected Python to Bash
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          python_path="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"
+          runner_temp="$(cygpath -u "$RUNNER_TEMP")"
+          shim_dir="$(mktemp -d "$runner_temp/python-shim-XXXXXX")"
+          printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$python_path" > "$shim_dir/python3"
+          chmod +x "$shim_dir/python3"
+          cygpath -w "$shim_dir" >> "$GITHUB_PATH"
       - name: Verify runner prerequisites
         shell: pwsh
         run: '& "${{ steps.python.outputs.python-path }}" -I -B tools/ci/windows_runner_preflight.py --lane aggregate'
@@ -711,7 +733,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: "true"
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
@@ -783,7 +805,7 @@ jobs:
           ref: ${{ needs.changes.outputs.head_sha }}
       - name: Select Python runtime
         id: python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14.8'
           architecture: x64
@@ -791,6 +813,17 @@ jobs:
           allow-prereleases: false
           freethreaded: false
           update-environment: true
+      - name: Expose selected Python to Bash
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          python_path="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"
+          runner_temp="$(cygpath -u "$RUNNER_TEMP")"
+          shim_dir="$(mktemp -d "$runner_temp/python-shim-XXXXXX")"
+          printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$python_path" > "$shim_dir/python3"
+          chmod +x "$shim_dir/python3"
+          cygpath -w "$shim_dir" >> "$GITHUB_PATH"
       - name: Verify runner prerequisites
         shell: pwsh
         run: '& "${{ steps.python.outputs.python-path }}" -I -B tools/ci/windows_runner_preflight.py --lane aggregate'

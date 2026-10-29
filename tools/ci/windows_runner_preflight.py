@@ -82,8 +82,7 @@ def verify(lane: str) -> None:
                       r"VC\Tools\MSVC\**\bin\Hostx64\x64\cl.exe")
             except ValueError as error:
                 raise ValueError("Required MSVC x64 C++ tools and Visual Studio Installer/vswhere: " + str(error)) from error
-        if lane == "aggregate" and not probe("python3", "--version").startswith("Python 3.14.8"):
-            raise ValueError("Required aggregate python3 version: 3.14.8")
+        # The selected interpreter was validated above; Bash jobs expose it as python3.
     print(f"Windows runner prerequisites ok: {lane}")
 
 
