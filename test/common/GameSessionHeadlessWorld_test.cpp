@@ -2405,8 +2405,9 @@ TEST_P(SavedWorldPresetTest, NonRegularPlantFilesRefuseAllLoadPathsBeforeAdoptio
                     ::close(descriptor);
             }
         } close_reader{keeper};
-        if (kind == 0)
+        if (kind == 0) {
             ASSERT_GE(keeper, 0);
+        }
         for (int entry = 0; entry < 3; ++entry) {
             SCOPED_TRACE(entry);
             if (kind == 0) {
@@ -3118,11 +3119,15 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
     const auto save = root.path() / "worlds/saves" / catalog.worlds.front().metadata.worldId;
     std::vector<fs::path> debris;
     for (const auto& entry : fs::recursive_directory_iterator(save)) {
-        if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
+        if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0 &&
+            entry.path().extension() != ".owner")
             debris.push_back(entry.path());
     }
     ASSERT_EQ(debris.size(), 1u);
     EXPECT_EQ(debris.front().parent_path(), save);
+    auto ownership = debris.front();
+    ownership += ".owner";
+    ASSERT_TRUE(fs::is_regular_file(ownership));
     EXPECT_EQ(
         nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")).at("simulationTick"),
         2u);
@@ -3146,6 +3151,7 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
             ++remaining;
     EXPECT_EQ(remaining, 0u);
     EXPECT_FALSE(fs::exists(debris.front()));
+    EXPECT_FALSE(fs::exists(ownership));
 }
 #endif
 

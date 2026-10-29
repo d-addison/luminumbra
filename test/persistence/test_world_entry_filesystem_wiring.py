@@ -105,7 +105,12 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertNotRegex(recovery, r"::(?:DeleteFileW|MoveFileExW)\(")
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
         self.assertEqual(writer.count("Detail::WindowsPublishWithoutReplacement("), 2)
-        self.assertNotIn("::MoveFileExW(", writer)
+        promotion = body(writer, "bool promote_seed(")
+        self.assertEqual(writer.count("::MoveFileExW("), 1)
+        self.assertIn("::MoveFileExW(m_path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)",
+                      promotion)
+        self.assertNotIn("MOVEFILE_REPLACE_EXISTING", promotion)
+        self.assertNotIn("::MoveFileExW(", writer.replace(promotion, ""))
         for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):
             publishing = body(writer, marker).split("#else", 1)[0]
             linking = publishing.index("Detail::WindowsPublishWithoutReplacement(")
@@ -209,7 +214,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
                       session)
         reclaim = body(writer, "std::size_t ReclaimAbandonedStaging(")
         self.assertIn("destination.filename().native()", reclaim)
-        self.assertIn("entry.path().filename().native()", reclaim)
+        self.assertIn("StagingNameHasPrefix(entry.path().filename(), prefix)", reclaim)
 
     def test_journal_metadata_keeps_calendar_normalization_and_serialized_writers(self):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")

@@ -300,7 +300,7 @@ public:
     // ownership. Includes all destinations; does not inspect or mutate the disk.
     static std::size_t waiting_save_writers();
 
-    // Called after ledger staging is flushed/closed, before replacement. Returning
+    // Called after ledger staging and ownership are flushed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
     // to leave real crash debris. Install/clear while no writers are running.
     // The hook runs while save ownership is held; nullptr disables it.

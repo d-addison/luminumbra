@@ -408,6 +408,12 @@ public:
     using NativeFile = int;
 #endif
 
+    // The caller closes this retained handle. On Windows it is opened by
+    // file ID so retaining the object does not delay retirement of a named link.
+    static NativeFile retain_file_identity(NativeFile file) {
+        return duplicate_file(file).release();
+    }
+
     // Called immediately after exclusive creation, while the writer still owns
     // the native handle. Retain the object until release or completed removal
     // so an unlinked object's identity cannot be recycled. Windows writers
@@ -418,6 +424,18 @@ public:
             throw std::runtime_error("Invalid world file creation record.");
         artifact.retained = duplicate_file(file);
         artifact.identity = identity_from(artifact.retained.get());
+    }
+
+    // Register an already-created file still owned by a scoped staging writer.
+    // Retain its creating identity and verify the name before recording it;
+    // failure leaves cleanup with that writer, never adopts a replacement.
+    void record_staged_file(const std::filesystem::path& path, NativeFile file) {
+        auto artifact = untracked_artifact(path, false);
+        artifact.retained = duplicate_file(file);
+        artifact.identity = identity_from(artifact.retained.get());
+        if (!validate(artifact))
+            throw std::runtime_error("Staged world artifact disappeared before registration.");
+        m_artifacts[m_count++] = std::move(artifact);
     }
 
     // Retain the source before exclusive publication. Claim the destination
@@ -1114,7 +1132,7 @@ private:
         }
     }
 
-    Artifact vacant_artifact(const std::filesystem::path& path, bool directory) const {
+    Artifact untracked_artifact(const std::filesystem::path& path, bool directory) const {
         if (m_count == 0 || m_count == m_artifacts.size())
             throw std::runtime_error("Invalid world artifact journal capacity.");
         const auto normalized = std::filesystem::canonical(path.parent_path()) / path.filename();
@@ -1125,11 +1143,18 @@ private:
                 validate(artifact))
                 owned_parent = true;
         }
-        if (!owned_parent || tracked(normalized) ||
-            std::filesystem::exists(std::filesystem::symlink_status(normalized)))
+        if (!owned_parent || tracked(normalized))
             throw std::runtime_error("Refusing to claim a world artifact: " +
                                      Filesystem::GenericUtf8PathString(normalized));
         return {.path = normalized, .directory = directory, .identity = {}, .retained = {}};
+    }
+
+    Artifact vacant_artifact(const std::filesystem::path& path, bool directory) const {
+        auto artifact = untracked_artifact(path, directory);
+        if (std::filesystem::exists(std::filesystem::symlink_status(artifact.path)))
+            throw std::runtime_error("Refusing to claim a world artifact: " +
+                                     Filesystem::GenericUtf8PathString(artifact.path));
+        return artifact;
     }
 
     bool tracked(const std::filesystem::path& path) const {
