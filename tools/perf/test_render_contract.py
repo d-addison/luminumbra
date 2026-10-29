@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import perf
 import render_contract as contract
 import validate_render_capture as capture
@@ -93,7 +95,19 @@ class RenderContractTests(unittest.TestCase):
                     end = index
                     break
         self.assertIsNotNone(end)
-        self.assertIn('std::ifstream sf(sidecar);', tail[:end])
+        # Metadata now uses a verified handle in a shared completion reader.
+        # Every call that can open that handle must stay inside this guard.
+        call = 'Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, photo.stars, legacy)'
+        self.assertIn(call, tail[:end])
+        self.assertEqual(gallery.count('ReadCompletedPhotoCapture('), 1)
+        self.assertNotIn('std::ifstream', gallery)
+        pixels = (root / 'src/luminumbra_client/rendering/PixelIo.cpp').read_text(encoding='utf-8')
+        reader = pixels.split('bool ReadCompletedPhotoCapture(', 1)[1]
+        self.assertIn('Filesystem::VerifiedFileInput sidecar(', reader)
+        self.assertIn('photos / (stamp + ".photo.json")', reader)
+        self.assertIn('photo_dir / "verdict.photo.json"', reader)
+        self.assertIn('sidecar.read(buffer)', reader)
+        self.assertNotIn('allows(sidecar)', reader)
         self.assertNotIn('allows(sidecar)', gallery)
         self.assertIn('if (!Filesystem::capture_content_paths().allows(thumbs_dir))\n        return;', gallery)
         self.assertLess(gallery.index('allows(thumbs_dir)'), gallery.index('fs::directory_iterator'))

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nlohmann/json.hpp"
+#include "persistence/SavedInputLimits.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -88,6 +89,11 @@ inline std::string SerializeEntityRegistrySnapshotJson(EntityRegistrySnapshot sn
 inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
                                            EntityRegistrySnapshot& out_snapshot,
                                            std::vector<std::string>& errors) {
+    if (!Persistence::SavedInputLimits::JsonDepthAllowed(json_text)) {
+        errors.push_back(
+            "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
+        return false;
+    }
     try {
         const nlohmann::json snapshot = nlohmann::json::parse(json_text);
         if (snapshot.at("schema").get<std::string>() != EntitySnapshotSchema()) {

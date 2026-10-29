@@ -87,6 +87,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -2708,10 +2709,15 @@ int main(int argc, char* argv[]) {
                 const std::filesystem::path base_path = std::filesystem::path(root_path_str) /
                                                         "worlds" / "atlas" / "presets" /
                                                         (worldType + ".json");
-                std::ifstream in(base_path);
-                if (in) {
-                    nlohmann::json base;
-                    in >> base;
+                nlohmann::json base;
+                bool missing = false;
+                if (Luminumbra::Persistence::ReadSavedJson(
+                        base_path,
+                        Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                        base,
+                        missing,
+                        false) &&
+                    !missing) {
                     //  the form carries semantic-knob entries
                     // ("knob.<id>"/type "knob") alongside any advanced raw
                     // overrides. If knobs are present, resolve through the engine
@@ -2849,11 +2855,16 @@ int main(int argc, char* argv[]) {
             try {
                 const std::filesystem::path pf = std::filesystem::path(root_path_str) / "worlds" /
                                                  "atlas" / "presets" / (worldType + ".json");
-                std::ifstream in(pf);
-                if (!in)
-                    return "";
                 nlohmann::json j;
-                in >> j;
+                bool missing = false;
+                if (!Luminumbra::Persistence::ReadSavedJson(
+                        pf,
+                        Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                        j,
+                        missing,
+                        false) ||
+                    missing)
+                    return "";
                 j = Luminumbra::world::ResolveTerrainPresetDefaults(j);
                 //  seed a semantic knob from the preset's persisted
                 // knob layer (path "knob.<id>"). Curated presets carry none -> "" ->
@@ -2908,17 +2919,21 @@ int main(int argc, char* argv[]) {
                        const std::string& baseType,
                        const std::vector<Luminumbra::Client::WorldGenParam>& params,
                        bool overwrite_confirmed) -> std::string {
+                if (displayName.size() > Luminumbra::Persistence::SavedInputLimits::kPresetBytes)
+                    return "";
                 try {
                     const std::filesystem::path presets_dir =
                         root_dir / "worlds" / "atlas" / "presets";
-                    std::ifstream in(presets_dir / (baseType + ".json"));
-                    if (!in)
-                        return "";
-                    const auto base = nlohmann::json::parse(in);
-                    // The base may be the preset being overwritten. Release its
-                    // read handle before atomic replacement on Windows.
-                    in.close();
-                    if (in.fail())
+                    nlohmann::json base;
+                    bool missing = false;
+                    // ReadSavedJson releases the base handle before replacement on Windows.
+                    if (!Luminumbra::Persistence::ReadSavedJson(
+                            presets_dir / (baseType + ".json"),
+                            Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                            base,
+                            missing,
+                            false) ||
+                        missing)
                         return "";
                     //  persist BOTH the knob layer (knob vector +
                     // baseline + override diff) AND the resolved params, so reloading
@@ -2939,7 +2954,14 @@ int main(int argc, char* argv[]) {
                     const std::string worldType = "user_" + UserPresetSlug(displayName);
                     saved["name"] = displayName.empty() ? std::string("Custom") : displayName;
                     const auto destination = presets_dir / (worldType + ".json");
-                    const auto bytes = saved.dump(2);
+                    std::string bytes;
+                    if (!Luminumbra::Persistence::BoundedJsonDump(
+                            saved,
+                            Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                            bytes,
+                            2,
+                            false))
+                        return "";
                     using Writer = Luminumbra::Persistence::WorldSaveService;
                     const bool published = overwrite_confirmed
                                                ? Writer::write_file_durably(destination, bytes)
@@ -2970,10 +2992,16 @@ int main(int argc, char* argv[]) {
                             continue;
                         std::string name = stem;
                         try {
-                            std::ifstream f(entry.path());
                             nlohmann::json j;
-                            f >> j;
-                            name = j.value("name", stem);
+                            bool missing = false;
+                            if (Luminumbra::Persistence::ReadSavedJson(
+                                    entry.path(),
+                                    Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                                    j,
+                                    missing,
+                                    false) &&
+                                !missing)
+                                name = j.value("name", stem);
                         } catch (...) {}
                         out.emplace_back(name, stem);
                     }
@@ -3884,8 +3912,7 @@ int main(int argc, char* argv[]) {
                                                                gameSession->GetMetadata().worldId);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
-                std::ifstream input(saved.preset_path, std::ios::binary);
-                const auto preset = nlohmann::json::parse(input);
+                const auto preset = nlohmann::json::parse(saved.preset_json);
                 const auto* world = gameSession->GetWorldSystem();
                 benchmark_world_identity = {
                     {"seed", static_cast<std::uint32_t>(world->get_seed())},

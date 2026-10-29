@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
@@ -303,3 +304,23 @@ TEST_F(SyntheticSaveFixture, FailedWriteRemovesPartialSaveAndAllowsRetry) {
 }
 
 } // namespace
+
+TEST_F(SyntheticSaveFixture, PresetAdmissionPrecedesEveryDestinationWrite) {
+    const auto root = NewRoot("preset_admission");
+    fs::create_directories(root);
+    const auto source = root / "preset.json";
+    auto spec = Spec("refused", 1);
+    spec.preset_source = source;
+    const auto depth = Persistence::SavedInputLimits::kJsonNestingDepth;
+    for (const auto& bytes : {std::string("{"),
+                              std::string(depth + 1, '[') + "0" + std::string(depth + 1, ']'),
+                              std::string(Persistence::SavedInputLimits::kPresetBytes + 1, ' ')}) {
+        ASSERT_TRUE(WorldSaveService::write_file_durably(source, bytes));
+        const auto before = DiskBytes(root);
+        const auto report = WriteSyntheticSave(spec, root);
+        EXPECT_FALSE(report.ok);
+        EXPECT_FALSE(report.error.empty());
+        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_FALSE(fs::exists(root / "worlds"));
+    }
+}

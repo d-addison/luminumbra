@@ -170,9 +170,11 @@ class ReplaySourceContract(unittest.TestCase):
         creation = read_source("src/luminumbra_common/world/GameSession.cpp").split(
             "bool GameSession::CreateWorldInternal(", 1)[1].split(
                 "bool GameSession::LoadWorld(", 1)[0]
-        self.assertIn("std::string saved_preset_json = resolved.dump();", creation)
-        self.assertRegex(creation, r'std::string saved_preset_json = resolved.dump\(\);\s*'
-                         r'if \(!transient\) \{')
+        self.assertIn("std::string saved_preset_json;", creation)
+        self.assertRegex(creation, r'BoundedJsonDump\(\s*resolved,\s*'
+                         r'Persistence::SavedInputLimits::kPresetBytes - 1,\s*saved_preset_json,\s*-1,\s*false\)')
+        self.assertLess(creation.index("BoundedJsonDump("),
+                        creation.index("fs::create_directories(worldPath)"))
         self.assertLess(creation.index("requiredPresetContentHash"),
                         creation.index("fs::create_directories(worldPath)"))
         self.assertLess(creation.index("LoadTerrainPresetFromJson(resolved"),
@@ -535,8 +537,8 @@ class ReplaySourceContract(unittest.TestCase):
 
 class SessionUsabilitySourceContract(unittest.TestCase):
     @staticmethod
-    def function(source, name):
-        start = source.index("GameSession::" + name + "(")
+    def function(source, name, prefix="GameSession::"):
+        start = source.index(prefix + name + "(")
         opening = source.index("{", start)
         # Ignore braces inside diagnostics and comments when locating the body.
         tokens = re.finditer(r'"(?:\\.|[^"\\])*"|\{|\}', source[opening:])
@@ -549,6 +551,166 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 if depth == 0:
                     return source[start:opening + token.end()]
         raise AssertionError("unterminated session function")
+
+    def test_every_plant_reader_admits_and_reads_the_same_regular_file_handle(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        reader = self.function(source, "load_plant_entities", "WorldSaveService::")
+        self.assertIn("const SavedInputFile input(path);", reader)
+        self.assertNotIn("std::filesystem::exists(", reader)
+        self.assertNotIn("ifstream", reader)
+        self.assertLess(reader.index("input.read(bytes, SavedInputLimits::kPlantFileBytes)"),
+                        reader.index("LoadEntityRegistrySnapshotJson(bytes,"))
+        admission = read_source("src/luminumbra_common/persistence/SavedInputFile.h")
+        self.assertIn("O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC", admission)
+        self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS", admission)
+        for check in ("::fstat(m_descriptor, &information)", "S_ISREG(information.st_mode)",
+                      "::GetFileType(m_handle) != FILE_TYPE_DISK",
+                      "::GetFileInformationByHandle(m_handle, &information)",
+                      "FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY",
+                      "::GetFileSizeEx(m_handle, &length)", "size > bytes.max_size()"):
+            self.assertLess(admission.index(check), admission.index("std::string candidate("))
+        self.assertLess(admission.index("std::string candidate("), admission.index("::read(m_descriptor,"))
+        self.assertLess(admission.index("std::string candidate("), admission.index("::ReadFile(m_handle,"))
+        self.assertIn("size - offset", admission)
+        self.assertLess(admission.index("size > maximum"),
+                        admission.index("std::string candidate("))
+        self.assertLess(reader.index("AdmitPlantComponentBytes(bytes)"),
+                        reader.index("LoadEntityRegistrySnapshotJson(bytes,"))
+        for name in ("read_exact", "at_end"):
+            body = self.function(admission, name, "bool ")
+            self.assertIn("detail::ReadSavedInputRetryingInterrupt(", body)
+        retry = self.function(admission, "ReadSavedInputRetryingInterrupt", "auto ")
+        self.assertIn("for (;;) {", retry)
+        self.assertIn("received >= 0 || errno != EINTR", retry)
+        self.assertIn("::read(m_descriptor, &trailing, 1)", admission)
+        self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
+                      admission)
+        world = self.function(source, "load_world", "WorldSaveService::")
+        self.assertIn("load_plant_entities(plants, save_dir, &errors)", world)
+        session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
+                                "ReadWorldStateFrom")
+        self.assertIn("WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)",
+                      session)
+
+    def test_saved_input_budgets_precede_allocations_and_publication(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        region = source.split("bool ReadRegionFile(", 1)[1].split("bool AdmitRegionWrite(", 1)[0]
+        self.assertLess(region.index("RegionFileLengthAllowed(file_size)"), region.index("std::string manifest("))
+        self.assertLess(region.index("ReadU16(control + 4)"), region.index("std::string manifest("))
+        for budget in ("kRegionRecordBytes", "kRegionCompressedBytes", "kRegionReadWorkBytes",
+                       "kRegionCompressedAggregateBytes"):
+            self.assertLess(region.index(budget), region.index("payload.resize("))
+        energy_file = read_source("src/luminumbra_common/persistence/SavedEnergyInput.h")
+        for budget in ("length > kEnergyReadRecordBytes", "++pages > kEnergyReadPages",
+                       "EnergyFieldState::AdmitRecord(header)"):
+            self.assertLess(energy_file.index(budget), energy_file.index("input.read(candidate,"))
+        energy = read_source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        decode = self.function(energy, "DeserializeRecord", "EnergyFieldState::")
+        self.assertLess(decode.index("AdmitRecord(record)"), decode.index("std::istringstream"))
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        save = self.function(session, "SaveWorldStateToImpl")
+        for admission in ("PrepareWorldMetadataTo(", "prepared_plants.prepare(",
+                          "prepared_chunks.prepare(", "energy_snapshot.SerializeRecord(" ):
+            self.assertLess(save.index(admission), save.index("prepared_chunks.publish("))
+        self.assertRegex(save, r"write_chunks\s*&&\s*!prepared_chunks\.prepare\(")
+        self.assertIn("!full_snapshot && has_snapshot", save)
+        self.assertNotIn("admit_world_write(", save)
+        self.assertNotIn("service.save_world(", save)
+        self.assertNotIn("save_dirty_chunks(", save)
+        metadata = self.function(session, "SaveWorldMetadataTo")
+        self.assertLess(metadata.index("PrepareWorldMetadataTo("), metadata.index("PersistSavedPreset("))
+        reader = self.function(session, "ReadWorldStateFrom")
+        self.assertIn('m_worldOpenError.find("Saved-input admission refused:") == 0', reader)
+        self.assertNotIn('m_worldOpenError.find("oversized")', reader)
+        metadata_admission = self.function(source, "admit_metadata_bytes", "WorldSaveService::")
+        self.assertLess(metadata_admission.index("clock.write_metadata(metadata)"),
+                        metadata_admission.index("BoundedJsonDump("))
+        pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
+        self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
+
+    def test_saved_json_depth_is_admitted_before_parsing_and_component_copying(self):
+        admission = read_source("src/luminumbra_common/persistence/SavedJsonAdmission.h")
+        traversal = admission.split("inline bool AdmitJsonValueDepth(", 1)[1].split("inline bool BoundedJsonDump(", 1)[0]
+        for guard in ("value.is_binary()", "child.is_binary()", "value.is_discarded()", "child.is_discarded()"):
+            self.assertIn(guard, traversal)
+        reader = admission.split("inline bool ReadSavedJson(", 1)[1].split("// Lexical preflight", 1)[0]
+        self.assertLess(reader.index("JsonDepthAllowed(bytes)"),
+                        reader.index("nlohmann::json::parse(bytes,"))
+        plant = admission.split("inline bool AdmitPlantComponentBytes(", 1)[1]
+        self.assertIn("JsonDepthAllowed(bytes)", plant)
+        entity = read_source("src/luminumbra_common/ecs/EntitySnapshot.h")
+        loader = entity.split("inline bool LoadEntityRegistrySnapshotJson(", 1)[1]
+        self.assertLess(loader.index("JsonDepthAllowed(json_text)"),
+                        loader.index("nlohmann::json::parse(json_text)"))
+        self.assertLess(loader.index("JsonDepthAllowed(json_text)"),
+                        loader.index("entity.components.push_back("))
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        writer = self.function(source, "prepare_plant_entities", "WorldSaveService::")
+        self.assertLess(writer.index("AdmitJsonValueDepth(component.data,"),
+                        writer.index('values.push_back({{"type", component.type}'))
+
+    def test_metadata_writer_and_catalog_share_one_limit_and_creation_is_session_owned(self):
+        limits = read_source("src/luminumbra_common/persistence/SavedInputLimits.h")
+        self.assertNotIn("kCatalogMetadataBytes", limits)
+        catalog = read_source("src/luminumbra_common/persistence/SavedWorldCatalog.cpp")
+        self.assertIn("ReadSavedJson(metadata_path, SavedInputLimits::kMetadataBytes,", catalog)
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        writer = self.function(source, "save_metadata", "WorldSaveService::")
+        self.assertNotIn("create_directories", writer)
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        reconcile = self.function(session, "ReconcileWorldStateMetadataTo")
+        self.assertLess(reconcile.index("PrepareWorldMetadataTo("),
+                        reconcile.index("create_directories("))
+        self.assertLess(reconcile.index("create_directories("),
+                        reconcile.index("WorldSaveService::save_metadata("))
+
+    def test_checked_rename_uses_explicit_source_link_policy_on_both_platforms(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        rename = self.function(source, "rename_file_durably", "WorldSaveService::")
+        self.assertIn("SavedInputFile input(source, SavedInputFile::LeafSymlinks::Follow)", rename)
+        reader = read_source("src/luminumbra_common/persistence/SavedInputFile.h")
+        self.assertIn("LeafSymlinks leaf_symlinks = LeafSymlinks::Refuse", reader)
+        self.assertEqual(reader.count("leaf_symlinks == LeafSymlinks::Refuse"), 2)
+        self.assertLess(rename.index("input.read(contents, expected_bytes.size())"),
+                        rename.index("ReclaimAbandonedStaging("))
+
+    def test_synthetic_save_preserves_collision_precedence_and_write_diagnostics(self):
+        source = read_source("src/luminumbra_common/persistence/SyntheticSaveFixture.cpp")
+        writer = self.function(source, "WriteSyntheticSave", "SyntheticSaveReport ")
+        self.assertLess(writer.index("save already exists"), writer.index("SavedInputFile input("))
+        self.assertLess(writer.index("SavedInputFile input("), writer.index("fs::create_directories("))
+        self.assertRegex(writer, r'write_file_durably\(\s*report.save_dir / "preset.json", '
+                         r'preset_bytes, &save_errors\)')
+        self.assertIn('save_errors.empty() ? "cannot persist preset" : save_errors.front()', writer)
+
+    def test_preset_hash_encoding_and_existing_exact_limit_are_consistent(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        create = self.function(source, "CreateWorldInternal")
+        self.assertRegex(create, r'kPresetBytes - 1,\s*saved_preset_json,\s*-1,\s*false\)')
+        compatible = self.function(source, "SavedPresetCompatible")
+        self.assertNotIn("canonical.size()", compatible.split("if (has_preset)", 1)[0])
+        self.assertIn("canonical.size() < Persistence::SavedInputLimits::kPresetBytes", compatible)
+        persist = self.function(source, "PersistSavedPreset", "bool ")
+        self.assertLess(persist.index("if (!missing)"), persist.index("canonical.size() >="))
+        self.assertIn('write_file_durably(path, canonical + "\\n")', persist)
+
+    def test_energy_writer_counts_normalized_pages_and_plants_publish_prepared_bytes(self):
+        energy = read_source("src/luminumbra_common/fields/EnergyFieldState.cpp")
+        encode = self.function(energy, "SerializeRecord", "EnergyFieldState::")
+        self.assertLess(encode.index("normalized.NormalizeAllPages()"),
+                        encode.index("normalized.m_pages.size() > kEnergyWritePages"))
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        publish = self.function(source, "publish", "WorldSaveService::PreparedPlantWrite::")
+        self.assertIn("WriteFileDurably(path, m_bytes, staging, errors)", publish)
+        self.assertNotIn("prepare_plant_entities", publish)
+        session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
+                                "SaveWorldStateToImpl")
+        self.assertIn("prepared_plants.publish(save_dir, &errors)", session)
+        self.assertNotIn("save_plant_entities(", session)
+        self.assertEqual(session.count("SerializeRecord("), 1)
+        self.assertIn("write_file_durably(energy_path, energy_bytes)", session)
+        self.assertLess(session.index("prepared_plants.prepare("),
+                        session.index("prepared_chunks.publish("))
 
     def test_operation_refusal_cannot_change_current_session_usability(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
@@ -563,9 +725,10 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             if name in ("LoadWorld", "LoadWorldFrom"):
                 self.assertIn("LoadedWorldState loaded;", preparation)
                 preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
-                self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded))", state_read)
-                self.assertLess(state_read.index("m_worldUsable = false;"),
-                                state_read.index("m_worldSystem->clear_world("))
+                self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded, true))", state_read)
+                self.assertNotIn("m_worldUsable", state_read)
+                self.assertNotIn("clear_world(", state_read)
+                self.assertNotIn("m_lastLoadedChunkCount =", state_read)
             self.assertNotIn("m_worldUsable", preparation)
             self.assertIn("m_worldOpenError =", preparation)
             self.assertLess(adoption.index("m_speciesTable ="),
@@ -575,7 +738,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(metadata_failure.index("m_worldUsable = false;"),
                         metadata_failure.index("return false;"))
         opening = self.function(source, "LoadWorld")
-        self.assertLess(opening.index("ReadWorldStateFrom(worldPath, loaded)"),
+        self.assertLess(opening.index("ReadWorldStateFrom(worldPath, loaded, true)"),
                         opening.index("ResetWorldSystems();"))
         self.assertLess(opening.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         opening.index("m_worldUsable = true;"))
@@ -591,8 +754,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertNotIn("m_saveRootPath =", body)
         self.assertLess(adoption.index("m_speciesTable ="),
                         adoption.index("m_worldUsable = true;"))
-        self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded))", state_read)
-        self.assertLess(body.index("ReadWorldStateFrom(worldPath, loaded)"),
+        self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded, true))", state_read)
+        self.assertLess(body.index("ReadWorldStateFrom(worldPath, loaded, true)"),
                         body.index("ResetWorldSystems();"))
         self.assertLess(adoption.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         adoption.index("m_worldUsable = true;"))
@@ -601,7 +764,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
 
     def test_persistence_uses_session_state_and_fatal_snapshot_refusals_latch_it(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
-        for name in ("SaveWorldMetadataTo", "SaveWorldStateToImpl", "SaveEnergyFieldRecord",
+        for name in ("SaveWorldMetadataTo", "SaveWorldStateToImpl",
                      "LoadWorldStateFrom"):
             with self.subTest(consumer=name):
                 body = self.function(source, name)
@@ -614,25 +777,46 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         readiness = self.function(source, "LoadWorldState")
         self.assertIn("return m_worldSystem && m_worldUsable;", readiness)
         snapshot = self.function(source, "LoadWorldStateFrom")
-        # Every staged refusal reaches the same invalidation before adoption.
+        # Fatal snapshot refusals invalidate; admission refuses before live state changes.
         failure = snapshot.split("if (!ReadWorldStateFrom(save_dir, state))", 1)[1]
         self.assertLess(failure.index("m_worldUsable = false;"),
                         failure.index("m_worldSystem->clear_world("))
         self.assertLess(failure.index("return false;"),
                         failure.index("AdoptWorldStateFrom(save_dir, state);"))
         self.assertEqual(snapshot.count("m_worldSystem->clear_world("), 1)
+        self.assertIn("if (!state.input_refused)", failure)
+        for name in ("LoadWorld", "LoadWorldFrom"):
+            candidate = self.function(source, name)
+            preparation = candidate.split("ResetWorldSystems();", 1)[0]
+            self.assertNotIn("clear_world(", preparation)
+            self.assertNotIn("m_worldUsable =", preparation)
+            self.assertNotIn("m_lastLoadedChunkCount =", preparation)
         reader = self.function(source, "ReadWorldStateFrom")
-        self.assertEqual(reader.count("return false;"), 5)
-        self.assertEqual(reader.count("m_worldOpenError ="), 5)
+        self.assertEqual(reader.count("return false;"), 7)
+        self.assertEqual(reader.count("m_worldOpenError ="), 7)
         for validation in ("service.load_world(", "WorldSaveService::read_clock_metadata(",
                            "WorldSaveService::load_active_regions(", "m_regionSchedulerOverride",
-                           "chunk->sdf_data.size() != kFullSdfLattice"):
+                           "chunk->sdf_data.size() != kFullSdfLattice",
+                           "ReadSavedEnergy(input, record)",
+                           "state.energy->DeserializeRecord(record, tick_base)"):
             self.assertIn(validation, reader)
+        self.assertLess(reader.index("load_plant_entities(state.plants"),
+                        reader.index("service.load_world("))
+        adoption = self.function(source, "AdoptWorldStateFrom")
+        self.assertNotIn("load_plant_entities(", adoption)
+        self.assertNotIn("aether_state.efs", adoption)
+        self.assertIn("*m_energyFieldState = std::move(*saved.energy)", adoption)
+        self.assertIn("ApplyPlantEntitySnapshot(m_registry, saved.plants)", adoption)
         self.assertNotIn("m_worldUsable", reader)
         self.assertNotIn("m_worldSystem->", reader)
         self.assertNotIn("m_renderCalendar =", reader)
         self.assertNotIn("RestoreWorldClock(", reader)
         self.assertNotIn("m_worldUsable = true;", snapshot)
+        saving = self.function(source, "SaveWorldStateToImpl")
+        self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
+                        saving.index("prepared_chunks.publish("))
+        self.assertLess(saving.index("ValidatePlantEntitySnapshot(plant_snapshot)"),
+                        saving.index("prepared_plants.publish("))
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
         full_snapshot = runner.split("ServerWorldRunner::SaveFullSnapshot()", 1)[1].split(
             "ServerWorldRunner::StreamedChunkCount()", 1)[0]
@@ -649,7 +833,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                            "if (!preset.ok)",
                            "preset.preset_content_hash != requiredPresetContentHash"):
             self.assertLess(creation.index(validation), directory)
-        self.assertIn('saved_preset_json = resolved.dump();', creation)
+        self.assertIn('BoundedJsonDump(', creation)
         self.assertIn('saved_preset_json + "\\n"', creation)
         adoption = creation.split("ResetWorldSystems();", 1)[1]
         self.assertIn("m_presetContentHash = preset.preset_content_hash;", adoption)

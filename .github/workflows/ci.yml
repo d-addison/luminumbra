@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -33,9 +33,11 @@ concurrency:
   # descendants; only their own successful rerun or an explicit resolution
   # can resolve them.
   # Main pushes and manual runs (including qualification captures) have isolated
-  # groups and never cancel. PR ref grouping/cancellation stays unchanged.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
+  # groups and never cancel. PR runs share workflow/ref and cancel older runs,
+  # except edited events without changes.base: these use a unique, non-cancelling
+  # group so title/body edits cannot interrupt validation on the same PR ref.
+  group: ${{ (github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base) && format('{0}-metadata-{1}', github.workflow, github.run_id) || github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ !(github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base) && github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
 
 env:
   QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -44,11 +46,16 @@ env:
   CTEST_PARALLEL_LEVEL: "4"
 
 jobs:
+  # Only base edits enter normal CI routing. All jobs reject other edited events
+  # before allocating runners. Their distinct metadata-edit check names prevent
+  # skipped duplicates from satisfying or replacing required checks on this SHA.
+  # A pre-job/needs skip alone would still publish the original required names.
   # Required Linux/GCC and Windows/MSVC jobs run native or standalone Python
   # tests on ready PRs. Other heavy jobs skip via this gate, with no needs chain.
   # !cancelled() and != false keep missing/failed classification on the build path.
   changes:
-    name: Classify changed paths
+    name: Classify changed paths${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -56,6 +63,7 @@ jobs:
       needs_python: ${{ steps.paths.outputs.needs_python }}
       needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
       heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
+      needs_ucrt64: ${{ steps.ucrt64.outputs.needs_ucrt64 }}
     steps:
       - name: Check out repository and PR history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -107,13 +115,58 @@ jobs:
             all_lanes
           fi
 
+      - name: Classify UCRT64 paths
+        id: ucrt64
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Inspect both snapshots so deleted platform code still opts in.
+          # Unknown history or unreadable content keeps qualification enabled.
+          needs_ucrt64=true
+          windows_pattern='_WIN32|WIN32|WIN64|__MINGW32__|__MINGW64__|_MSC_VER|_M_X64|_M_AMD64|MSYS|[Mm]in[Gg][Ww]|[Ww]indows'
+          if [ "$CI_EVENT" = pull_request ] && [ -n "$CI_BASE_SHA" ] && [ -n "$CI_HEAD_SHA" ]; then
+            changed_paths=$(mktemp)
+            trap 'rm -f -- "$changed_paths"' EXIT
+            if merge_base=$(git merge-base "$CI_BASE_SHA" "$CI_HEAD_SHA") &&
+               git diff --name-only -z --no-ext-diff --no-renames "$merge_base" "$CI_HEAD_SHA" -- > "$changed_paths"; then
+              needs_ucrt64=false
+              while IFS= read -r -d '' path; do
+                case "$path" in
+                  .github/workflows/*|cmake/*|tools/ci/*|scripts/*|vendor/*|tools/static_preview/*|CMakePresets.json|CMakeLists.txt|*/CMakeLists.txt|*.cmake)
+                    needs_ucrt64=true
+                    break
+                    ;;
+                esac
+                if [[ "$path" =~ $windows_pattern ]]; then
+                  needs_ucrt64=true
+                  break
+                fi
+                if git grep -a -E -q --no-textconv -e "$windows_pattern" "$merge_base" "$CI_HEAD_SHA" -- ":(literal)$path"; then
+                  needs_ucrt64=true
+                  break
+                else
+                  status=$?
+                  if [ "$status" -ne 1 ]; then
+                    needs_ucrt64=true
+                    break
+                  fi
+                fi
+              done < "$changed_paths"
+            fi
+            rm -f -- "$changed_paths"
+            trap - EXIT
+          fi
+          echo "needs_ucrt64=$needs_ucrt64" >> "$GITHUB_OUTPUT"
+
   # Drafts cannot merge. ready_for_review reruns these jobs on the same head;
   # maintainers must wait for that run's required checks to pass before merging.
   linux:
-    name: ${{ matrix.shard == 0 && 'Linux / GCC full qualification' || format('Linux / GCC shard {0}/2', matrix.shard) }}
+    name: ${{ matrix.shard == 0 && 'Linux / GCC full qualification' || format('Linux / GCC shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     # The required-name aggregate and the producer guard both reject drafts.
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled()) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -340,9 +393,9 @@ jobs:
           retention-days: 30
 
   gns-compile-probe:
-    name: GNS transport / compile probe
+    name: GNS transport / compile probe${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     # Building GameNetworkingSockets from source (FetchContent + protobuf
     # codegen) is several minutes on top of the project build, well past the
@@ -390,9 +443,9 @@ jobs:
         run: ctest --test-dir build/gns-probe --no-tests=error -R '^ProfilerSourceContract$' --output-on-failure
 
   diligent-rhi:
-    name: Diligent RHI / software GL
+    name: Diligent RHI / software GL${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -497,9 +550,9 @@ jobs:
           retention-days: 14
 
   windows-msvc:
-    name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}
+    name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: windows-2025
     timeout-minutes: 90
     strategy:
@@ -511,7 +564,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 500M
+      CCACHE_MAXSIZE: 1200M
       # Only the main configure opts in via command-line launchers. Captures
       # and packaging must not inherit a launcher from the environment.
       CMAKE_C_COMPILER_LAUNCHER: ""
@@ -582,8 +635,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       # One Windows shard is enough: the contracts do not depend on the shard's test partition.
+      # Shard 2 carries them: with a warm compiler cache its build and test partition is the shorter one.
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
+        if: ${{ matrix.shard != 1 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
@@ -694,7 +748,8 @@ jobs:
           # Developer-shell setup can change PATH; retain the selected runtime.
           Set-Alias -Name python -Value $pythonExecutable
           # Preserve Release optimization and retain embedded compiler symbols
-          # plus the linked PDB for render-child failure evidence.
+          # plus the linked PDB for render-child failure evidence. Dependency
+          # precompiled headers and Jolt's /Zi are disabled so ccache can cache them.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
@@ -703,6 +758,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
             -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `
             '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
@@ -755,7 +811,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
         continue-on-error: true
         shell: pwsh
-        run: ccache -s
+        run: ccache -s -v
       - name: Clean compiler cache before saving
         if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         continue-on-error: true
@@ -842,13 +898,12 @@ jobs:
           retention-days: 30
 
   windows-ucrt64:
-    name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
-    # Runs on ready pull requests (devel- and main-bound), main/devel pushes,
-    # and every manual dispatch. Devel pushes seed the compiler cache restored
-    # by pull requests into devel. A MinGW/UCRT break shows on the pull request
-    # that causes it. It is not a required devel context; it stays required on main.
+    name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    # Main/devel pushes seed the cache; manual dispatches, every ready PR into main
+    # and ready PRs with Windows paths or the windows-proof label qualify on demand.
+    # Main-bound PRs require native evidence even for confirmed non-C++ changes.
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (needs.changes.outputs.needs_cpp != 'false' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof')))) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')))) }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -866,7 +921,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 500M
+      CCACHE_MAXSIZE: 1200M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -966,7 +1021,7 @@ jobs:
         run: >-
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DCMAKE_C_FLAGS=-g -DCMAKE_CXX_FLAGS=-g
+          -DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
@@ -980,7 +1035,7 @@ jobs:
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
         shell: msys2 {0}
-        run: ccache -s || true
+        run: ccache -s -v || true
       - name: Clean compiler cache before saving
         if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
@@ -1087,7 +1142,7 @@ jobs:
         run: python tools/ci/slowest_tests.py build/release/ctest.junit.xml --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Upload shard JUnit
-        if: always() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ucrt64-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
@@ -1099,11 +1154,11 @@ jobs:
           retention-days: 30
 
   linux-result:
-    name: Linux / GCC
+    name: Linux / GCC${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, linux]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() || needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1195,11 +1250,11 @@ jobs:
           retention-days: 30
 
   windows-msvc-result:
-    name: Windows / MSVC
+    name: Windows / MSVC${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, windows-msvc]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() || needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1232,7 +1287,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: "true"
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
@@ -1273,11 +1328,11 @@ jobs:
           retention-days: 30
 
   windows-ucrt64-result:
-    name: Windows / MSYS2 UCRT64
+    name: Windows / MSYS2 UCRT64${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, windows-ucrt64]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() || needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1305,24 +1360,24 @@ jobs:
         env:
           CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.windows-ucrt64.result }}
-          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          NEEDS_CPP: "true"
           CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          CI_ENABLED: ${{ (needs.changes.outputs.needs_cpp != 'false' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof')))) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true'))) }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
           --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
-        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        if: needs.windows-ucrt64.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: ucrt64-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*
           path: build/ucrt64-shards
       - name: Merge shard JUnit and check inventory
-        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        if: needs.windows-ucrt64.result == 'success'
         env:
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
         run: |
@@ -1340,7 +1395,7 @@ jobs:
           # Require each developer target explicitly; total-count margin cannot hide one.
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Upload merged JUnit
-        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        if: needs.windows-ucrt64.result == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ucrt64-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1351,7 +1406,8 @@ jobs:
           retention-days: 30
 
   lint:
-    name: Format changed files
+    name: Format changed files${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -1368,7 +1424,8 @@ jobs:
 
   fast-compile:
     # Advisory during warning and duration calibration; never a required gate.
-    name: Fast compile / GCC + clang-tidy
+    name: Fast compile / GCC + clang-tidy${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -1445,9 +1502,9 @@ jobs:
           fi
 
   tidy-shard:
-    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3
+    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     # The gate analyses 458 translation units across src/, test/ and tools/ plus
     # their first-party headers. Three standard hosted runners partition that
@@ -1506,11 +1563,11 @@ jobs:
 
   tidy:
     # Report the required result on uncancelled ready runs, including routed skips.
-    name: Static analysis / clang-tidy
+    name: Static analysis / clang-tidy${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: [changes, tidy-shard]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ (!cancelled() || needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && ((!cancelled() || needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1536,7 +1593,8 @@ jobs:
           fi
 
   public-tree:
-    name: Public tree / inventory honesty
+    name: Public tree / inventory honesty${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

@@ -147,7 +147,82 @@ protected:
                 return record.pos[0] >= 3 * kColumnExtent;
             }));
     }
+    static Attribution::FoliageRebuild
+    RebuildWithSampler(FoliagePass& pass,
+                       const std::vector<FoliagePass::ChunkScatter>& chunks,
+                       std::uint64_t frame_id,
+                       bool present) {
+        if (present)
+            return RebuildAttributed(pass, chunks, frame_id);
+        const Attribution::FoliageFrameScope frame(true);
+        pass.set_evidence_frame(frame_id, 1);
+        pass.rebuild_instances(chunks, nullptr, nullptr, kCamera);
+        return frame.snapshot().rebuild;
+    }
+    static void ExpectSamplerTransition(bool initially_present) {
+        // One column stays below both upload/build budgets. Only sampler
+        // availability changes; camera, evidence phase, support and chunks stay fixed.
+        for (const bool gpu : {false, true}) {
+            for (const bool rendered_ground : {false, true}) {
+                SCOPED_TRACE(gpu);
+                SCOPED_TRACE(rendered_ground);
+                ScopedPass scoped;
+                auto& pass = scoped.pass();
+                ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+                pass.set_evidence_enabled(true);
+                if (rendered_ground) {
+                    pass.use_rendered_ground();
+                    UploadGround(pass, 1, {0, 0, 0});
+                }
+                const auto chunks = SupportedChunks(1);
+                RebuildWithSampler(pass, chunks, 1, initially_present);
+                const auto generation = pass.build_generation();
+                const auto before = initially_present ? Records(pass, gpu) : pass.instances();
+                ASSERT_EQ(before.empty(), !initially_present);
+                ExpectReused(RebuildWithSampler(pass, chunks, 2, initially_present),
+                             gpu && initially_present);
+                EXPECT_EQ(pass.build_generation(), generation);
+
+                const auto changed = RebuildWithSampler(pass, chunks, 3, !initially_present);
+                EXPECT_EQ(changed.reasons, Attribution::Config);
+                EXPECT_EQ(pass.build_generation(), generation + 1);
+                EXPECT_FALSE(changed.backlog);
+                if (initially_present) {
+                    EXPECT_EQ(changed.path, Attribution::FoliagePath::Inactive);
+                    EXPECT_TRUE(pass.instances().empty());
+                    EXPECT_EQ(pass.frame_instance_count(), 0u);
+                    EXPECT_EQ(pass.frame_instance_count_generation(), generation + 1);
+                    EXPECT_FALSE(pass.uploaded_input_hash().has_value());
+                    EXPECT_EQ(changed.uploaded_bytes, 0u);
+                } else {
+                    EXPECT_EQ(changed.path,
+                              gpu ? Attribution::FoliagePath::Gpu : Attribution::FoliagePath::Cpu);
+                    EXPECT_FALSE(Records(pass, gpu).empty());
+                }
+                ExpectReused(RebuildWithSampler(pass, chunks, 4, !initially_present),
+                             gpu && !initially_present);
+                EXPECT_EQ(pass.build_generation(), generation + 1);
+
+                const auto restored = RebuildWithSampler(pass, chunks, 5, initially_present);
+                EXPECT_EQ(restored.reasons, Attribution::Config);
+                EXPECT_EQ(pass.build_generation(), generation + 2);
+                EXPECT_FALSE(restored.backlog);
+                if (initially_present)
+                    ExpectSame(before, Records(pass, gpu));
+                else
+                    EXPECT_EQ(pass.frame_instance_count(), 0u);
+            }
+        }
+    }
 };
+
+TEST_F(FoliageInvalidationTest, SamplerLossInvalidatesCompletedScatter) {
+    ASSERT_NO_FATAL_FAILURE(ExpectSamplerTransition(true));
+}
+
+TEST_F(FoliageInvalidationTest, SamplerRestorationInvalidatesInactiveScatter) {
+    ASSERT_NO_FATAL_FAILURE(ExpectSamplerTransition(false));
+}
 
 TEST_F(FoliageInvalidationTest, AddedSupportMatchesFreshPassBytesAndGpuInputHash) {
     ASSERT_NO_FATAL_FAILURE(ExpectEditedSupportMatchesFresh(SupportEdit::Add));

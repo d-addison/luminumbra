@@ -21,17 +21,23 @@ public:
     FroxelPass();
     ~FroxelPass();
 
-    // Returns false only when lazy kernel compilation fails and the pipeline
-    // must preserve the existing behavior of disabling volumetric quality.
+    // Initialization failure disables volumetrics until destroy() explicitly
+    // releases the state and permits a retry. Frozen replay never initializes.
     bool execute_inject(const RenderContext& ctx, const std::filesystem::path& root_path);
     void execute_integrate(const RenderContext& ctx);
-    void destroy();
+    void destroy(); // Also clears a latched initialization failure for retry.
 
     u32 integrated_texture() const {
         return m_integrated_tex;
     }
 
 private:
+    enum class InitializationState {
+        Uninitialized,
+        Ready,
+        Failed
+    };
+    InitializationState m_initialization_state = InitializationState::Uninitialized;
     AttributedGl::Program m_inject_program{};
     AttributedGl::Program m_integrate_program{};
     u32 m_scatter_tex = 0;    // rgba16f 160x90x64: rgb in-scatter, a sigma
