@@ -1017,9 +1017,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             "diligent-rhi": "dcd14e3c82e44abaa18c301cb39cad12a342fd23f13dbe2fef729ce1c46d73a8",
             # Pin the selected Python, partitioned local checks, render failure symbols,
             # shard-2-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "53c849e631b54685a007c22df4644ffa6424968b6bedb76d0156fd03bba13a14",
+            "windows-msvc": "e78460c6c4b383c04a9feed713717ea5da4c913ff8f9b34a5b4a6d5705adf03c",
             # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
-            "windows-ucrt64": "7f44d5762b7ceb7c096fab1f31478c3c930bdb6829365ce83f4ead0921799eeb",
+            "windows-ucrt64": "a60eaea73fab8e1e956b4f702be1abaa35e51e57a5644092bb7a15c801e011fa",
             "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
             "windows-msvc-result": "8ed308a876a2cabec06a4083fcf87981cdb572e2cf32cbab65aefd327d4e5073",
             "windows-ucrt64-result": "dd4646d859c3451f01ae7cf328337256ca30e26a86ee97efd66518f2b2625b96",
@@ -1052,7 +1052,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             self.assertEqual(len(selectors), 1)
             selector = selectors[0]
             self.assertEqual(value(selector, "uses", 8),
-                             "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+                             "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0")
             self.assertIsNone(value(selector, "if", 8))
             self.assertEqual(value(selector, "python-version", 10), "'3.14.8'")
             self.assertEqual(value(selector, "architecture", 10), "x64")
@@ -1651,7 +1651,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(len(selected), 1)
                 setup = selected[0]
                 self.assertEqual(value(setup, "uses", 8),
-                                 "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+                                 "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0")
                 self.assertEqual(value(setup, "id", 8), "python")
                 self.assertEqual(dict(re.findall(r"^          ([\w-]+): (.*)$", setup, re.MULTILINE)), {
                     "python-version": "'3.14.8'", "architecture": "x64", "check-latest": "false",
