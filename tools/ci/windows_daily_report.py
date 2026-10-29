@@ -35,7 +35,8 @@ def report(environment: dict[str, str]) -> None:
         for job in page["jobs"] if job["status"] == "completed" and job["conclusion"] != "success")
     passed = environment["BUILD_RESULT"] == "success" and not failed
     issues = [issue for page in pages(f"repos/{repository}/issues?state=open&per_page=100")
-              for issue in page if issue["title"] == TITLE and "pull_request" not in issue]
+              for issue in page if issue["title"] == TITLE and "pull_request" not in issue
+              and any(label["name"] == LABEL for label in issue["labels"])]
     issue = min(issues, key=lambda row: row["number"]) if issues else None
     if passed and issue is None:
         return
@@ -47,7 +48,7 @@ def report(environment: dict[str, str]) -> None:
     body += "Failed jobs:\n" + "\n".join(f"- {name}" for name in failed)
     if not failed:
         body += f"\n- Windows build ({environment['BUILD_RESULT']})"
-    if issue is None or not any(label["name"] == LABEL for label in issue["labels"]):
+    if issue is None:
         labels = [label for page in pages(f"repos/{repository}/labels?per_page=100") for label in page]
         if not any(label["name"] == LABEL for label in labels):
             gh("label", "create", LABEL, "--repo", repository, "--description", "Daily Windows validation failures")
@@ -56,8 +57,6 @@ def report(environment: dict[str, str]) -> None:
                        "--label", LABEL, "--body", "Daily Windows proof is report-only for landings and gates the v0.3.1 tag.\n\n" + body).strip()
         gh("issue", "comment", issue_url, "--repo", repository, "--body", body)
     else:
-        if not any(label["name"] == LABEL for label in issue["labels"]):
-            gh("issue", "edit", str(issue["number"]), "--repo", repository, "--add-label", LABEL)
         gh("issue", "comment", str(issue["number"]), "--repo", repository, "--body", body)
 
 

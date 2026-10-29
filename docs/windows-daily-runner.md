@@ -38,14 +38,19 @@ are stored in this repository.
 
 Trigger on demand with `gh workflow run windows-daily.yml` (optionally `--ref`
 with a branch or tag). For a same-repository pull request, add the `windows-proof`
-label. Labeled, synchronize and reopened events run only while that label is
-present; fork PRs cannot reach any self-hosted job. Draft rejection remains in
+label. Labeled, synchronize, reopened and ready-for-review events run only while that
+label is present, so marking a labeled draft ready starts its proof run. Fork PRs
+cannot reach any self-hosted job through this workflow, and a fork could edit its
+own copy of the workflow, so the repository's server-side setting **Settings >
+Actions > General > Fork pull request workflows > Require approval for all external
+contributors** (API policy `all_external_contributors`) must stay on. Draft rejection remains in
 place. Manual and scheduled runs queue without cancelling each other; a PR run
 cancels only older daily proof runs for that PR. See
 [manual qualification capture](ci-qualification-capture.md) for binary-bound evidence.
 
-A red scheduled or manual run creates or updates **Daily Windows run**, labeled
-`windows-daily`, with a failure comment naming the run URL, head SHA and failed
+A red scheduled or manual run creates or updates the open **Daily Windows run**
+issue carrying the `windows-daily` label (an issue with that title but no label is
+ignored), with a failure comment naming the run URL, head SHA and failed
 jobs. A later passing run comments and closes it. The report uses only the
 workflow token through `gh`. PR proof runs do not update the issue. Red Windows
 proof gates the **v0.3.1 tag**, not landings, and never freezes `devel`. This change

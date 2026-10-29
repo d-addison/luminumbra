@@ -891,7 +891,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(re.findall(r"^  ([\w_]+):", triggers, re.MULTILINE),
                          ["schedule", "workflow_dispatch", "pull_request"])
         self.assertEqual(re.findall(r"cron: '([^']+)'", triggers), ["17 10 * * *"])
-        self.assertIn("types: [labeled, synchronize, reopened]", triggers)
+        self.assertIn("types: [labeled, synchronize, reopened, ready_for_review]", triggers)
         self.assertNotIn("pull_request_target", daily + reusable)
         self.assertNotRegex(daily + reusable, r"secrets[.:]|registration.token|RUNNER_TOKEN")
         self.assertEqual(value(daily.split("\njobs:", 1)[0], "contents", 2), "read")
@@ -1025,12 +1025,11 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                                {"name": "report", "status": "in_progress", "conclusion": None}]}]
         issue = {"number": 3, "title": report.TITLE, "labels": [{"name": report.LABEL}]}
         for existing, labels in (([], []), ([], [{"name": report.LABEL}]), ([issue], []),
-                                 ([issue, {**issue, "number": 4}], []),
-                                 ([{**issue, "labels": []}], []),
-                                 ([{**issue, "labels": []}], [{"name": report.LABEL}])):
-            distractions = [{"title": "Daily Windows run - other", "number": 1},
-                            {"title": report.TITLE, "number": 2, "pull_request": {}}]
-            needs_label = not existing or not existing[0]["labels"]
+                                 ([issue, {**issue, "number": 4}], [])):
+            distractions = [{"title": "Daily Windows run - other", "number": 1, "labels": []},
+                            {"title": report.TITLE, "number": 2, "pull_request": {}, "labels": [{"name": report.LABEL}]},
+                            {"title": report.TITLE, "number": 5, "labels": [{"name": "unrelated"}]}]
+            needs_label = not existing
             responses = [job_pages, [distractions, existing]]
             if needs_label:
                 responses.append([[], labels])
@@ -1044,7 +1043,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                     self.assertIn(expected, body)
                 self.assertEqual(sum(args[:2] == ("issue", "create") for args in calls), int(not existing))
                 self.assertEqual(sum(args[:2] == ("label", "create") for args in calls), int(needs_label and not labels))
-                self.assertEqual(sum(args[:2] == ("issue", "edit") for args in calls), int(bool(existing) and needs_label))
+                self.assertEqual(sum(args[:2] == ("issue", "edit") for args in calls), 0)
                 if existing:
                     self.assertEqual(comments[0][2], "3")
         for existing in ([], [issue]):
