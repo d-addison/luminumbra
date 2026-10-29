@@ -119,6 +119,8 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/WorldDressing.cpp
 
     # UI
+    ${CMAKE_CURRENT_LIST_DIR}/ui/CollectUiLayout.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/UiLayout.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_UIManager.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Button.cpp

@@ -630,11 +630,12 @@ class CTestShardTests(unittest.TestCase):
                             self.assertNotIn("PROCESSORS", props)
                             self.assertNotIn("COST", props)
                 self.assertTrue(local_names <= set(selected))
-                self.assertEqual(len(selected), 4 if standalone else 61 if windows else 63)
+                self.assertEqual(len(selected), 4 if standalone else 62 if windows else 64)
                 if not standalone:
                     self.assertTrue(borrowed_input_names <= set(selected))
                     self.assertTrue({"ContainmentLinkClosureContract",
-                                     "FirstPartyExceptionsContract"} <= set(selected))
+                                     "FirstPartyExceptionsContract",
+                                     "UiLayoutSourceContract"} <= set(selected))
                 names = [row["name"] for row in rows]
                 unthrottled = copy.deepcopy(rows)
                 for row in unthrottled:

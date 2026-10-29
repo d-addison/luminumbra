@@ -1100,6 +1100,14 @@ else()
     target_link_libraries(waterfall_visual_test PRIVATE OpenGL::GL)
 endif()
 
+# The serializer has no window, renderer or GL linkage and always runs headlessly.
+add_executable(ui_layout_test
+    ui/ui_layout_test.cpp
+    ../src/luminumbra_client/ui/UiLayout.cpp
+)
+target_include_directories(ui_layout_test PRIVATE ../src/luminumbra_client)
+target_link_libraries(ui_layout_test PRIVATE gtest_main nlohmann_json::nlohmann_json)
+
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
 ../src/luminumbra_client/ui/core/UIComponent.cpp
@@ -2062,6 +2070,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     particle_determinism_test
     far_lod_worker_test
     ui_smoke_test
+    ui_layout_test
     ui_page_load_test
     worldgen_preview_test
     initial_world_loading_perf_test
@@ -2508,6 +2517,7 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
     "  ],\n"
     "  \"required_ui_tests\": [\n"
     "    \"UiSmokeTest.CapturesMaintainedMenuScreenshots\",\n"
+    "    \"UiSmokeTest.LayoutIncludesVisibleDocumentsDirectTextClipsAndTree\",\n"
     "    \"UiSmokeTest.AuthoredRmlDocumentsLoadAndExposeRequiredElements\",\n"
     "    \"UiSmokeTest.UiStateNavigationMaintainsDocumentAndGameState\",\n"
     "    \"UiSmokeTest.AuthoredMenuInteractionsNavigateAndInvokeCallbacks\",\n"

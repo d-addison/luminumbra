@@ -19,6 +19,8 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <imgui.h>
+#include <imgui_internal.h>
 #include <ios>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -27,6 +29,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -47,6 +50,7 @@
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "ui/Rml_UIManager.h"
+#include "ui/UiLayout.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
 #include "ui/components/common/Panel.h"
@@ -602,9 +606,304 @@ TEST(UiSmokeTest, CapturesMaintainedMenuScreenshots) {
         const fs::path output = capture_root / (std::string(spec.view) + ".png");
         ASSERT_TRUE(CaptureUiPng(ui, context.window(), output)) << output.string();
         ASSERT_GT(fs::file_size(output), 128u);
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(context.window(), &width, &height);
+        const auto layout = Luminumbra::Client::UI::CollectUiLayout(
+            ui.GetContext(), nullptr, spec.view, width, height);
+        const auto required =
+            std::find_if(layout.rml_elements.begin(),
+                         layout.rml_elements.end(),
+                         [&](const auto& element) { return element.id == spec.required_id; });
+        ASSERT_NE(required, layout.rml_elements.end()) << spec.view;
+        EXPECT_GT(required->rect.w, 0);
+        EXPECT_GT(required->rect.h, 0);
+        EXPECT_GE(required->rect.x, 0);
+        EXPECT_GE(required->rect.y, 0);
+        EXPECT_LE(required->rect.x + required->rect.w, width);
+        EXPECT_LE(required->rect.y + required->rect.h, height);
+        const auto bytes = Luminumbra::Client::UI::SerializeUiLayout(layout);
+        ui.Render();
+        EXPECT_EQ(bytes,
+                  Luminumbra::Client::UI::SerializeUiLayout(Luminumbra::Client::UI::CollectUiLayout(
+                      ui.GetContext(), nullptr, spec.view, width, height)));
+        auto sidecar = output;
+        sidecar.replace_extension(".layout.json");
+        ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(sidecar, bytes));
+        EXPECT_EQ(ReadTextFile(sidecar), bytes);
         captures.emplace_back(spec.view, output);
     }
     WriteUiScreenshotArtifact(ArtifactRoot() / "ui_screenshots.json", captures);
+    ui.Shutdown();
+}
+
+class ScopedLayoutImGuiContext {
+public:
+    ScopedLayoutImGuiContext()
+        : m_previous(ImGui::GetCurrentContext())
+        , m_context(ImGui::CreateContext()) {
+        ImGui::SetCurrentContext(m_context);
+        auto& io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.LogFilename = nullptr;
+        io.DisplaySize = ImVec2(800, 600);
+        io.DisplayFramebufferScale = ImVec2(2, 1.5f);
+        io.DeltaTime = 1.0f / 60.0f;
+        unsigned char* pixels = nullptr;
+        int width = 0, height = 0;
+        io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    }
+    ~ScopedLayoutImGuiContext() {
+        ImGui::DestroyContext(m_context);
+        ImGui::SetCurrentContext(m_previous);
+    }
+    ScopedLayoutImGuiContext(const ScopedLayoutImGuiContext&) = delete;
+    ScopedLayoutImGuiContext& operator=(const ScopedLayoutImGuiContext&) = delete;
+
+private:
+    ImGuiContext* m_previous;
+    ImGuiContext* m_context;
+};
+
+TEST(UiLayoutCollection, NullContextsAndInvalidFramebufferNeedNoGl) {
+    using namespace Luminumbra::Client::UI;
+    const auto empty = CollectUiLayout(nullptr, nullptr, "empty", 800, 600);
+    EXPECT_EQ(empty.screen, "empty");
+    EXPECT_EQ(empty.width, 800);
+    EXPECT_EQ(empty.height, 600);
+    EXPECT_TRUE(empty.rml_elements.empty());
+    EXPECT_TRUE(empty.imgui_windows.empty());
+    for (const int dimension : {0, -1}) {
+        EXPECT_THROW(CollectUiLayout(nullptr, nullptr, "empty", dimension, 600),
+                     std::invalid_argument);
+        EXPECT_THROW(CollectUiLayout(nullptr, nullptr, "empty", 800, dimension),
+                     std::invalid_argument);
+    }
+    EXPECT_THROW(
+        CollectUiLayout(nullptr, nullptr, std::string(kUiLayoutMaxStringBytes + 1, 'x'), 800, 600),
+        std::length_error);
+}
+
+TEST(UiLayoutCollection, ImGuiWindowsUseDisplayOrderAndFramebufferScaleWithoutGl) {
+    const ScopedLayoutImGuiContext context;
+    ImGui::NewFrame();
+    // Create the tooltip first: its layer must still paint after ordinary windows.
+    ImGui::BeginTooltip();
+    ImGui::TextUnformatted("layout tooltip");
+    ImGui::EndTooltip();
+    ImGui::SetNextWindowPos(ImVec2(10, 20), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(200, 100), ImGuiCond_Always);
+    ImGui::Begin("layout_first", nullptr, ImGuiWindowFlags_NoSavedSettings);
+    ImGui::BeginChild("layout_child", ImVec2(80, 40));
+    ImGui::EndChild();
+    ImGui::End();
+    ImGui::SetNextWindowPos(ImVec2(40, 60), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(150, 90), ImGuiCond_Always);
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_Always);
+    ImGui::Begin("layout_second", nullptr, ImGuiWindowFlags_NoSavedSettings);
+    ImGui::End();
+    ImGui::Render();
+    using namespace Luminumbra::Client::UI;
+    const auto layout = CollectUiLayout(nullptr, ImGui::GetCurrentContext(), "imgui", 1600, 900);
+    const auto find = [&](const std::string& title) {
+        return std::find_if(layout.imgui_windows.begin(),
+                            layout.imgui_windows.end(),
+                            [&](const auto& window) { return window.title == title; });
+    };
+    const auto first = find("layout_first");
+    const auto second = find("layout_second");
+    const auto child = std::find_if(
+        layout.imgui_windows.begin(), layout.imgui_windows.end(), [](const auto& window) {
+            return window.title.find("layout_child") != std::string::npos;
+        });
+    const auto tooltip =
+        std::find_if(layout.imgui_windows.begin(),
+                     layout.imgui_windows.end(),
+                     [](const auto& window) { return window.title.starts_with("##Tooltip"); });
+    ASSERT_NE(first, layout.imgui_windows.end());
+    ASSERT_NE(second, layout.imgui_windows.end());
+    ASSERT_NE(child, layout.imgui_windows.end());
+    ASSERT_NE(tooltip, layout.imgui_windows.end());
+    EXPECT_LT(first, second);
+    EXPECT_LT(first, child);
+    EXPECT_LT(child, second);
+    EXPECT_LT(second, tooltip);
+    EXPECT_DOUBLE_EQ(first->rect.x, 20);
+    EXPECT_DOUBLE_EQ(first->rect.y, 30);
+    EXPECT_DOUBLE_EQ(first->rect.w, 400);
+    EXPECT_DOUBLE_EQ(first->rect.h, 150);
+    EXPECT_FALSE(first->collapsed);
+    EXPECT_TRUE(first->visible);
+    EXPECT_TRUE(second->collapsed);
+    EXPECT_TRUE(second->visible);
+    EXPECT_EQ(SerializeUiLayout(layout),
+              SerializeUiLayout(
+                  CollectUiLayout(nullptr, ImGui::GetCurrentContext(), "imgui", 1600, 900)));
+    // Unsubmitted windows remain in the current context and must not be filtered out.
+    ImGui::NewFrame();
+    ImGui::Render();
+    EXPECT_EQ(CollectUiLayout(nullptr, ImGui::GetCurrentContext(), "imgui", 1600, 900)
+                  .imgui_windows.size(),
+              layout.imgui_windows.size());
+}
+
+TEST(UiLayoutCollection, ImGuiNavigationAndHiddenWindowsUseCurrentContextStateWithoutGl) {
+    const ScopedLayoutImGuiContext context;
+    ImGui::NewFrame();
+    for (const auto* title : {"layout_back", "layout_front"}) {
+        ImGui::SetNextWindowSize(ImVec2(200, 100), ImGuiCond_Always);
+        ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoSavedSettings);
+        ImGui::End();
+    }
+    ImGui::Render();
+    auto* imgui = ImGui::GetCurrentContext();
+    auto* back = ImGui::FindWindowByName("layout_back");
+    auto* front = ImGui::FindWindowByName("layout_front");
+    ASSERT_NE(back, nullptr);
+    ASSERT_NE(front, nullptr);
+    using namespace Luminumbra::Client::UI;
+    const auto ordered_before =
+        [](const UiLayout& layout, const std::string& left, const std::string& right) {
+            const auto find = [&](const std::string& title) {
+                return std::find_if(layout.imgui_windows.begin(),
+                                    layout.imgui_windows.end(),
+                                    [&](const auto& window) { return window.title == title; });
+            };
+            const auto first = find(left);
+            const auto second = find(right);
+            return first != layout.imgui_windows.end() && second != layout.imgui_windows.end() &&
+                   first < second;
+        };
+    imgui->NavWindowingTarget = back;
+    EXPECT_TRUE(ordered_before(
+        CollectUiLayout(nullptr, imgui, "nav", 1600, 900), "layout_front", "layout_back"));
+    imgui->NavWindowingListWindow = front;
+    EXPECT_TRUE(ordered_before(
+        CollectUiLayout(nullptr, imgui, "nav", 1600, 900), "layout_back", "layout_front"));
+    imgui->NavWindowingListWindow = nullptr;
+    back->Flags |= ImGuiWindowFlags_NoBringToFrontOnFocus;
+    EXPECT_TRUE(ordered_before(
+        CollectUiLayout(nullptr, imgui, "nav", 1600, 900), "layout_back", "layout_front"));
+    front->Hidden = true;
+    const auto hidden = CollectUiLayout(nullptr, imgui, "hidden", 1600, 900);
+    const auto retained =
+        std::find_if(hidden.imgui_windows.begin(),
+                     hidden.imgui_windows.end(),
+                     [](const auto& window) { return window.title == "layout_front"; });
+    ASSERT_NE(retained, hidden.imgui_windows.end());
+    EXPECT_FALSE(retained->visible);
+    imgui->NavWindowingTarget = nullptr;
+    front->Hidden = false;
+}
+
+TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    auto* first = ui.GetContext()->LoadDocumentFromMemory(R"(
+        <rml><head><style>
+        body { width: 700px; height: 500px; }
+        #clip { position: absolute; left: 10px; top: 20px;
+                width: 100px; height: 80px; overflow: hidden; }
+        #text { width: 120px; height: 90px; }
+        </style></head><body id="first">
+        <div id="clip"><div id="text">  before <span>nested</span> after  </div></div>
+        <div id="hidden" style="display: none"><div id="hidden_child" /></div>
+        <div id="invisible" style="visibility: hidden" />
+        <div id="unclipped" style="position: absolute; left: 200px; top: 20px;
+                                   width: 30px; height: 40px; z-index: 7" />
+        </body></rml>)");
+    auto* second = ui.GetContext()->LoadDocumentFromMemory(R"(
+        <rml><head><style>body { width: 600px; height: 400px; }</style></head>
+        <body id="second"><div id="second_child" /></body></rml>)");
+    auto* hidden_document = ui.GetContext()->LoadDocumentFromMemory(
+        "<rml><body id=\"hidden_document\"><div id=\"hidden_document_child\" /></body></rml>");
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    ASSERT_NE(hidden_document, nullptr);
+    first->Show();
+    second->Show();
+    ui.GetContext()->Update();
+    ui.Render();
+    using namespace Luminumbra::Client::UI;
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(context.window(), &width, &height);
+    const auto layout = CollectUiLayout(ui.GetContext(), nullptr, "fixture", width, height);
+    const auto find = [&](const std::string& id) {
+        return std::find_if(layout.rml_elements.begin(),
+                            layout.rml_elements.end(),
+                            [&](const auto& element) { return element.id == id; });
+    };
+    for (const auto* id :
+         {"hidden", "hidden_child", "invisible", "hidden_document", "hidden_document_child"})
+        EXPECT_EQ(find(id), layout.rml_elements.end()) << id;
+    const auto text = find("text");
+    const auto clip = find("clip");
+    const auto unclipped = find("unclipped");
+    const auto second_child = find("second_child");
+    ASSERT_NE(text, layout.rml_elements.end());
+    ASSERT_NE(clip, layout.rml_elements.end());
+    ASSERT_NE(unclipped, layout.rml_elements.end());
+    ASSERT_NE(second_child, layout.rml_elements.end());
+    EXPECT_LT(text, second_child) << "context document order";
+    EXPECT_EQ(text->text, "before  after");
+    EXPECT_EQ(text->tag, "div");
+    ASSERT_TRUE(text->parent.has_value());
+    EXPECT_EQ(
+        text->parent,
+        std::optional<std::size_t>(static_cast<std::size_t>(clip - layout.rml_elements.begin())));
+    EXPECT_EQ(text->depth, clip->depth + 1);
+    ASSERT_TRUE(text->clip.has_value());
+    const auto clip_rect = text->clip.value_or(UiLayoutRect{});
+    EXPECT_DOUBLE_EQ(clip_rect.x, 10);
+    EXPECT_DOUBLE_EQ(clip_rect.y, 20);
+    EXPECT_DOUBLE_EQ(clip_rect.w, 100);
+    EXPECT_DOUBLE_EQ(clip_rect.h, 80);
+    EXPECT_FALSE(text->clip_masked);
+    EXPECT_FALSE(unclipped->clip.has_value());
+    EXPECT_FALSE(unclipped->z.has_value()) << "raw CSS z-index is not effective paint order";
+    for (const auto& element : layout.rml_elements) {
+        EXPECT_GE(element.rect.x, 0);
+        EXPECT_GE(element.rect.y, 0);
+        EXPECT_LE(element.rect.x + element.rect.w, width);
+        EXPECT_LE(element.rect.y + element.rect.h, height);
+    }
+    const auto bytes = SerializeUiLayout(layout);
+    ui.Render();
+    EXPECT_EQ(
+        bytes,
+        SerializeUiLayout(CollectUiLayout(ui.GetContext(), nullptr, "fixture", width, height)));
+    auto* clipping_element = first->GetElementById("clip");
+    ASSERT_NE(clipping_element, nullptr);
+    clipping_element->SetProperty("border-radius", "8px");
+    ui.GetContext()->Update();
+    ui.Render();
+    const auto masked = CollectUiLayout(ui.GetContext(), nullptr, "masked", width, height);
+    const auto masked_text = std::find_if(masked.rml_elements.begin(),
+                                          masked.rml_elements.end(),
+                                          [](const auto& element) { return element.id == "text"; });
+    ASSERT_NE(masked_text, masked.rml_elements.end());
+    EXPECT_TRUE(masked_text->clip_masked);
+    EXPECT_TRUE(masked_text->clip.has_value());
+    clipping_element->SetProperty("transform", "translateX(5px)");
+    ui.GetContext()->Update();
+    ui.Render();
+    const auto transformed = CollectUiLayout(ui.GetContext(), nullptr, "masked", width, height);
+    const auto transformed_text =
+        std::find_if(transformed.rml_elements.begin(),
+                     transformed.rml_elements.end(),
+                     [](const auto& element) { return element.id == "text"; });
+    ASSERT_NE(transformed_text, transformed.rml_elements.end());
+    EXPECT_TRUE(transformed_text->clip_masked);
+    EXPECT_FALSE(transformed_text->clip.has_value()) << "transformed mask has no scissor";
+    first->Hide();
+    second->Hide();
+    const auto empty = CollectUiLayout(ui.GetContext(), nullptr, "hidden", width, height);
+    EXPECT_TRUE(empty.rml_elements.empty());
     ui.Shutdown();
 }
 
