@@ -1968,6 +1968,11 @@ if(BUILD_TESTING)
     set_tests_properties(WorkflowPolicyContractPart11
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     add_test(
+        NAME WorkflowPolicyContractPart12
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 12)
+    set_tests_properties(WorkflowPolicyContractPart12
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
         NAME SoftwareGlEvidenceContract
         COMMAND "${Python3_EXECUTABLE}" -I -B
                 "${CMAKE_CURRENT_SOURCE_DIR}/static_preview/test_run_software_gl.py")
@@ -2131,6 +2136,7 @@ if(BUILD_TESTING)
             WorkflowPolicyContractPart6 WorkflowPolicyContractPart7
             WorkflowPolicyContractPart8 WorkflowPolicyContractPart9
             WorkflowPolicyContractPart10 WorkflowPolicyContractPart11
+            WorkflowPolicyContractPart12
             QualificationCaptureContract SlowestTestsScriptContract
             LocalCheckRegistrationContract
             ${_rmlui_source_contracts}
@@ -2146,5 +2152,6 @@ if(BUILD_TESTING)
         set_property(TEST WorkflowPolicyContractPart9 PROPERTY COST 19)
         set_property(TEST WorkflowPolicyContractPart10 PROPERTY COST 17)
         set_property(TEST WorkflowPolicyContractPart11 PROPERTY COST 16)
+        set_property(TEST WorkflowPolicyContractPart12 PROPERTY COST 15)
     endif()
 endif()

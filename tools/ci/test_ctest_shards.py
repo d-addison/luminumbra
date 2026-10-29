@@ -601,6 +601,7 @@ class CTestShardTests(unittest.TestCase):
                       "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
                       "WorkflowPolicyContractPart9": 19, "OfflineDependenciesContractPart2": 18,
                       "WorkflowPolicyContractPart10": 17, "WorkflowPolicyContractPart11": 16,
+                      "WorkflowPolicyContractPart12": 15,
                       "OfflineDependenciesContract": 10, "OfflineDependenciesContractPart1": 10}
         for standalone in (False, True):
             inventories = {}
@@ -629,7 +630,7 @@ class CTestShardTests(unittest.TestCase):
                             self.assertNotIn("PROCESSORS", props)
                             self.assertNotIn("COST", props)
                 self.assertTrue(local_names <= set(selected))
-                self.assertEqual(len(selected), 4 if standalone else 60 if windows else 62)
+                self.assertEqual(len(selected), 4 if standalone else 61 if windows else 63)
                 if not standalone:
                     self.assertTrue(borrowed_input_names <= set(selected))
                     self.assertTrue({"ContainmentLinkClosureContract",
@@ -661,7 +662,8 @@ class CTestShardTests(unittest.TestCase):
         names = ["WorkflowPolicyContract", "ChangedTranslationUnitsContract", "CTestShardContractPart1",
                  "WorkflowPolicyContractPart1", "WorkflowPolicyContractPart8", "WorkflowPolicyContractPart9",
                  "OfflineDependenciesContractPart2", "WorkflowPolicyContractPart10",
-                 "WorkflowPolicyContractPart11", "OfflineDependenciesContract"]
+                 "WorkflowPolicyContractPart11", "WorkflowPolicyContractPart12",
+                 "OfflineDependenciesContract"]
         probe = self.root / "probe.py"
         probe.write_text(
             "import pathlib, sys, time\n"
