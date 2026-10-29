@@ -369,10 +369,10 @@ class PathGateTests(unittest.TestCase):
                 ("pull_request", "push", "workflow_dispatch", "schedule"), ("main", "devel"),
                 ("true", "false", "", "unknown"), (False, True, None), (False, True),
                 ("true", "false", "", "unknown", "TRUE")):
-            main_pr = event == "pull_request" and base == "main"
+            main_or_labelled_pr = event == "pull_request" and (base == "main" or label)
             routed = (event in ("push", "workflow_dispatch") or
                       (event == "pull_request" and (label or paths.lower() == "true")))
-            enabled = main_pr or (cpp != "false" and routed)
+            enabled = main_or_labelled_pr or (cpp != "false" and routed)
             ready = event != "pull_request" or draft is False
             context = {
                 "github.event_name": event, "github.base_ref": base, "github.ref": f"refs/heads/{base}",
