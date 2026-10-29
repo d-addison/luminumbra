@@ -2714,6 +2714,12 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
 
     def test_windows_docs_skip_precedes_checkout_and_keeps_unknown_classification_native(self):
         ci = jobs(self.workflows["ci.yml"])
+        # Manual dispatches, including qualification captures, never classify as skippable.
+        classify = next(step for step in steps(ci["changes"]) if "id: paths" in step)
+        script = " ".join(value(classify, "run", 8).split())
+        self.assertIn('if [ "$CI_EVENT" != pull_request ] ||', script)
+        self.assertLess(script.index('[ "$CI_EVENT" != pull_request ]'), script.index("then all_lanes"))
+        self.assertIn("needs_cpp=true", script)
         for job_id in ("windows-msvc", "windows-ucrt64"):
             job = ci[job_id]
             expression = value(job, "if", 4)
