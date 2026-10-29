@@ -41,6 +41,7 @@ void WaterfallPass::destroy_geometry() {
         m_vbo = 0;
     }
     m_sheet_sites.clear();
+    m_sites.clear();
     m_geometry_built = false;
 }
 
@@ -151,6 +152,9 @@ void WaterfallPass::prepare(const Systems::SHIELD_WorldSystem& world,
                             const std::filesystem::path& root_path) {
     // Re-bakeable: drop any prior geometry so a re-enter rebuilds cleanly.
     destroy_geometry();
+    if (particle_pass) {
+        particle_pass->clear_waterfall_spray();
+    }
 
     // World-deterministic detection (cached). Copy into m_sheet_sites so the
     // per-site crest/foot Y survive even if the cache is later cleared.

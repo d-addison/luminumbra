@@ -6314,7 +6314,7 @@
     {
       "id": "iss.553-dependency-startup",
       "source": "issue #553",
-      "statement": "A revision-bound Jolt startup patch uses a read-only source overlay and registered actual-dependency failure-injection regressions. Native ownership and platform qualification remain pending; first-party startup and world adoption are separate work.",
+      "statement": "A revision-bound Jolt startup patch uses a read-only source overlay and registered actual-dependency failure-injection regressions. Native ownership and platform qualification remain pending; first-party startup and world adoption are separate work. Windows native worker and semaphore refusal regressions are registered; MSVC and UCRT64 execution remains pending.",
       "status": "partial",
       "evidence": [
         {
@@ -6329,6 +6329,21 @@
           "kind": "ctest",
           "ref": "JoltStartup.MeasuredNullThrowAndUnwindSweep",
           "planned": "Run actual-dependency failure and mutation controls with generated build owners; owner: physics"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.WindowsFirstAndLaterWorkerCreationFailureJoinsAcquiredWorkers",
+          "planned": "Run Windows native creation refusal and rollback regressions under MSVC and UCRT64; owner: physics"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.WindowsApplicationWorkerCreationFailureReleasesRuntimeAndAllowsRetry",
+          "planned": "Run Windows native creation refusal and rollback regressions under MSVC and UCRT64; owner: physics"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.WindowsApplicationSemaphoreCreationFailureReleasesRuntimeAndAllowsRetry",
+          "planned": "Run Windows native creation refusal and rollback regressions under MSVC and UCRT64; owner: physics"
         }
       ],
       "requirements": []
