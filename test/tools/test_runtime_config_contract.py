@@ -308,7 +308,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for proof in ("record.matches_name()", "directory.identity(world_identity,true)",
                       "record.identity(instance_identity)", "record.read_record(recorded)",
                       "StagingOwnershipBytes(staging,world_identity,staging_identity,instance_identity)",
-                      "!expected.empty()&&recorded==expected"):
+                      "if(expected.empty()||recorded!=expected)returnfalse;"):
             self.assertIn(proof, validator)
         self.assertLess(validator.index('recorded.size()<'), validator.index('ReadU64('))
         missing = service[service.index("boolStagingPathMissing("):
@@ -317,7 +317,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn('::lstat(staging.c_str(),&named)==0', missing)
         self.assertIn('if(errno==ENOENT)returntrue;', missing)
         orphan = service[service.index("boolReclaimOrphanedLedgerStaging("):
-                         service.index("std::filesystem::pathNextLedgerTempPath(")]
+                         service.index("boolReclaimClaimedLedgerStaging(")]
         ordered = ("ValidOrphanedStagingOwnership(staging,record)",
                    "StagingPathMissing(staging)", "record.remove()", "FlushRemovalDirectory(")
         positions = [orphan.index(value) for value in ordered]
@@ -405,8 +405,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         positions = [writer.index(value) for value in ordered]
         self.assertEqual(positions, sorted(positions))
         transaction = service[service.index("classLedgerStaging{"):service.index("std::size_tReclaimAbandonedStaging(")]
-        ordered = ("m_payload.write(bytes)", "StagingOwnershipBytes(", "m_record.write(ownership)",
-                   "FlushAncestorEntries(m_path,errors)", "FlushRemovalDirectory(m_path,errors)", "m_ready=true")
+        ordered = ("m_claim.write(claim)", "FlushAncestorEntries(m_path,errors)",
+                   "FlushRemovalDirectory(m_path,errors)", "m_payload.promote_seed(m_path,m_occupied,errors)",
+                   "m_payload.write(bytes)", "m_record.write(ownership)", "m_ready=true")
         positions = [transaction.index(value) for value in ordered]
         self.assertEqual(positions, sorted(positions))
         fixture = compact_cpp((ROOT / "test/persistence/world_save_service_test.cpp").read_text(encoding="utf-8"))
@@ -444,7 +445,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           service.index("boolvalid(std::vector<std::string>*errors)")]
         ordered = ("m_payload.write(bytes)",
                    "m_payload.finish_write(StagingFile::RetainedAccess::Identity,errors)",
-                   "m_payload.identity(staging_identity)", "StagingOwnershipBytes(",
+                   "m_payload.identity(staging_identity)", "constautoownership=StagingOwnershipBytes(",
                    "m_record.write(ownership)",
                    "m_record.finish_write(StagingFile::RetainedAccess::Read,errors)",
                    "m_ready=true")
@@ -453,6 +454,100 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         fixture = compact_cpp((ROOT / "test/persistence/world_save_service_test.cpp")
                               .read_text(encoding="utf-8"))
         self.assertIn("TEST(WorldSaveService,LedgerStagingPublishesCreatesAndReplacementsWithoutDebris)", fixture)
+
+    def test_ledger_claim_is_durable_before_payload_promotion_and_completion(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        transaction = service[service.index("classLedgerStaging{"):
+                              service.index("boolStagingNameHasPrefix(")]
+        constructor = transaction[:transaction.index("~LedgerStaging()")]
+        self.assertIn("m_payload(OwnershipPath(m_path),StagingFile::Mode::Create)", constructor)
+        self.assertIn("m_claim(ClaimPath(m_path),StagingFile::Mode::Create)", constructor)
+        self.assertNotIn("m_payload(m_path,StagingFile::Mode::Create)", constructor)
+        prepare = transaction[transaction.index("boolprepare("):transaction.index("boolvalid(")]
+        ordered = ("m_payload.write(seed)", "m_claim.write(claim)",
+                   "m_claim.finish_write(StagingFile::RetainedAccess::Read,errors)",
+                   "FlushAncestorEntries(m_path,errors)", "FlushRemovalDirectory(m_path,errors)",
+                   "m_payload.promote_seed(m_path,m_occupied,errors)",
+                   "!FlushRemovalDirectory(m_path,errors))returnfalse;",
+                   "m_payload.truncate_payload()", "m_payload.write(bytes)",
+                   "m_payload.finish_write(StagingFile::RetainedAccess::Identity,errors)",
+                   "m_payload.identity(staging_identity)", "m_record.open(StagingFile::Mode::Create)",
+                   "m_record.write(ownership)",
+                   "m_record.finish_write(StagingFile::RetainedAccess::Read,errors)",
+                   "m_ready=true", "m_claim.remove()", "m_claim.close()")
+        positions = []
+        offset = 0
+        for fragment in ordered:
+            offset = prepare.index(fragment, offset)
+            positions.append(offset)
+        self.assertEqual(positions, sorted(positions))
+        promotion = service[service.index("boolpromote_seed("):
+                            service.index("booltruncate_payload(")]
+        windows, posix = promotion.split("#ifdefined(_WIN32)", 1)[1].split("#else", 1)
+        self.assertIn("::MoveFileExW(m_path.c_str(),destination.c_str(),MOVEFILE_WRITE_THROUGH)", windows)
+        self.assertNotIn("MOVEFILE_REPLACE_EXISTING", windows)
+        self.assertIn("occupied=error==ERROR_FILE_EXISTS||error==ERROR_ALREADY_EXISTS;", windows)
+        self.assertEqual(posix.count("occupied=errno==EEXIST;"), 3)
+        writer = service[service.index("boolWorldSaveService::save_active_regions("):]
+        self.assertIn("if(!temporary.prepare(bytes,errors)){if(temporary.occupied())continue;", writer)
+        self.assertIn("SYS_renameat2", posix)
+        self.assertIn("RENAME_NOREPLACE", posix)
+        self.assertIn("::renamex_np(m_path.c_str(),destination.c_str(),RENAME_EXCL)", posix)
+        self.assertLess(posix.index("::link(m_path.c_str(),destination.c_str())"),
+                        posix.index("!matches_name(2)||::unlink(m_path.c_str())"))
+        writer = service[service.index("boolwrite(conststd::string&bytes)"):
+                         service.index("boolpromote_seed(")]
+        for flush in ("::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
+            self.assertIn(flush, writer)
+        self.assertIn("if(!payload_remains&&m_claim_created&&!m_claim.remove())", transaction)
+
+    def test_incomplete_ledger_reclaim_requires_reserved_identity_and_nofollow_inspection(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        reclaim = service[service.index("boolReclaimClaimedLedgerStaging("):
+                          service.index("std::filesystem::pathNextLedgerTempPath(")]
+        ordered = ("ValidOrphanedStagingOwnership(staging,claim,&reserved)",
+                   "reserved!=StablePayloadIdentity(reserved)",
+                   "payload.identity(present,false,2)", "StablePayloadIdentity(present)!=reserved",
+                   "!payload.matches_name(2)", "seed.identity(seed_identity,false,2)",
+                   "StablePayloadIdentity(seed_identity)==reserved", "seed.remove(2)",
+                   "seed.close()", "payload.remove()", "payload.close()",
+                   "StagingPathMissing(staging)", "claim.remove()")
+        positions = [reclaim.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("ReclaimOrphanedLedgerStaging(staging)", reclaim)
+        cleanup = service[service.index("std::size_tReclaimAbandonedStaging("):]
+        self.assertIn('if(StagingNameEquals(entry.path().extension(),".claim"))', cleanup)
+        self.assertIn("staging.replace_extension();if(ReclaimClaimedLedgerStaging(staging))", cleanup)
+        native = service[service.index("classStagingFile{"):
+                         service.index("std::filesystem::pathOwnershipPath(")]
+        self.assertIn("O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", native)
+        self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", native)
+        self.assertIn("::lstat(m_path.c_str(),&named)", native)
+        self.assertIn("info.nNumberOfLinks>links", native)
+        self.assertIn("info.st_nlink>links", native)
+
+    def test_claim_interruption_regressions_cover_recovery_and_refusals(self):
+        fixture = compact_cpp((ROOT / "test/persistence/world_save_service_test.cpp")
+                              .read_text(encoding="utf-8"))
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        # These tests exercise new recovery, rather than only preserving files
+        # which the earlier implementation already left untouched.
+        self.assertIn("boolReclaimClaimedLedgerStaging(", service)
+        for regression in ("LedgerStagingRepeatedClaimInterruptionsDoNotAccumulatePayloads",
+                           "LedgerStagingIncompleteClaimsRequireCanonicalProofAndReservedIdentity",
+                           "LedgerStagingIncompleteClaimSurvivesTornCompletionAndPayloadWrites",
+                           "LedgerStagingIncompleteClaimsRecoverOnlyTheirReservationLinks",
+                           "LedgerStagingIncompleteClaimsPreserveNonregularLeavesUntilRestored",
+                           "LedgerStagingIncompleteClaimsPreserveUnreadableProofUntilRetry"):
+            self.assertIn("TEST(WorldSaveService," + regression + ")", fixture)
+        self.assertIn("for(constintpoint:{0,1,2})", fixture)
+        self.assertIn("attempt<8", fixture)
+        self.assertIn("changed.resize(79)", fixture)
+        self.assertIn("changed.assign(513,'x')", fixture)
+        self.assertIn("BindOwnershipInstance(interrupted.claim_bytes,interrupted.claim)", fixture)
 
     def test_staging_refusals_preserve_specific_diagnostics_without_an_errors_vector(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")

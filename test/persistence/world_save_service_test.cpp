@@ -42,6 +42,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
+
 namespace {
 
 using Luminumbra::Chunk;
@@ -1062,7 +1068,250 @@ void RefreshOwnershipChecksum(std::string& bytes) {
         bytes[bytes.size() - 8 + static_cast<std::size_t>(index)] =
             static_cast<char>((checksum >> (index * 8)) & 255u);
 }
+
+void SetOwnershipWord(std::string& bytes, std::size_t offset, std::uint64_t value) {
+    ASSERT_LE(offset, bytes.size());
+    ASSERT_GE(bytes.size() - offset, 8u);
+    for (unsigned index = 0; index < 8; ++index)
+        bytes[offset + index] = static_cast<char>((value >> (index * 8)) & 255u);
+}
+
+void BindOwnershipInstance(std::string& bytes, const std::filesystem::path& path) {
+    std::array<std::uint64_t, 3> identity{};
+#if defined(_WIN32)
+    const HANDLE handle = ::CreateFileW(path.c_str(),
+                                        FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_OPEN_REPARSE_POINT,
+                                        nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool identified = ::GetFileInformationByHandle(handle, &information) != 0;
+    const bool closed = ::CloseHandle(handle) != 0;
+    ASSERT_TRUE(identified);
+    ASSERT_TRUE(closed);
+    identity = {
+        information.dwVolumeSerialNumber, information.nFileIndexHigh, information.nFileIndexLow};
+#else
+    struct stat information {};
+    ASSERT_EQ(::lstat(path.c_str(), &information), 0);
+    ASSERT_TRUE(S_ISREG(information.st_mode));
+    identity = {static_cast<std::uint64_t>(information.st_dev),
+                static_cast<std::uint64_t>(information.st_ino),
+                0};
+#endif
+    // AROWN001: magic + three directory words + six payload words.
+    for (std::size_t index = 0; index < identity.size(); ++index)
+        ASSERT_NO_FATAL_FAILURE(SetOwnershipWord(bytes, 80 + index * 8, identity[index]));
+}
+
+struct InterruptedLedgerStaging {
+    std::filesystem::path payload;
+    std::filesystem::path owner;
+    std::filesystem::path claim;
+    std::string claim_bytes;
+    std::string payload_bytes;
+};
+
+void LeaveInterruptedLedgerStaging(const std::filesystem::path& directory,
+                                   int point,
+                                   InterruptedLedgerStaging& interrupted) {
+    ASSERT_NO_FATAL_FAILURE(LeaveOwnedLedgerStaging(directory));
+    const auto captured = CapturedLedgerStaging::current();
+    interrupted = {.payload = captured.payload,
+                   .owner = captured.record,
+                   .claim = captured.payload,
+                   .claim_bytes = captured.ownership,
+                   .payload_bytes = ReadFileBytes(captured.payload)};
+    interrupted.claim += ".claim";
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(interrupted.claim, {}));
+    ASSERT_NO_FATAL_FAILURE(BindOwnershipInstance(interrupted.claim_bytes, interrupted.claim));
+    // Incomplete claims retain only the reserved payload's three stable words.
+    for (std::size_t index = 3; index < 6; ++index)
+        ASSERT_NO_FATAL_FAILURE(SetOwnershipWord(interrupted.claim_bytes, 32 + index * 8, 0));
+    ASSERT_NO_FATAL_FAILURE(RefreshOwnershipChecksum(interrupted.claim_bytes));
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(interrupted.claim, interrupted.claim_bytes));
+    if (point == 0) {
+        // After the durable claim, before promotion: the reserved inode still
+        // contains a self-identifying sidecar and has no payload name.
+        ASSERT_TRUE(std::filesystem::remove(interrupted.owner));
+        std::filesystem::rename(interrupted.payload, interrupted.owner);
+        auto seed = captured.ownership;
+        for (std::size_t index = 0; index < 6; ++index)
+            ASSERT_NO_FATAL_FAILURE(SetOwnershipWord(seed, 32 + index * 8, 0));
+        ASSERT_NO_FATAL_FAILURE(BindOwnershipInstance(seed, interrupted.owner));
+        ASSERT_NO_FATAL_FAILURE(RefreshOwnershipChecksum(seed));
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(interrupted.owner, seed));
+    } else if (point == 1) {
+        // After promotion, before the payload write or completion record.
+        ASSERT_TRUE(std::filesystem::remove(interrupted.owner));
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(interrupted.payload, {}));
+    }
+    // point == 2 leaves the completed record and payload unchanged, just before
+    // the incomplete claim is retired. No production testing seam is needed.
+}
 } // namespace
+
+TEST(WorldSaveService, LedgerStagingRepeatedClaimInterruptionsDoNotAccumulatePayloads) {
+    // Three durable boundaries, eight retries each, and both empty/nonempty
+    // recovery saves. Each directory contains at most one interrupted pair.
+    for (const int point : {0, 1, 2}) {
+        const TempSaveDir save_dir("ledger_claim_interruptions");
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            SCOPED_TRACE(point);
+            SCOPED_TRACE(attempt);
+            InterruptedLedgerStaging interrupted;
+            ASSERT_NO_FATAL_FAILURE(
+                LeaveInterruptedLedgerStaging(save_dir.path(), point, interrupted));
+            ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path(), attempt % 2 == 0));
+            EXPECT_FALSE(std::filesystem::exists(interrupted.payload));
+            EXPECT_FALSE(std::filesystem::exists(interrupted.owner));
+            EXPECT_FALSE(std::filesystem::exists(interrupted.claim));
+            for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+                EXPECT_FALSE(
+                    entry.path().filename().string().starts_with("active-regions.arl.tmp."));
+        }
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingIncompleteClaimsRequireCanonicalProofAndReservedIdentity) {
+    // Valid control, empty/partial/oversized/unreadable-equivalent proof,
+    // checksum, directory/instance/name/nonce bindings, unknown state and a
+    // substituted payload. The valid control fails without claim recovery.
+    for (int mutation = 0; mutation < 14; ++mutation) {
+        SCOPED_TRACE(mutation);
+        const TempSaveDir save_dir("ledger_claim_proof");
+        InterruptedLedgerStaging interrupted;
+        ASSERT_NO_FATAL_FAILURE(LeaveInterruptedLedgerStaging(save_dir.path(), 1, interrupted));
+        auto changed = interrupted.claim_bytes;
+        if (mutation == 1)
+            changed.clear();
+        else if (mutation == 2)
+            changed.resize(79);
+        else if (mutation == 3)
+            changed.assign(513, 'x');
+        else if (mutation >= 4 && mutation <= 10) {
+            const std::array<std::size_t, 7> offsets{0, 8, 80, 112, changed.size() - 9, 56, 32};
+            changed[offsets[static_cast<std::size_t>(mutation - 4)]] ^= 1;
+            ASSERT_NO_FATAL_FAILURE(RefreshOwnershipChecksum(changed));
+        } else if (mutation == 11) {
+            changed.back() ^= 1;
+        } else if (mutation == 12) {
+            // Keep the claimed inode alive so the replacement cannot reuse it.
+            std::filesystem::rename(interrupted.payload, save_dir.path() / "held-payload");
+            ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(interrupted.payload, "foreign payload"));
+        } else if (mutation == 13) {
+            // A checksum-valid record without a reserved file identity cannot
+            // authorize deletion, even at the correct unique filename.
+            for (std::size_t index = 0; index < 3; ++index)
+                ASSERT_NO_FATAL_FAILURE(SetOwnershipWord(changed, 32 + index * 8, 0));
+            ASSERT_NO_FATAL_FAILURE(RefreshOwnershipChecksum(changed));
+        }
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(interrupted.claim, changed));
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        if (mutation == 0) {
+            EXPECT_FALSE(std::filesystem::exists(interrupted.payload));
+            EXPECT_FALSE(std::filesystem::exists(interrupted.claim));
+        } else {
+            EXPECT_TRUE(std::filesystem::is_regular_file(interrupted.payload));
+            EXPECT_EQ(ReadFileBytes(interrupted.claim), changed);
+            EXPECT_EQ(ReadFileBytes(interrupted.payload), mutation == 12 ? "foreign payload" : "");
+        }
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingIncompleteClaimSurvivesTornCompletionAndPayloadWrites) {
+    for (const bool complete_payload : {false, true}) {
+        const TempSaveDir save_dir("ledger_torn_completion");
+        InterruptedLedgerStaging interrupted;
+        ASSERT_NO_FATAL_FAILURE(LeaveInterruptedLedgerStaging(save_dir.path(), 1, interrupted));
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(
+            interrupted.payload, complete_payload ? interrupted.payload_bytes : "partial ledger"));
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(interrupted.owner, "partial ownership"));
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        EXPECT_FALSE(std::filesystem::exists(interrupted.payload));
+        EXPECT_FALSE(std::filesystem::exists(interrupted.claim));
+        // The partial sidecar cannot prove its own identity and must survive;
+        // it contains no ledger copy.
+        EXPECT_EQ(ReadFileBytes(interrupted.owner), "partial ownership");
+    }
+}
+
+#if !defined(_WIN32)
+TEST(WorldSaveService, LedgerStagingIncompleteClaimsRecoverOnlyTheirReservationLinks) {
+    for (const bool own_reservation : {false, true}) {
+        const TempSaveDir save_dir("ledger_claim_links");
+        InterruptedLedgerStaging interrupted;
+        ASSERT_NO_FATAL_FAILURE(LeaveInterruptedLedgerStaging(save_dir.path(), 1, interrupted));
+        const auto other = own_reservation ? interrupted.owner : save_dir.path() / "foreign-link";
+        std::filesystem::create_hard_link(interrupted.payload, other);
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        if (!own_reservation) {
+            EXPECT_TRUE(std::filesystem::exists(interrupted.payload));
+            EXPECT_EQ(ReadFileBytes(interrupted.claim), interrupted.claim_bytes);
+            ASSERT_TRUE(std::filesystem::remove(other));
+            ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        }
+        EXPECT_FALSE(std::filesystem::exists(interrupted.payload));
+        EXPECT_FALSE(std::filesystem::exists(interrupted.claim));
+        EXPECT_FALSE(std::filesystem::exists(other));
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingIncompleteClaimsPreserveNonregularLeavesUntilRestored) {
+    // Each leaf (claim/payload) is replaced by a symlink, FIFO or directory.
+    // Restoration keeps the original inode alive and proves recovery on retry.
+    for (int replacement = 0; replacement < 6; ++replacement) {
+        SCOPED_TRACE(replacement);
+        const TempSaveDir save_dir("ledger_claim_leaf");
+        InterruptedLedgerStaging interrupted;
+        ASSERT_NO_FATAL_FAILURE(LeaveInterruptedLedgerStaging(save_dir.path(), 1, interrupted));
+        const auto leaf = replacement % 2 == 0 ? interrupted.claim : interrupted.payload;
+        const auto held = save_dir.path() / "held-leaf";
+        const auto target = save_dir.path() / "foreign-target";
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(target, "foreign bytes"));
+        std::filesystem::rename(leaf, held);
+        if (replacement < 2)
+            std::filesystem::create_symlink(target.filename(), leaf);
+        else if (replacement < 4)
+            ASSERT_EQ(::mkfifo(leaf.c_str(), 0600), 0);
+        else
+            ASSERT_TRUE(std::filesystem::create_directory(leaf));
+        const auto kind = std::filesystem::symlink_status(leaf).type();
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        EXPECT_EQ(std::filesystem::symlink_status(leaf).type(), kind);
+        EXPECT_EQ(ReadFileBytes(target), "foreign bytes");
+        ASSERT_TRUE(std::filesystem::remove(leaf));
+        std::filesystem::rename(held, leaf);
+        ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+        EXPECT_FALSE(std::filesystem::exists(interrupted.payload));
+        EXPECT_FALSE(std::filesystem::exists(interrupted.claim));
+    }
+}
+#else
+TEST(WorldSaveService, LedgerStagingIncompleteClaimsPreserveUnreadableProofUntilRetry) {
+    const TempSaveDir save_dir("locked_ledger_claim");
+    InterruptedLedgerStaging interrupted;
+    ASSERT_NO_FATAL_FAILURE(LeaveInterruptedLedgerStaging(save_dir.path(), 1, interrupted));
+    const HANDLE locked = ::CreateFileW(interrupted.claim.c_str(),
+                                        GENERIC_READ,
+                                        0,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_OPEN_REPARSE_POINT,
+                                        nullptr);
+    ASSERT_NE(locked, INVALID_HANDLE_VALUE);
+    SaveLedgerAfterStaging(save_dir.path());
+    EXPECT_NE(::CloseHandle(locked), 0);
+    EXPECT_TRUE(std::filesystem::exists(interrupted.payload));
+    EXPECT_EQ(ReadFileBytes(interrupted.claim), interrupted.claim_bytes);
+    ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(interrupted.payload));
+    EXPECT_FALSE(std::filesystem::exists(interrupted.claim));
+}
+#endif
 
 TEST(WorldSaveService, LedgerStagingPublishesCreatesAndReplacementsWithoutDebris) {
     const TempSaveDir save_dir("ledger_repeated_publication");
@@ -1598,8 +1847,16 @@ TEST(WorldSaveService, LedgerOwnershipFlushFailurePreservesLiveLedgerAndRemovesO
     for (auto ancestor = path.parent_path(); !ancestor.empty() && ancestor != ancestor.root_path();
          ancestor = ancestor.parent_path())
         ++destination_ancestors;
-    const int before_final_flush = staging_ancestors + 1 + destination_ancestors;
-    for (const int failure : {0, staging_ancestors, staging_ancestors + 1, before_final_flush}) {
+    // Claim directory, promoted payload directory, completion directory, then
+    // claim retirement all flush before destination publication begins.
+    const int before_final_flush = staging_ancestors + 4 + destination_ancestors;
+    for (const int failure : {0,
+                              staging_ancestors,
+                              staging_ancestors + 1,
+                              staging_ancestors + 2,
+                              staging_ancestors + 3,
+                              staging_ancestors + 4,
+                              before_final_flush}) {
         SCOPED_TRACE(failure);
         ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
         const auto original = ReadFileBytes(path);
