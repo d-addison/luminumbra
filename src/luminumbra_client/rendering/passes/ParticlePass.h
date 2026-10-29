@@ -242,8 +242,6 @@ public:
                                  const glm::vec3& plunge_pos,
                                  float drop_height,
                                  float channel_width);
-    // Remove waterfall emitters and their mist while preserving other emitter handles.
-    void clear_waterfall_spray();
 
     // per-frame WIND velocity (world-space; horizontal XZ carried in
     // x/z, y usually 0) sampled by the client from the  wind field / replicated
