@@ -8,8 +8,11 @@
 
 #include "rendering/passes/ParticlePass.h"
 
+#include <glad/glad.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -29,6 +32,92 @@ fs::path SourceRoot() {
 
 fs::path FixtureEmitter() {
     return SourceRoot() / "data/common/particles/fixture_sparkle.json";
+}
+
+// Replace only the GL boundary used by init_buffers/destroy_buffers. CPU storage,
+// emission, integration and ownership all run through the public production API.
+template<typename Result, typename... Args>
+Result GLAPIENTRY IgnoreParticleGlCall(Args...) {
+    return Result();
+}
+
+template<typename Function>
+class ScopedParticleGlCall {
+public:
+    explicit ScopedParticleGlCall(Function& entry, Function replacement = IgnoreParticleGlCall)
+        : m_entry(entry)
+        , m_original(entry) {
+        m_entry = replacement;
+    }
+    ~ScopedParticleGlCall() {
+        m_entry = m_original;
+    }
+    ScopedParticleGlCall(const ScopedParticleGlCall&) = delete;
+    ScopedParticleGlCall& operator=(const ScopedParticleGlCall&) = delete;
+
+private:
+    Function& m_entry;
+    Function m_original;
+};
+
+class ParticleLiveTest : public testing::Test {
+protected:
+    void SetUp() override {
+        pass.init_buffers();
+        EXPECT_EQ(pass.live_particle_count(), 0u);
+        EXPECT_TRUE(pass.live_particle_states().empty());
+    }
+    void TearDown() override {
+        pass.destroy_buffers();
+        EXPECT_EQ(pass.live_particle_count(), 0u);
+        EXPECT_TRUE(pass.live_particle_states().empty());
+    }
+    static void GLAPIENTRY GenerateNames(GLsizei count, GLuint* names) {
+        std::fill_n(names, count, 0u); // No GPU objects; labels/deletion are no-ops.
+    }
+    static void* GLAPIENTRY MapInstances(GLenum, GLintptr offset, GLsizeiptr bytes, GLbitfield) {
+        // One bounded CPU mapping suffices: update writes only one ring per call.
+        static std::array<ParticlePass::InstanceRecord, ParticlePass::kMaxInstances> records{};
+        EXPECT_EQ(offset, 0);
+        EXPECT_EQ(bytes, static_cast<GLsizeiptr>(sizeof(records)));
+        return records.data();
+    }
+
+    ParticlePass pass;
+    const fs::path particle_root = SourceRoot() / "data/common/particles";
+    const fs::path spray_file = particle_root / "waterfall_spray.json";
+
+private:
+    ScopedParticleGlCall<PFNGLGENVERTEXARRAYSPROC> gen_arrays{glad_glGenVertexArrays,
+                                                              GenerateNames};
+    ScopedParticleGlCall<PFNGLGENBUFFERSPROC> gen_buffers{glad_glGenBuffers, GenerateNames};
+    ScopedParticleGlCall<PFNGLBINDVERTEXARRAYPROC> bind_array{glad_glBindVertexArray};
+    ScopedParticleGlCall<PFNGLBINDBUFFERPROC> bind_buffer{glad_glBindBuffer};
+    ScopedParticleGlCall<PFNGLBUFFERSTORAGEPROC> storage{glad_glBufferStorage};
+    ScopedParticleGlCall<PFNGLMAPBUFFERRANGEPROC> mapping{glad_glMapBufferRange, MapInstances};
+    ScopedParticleGlCall<PFNGLVERTEXBINDINGDIVISORPROC> divisor{glad_glVertexBindingDivisor};
+    ScopedParticleGlCall<PFNGLENABLEVERTEXATTRIBARRAYPROC> enable_attribute{
+        glad_glEnableVertexAttribArray};
+    ScopedParticleGlCall<PFNGLVERTEXATTRIBFORMATPROC> attribute_format{glad_glVertexAttribFormat};
+    ScopedParticleGlCall<PFNGLVERTEXATTRIBBINDINGPROC> attribute_binding{
+        glad_glVertexAttribBinding};
+    ScopedParticleGlCall<PFNGLVERTEXATTRIBIFORMATPROC> integer_format{glad_glVertexAttribIFormat};
+    ScopedParticleGlCall<PFNGLBINDVERTEXBUFFERPROC> vertex_buffer{glad_glBindVertexBuffer};
+};
+
+void ExpectParticleStates(const ParticlePass& pass,
+                          const std::vector<ParticlePass::LiveParticleState>& expected) {
+    const auto actual = pass.live_particle_states();
+    ASSERT_EQ(actual.size(), expected.size());
+    EXPECT_EQ(pass.live_particle_count(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(actual[i].pos, expected[i].pos);
+        EXPECT_EQ(actual[i].vel, expected[i].vel);
+        EXPECT_EQ(actual[i].age, expected[i].age);
+        EXPECT_EQ(actual[i].lifetime, expected[i].lifetime);
+        EXPECT_EQ(actual[i].emitter_index, expected[i].emitter_index);
+    }
 }
 
 } // namespace
@@ -173,4 +262,121 @@ TEST(ParticleDeterminism, WaterfallReplacementPreservesOtherEmitterHandles) {
     ASSERT_EQ(pass.add_waterfall_spray(spray_file, glm::vec3(0.0f), 8.0f, 4.0f), 0u);
     pass.clear_waterfall_spray();
     EXPECT_FALSE(pass.has_emitters());
+}
+
+TEST_F(ParticleLiveTest, WaterfallRemovalPreservesAndRemapsEveryUnrelatedParticle) {
+    ASSERT_EQ(pass.add_emitter(FixtureEmitter(), glm::vec3(1.0f)), 0u);
+    ASSERT_EQ(pass.add_waterfall_spray(spray_file, glm::vec3(20.0f), 8.0f, 4.0f), 1u);
+    ASSERT_EQ(pass.add_splash_emitter(particle_root / "precip_splash.json"), 2u);
+    ASSERT_EQ(pass.add_waterfall_spray(spray_file, glm::vec3(40.0f), 8.0f, 4.0f), 3u);
+    ASSERT_EQ(pass.add_emitter(FixtureEmitter(), glm::vec3(3.0f)), 4u);
+    pass.set_precipitation(particle_root, glm::vec3(0.0f, -100.0f, 0.0f), 1.0f, 1.0f);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    // Low rain makes live splash particles; high rain then leaves live drops too.
+    pass.update(0.125f);
+    pass.set_precipitation(particle_root, glm::vec3(0.0f, 100.0f, 0.0f), 1.0f, 1.0f);
+    pass.update(0.125f);
+    pass.update(0.0f); // Include the previous frame's impact bursts in the live count.
+    const auto before = pass.live_particle_states();
+    ASSERT_EQ(pass.live_particle_count(), before.size());
+    std::array<std::size_t, 7> owned{};
+    std::vector<ParticlePass::LiveParticleState> survivors;
+    constexpr std::array<uint32_t, 7> remap{
+        0, ParticlePass::kInvalidEmitter, 1, ParticlePass::kInvalidEmitter, 2, 3, 4};
+    for (auto particle : before) {
+        ASSERT_LT(particle.emitter_index, owned.size());
+        ++owned[particle.emitter_index];
+        const auto mapped = remap[particle.emitter_index];
+        if (mapped != ParticlePass::kInvalidEmitter) {
+            particle.emitter_index = mapped;
+            survivors.push_back(particle);
+        }
+    }
+    for (const auto count : owned)
+        ASSERT_GT(count, 0u); // Every emitter, including both falls, rain, snow and splash.
+    ASSERT_LT(survivors.size(), before.size());
+
+    pass.clear_waterfall_spray();
+    ASSERT_NO_FATAL_FAILURE(ExpectParticleStates(pass, survivors));
+    pass.clear_waterfall_spray();
+    ASSERT_NO_FATAL_FAILURE(ExpectParticleStates(pass, survivors));
+
+    // Precipitation handles still address the compacted rain/snow emitters.
+    pass.set_precipitation(particle_root, glm::vec3(9.0f, 100.0f, 9.0f), 0.0f, 0.0f);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    ASSERT_EQ(pass.emitter_descriptors().size(), 5u);
+    EXPECT_EQ(pass.emitter_descriptors()[3].id, 5u);
+    EXPECT_EQ(pass.emitter_descriptors()[4].id, 6u);
+    EXPECT_EQ(pass.emitter_descriptors()[3].origin_region[0], 9000);
+    EXPECT_EQ(pass.emitter_descriptors()[4].origin_region[0], 9000);
+    pass.update(0.03125f);
+    const auto disabled_weather = pass.live_particle_states();
+    EXPECT_EQ(pass.live_particle_count(), disabled_weather.size());
+    for (uint32_t index = 3; index < 5; ++index) {
+        EXPECT_EQ(static_cast<std::size_t>(std::count_if(
+                      disabled_weather.begin(),
+                      disabled_weather.end(),
+                      [index](const auto& particle) { return particle.emitter_index == index; })),
+                  owned[index + 2]); // Both weather spawn scales are zero; old drops survive.
+    }
+
+    // A new impact must use the remapped splash template, now emitter index 1.
+    pass.set_precipitation(particle_root, glm::vec3(0.0f, -100.0f, 0.0f), 1.0f, 0.0f);
+    pass.update(0.03125f);
+    pass.update(0.0f);
+    const auto after_impact = pass.live_particle_states();
+    EXPECT_EQ(pass.live_particle_count(), after_impact.size());
+    EXPECT_GT(std::count_if(after_impact.begin(),
+                            after_impact.end(),
+                            [](const auto& particle) {
+                                return particle.emitter_index == 1u && particle.age == 0.0f;
+                            }),
+              0);
+
+    pass.clear_emitters();
+    ExpectParticleStates(pass, {});
+    EXPECT_FALSE(pass.has_emitters());
+    pass.set_precipitation(particle_root, glm::vec3(100.0f), 1.0f, 1.0f);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    ASSERT_EQ(pass.emitter_descriptors().size(), 2u); // Cached handles/load flags reset.
+    EXPECT_EQ(pass.emitter_descriptors()[0].id, 0u);
+    EXPECT_EQ(pass.emitter_descriptors()[1].id, 1u);
+    pass.update(0.125f); // Teardown also checks destroy_buffers with live particles.
+    EXPECT_GT(pass.live_particle_count(), 0u);
+}
+
+TEST_F(ParticleLiveTest, WaterfallOnlyLiveSetBecomesEmpty) {
+    for (int site = 0; site < 2; ++site)
+        ASSERT_NE(pass.add_waterfall_spray(spray_file, glm::vec3(20.0f), 8.0f, 4.0f),
+                  ParticlePass::kInvalidEmitter);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    pass.update(0.125f);
+    ASSERT_GT(pass.live_particle_count(), 0u);
+    const auto before = pass.live_particle_states();
+    for (uint32_t index = 0; index < 2; ++index)
+        ASSERT_TRUE(std::any_of(before.begin(), before.end(), [index](const auto& particle) {
+            return particle.emitter_index == index;
+        }));
+    pass.clear_waterfall_spray();
+    ExpectParticleStates(pass, {});
+    EXPECT_FALSE(pass.has_emitters());
+    pass.clear_waterfall_spray();
+    ExpectParticleStates(pass, {});
+    pass.update(0.125f);
+    ExpectParticleStates(pass, {});
+}
+
+TEST_F(ParticleLiveTest, NoWaterfallParticlesLeavesLiveSetUnchanged) {
+    ASSERT_EQ(pass.add_emitter(FixtureEmitter(), glm::vec3(1.0f)), 0u);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    pass.update(0.125f);
+    const auto before = pass.live_particle_states();
+    ASSERT_FALSE(before.empty());
+    pass.clear_waterfall_spray(); // No waterfall emitters: early return.
+    ExpectParticleStates(pass, before);
+    ASSERT_EQ(pass.add_waterfall_spray(spray_file, glm::vec3(20.0f), 8.0f, 4.0f), 1u);
+    pass.clear_waterfall_spray(); // A waterfall emitter exists but has never spawned.
+    ExpectParticleStates(pass, before);
+    pass.clear_waterfall_spray();
+    ExpectParticleStates(pass, before);
 }
