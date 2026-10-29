@@ -908,6 +908,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(report, "GH_TOKEN", 10), "${{ github.token }}")
         self.assertEqual(value(report, "BUILD_RESULT", 10), "${{ needs.build.result }}")
         self.assertIn("windows_daily_report.py", report)
+        # The token-bearing reporter comes from the workflow's own ref, never the tested candidate.
+        self.assertEqual(value(report, "ref", 10), "${{ github.sha }}")
+        self.assertEqual(value(report, "persist-credentials", 10), "false")
         source = jobs(reusable)["changes"]
         self.assertIn("ref: ${{ github.event_name == 'schedule' && 'devel' || github.sha }}", source)
         self.assertIn('"head_sha=$sha" >> $env:GITHUB_OUTPUT', source)
