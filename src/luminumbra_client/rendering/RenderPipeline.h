@@ -863,8 +863,12 @@ public:
     // Far tile and foliage ground builds use the attached JobSystem's Normal
     // lane. Without it, far-LOD stays inert and foliage prepares synchronously.
     void attach_farlod_job_system(JobSystem* job_system);
-    // Drains in-flight far tile builds (they sample the world system). MUST
-    // run before the currently bound world is destroyed/recreated.
+    // Save fence: finish accepted cache writes without changing render/world state.
+    void wait_for_accepted_far_tile_writes();
+    // Finish live-world readers without discarding results before a fallible open.
+    void wait_for_world_readers();
+    // Retire the old binding and visuals at a committed world replacement.
+    // Before a fallible open, wait_for_world_readers keeps the old world resumable.
     void prepare_world_swap();
     // Internal, non-persisted request. Normal worlds retain a typed refusal until
     // immutable committed authority is available. Fixtures bind explicitly.
@@ -991,6 +995,20 @@ public:
     // emitter at each plunge foot (capped to bound particle cost).
     // dressing on a world-deterministic site set — never hashed (one-way).
     void prepare_waterfalls(const Systems::SHIELD_WorldSystem& world);
+    // CPU-only: exclusive pass/site-cache access, with the world retained until
+    // the job drains. Other adoption operations below require the GL thread.
+    WaterfallPass::PreparedGeometry
+    build_waterfall_geometry(const Systems::SHIELD_WorldSystem& world) {
+        return m_waterfall_pass->build_geometry(world);
+    }
+    void begin_waterfall_adoption(WaterfallPass::PreparedGeometry geometry) {
+        m_waterfall_pass->begin_adoption(std::move(geometry));
+    }
+    bool adopt_waterfalls() {
+        return m_waterfall_pass->adopt_next(m_particle_pass.get(), m_root_path);
+    }
+    // Entry cancellation runs after its CPU job and world readers are drained.
+    void cancel_waterfall_adoption();
 
 private:
     friend struct TerrainCullingTestPeer;

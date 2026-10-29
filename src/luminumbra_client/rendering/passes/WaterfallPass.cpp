@@ -10,6 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 
@@ -32,14 +35,17 @@ void WaterfallPass::reset_shader() {
 }
 
 void WaterfallPass::destroy_geometry() {
-    if (m_vao) {
-        glDeleteVertexArrays(1, &m_vao);
-        m_vao = 0;
+    for (const auto& page : m_pages) {
+        if (page.vao)
+            glDeleteVertexArrays(1, &page.vao);
+        if (page.vbo)
+            glDeleteBuffers(1, &page.vbo);
     }
-    if (m_vbo) {
-        glDeleteBuffers(1, &m_vbo);
-        m_vbo = 0;
-    }
+    m_pages = std::vector<GeometryPage>{};
+    m_pending_vertices = std::vector<float>{};
+    m_uploaded_floats = 0;
+    m_adopted_spray = 0;
+    m_replace_spray = false;
     m_sheet_sites.clear();
     m_sites.clear();
     m_geometry_built = false;
@@ -53,7 +59,7 @@ void WaterfallPass::execute(const RenderContext& ctx) {
     // as a translucent double-sided veil (depth-test on, depth-write off, blend on
     // so it layers over the scene + each other). A no-op (zero draws) when no
     // sites were baked, so existing visual gates stay byte-stable.
-    if (m_geometry_built && m_vao != 0 && !m_sheet_sites.empty() && m_shader &&
+    if (m_geometry_built && !m_pages.empty() && !m_sheet_sites.empty() && m_shader &&
         m_shader->IsValid()) {
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
         glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // into internal lighting FBO
@@ -96,8 +102,9 @@ void WaterfallPass::execute(const RenderContext& ctx) {
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(1.0f, 1.0f);
 
-        glBindVertexArray(m_vao);
         for (std::size_t i = 0; i < m_sheet_sites.size(); ++i) {
+            if (i % kSitesPerPage == 0)
+                glBindVertexArray(m_pages[i / kSitesPerPage].vao);
             const WaterfallSite& s = m_sheet_sites[i];
             //  ( T.1): the LIVE upstream water scales the sheet —
             // a dammed/drained crest extinguishes its fall. Reads the live float
@@ -116,7 +123,7 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             m_shader->setFloat("u_foot_y", s.foot.y);
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
             Luminumbra::Rendering::AttributedGl::Submit(
-                glDrawArrays, GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
+                glDrawArrays, GL_TRIANGLES, static_cast<GLint>((i % kSitesPerPage) * 12), 12);
         }
         glBindVertexArray(0);
 
@@ -147,37 +154,34 @@ void WaterfallPass::execute(const RenderContext& ctx) {
 // spray emitter per site (capped). The SITES are a pure function of
 // the generated world (camera/frame independent, same seed -> same sites), but
 // the dressing geometry/spray are never hashed (one-way, regression review/).
-void WaterfallPass::prepare(const Systems::SHIELD_WorldSystem& world,
-                            ParticlePass* particle_pass,
-                            const std::filesystem::path& root_path) {
-    // Re-bakeable: drop any prior geometry so a re-enter rebuilds cleanly.
-    destroy_geometry();
-    if (particle_pass) {
-        particle_pass->clear_waterfall_spray();
+WaterfallPass::PreparedGeometry
+WaterfallPass::build_geometry(const Systems::SHIELD_WorldSystem& world) {
+    // Every world entry gets a fresh survey: seed and water epoch alone
+    // cannot distinguish terrain presets. Both entry paths build here.
+    m_sites.clear();
+    PreparedGeometry geometry;
+    const auto& sites = waterfall_sites(world);
+    // 12 vertices * 6 floats per site. Check both CPU and GL sizes BEFORE
+    // copying/allocating, including the GLint vertex offsets used by execute.
+    constexpr std::size_t kFloatsPerSite = 72;
+    const auto max_gl_bytes = static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max());
+    if (sites.size() > geometry.vertices.max_size() / kFloatsPerSite ||
+        sites.size() > max_gl_bytes / sizeof(float) / kFloatsPerSite ||
+        sites.size() > static_cast<std::size_t>(std::numeric_limits<GLint>::max()) / 12) {
+        throw std::length_error("Waterfall geometry exceeds addressable size");
     }
-
-    // World-deterministic detection (cached). Copy into m_sheet_sites so the
-    // per-site crest/foot Y survive even if the cache is later cleared.
-    const std::vector<WaterfallSite>& sites = waterfall_sites(world);
-    if (sites.empty()) {
-        LUMINUMBRA_CORE_INFO("[waterfall] prepare_waterfalls: 0 sites detected (no dressing)");
-        return;
-    }
-    m_sheet_sites = sites;
-
+    geometry.sites = sites;
+    auto& verts = geometry.vertices;
     // Interleaved pos(3) + normal(3) per vertex; 12 verts per site = the vertical SHEET (6) +
     // a horizontal plunge-POOL quad at the foot (6) so the fall visibly lands in water (the
     // "connect to water" fix — the pool reads as roiling foam because the shader's fall_t≈1 there).
-    constexpr int kFloatsPerVertex = 6;
-    constexpr int kVertsPerSite = 12;
-    std::vector<float> verts;
-    verts.reserve(m_sheet_sites.size() * kVertsPerSite * kFloatsPerVertex);
+    verts.reserve(sites.size() * kFloatsPerSite);
 
     constexpr float kMinWidth = 2.0f; // a sane minimum sheet width (m)
     constexpr float kMinRun = 0.5f;   // ensure the foot is advanced downstream
     const glm::vec3 up(0.0f, 1.0f, 0.0f);
 
-    for (const WaterfallSite& s : m_sheet_sites) {
+    for (const WaterfallSite& s : sites) {
         // Downhill flow azimuth in XZ. Guard div-by-zero on normalize (fallback +X).
         glm::vec2 flow2 = s.flow_dir;
         float flow_len = std::sqrt(flow2.x * flow2.x + flow2.y * flow2.y);
@@ -255,57 +259,105 @@ void WaterfallPass::prepare(const Systems::SHIELD_WorldSystem& world,
         push_vert(ptr);
     }
 
-    // Upload the combined sheet geometry to a dedicated VAO/VBO.
-    glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
-    glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(),
-                 GL_STATIC_DRAW);
-    // location 0 = aPos, location 1 = aNormal (basic.vert layout).
-    glVertexAttribPointer(
-        0, 3, GL_FLOAT, GL_FALSE, kFloatsPerVertex * sizeof(float), reinterpret_cast<void*>(0));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1,
-                          3,
-                          GL_FLOAT,
-                          GL_FALSE,
-                          kFloatsPerVertex * sizeof(float),
-                          reinterpret_cast<void*>(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    PassGl::label_gl_object(GL_VERTEX_ARRAY, m_vao, "waterfall.sheet_vao");
-    PassGl::label_gl_object(GL_BUFFER, m_vbo, "waterfall.sheet_vbo");
-    m_geometry_built = true;
+    return geometry;
+}
 
-    // Spray: one mist emitter per plunge foot, capped to bound particle cost.
+void WaterfallPass::begin_adoption(PreparedGeometry geometry) {
+    constexpr std::size_t kFloatsPerSite = 72;
+    const auto max_bytes = static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max());
+    if (geometry.sites.size() > max_bytes / sizeof(float) / kFloatsPerSite ||
+        geometry.sites.size() > static_cast<std::size_t>(std::numeric_limits<GLint>::max()) / 12 ||
+        geometry.vertices.size() != geometry.sites.size() * kFloatsPerSite)
+        throw std::length_error("Invalid prepared waterfall geometry");
+    // The CPU preparation already surveyed this world. Replacing GPU geometry
+    // must retain that cache for the first audio query after adoption.
+    auto prepared_sites = std::move(m_sites);
+    destroy_geometry();
+    m_sites = std::move(prepared_sites);
+    m_sheet_sites = std::move(geometry.sites);
+    m_pending_vertices = std::move(geometry.vertices);
+    const auto page_count = m_sheet_sites.size() / kSitesPerPage +
+                            (m_sheet_sites.size() % kSitesPerPage != 0 ? 1u : 0u);
+    if (page_count > m_pages.max_size())
+        throw std::length_error("Waterfall page count exceeds addressable size");
+    m_pages.reserve(page_count);
+    m_replace_spray = true;
+}
+
+bool WaterfallPass::adopt_next(ParticlePass* particle_pass,
+                               const std::filesystem::path& root_path) {
+    if (m_geometry_built || (m_sheet_sites.empty() && !m_replace_spray))
+        return true;
+    constexpr int kFloatsPerVertex = 6;
+    constexpr std::size_t kFloatsPerPage = kSitesPerPage * 72;
+    const auto remaining = m_pending_vertices.size() - m_uploaded_floats;
+    const auto count = std::min(remaining, kFloatsPerPage);
+    if (count != 0) {
+        // Exactly one page, bounded to 64 KiB including buffer allocation.
+        m_pages.push_back(GeometryPage{.vao = 0, .vbo = 0});
+        auto& page = m_pages.back();
+        glGenVertexArrays(1, &page.vao);
+        glGenBuffers(1, &page.vbo);
+        if (page.vao == 0 || page.vbo == 0)
+            throw std::runtime_error("Could not allocate waterfall geometry");
+        glBindVertexArray(page.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, page.vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(count * sizeof(float)),
+                     nullptr,
+                     GL_STATIC_DRAW);
+        glBufferSubData(GL_ARRAY_BUFFER,
+                        0,
+                        static_cast<GLsizeiptr>(count * sizeof(float)),
+                        m_pending_vertices.data() + m_uploaded_floats);
+        // location 0 = aPos, location 1 = aNormal (basic.vert layout).
+        glVertexAttribPointer(
+            0, 3, GL_FLOAT, GL_FALSE, kFloatsPerVertex * sizeof(float), reinterpret_cast<void*>(0));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1,
+                              3,
+                              GL_FLOAT,
+                              GL_FALSE,
+                              kFloatsPerVertex * sizeof(float),
+                              reinterpret_cast<void*>(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        PassGl::label_gl_object(GL_VERTEX_ARRAY, page.vao, "waterfall.sheet_vao");
+        PassGl::label_gl_object(GL_BUFFER, page.vbo, "waterfall.sheet_vbo");
+        m_uploaded_floats += count;
+    }
+    // Defer emitter replacement until validated adoption advances. CPU
+    // preparation, refused payloads and cancellation before adoption leave the
+    // old world's spray intact. Empty replacement worlds must clear it too.
+    if (m_replace_spray && particle_pass) {
+        particle_pass->clear_waterfall_spray();
+        m_replace_spray = false;
+    }
     constexpr std::size_t kMaxSpray = 24;
-    std::size_t spray_count = 0;
-    if (particle_pass) {
-        const std::filesystem::path spray_json =
-            root_path / "data/common/particles/waterfall_spray.json";
-        for (const WaterfallSite& s : m_sheet_sites) {
-            if (spray_count >= kMaxSpray)
-                break;
-            particle_pass->add_waterfall_spray(spray_json, s.foot, s.drop_height, s.width);
-            ++spray_count;
-        }
+    const auto spray_count = particle_pass ? std::min(m_sheet_sites.size(), kMaxSpray) : 0;
+    if (m_adopted_spray < spray_count) {
+        const auto& site = m_sheet_sites[m_adopted_spray++];
+        particle_pass->add_waterfall_spray(root_path / "data/common/particles/waterfall_spray.json",
+                                           site.foot,
+                                           site.drop_height,
+                                           site.width);
     }
+    if (m_uploaded_floats != m_pending_vertices.size() || m_adopted_spray != spray_count)
+        return false;
+    m_pending_vertices = std::vector<float>{};
+    m_uploaded_floats = 0;
+    m_geometry_built = true;
+    LUMINUMBRA_CORE_INFO(
+        "[waterfall] prepared {} sites ({} spray emitters)", m_sheet_sites.size(), spray_count);
+    return true;
+}
 
-    if (m_sheet_sites.size() > kMaxSpray) {
-        LUMINUMBRA_CORE_INFO(
-            "[waterfall] prepare_waterfalls: {} sites; sheets drawn for all, spray capped to {}",
-            m_sheet_sites.size(),
-            kMaxSpray);
-    } else {
-        LUMINUMBRA_CORE_INFO(
-            "[waterfall] prepare_waterfalls: {} sites (sheets + {} spray emitters)",
-            m_sheet_sites.size(),
-            spray_count);
-    }
+void WaterfallPass::prepare(const Systems::SHIELD_WorldSystem& world,
+                            ParticlePass* particle_pass,
+                            const std::filesystem::path& root_path) {
+    begin_adoption(build_geometry(world));
+    while (!adopt_next(particle_pass, root_path)) {}
 }
 
 } // namespace Luminumbra::Rendering

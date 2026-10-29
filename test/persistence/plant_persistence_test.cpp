@@ -328,6 +328,41 @@ TEST(PlantPersistence, EveryPlantRequiresAllCoreComponentsBeforeRegistryMutation
     }
 }
 
+TEST(PlantPersistence, GenericPartialPlantRecordsRoundTripButCannotBeAdopted) {
+    namespace SS = ::Luminumbra::Persistence;
+    const auto directory =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("partial-plant-records-");
+    struct Cleanup {
+        const std::filesystem::path& path;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } cleanup{directory};
+    entt::registry source;
+    barePlant(source, 1.0f, 3, 500);
+    const auto original = F::BuildPlantEntitySnapshot(source);
+    for (unsigned mask = 0; mask < 7; ++mask) {
+        SCOPED_TRACE(mask);
+        auto snapshot = original;
+        std::erase_if(snapshot.entities.front().components, [mask](const auto& component) {
+            return (component.type == "Transform" && (mask & 1u) == 0) ||
+                   (component.type == "PlantGenome" && (mask & 2u) == 0) ||
+                   (component.type == "PlantGrowth" && (mask & 4u) == 0);
+        });
+        std::vector<std::string> errors;
+        ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(snapshot, directory, &errors));
+        E::EntityRegistrySnapshot loaded;
+        ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, directory, &errors));
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded),
+                  E::SerializeEntityRegistrySnapshotJson(snapshot));
+        EXPECT_TRUE(errors.empty());
+        entt::registry target;
+        EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, loaded));
+        EXPECT_TRUE(target.view<C::PlantTag>().empty());
+    }
+}
+
 TEST(PlantPersistence, RepresentableMaximaAndHistoricalPartialGenomesStillLoad) {
     entt::registry source;
     const auto plant = barePlant(source, 1.0f, 3, 500);

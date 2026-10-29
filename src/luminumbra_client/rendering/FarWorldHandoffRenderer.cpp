@@ -278,6 +278,11 @@ const FarWorldHandoffDiagnosticSnapshot& FarWorldHandoffRenderer::Diagnostic() c
     CheckOwner();
     return diagnostic_;
 }
+void FarWorldHandoffRenderer::WaitForAcceptedCacheWrites() {
+    Guard const guard(*this);
+    // Immutable volume builds do not enqueue persistent cache writes.
+}
+
 void FarWorldHandoffRenderer::PrepareWorldSwap() {
     Guard const guard(*this);
     Drain();

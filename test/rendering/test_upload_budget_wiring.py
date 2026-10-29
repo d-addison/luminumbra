@@ -51,20 +51,109 @@ class UploadBudgetWiring(unittest.TestCase):
         python_tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
         self.assertIn('"test/rendering/test_upload_budget_wiring.py"', python_tests)
 
+    def test_save_fence_preserves_current_world_until_quit_save_succeeds(self):
+        quit_action = body(self.main, '} else if (act == "quit")')
+        save = quit_action.index("if (!gameSession->SaveWorld())")
+        fence = "renderPipeline.wait_for_accepted_far_tile_writes();"
+        self.assertIn(fence, quit_action[:save])
+        self.assertIn("return;", body(quit_action, "if (!gameSession->SaveWorld())"))
+        failure = body(quit_action, "if (!gameSession->SaveWorld())")
+        self.assertNotIn("prepare_world_entry()", failure)
+        cleanup = quit_action.index("prepare_world_entry();")
+        self.assertGreater(cleanup, save + len("if (!gameSession->SaveWorld())") + len(failure))
+        self.assertEqual(quit_action.count("prepare_world_entry();"), 1)
+        for destructive in ("prepare_world_entry()", "prepare_world_swap()",
+                            "DrainWorldDressing(", "DrainBackgroundWorldScan("):
+            self.assertNotIn(destructive, quit_action[:save])
+        benchmark = body(self.main, "[&](bool main_menu)")
+        self.assertIn(fence, benchmark[:benchmark.index("gameSession->SaveWorld()")])
+        cleanup_scope = body(benchmark, "if (saved && main_menu)")
+        self.assertIn("prepare_world_entry();", cleanup_scope)
+        self.assertEqual(benchmark.count("prepare_world_entry();"), 1)
+        forward = compact(body(self.pipeline, "void RenderPipeline::wait_for_accepted_far_tile_writes()"))
+        self.assertEqual(forward, "m_far_world->WaitForAcceptedCacheWrites(); "
+                         "if (m_farlod) m_farlod->wait_for_accepted_cache_writes();")
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        self.assertEqual(compact(body(legacy, "void FarLodSystem::wait_for_accepted_cache_writes()")),
+                         "m_tile_saves.flush();")
+        for backend, check in (("FarWorldRenderer", "CheckOwner();"),
+                               ("FarWorldHandoffRenderer", "Guard const guard(*this);")):
+            source = read(RENDERING / (backend + ".cpp"))
+            wait = body(source, "void " + backend + "::WaitForAcceptedCacheWrites()")
+            self.assertEqual(compact(re.sub(r"//[^\n]*", "", wait)), check)
+
+    def test_fallible_world_open_waits_without_discarding_until_revision_changes(self):
+        wait = compact(body(self.main, "auto wait_for_world_entry_readers ="))
+        self.assertEqual(wait, "renderPipeline.wait_for_world_readers(); "
+                         "WaitForBackgroundWorldScan(jobSystem); jobSystem.wait(s_worldDressingHandle);")
+        cleanup = body(self.main, "auto finish_world_replacement =")
+        guard = "if (gameSession->WorldRevision() != entry_world_revision)"
+        self.assertIn(guard, cleanup)
+        self.assertEqual(compact(cleanup.split(guard, 1)[1]), "prepare_world_entry();")
+        # Both outcomes use the same revision predicate: refusal before adoption
+        # preserves state; success and a failure after adoption both retire it.
+        expression = re.search(r"if \((.*)\)", cleanup).group(1)
+        expression = expression.replace("gameSession->WorldRevision()", "current")
+        for previous, current, expected in ((7, 7, False), (7, 8, True)):
+            self.assertEqual(eval(expression, {"__builtins__": {}},
+                                  dict(current=current, entry_world_revision=previous)), expected)
+        for signature, call, outcome in (
+                ("auto start_world_creation =", "gameSession->CreateWorld(", "if (!created)"),
+                ("auto start_world_load =", "gameSession->LoadWorldFrom(", "if (!loaded)")):
+            opening = body(self.main, signature)
+            self.assertNotIn("prepare_world_entry();", opening)
+            self.assertLess(opening.index("wait_for_world_entry_readers();"), opening.index(call))
+            self.assertLess(opening.index(call), opening.index("finish_world_replacement();"))
+            self.assertLess(opening.index("finish_world_replacement();"), opening.index(outcome))
+        stages = body(self.main, "auto run_entry_stage =")
+        readers = stages.split("case WorldEntryStage::DrainReaders:", 1)[1].split(
+            "case WorldEntryStage::OpenWorld:", 1)[0]
+        self.assertIn("wait_for_world_entry_readers();", readers)
+        self.assertNotIn("prepare_world_entry();", readers)
+        opening = stages.split("case WorldEntryStage::OpenWorld:", 1)[1].split(
+            "case WorldEntryStage::RestoreState:", 1)[0]
+        self.assertLess(opening.index("gameSession->AdoptPreparedWorld("),
+                        opening.index("finish_world_replacement();"))
+        self.assertLess(opening.index("finish_world_replacement();"), opening.index("if (!opened)"))
+        backdrop = body(self.main, "if (want_backdrop)")
+        self.assertLess(backdrop.index("wait_for_world_entry_readers();"),
+                        backdrop.index("gameSession->CreateTransientWorld("))
+        self.assertLess(backdrop.index("finish_world_replacement();"), backdrop.index("if (created"))
+        pipeline_wait = body(self.pipeline, "void RenderPipeline::wait_for_world_readers()")
+        self.assertIn("m_farlod->wait_for_world_readers();", pipeline_wait)
+        self.assertIn("m_far_world->WaitForAcceptedCacheWrites();", pipeline_wait)
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        legacy_wait = body(legacy, "void FarLodSystem::wait_for_world_readers()")
+        self.assertIn("m_job_system->wait(handle);", legacy_wait)
+        self.assertIn("wait_for_accepted_cache_writes();", legacy_wait)
+        for destructive in ("m_world =", "m_epoch", "m_pending.clear()", "m_ready_builds.clear()",
+                            "m_shared->completed.clear()"):
+            self.assertNotIn(destructive, legacy_wait)
+        scan = read(ROOT / "src/luminumbra_client/app/CaveFlourishes.cpp")
+        scan_wait = body(scan, "void WaitForBackgroundWorldScan(")
+        self.assertIn("jobs.wait(state.handle);", scan_wait)
+        self.assertNotIn("state.scan.reset()", scan_wait)
+
     def test_waterfall_replacement_clears_sites_and_spray_before_empty_site_return(self):
         source = read(RENDERING / "passes/WaterfallPass.cpp")
         destroy = compact(body(source, "void WaterfallPass::destroy_geometry()"))
         self.assertIn("m_sites.clear();", destroy)
         self.assertEqual(brace_depth(destroy, destroy.index("m_sites.clear();")), 0)
-        prepare = compact(body(source, "void WaterfallPass::prepare("))
-        query = prepare.index("waterfall_sites(world)")
-        empty = prepare.index("if (sites.empty())")
-        self.assertLess(prepare.index("destroy_geometry();"), query)
-        self.assertLess(prepare.index("particle_pass->clear_waterfall_spray();"), query)
-        self.assertLess(query, empty)
-        self.assertLess(empty, prepare.index("particle_pass->add_waterfall_spray("))
-        self.assertIn("particle_pass->clear_waterfall_spray();",
-                      body(prepare, "if (particle_pass)"))
+        build = compact(body(source, "WaterfallPass::build_geometry("))
+        self.assertLess(build.index("m_sites.clear();"), build.index("waterfall_sites(world)"))
+        begin = compact(body(source, "void WaterfallPass::begin_adoption("))
+        preserve = begin.index("auto prepared_sites = std::move(m_sites);")
+        destroy_prepared = begin.index("destroy_geometry();")
+        restore = begin.index("m_sites = std::move(prepared_sites);")
+        self.assertLess(preserve, destroy_prepared)
+        self.assertLess(destroy_prepared, restore)
+        self.assertIn("m_replace_spray = true;", begin)
+        # Adoption, not preparation, replaces the spray, and it does so even for empty site sets.
+        adopt = compact(body(source, "bool WaterfallPass::adopt_next("))
+        self.assertIn("(m_sheet_sites.empty() && !m_replace_spray)", adopt)
+        replace = adopt.index("if (m_replace_spray && particle_pass)")
+        self.assertIn("particle_pass->clear_waterfall_spray();", body(adopt[replace:], "if (m_replace_spray"))
+        self.assertLess(replace, adopt.index("particle_pass->add_waterfall_spray("))
         swap = body(self.pipeline, "void RenderPipeline::prepare_world_swap()")
         self.assertIn("m_waterfall_pass->destroy_geometry();", swap)
         self.assertIn("m_particle_pass->clear_waterfall_spray();", swap)
@@ -76,6 +165,53 @@ class UploadBudgetWiring(unittest.TestCase):
         preview = read(ROOT / "src/luminumbra_client/world/WorldgenPreview.cpp")
         self.assertIn("pipeline.prepare_world_swap();", preview)
 
+    def test_native_save_fences_release_owners_before_driver_destruction(self):
+        native = read(ROOT / "test/rendering/FarWorldRenderer_test.cpp")
+        handoff = body(native, "TEST(FarWorldHandoffRenderer, SaveFencePreservesBindingOwnershipAndDraws)")
+        calls = ("renderer.PrepareWorldSwap();", "EXPECT_EQ(state.live, 0u);",
+                 "EXPECT_TRUE(state.released_with_context);", "state.fixture_released = true;",
+                 "renderer.Shutdown();", "jobs.shutdown();")
+        positions = [handoff.index(call) for call in calls]
+        self.assertEqual(positions, sorted(positions))
+        fixture = body(native, "TEST(FarWorldRenderer, SaveFencePreservesBindingOwnershipAndDraws)")
+        self.assertLess(fixture.index("renderer.PrepareWorldSwap();"),
+                        fixture.index("EXPECT_TRUE(owner.State().fixture_released);"))
+        driver = body(native, "~Driver() override")
+        self.assertIn("EXPECT_TRUE(state_.fixture_released);", driver)
+        self.assertIn("EXPECT_EQ(state_.live, 0u);", driver)
+
+    def test_shutdown_joins_entry_worker_before_first_destructive_drain(self):
+        shutdown = self.main.split('trace_shutdown("query_cleanup_started");', 1)[1]
+        cancel = shutdown.index("world_entry.cancel();")
+        advance = shutdown.index("world_entry.advance(run_entry_stage, drain_entry);")
+        first_swap = shutdown.index("renderPipeline.prepare_world_swap();")
+        self.assertLess(cancel, advance)
+        self.assertLess(advance, first_swap)
+        self.assertLess(advance, shutdown.index("DrainBackgroundWorldScan(jobSystem);"))
+        self.assertLess(advance, shutdown.index("DrainWorldDressing("))
+        drain = body(self.main, "auto drain_entry =")
+        self.assertLess(drain.index("jobSystem.wait(entry_cpu_job);"),
+                        drain.index("prepare_world_entry();"))
+        self.assertLess(drain.index("jobSystem.wait(entry_cpu_job);"),
+                        drain.index("renderPipeline.cancel_waterfall_adoption();"))
+
+    def test_live_regeneration_retires_far_results_and_rebuilds_waterfalls(self):
+        viewer = read(ROOT / "src/luminumbra_client/debug/WorldGenViewer.cpp")
+        apply = body(viewer, 'if (ImGui::Button("Apply & Regenerate"))')
+        calls = ("pipeline.prepare_world_swap();", "main_world_system->set_params(m_params);",
+                 "main_world_system->set_seed(m_seed);",
+                 "main_world_system->regenerate_all_chunks(nullptr);",
+                 "pipeline.prepare_waterfalls(*main_world_system);")
+        positions = [apply.index(call) for call in calls]
+        self.assertEqual(positions, sorted(positions))
+        swap = body(self.pipeline, "void RenderPipeline::prepare_world_swap()")
+        self.assertIn("m_far_world->PrepareWorldSwap();", swap)
+        self.assertIn("m_farlod->prepare_world_swap();", swap)
+        legacy = body(read(RENDERING / "FarLodSystem.cpp"),
+                      "void FarLodSystem::prepare_world_swap()")
+        self.assertIn("wait_for_builds();", legacy)
+        self.assertIn("++m_epoch;", legacy)
+
     def test_waterfall_spray_cleanup_preserves_other_emitter_handles_and_indices(self):
         source = read(RENDERING / "passes/ParticlePass.cpp")
         add = body(source, "uint32_t ParticlePass::add_waterfall_spray(")
@@ -83,16 +219,15 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(add.index("if (id == kInvalidEmitter)"),
                         add.index("spray.waterfall_spray = true;"))
         clear = compact(body(source, "void ParticlePass::clear_waterfall_spray()"))
-        self.assertIn("std::array<std::size_t, kMaxEmitters> remap{};", clear)
-        self.assertIn("remap[index] = kNoSplashEmitter;", clear)
-        self.assertIn("remap[index] = kept;", clear)
-        self.assertIn("m_active_emitters[kept] = std::move(m_active_emitters[index]);", clear)
+        self.assertIn("std::array<uint32_t, kMaxEmitters> remap{};", clear)
+        self.assertIn("m_active_emitters[index].waterfall_spray ? kInvalidEmitter : retained++", clear)
         self.assertIn("particle.alive = false;", clear)
         self.assertIn("m_live_count = 0;", clear)
         self.assertIn("++m_live_count;", clear)
-        self.assertIn("particle.emitter_index = static_cast<uint32_t>(mapped);", clear)
+        self.assertIn("particle.emitter_index = replacement;", clear)
         self.assertIn("m_splash_emitter_index = remap[m_splash_emitter_index];", clear)
-        self.assertIn("m_active_emitters.resize(kept);", clear)
+        self.assertIn("m_ambient_emitter_index = remap[m_ambient_emitter_index];", clear)
+        self.assertIn("std::erase_if(m_active_emitters,", clear)
         self.assertIn("m_descriptors.clear();", clear)
         self.assertIn("m_frame_instance_count = 0;", clear)
         self.assertNotIn("clear_emitters()", clear)

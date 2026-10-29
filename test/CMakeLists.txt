@@ -270,6 +270,7 @@ add_executable(common_tests
     audio/AudioBankIntegrity_test.cpp
     audio/synthetic_bank_fixture.h
     common/ActivationQueueSemantics_test.cpp
+    common/ActivationResidencyIndex_test.cpp
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
@@ -1011,10 +1012,12 @@ endif()
 #  GL-free particle determinism unit tests (emitter descriptor surface).
 add_executable(particle_determinism_test
     rendering/particle_determinism_test.cpp
+    rendering/waterfall_adoption_test.cpp
 )
 
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
+    rendering/far_lod_persistence_test.cpp
     rendering/terrain_culling_test.cpp
     rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
@@ -1214,6 +1217,22 @@ elseif(APPLE)
 else()
     target_link_libraries(environment_brdf_test PRIVATE OpenGL::GL)
 endif()
+
+# Entry scheduling is CPU-only: injected stages, no GL context or clock.
+add_executable(world_entry_test client/world_entry_test.cpp)
+target_include_directories(world_entry_test PRIVATE ../src)
+target_compile_definitions(world_entry_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(world_entry_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
+luminumbra_configure_first_party_target(world_entry_test)
+
+# Native-call interception is isolated from engine definitions of the journal.
+add_executable(created_world_artifacts_test
+    persistence/created_world_artifacts_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
+)
+target_include_directories(created_world_artifacts_test PRIVATE ../src)
+target_link_libraries(created_world_artifacts_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(created_world_artifacts_test)
 
 add_executable(initial_world_loading_perf_test
     performance/initial_world_loading_perf_test.cpp
@@ -2073,6 +2092,8 @@ set(LUMINUMBRA_GTEST_TARGETS
     ui_smoke_test
     ui_page_load_test
     worldgen_preview_test
+    world_entry_test
+    created_world_artifacts_test
     initial_world_loading_perf_test
     world_load_bounded_test
     # species JSON behaviour overrides — byte-identical
@@ -2233,6 +2254,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME WorldEntryFilesystemWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/persistence/test_world_entry_filesystem_wiring.py")
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
 add_test(NAME ReplayWorkspacePython COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -2522,6 +2545,7 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
     "    \"UiSmokeTest.AuthoredMenuInteractionsNavigateAndInvokeCallbacks\",\n"
     "    \"UiSmokeTest.SettingsScreenRoundTripsThroughTheBridge\",\n"
     "    \"UiSmokeTest.RedesignedControlsAreFunctional\",\n"
+    "    \"UiSmokeTest.CreateThenBackInOneEventPumpCancelsBeforeOpeningWorld\",\n"
     "    \"UiSmokeTest.SaveAndListUserPresetsAreFunctional\",\n"
     "    \"UiSmokeTest.PauseMenuActionsAndNavigationAreFunctional\",\n"
     "    \"UiSmokeTest.GalleryBackNavigationAndContentArePresent\",\n"

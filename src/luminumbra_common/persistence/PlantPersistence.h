@@ -196,7 +196,10 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
 
 // Read-only admission for the complete roster. No registry operation runs until
 // every plant passes, including plants after the first valid record.
-inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
+// Generic persistence admits partial records but still checks every supplied
+// component. Runtime adoption additionally requires the complete core set.
+inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
+                                        bool require_core_components = true) {
     try {
         for (const auto& record : snap.entities) {
             if (record.name != "plant")
@@ -219,7 +222,7 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
                     return false;
                 seen[index] = true;
             }
-            if (!seen[0] || !seen[1] || !seen[2])
+            if (require_core_components && (!seen[0] || !seen[1] || !seen[2]))
                 return false;
         }
         return true;

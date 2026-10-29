@@ -188,11 +188,13 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
                        chunk_base_y + sphere.radius,
                        chunk_base_y + static_cast<float>(Luminumbra::CHUNK_SIZE_Y) - sphere.radius);
         const Luminumbra::Vec3 center(sample_x, center_y, sample_z);
+        const Luminumbra::Persistence::WorldSaveService::SaveOwnership ownership;
         if (!CarveSphereIntoChunk(*chunk, center, sphere.radius)) {
             result.failure_reason = "carve_edit_had_no_effect";
             return result;
         }
         chunk->mark_voxel_data_dirty();
+        world_system->notify_far_lod_authority_changed(chunk->get_coords());
         // Invalidate the LOD so the existing surface-horizon rebuild path
         // remeshes the edited voxel data (generation is skipped for chunks
         // that already carry sdf data, so the carve survives the rebuild).
