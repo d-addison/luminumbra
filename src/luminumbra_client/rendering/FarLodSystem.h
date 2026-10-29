@@ -219,8 +219,8 @@ public:
     //     radial clips and instead discards far fragments whose world XZ is
     //     within `inner_radius_m` of the centre (the live slice owns that space),
     //     so the coarse far mesh cannot poke through the fine live slice.
-    // The crash-safety drain (prepare_world_swap before the bound world is freed)
-    // is unchanged. clear_preview_anchor returns to first-person streaming.
+    // Wait for world readers before freeing the bound world, then retire its binding.
+    // clear_preview_anchor returns to first-person streaming.
     void set_preview_anchor(const glm::vec3& center, float inner_radius_m) {
         m_preview_mode = true;
         m_preview_anchor = center;
@@ -233,8 +233,14 @@ public:
         return m_preview_mode;
     }
 
-    // Waits for in-flight tile builds (they sample the world system) and
-    // drops the world binding. MUST run before the bound world is destroyed.
+    // Wait only for writes already accepted by the bounded cache writer.
+    // Retains the world binding, pending builds and ready uploads.
+    void wait_for_accepted_cache_writes();
+    // Finish builds and accepted writers before a fallible replacement; retain results/binding.
+    void wait_for_world_readers();
+
+    // Waits for in-flight tile builds and drops the world binding. A fallible
+    // replacement first waits for readers, then retires the binding after adoption.
     void prepare_world_swap();
     // prepare_world_swap + frees every GL resource.
     void shutdown();

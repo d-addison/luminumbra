@@ -17,6 +17,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -117,11 +118,18 @@ struct SavedFileBytes {
     std::string bytes;
 };
 
+inline void require_world_preparation_active(const std::stop_token& stop) {
+    if (stop.stop_requested())
+        throw std::runtime_error("Saved-world validation cancelled.");
+}
+
 // Bind sorted UTF-8 paths and the exact bytes read from each owning handle.
 // A snapshot retains those same bytes; paths in the source are never reopened
 // by its consumer. At most 65536 entries, 4096 bytes/path, 64 levels, 512 MiB total.
 inline std::string read_saved_world(const std::filesystem::path& directory,
-                                    std::vector<SavedFileBytes>* snapshot = nullptr) {
+                                    std::vector<SavedFileBytes>* snapshot = nullptr,
+                                    const std::stop_token& stop = {}) {
+    require_world_preparation_active(stop);
     if (std::filesystem::is_symlink(directory) || !std::filesystem::is_directory(directory))
         throw std::runtime_error("unsupported workload save directory");
     const SavedFileInput opened_directory(directory, SavedFileInput::Kind::Directory);
@@ -131,6 +139,7 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
     for (auto iterator = std::filesystem::recursive_directory_iterator(directory);
          iterator != std::filesystem::recursive_directory_iterator();
          ++iterator) {
+        require_world_preparation_active(stop);
         if (entries == 65536 || iterator.depth() > 64)
             throw std::runtime_error("workload save inventory exceeds bounds");
         ++entries;
@@ -162,6 +171,7 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
     constexpr std::uint64_t max_bytes = 512ull * 1024 * 1024;
     std::uint64_t total = 0;
     for (const auto& relative : paths) {
+        require_world_preparation_active(stop);
         SavedFileInput input(directory / Filesystem::PathFromUtf8(relative));
         if (!Filesystem::PathSpellingEqual(
                 input.resolved_path(), canonical_directory / Filesystem::PathFromUtf8(relative)))
@@ -179,6 +189,7 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
         std::array<char, 65536> buffer{};
         std::uint64_t consumed = 0;
         for (;;) {
+            require_world_preparation_active(stop);
             const auto count = input.read(buffer);
             if (count == 0)
                 break;
@@ -214,17 +225,20 @@ class VerifiedSaveSnapshot {
 public:
     VerifiedSaveSnapshot(const std::filesystem::path& directory,
                          std::string_view expected,
-                         const std::string& world_id) {
+                         const std::string& world_id,
+                         const std::stop_token& stop = {}) {
+        require_world_preparation_active(stop);
         if (world_id.empty() || world_id == "." || world_id == ".." ||
             world_id.find_first_of("/\\:") != std::string::npos || expected.empty())
             throw std::runtime_error("invalid workload snapshot identity");
         std::vector<SavedFileBytes> files;
-        if (read_saved_world(directory, &files) != expected || files.empty())
+        if (read_saved_world(directory, &files, stop) != expected || files.empty())
             throw std::runtime_error("workload saved authority changed before reload");
         std::random_device random;
         const auto parent = std::filesystem::temp_directory_path();
         // Refuse after 16 name collisions; never reuse a pre-existing directory.
         for (int attempt = 0; attempt < 16; ++attempt) {
+            require_world_preparation_active(stop);
             const auto candidate = parent / ("render-save-" + std::to_string(random()) + "-" +
                                              std::to_string(random()));
             if (std::filesystem::create_directory(candidate)) {
@@ -242,23 +256,37 @@ public:
                 root_, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
             const auto save = root_ / "worlds/saves" / world_id;
             for (const auto& file : files) {
+                require_world_preparation_active(stop);
                 const auto path = save / Filesystem::PathFromUtf8(file.relative);
                 std::filesystem::create_directories(path.parent_path());
                 std::ofstream output(path, std::ios::binary);
-                output.write(file.bytes.data(), static_cast<std::streamsize>(file.bytes.size()));
+                // Snapshot bytes are capped at 512 MiB in total. Each write
+                // consumes at most 64 KiB before observing cancellation again.
+                constexpr std::size_t kWriteBytes = 65536;
+                for (std::size_t offset = 0; offset < file.bytes.size();) {
+                    require_world_preparation_active(stop);
+                    const auto count = std::min(kWriteBytes, file.bytes.size() - offset);
+                    output.write(file.bytes.data() + offset, static_cast<std::streamsize>(count));
+                    if (!output)
+                        throw std::runtime_error("cannot write workload snapshot");
+                    offset += count;
+                }
                 output.close();
                 if (!output)
                     throw std::runtime_error("cannot write workload snapshot");
             }
             // Publish a read-only private materialization to the synchronous loader. At most 65539
             // entries including the three loader-root directories are visited.
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(root_))
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(root_)) {
+                require_world_preparation_active(stop);
                 std::filesystem::permissions(entry.path(),
                                              entry.is_directory()
                                                  ? std::filesystem::perms::owner_read |
                                                        std::filesystem::perms::owner_exec
                                                  : std::filesystem::perms::owner_read,
                                              std::filesystem::perm_options::replace);
+            }
+            require_world_preparation_active(stop);
             std::filesystem::permissions(root_,
                                          std::filesystem::perms::owner_read |
                                              std::filesystem::perms::owner_exec,

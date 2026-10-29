@@ -19,6 +19,7 @@ from unittest import mock
 
 # The registered contract also runs with Python isolated mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import capture_sim_budget as capture
 import check_sim_budgets
 import propose_sim_budgets

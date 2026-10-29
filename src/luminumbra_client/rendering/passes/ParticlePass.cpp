@@ -92,6 +92,21 @@ float ParticlePass::Curve::sample(float t) const {
 ParticlePass::ParticlePass() = default;
 ParticlePass::~ParticlePass() = default;
 
+std::vector<ParticlePass::LiveParticleState> ParticlePass::live_particle_states() const {
+    std::vector<LiveParticleState> states;
+    states.reserve(m_live_count);
+    for (const auto& particle : m_particles) {
+        if (particle.alive) {
+            states.push_back({.pos = particle.pos,
+                              .vel = particle.vel,
+                              .age = particle.age,
+                              .lifetime = particle.lifetime,
+                              .emitter_index = particle.emitter_index});
+        }
+    }
+    return states;
+}
+
 void ParticlePass::init_shader(const std::filesystem::path& root_path) {
     // Re-home of magical_particles. Billboard expansion now happens in the
     // vertex stage (4 verts/instance via gl_VertexID); the geometry shader is

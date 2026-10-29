@@ -1,12 +1,15 @@
+#include "../support/PersistenceFileOps.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/world/WorldEntry.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldClock.h"
 
@@ -14,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -23,7 +27,9 @@
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -295,6 +301,295 @@ protected:
     std::filesystem::path root;
 };
 
+TEST_F(WorldEntryFilesystem, PreparationNeedsNoLiveSessionAndCancellationNeverAdopts) {
+    using Luminumbra::world::GameSession;
+    InstallPresets();
+    GameSession::WorldPreparationOptions options;
+    options.root_path = Luminumbra::Filesystem::GenericUtf8PathString(root) + "/";
+    options.save_root = root;
+    options.configured_save_root = root;
+    options.job_system_available = true;
+    const auto before = DiskBytes(root);
+    std::stop_source stop;
+    std::shared_ptr<GameSession::WorldPreparation> creation;
+    std::jthread worker([&] {
+        creation = GameSession::PrepareWorldCreation(options,
+                                                     "Prepared",
+                                                     "1337",
+                                                     "default",
+                                                     nullptr,
+                                                     Luminumbra::world::TerrainPresetUse::NewWorld,
+                                                     {},
+                                                     stop.get_token());
+    });
+    worker.join();
+    ASSERT_TRUE(creation);
+    EXPECT_TRUE(GameSession::WorldPreparationError(*creation).empty());
+    EXPECT_EQ(DiskBytes(root), before); // Preparing creation writes nothing.
+    stop.request_stop();                // Also refuse cancellation after worker completion.
+    const auto abandoned_load = GameSession::PrepareWorldLoad(options, "missing", stop.get_token());
+    EXPECT_EQ(GameSession::WorldPreparationError(*abandoned_load),
+              "Saved-world validation cancelled.");
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetRootPath(options.root_path);
+        session.SetJobSystem(&jobs);
+        const auto revision = session.WorldRevision();
+        EXPECT_FALSE(session.AdoptPreparedWorld(creation));
+        EXPECT_EQ(session.GetWorldOpenError(), "Saved-world validation cancelled.");
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.GetWorldSystem(), nullptr);
+        EXPECT_EQ(DiskBytes(root), before);
+
+        ASSERT_TRUE(session.CreateWorld("Retained", "1337", "default"));
+        const auto id = session.GetMetadata().worldId;
+        auto* world = session.GetWorldSystem();
+        world->SetWaterSimWindowCursor(19);
+        const auto live_revision = session.WorldRevision();
+        const auto saved_bytes = DiskBytes(root);
+        for (const bool create : {false, true}) {
+            auto cancelled = create ? GameSession::PrepareWorldCreation(
+                                          options,
+                                          "Cancelled",
+                                          "0",
+                                          "default",
+                                          nullptr,
+                                          Luminumbra::world::TerrainPresetUse::NewWorld,
+                                          {},
+                                          stop.get_token())
+                                    : GameSession::PrepareWorldLoad(options, id, stop.get_token());
+            EXPECT_FALSE(session.AdoptPreparedWorld(cancelled));
+            EXPECT_EQ(session.GetWorldSystem(), world);
+            EXPECT_EQ(session.WorldRevision(), live_revision);
+            EXPECT_EQ(world->GetWaterSimWindowCursor(), 19u);
+            EXPECT_EQ(DiskBytes(root), saved_bytes);
+        }
+        std::stop_source late_cancel;
+        auto loaded = GameSession::PrepareWorldLoad(options, id, late_cancel.get_token());
+        ASSERT_TRUE(GameSession::WorldPreparationError(*loaded).empty());
+        late_cancel.request_stop();
+        EXPECT_FALSE(session.AdoptPreparedWorld(loaded));
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        EXPECT_EQ(session.WorldRevision(), live_revision);
+        EXPECT_EQ(world->GetWaterSimWindowCursor(), 19u);
+        EXPECT_EQ(DiskBytes(root), saved_bytes);
+
+        auto state_options = session.CaptureWorldPreparationOptions();
+        auto initial_state =
+            GameSession::PrepareWorldState(state_options, session.GetWorldSaveDir());
+        ASSERT_TRUE(GameSession::WorldPreparationError(*initial_state).empty());
+        ASSERT_TRUE(session.AdoptPreparedWorld(initial_state));
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        EXPECT_EQ(session.WorldRevision(), live_revision);
+        auto stale_state = GameSession::PrepareWorldState(state_options, session.GetWorldSaveDir());
+        auto valid = GameSession::PrepareWorldLoad(state_options, id);
+        ASSERT_TRUE(session.AdoptPreparedWorld(valid)) << session.GetWorldOpenError();
+        const auto adopted_revision = session.WorldRevision();
+        EXPECT_FALSE(session.AdoptPreparedWorld(valid));
+        EXPECT_EQ(session.WorldRevision(), adopted_revision);
+        EXPECT_FALSE(session.AdoptPreparedWorld({}));
+        EXPECT_FALSE(session.AdoptPreparedWorld(stale_state));
+        EXPECT_EQ(session.GetWorldOpenError(),
+                  "World preparation no longer matches session configuration.");
+        EXPECT_EQ(session.WorldRevision(), adopted_revision);
+    }
+    jobs.shutdown();
+}
+
+struct CancelPreparationRead {
+    std::stop_source stop;
+    std::size_t opens = 0;
+    std::size_t cancel_at = 0;
+    static CancelPreparationRead*& Active() {
+        static CancelPreparationRead* active = nullptr;
+        return active;
+    }
+    static void Read(const std::filesystem::path&, bool opening) {
+        auto& state = *Active();
+        if (opening && ++state.opens == state.cancel_at)
+            state.stop.request_stop();
+    }
+    explicit CancelPreparationRead(std::size_t ordinal)
+        : cancel_at(ordinal) {
+        Active() = this;
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(&Read);
+    }
+    ~CancelPreparationRead() {
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(nullptr);
+        Active() = nullptr;
+    }
+    CancelPreparationRead(const CancelPreparationRead&) = delete;
+    CancelPreparationRead& operator=(const CancelPreparationRead&) = delete;
+};
+
+TEST_F(WorldEntryFilesystem, CancellationAtEverySavedFileReadPreservesLiveState) {
+    using Luminumbra::world::GameSession;
+    InstallPresets();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(root) + "/");
+        session.SetJobSystem(&jobs);
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("Saved", "1337", "default"));
+        ASSERT_NE(session.GetEnergyFieldState(), nullptr);
+        session.GetEnergyFieldState()->SetAnchorCell(0, 0);
+        session.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 512);
+        session.GetEnergyFieldState()->Tick(1);
+        constexpr std::size_t kSamples = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                         (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                         (Luminumbra::CHUNK_SIZE_Z + 1);
+        for (int x = 0; x < 2; ++x) {
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
+            chunk->sdf_data.assign(kSamples, -1.0f);
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        }
+        ASSERT_TRUE(session.SaveWorld());
+        const auto energy_before = session.GetEnergyFieldState()->CanonicalBytes();
+        const auto id = session.GetMetadata().worldId;
+        const auto options = session.CaptureWorldPreparationOptions();
+        const auto save_directory = session.GetWorldSaveDir();
+        const auto before = DiskBytes(root);
+        const auto revision = session.WorldRevision();
+        auto* world = session.GetWorldSystem();
+        world->SetWaterSimWindowCursor(19);
+        for (const bool state_only : {false, true}) {
+            std::size_t reads = 0;
+            const auto prepare = [&](const std::stop_token& token) {
+                return state_only ? GameSession::PrepareWorldState(options, save_directory, token)
+                                  : GameSession::PrepareWorldLoad(options, id, token);
+            };
+            {
+                CancelPreparationRead observe(0);
+                auto prepared = prepare({});
+                ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+                reads = observe.opens;
+            }
+            ASSERT_GT(reads, 0u);
+            // Fixed tiny fixture; cover each actual read, including repeated catalog
+            // validation and final staged state reads, without relying on timing.
+            ASSERT_LT(reads, 64u);
+            for (std::size_t ordinal = 1; ordinal <= reads; ++ordinal) {
+                SCOPED_TRACE(ordinal);
+                CancelPreparationRead cancel(ordinal);
+                std::shared_ptr<GameSession::WorldPreparation> prepared;
+                std::jthread worker([&] { prepared = prepare(cancel.stop.get_token()); });
+                worker.join();
+                EXPECT_TRUE(cancel.stop.stop_requested());
+                EXPECT_EQ(cancel.opens, ordinal); // Cancellation must stop further file work.
+                EXPECT_EQ(GameSession::WorldPreparationError(*prepared),
+                          "Saved-world validation cancelled.");
+                EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+                EXPECT_EQ(session.WorldRevision(), revision);
+                EXPECT_EQ(session.GetWorldSystem(), world);
+                EXPECT_EQ(world->GetWaterSimWindowCursor(), 19u);
+                EXPECT_EQ(session.GetEnergyFieldState()->CanonicalBytes(), energy_before);
+                EXPECT_EQ(DiskBytes(root), before);
+            }
+        }
+    }
+    jobs.shutdown();
+}
+
+TEST_F(WorldEntryFilesystem, PreparedRefusalsRetainDiagnosticsAndLiveState) {
+    using Luminumbra::world::GameSession;
+    InstallPresets();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(root) + "/");
+        session.SetJobSystem(&jobs);
+        ASSERT_TRUE(session.CreateWorld("Retained", "1337", "default"));
+        const auto id = session.GetMetadata().worldId;
+        const auto options = session.CaptureWorldPreparationOptions();
+        const auto revision = session.WorldRevision();
+        auto* world = session.GetWorldSystem();
+        auto empty_state = GameSession::PrepareWorldState(options, {});
+        EXPECT_EQ(GameSession::WorldPreparationError(*empty_state),
+                  "World state directory is empty.");
+        EXPECT_FALSE(session.AdoptPreparedWorld(empty_state));
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        const auto metadata = session.GetWorldSaveDir() / "world_info.json";
+        const auto original = Read(metadata);
+        for (const auto& bytes : {std::string("{"), std::string("{\"container_version\":999}")}) {
+            Write(metadata, bytes);
+            const auto before = DiskBytes(root);
+            auto prepared = GameSession::PrepareWorldLoad(options, id);
+            const auto error = GameSession::WorldPreparationError(*prepared);
+            EXPECT_FALSE(error.empty());
+            EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+            EXPECT_EQ(session.GetWorldOpenError(), error);
+            EXPECT_EQ(session.WorldRevision(), revision);
+            EXPECT_EQ(session.GetWorldSystem(), world);
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+        std::filesystem::remove(metadata);
+        std::filesystem::create_directory(metadata);
+        auto unreadable = GameSession::PrepareWorldLoad(options, id);
+        EXPECT_FALSE(GameSession::WorldPreparationError(*unreadable).empty());
+        EXPECT_FALSE(session.AdoptPreparedWorld(unreadable));
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        EXPECT_TRUE(std::filesystem::is_directory(metadata));
+        std::filesystem::remove(metadata);
+        Write(metadata, original);
+        for (const bool create : {false, true}) {
+            auto prepared = create ? GameSession::PrepareWorldCreation(
+                                         options, "No jobs", "1337", "default", nullptr)
+                                   : GameSession::PrepareWorldLoad(options, id);
+            ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+            session.SetJobSystem(nullptr);
+            EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+            EXPECT_EQ(session.GetWorldOpenError(),
+                      create ? "JobSystem not set before creating world."
+                             : "JobSystem not set before loading world.");
+            session.SetJobSystem(&jobs);
+            EXPECT_EQ(session.WorldRevision(), revision);
+            EXPECT_EQ(session.GetWorldSystem(), world);
+        }
+        auto mismatched_options = options;
+        mismatched_options.active_regions = false;
+        auto mismatched = GameSession::PrepareWorldCreation(
+            mismatched_options, "Refused", "1337", "default", nullptr);
+        ASSERT_TRUE(GameSession::WorldPreparationError(*mismatched).empty());
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(session.AdoptPreparedWorld(mismatched));
+        EXPECT_EQ(session.GetWorldOpenError(),
+                  "World preparation no longer matches session configuration.");
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        EXPECT_EQ(DiskBytes(root), before);
+        auto previous_root =
+            GameSession::PrepareWorldCreation(options, "Previous root", "1337", "default", nullptr);
+        ASSERT_TRUE(GameSession::WorldPreparationError(*previous_root).empty());
+        session.SetSaveRootPath(root / "changed-root");
+        EXPECT_FALSE(session.AdoptPreparedWorld(previous_root));
+        EXPECT_EQ(session.GetWorldOpenError(),
+                  "World preparation no longer matches session configuration.");
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        EXPECT_EQ(DiskBytes(root), before);
+        session.SetSaveRootPath(options.configured_save_root);
+        auto missing = GameSession::PrepareWorldLoad(options, "missing-world");
+        EXPECT_FALSE(GameSession::WorldPreparationError(*missing).empty());
+        EXPECT_FALSE(session.AdoptPreparedWorld(missing));
+        auto unavailable = options;
+        unavailable.job_system_available = false;
+        auto refused =
+            GameSession::PrepareWorldCreation(unavailable, "Refused", "1337", "default", nullptr);
+        EXPECT_EQ(GameSession::WorldPreparationError(*refused),
+                  "JobSystem not set before creating world.");
+        EXPECT_FALSE(session.AdoptPreparedWorld(refused));
+    }
+    jobs.shutdown();
+}
+
 TEST_F(WorldEntryFilesystem, CreatesWorldWithActiveRegionsAndFullArtifactJournal) {
     InstallPresets();
     Luminumbra::JobSystem jobs;
@@ -417,7 +712,7 @@ TEST_F(WorldEntryFilesystem, JournalEntryReloadAndExportRetainCalendarAndWaterCu
     jobs.shutdown();
 }
 
-TEST_F(WorldEntryFilesystem, FatalStagedReadChangesRevisionAndDisablesEverySavePath) {
+TEST_F(WorldEntryFilesystem, StagedReadRefusalKeepsCandidateOpensLiveAndTearsDownSnapshotRead) {
     InstallPresets();
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
@@ -449,9 +744,15 @@ TEST_F(WorldEntryFilesystem, FatalStagedReadChangesRevisionAndDisablesEverySaveP
         EXPECT_FALSE(loaded);
         EXPECT_NE(reader.GetWorldOpenError().find("persisted region scheduler differs"),
                   std::string::npos);
-        EXPECT_NE(reader.WorldRevision(), revision);
+        // Candidate opens keep the live world when final state validation
+        // refuses; only the direct snapshot read tears it down.
+        if (path == 2) {
+            EXPECT_NE(reader.WorldRevision(), revision);
+            EXPECT_FALSE(reader.LoadWorldState());
+        } else {
+            EXPECT_EQ(reader.WorldRevision(), revision);
+        }
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
-        EXPECT_FALSE(reader.LoadWorldState());
         EXPECT_FALSE(reader.SaveWorld());
         EXPECT_FALSE(reader.SaveWorldState());
         EXPECT_FALSE(reader.SaveWorldStateTo(root / "refused-export", nullptr, true));

@@ -3,6 +3,7 @@
 #include "audio/IAudioManager.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
+#include "rendering/PixelIo.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -1173,33 +1174,71 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     namespace fs = std::filesystem;
     std::error_code ec;
 
-    // Each shutter writes <root>/data/ui/captures/cap_<N>.tga; collect them
-    // newest-first.: enumerate against the ASSET ROOT (the same root the
-    // emitted <img src> resolves through — the old CWD-relative lookup silently
-    // found nothing when CWD != root), unless a fixture source was injected
-    // (SetGalleryCaptureSource / --ui-fixtures).
-    std::vector<int> ids;
+    // Fixture/capture content contains authored thumbnails. Interactive photos
+    // are published directories whose image, thumbnail and verdict all completed.
+    const bool fixture_source =
+        !m_galleryCaptureDir.empty() || Filesystem::capture_content_paths().active();
+    struct GalleryPhoto {
+        int id = 0;
+        int stars = 0;
+        bool legacy = false;
+    };
+    // Names are bounded to 65536 entries; only the newest twelve valid photos
+    // need payload reads in an intact gallery. Never read every historical image.
+    std::vector<GalleryPhoto> candidates;
     const fs::path thumbs_dir = m_galleryCaptureDir.empty()
                                     ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
                                     : m_galleryCaptureDir;
-    // Enumeration supplies names only; RmlFileInterface verifies each image's
-    // owning read handle even if this directory is replaced after discovery.
     if (!Filesystem::capture_content_paths().allows(thumbs_dir))
         return;
-    if (fs::exists(thumbs_dir, ec)) {
-        for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
-            if (entry.path().extension() != ".tga")
-                continue;
-            const std::string stem = entry.path().stem().string(); // "cap_<N>"
-            if (stem.rfind("cap_", 0) != 0)
-                continue;
-            try {
-                ids.push_back(std::stoi(stem.substr(4)));
-            } catch (...) {}
+    constexpr std::size_t kMaxGalleryEntries = 65536;
+    std::size_t entries = 0;
+    for (fs::directory_iterator entry(thumbs_dir, ec), end; !ec && entry != end;
+         entry.increment(ec)) {
+        if (entries == kMaxGalleryEntries) {
+            candidates.clear();
+            break;
         }
+        ++entries;
+        const auto path = entry->path();
+        if (fixture_source && path.extension() != ".tga")
+            continue;
+        const bool legacy = path.extension() == ".tga";
+        const std::string stem =
+            Filesystem::GenericUtf8PathString(legacy ? path.stem() : path.filename());
+        if (stem.rfind("cap_", 0) != 0)
+            continue;
+        int id = 0;
+        const auto digits = std::string_view(stem).substr(4);
+        const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), id);
+        if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || id <= 0 ||
+            stem != "cap_" + std::to_string(id))
+            continue;
+        candidates.push_back({.id = id, .stars = 0, .legacy = legacy});
     }
-    std::sort(ids.begin(), ids.end(), std::greater<int>());
-
+    if (ec)
+        candidates.clear();
+    // Prefer published directories over historical flat files for a duplicate id.
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const GalleryPhoto& left, const GalleryPhoto& right) {
+                  return left.id != right.id ? left.id > right.id : left.legacy < right.legacy;
+              });
+    std::vector<GalleryPhoto> ids;
+    for (auto photo : candidates) {
+        if (!ids.empty() && ids.back().id == photo.id)
+            continue;
+        const int id = photo.id;
+        const bool legacy = photo.legacy;
+        if (!Filesystem::capture_content_paths().active()) {
+            if (!fixture_source &&
+                !Rendering::ReadCompletedPhotoCapture(m_assetRoot, id, photo.stars, legacy))
+                continue;
+        }
+        ids.push_back(photo);
+        if (ids.size() == 12)
+            break;
+    }
     if (ids.empty()) {
         grid->SetInnerRML(
             "<p class=\"gallery-empty\">No photos yet \xE2\x80\x94 enter a world, raise the "
@@ -1208,29 +1247,11 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     }
 
     std::string html;
-    int shown = 0;
-    for (int id : ids) {
-        if (shown++ >= 12)
-            break; // one page of the most recent captures
-        // Personal ratings are optional user data outside the capture inventory.
-        // Capture uses only the validated thumbnails, without consulting ratings
-        // or marking their intentional omission as a content refusal.
-        int stars = 0;
-        if (!Filesystem::capture_content_paths().active()) {
-            const auto sidecar =
-                fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json");
-            std::ifstream sf(sidecar);
-            if (sf) {
-                try {
-                    nlohmann::json j;
-                    sf >> j;
-                    if (j.contains("stars") && j["stars"].is_number_integer())
-                        stars = j["stars"].get<int>();
-                } catch (...) {}
-            }
-        }
+    for (const auto& [id, stars, legacy] : ids) {
+        const std::string image =
+            "cap_" + std::to_string(id) + (legacy ? ".tga" : "/thumbnail.tga");
         html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"" + m_galleryImgPrefix +
-                "cap_" + std::to_string(id) + ".tga\"/>";
+                image + "\"/>";
         if (stars >= 4)
             html += "<span class=\"photo-fav\">\xE2\x98\x85</span>";
         html += "</div>";

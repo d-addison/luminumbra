@@ -47,6 +47,7 @@ void WaterfallPass::destroy_geometry() {
     m_adopted_spray = 0;
     m_replace_spray = false;
     m_sheet_sites.clear();
+    m_sites.clear();
     m_geometry_built = false;
 }
 
@@ -268,7 +269,11 @@ void WaterfallPass::begin_adoption(PreparedGeometry geometry) {
         geometry.sites.size() > static_cast<std::size_t>(std::numeric_limits<GLint>::max()) / 12 ||
         geometry.vertices.size() != geometry.sites.size() * kFloatsPerSite)
         throw std::length_error("Invalid prepared waterfall geometry");
+    // The CPU preparation already surveyed this world. Replacing GPU geometry
+    // must retain that cache for the first audio query after adoption.
+    auto prepared_sites = std::move(m_sites);
     destroy_geometry();
+    m_sites = std::move(prepared_sites);
     m_sheet_sites = std::move(geometry.sites);
     m_pending_vertices = std::move(geometry.vertices);
     const auto page_count = m_sheet_sites.size() / kSitesPerPage +

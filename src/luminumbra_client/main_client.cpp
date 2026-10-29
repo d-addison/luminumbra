@@ -88,6 +88,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -161,6 +162,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -251,7 +253,7 @@ static std::string KeyDisplayLabel(int key) {
 // the cheap half). Capture/scenario runs compute synchronously so frame-1
 // content is unchanged. TEARDOWN CONTRACT: the job's callbacks hold a raw
 // SHIELD_WorldSystem* — every world transition (CreateWorld / session reset)
-// MUST DrainWorldDressing first, exactly like DrainBackgroundWorldScan above.
+// MUST wait for the dressing job first; discard its results only after adoption.
 struct WorldDressingPending {
     const void* world = nullptr; // identity guard: consume only for the world computed
     Luminumbra::Client::WorldDressingResult result;
@@ -2531,7 +2533,18 @@ int main(int argc, char* argv[]) {
         DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     };
 
+    auto wait_for_world_entry_readers = [&]() {
+        renderPipeline.wait_for_world_readers();
+        WaitForBackgroundWorldScan(jobSystem);
+        jobSystem.wait(s_worldDressingHandle);
+    };
+
     auto entry_world_revision = gameSession->WorldRevision();
+    auto finish_world_replacement = [&]() {
+        // An open can refuse before adoption. Preserve the still-live world's visuals/results.
+        if (gameSession->WorldRevision() != entry_world_revision)
+            prepare_world_entry();
+    };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
         const auto& detail = gameSession->GetWorldOpenError();
@@ -2718,10 +2731,15 @@ int main(int argc, char* argv[]) {
                 const std::filesystem::path base_path = std::filesystem::path(root_path_str) /
                                                         "worlds" / "atlas" / "presets" /
                                                         (worldType + ".json");
-                std::ifstream in(base_path);
-                if (in) {
-                    nlohmann::json base;
-                    in >> base;
+                nlohmann::json base;
+                bool missing = false;
+                if (Luminumbra::Persistence::ReadSavedJson(
+                        base_path,
+                        Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                        base,
+                        missing,
+                        false) &&
+                    !missing) {
                     //  the form carries semantic-knob entries
                     // ("knob.<id>"/type "knob") alongside any advanced raw
                     // overrides. If knobs are present, resolve through the engine
@@ -2785,8 +2803,10 @@ int main(int argc, char* argv[]) {
             refuse_world_entry(asset_error, false);
             return;
         }
-        prepare_world_entry();
-        if (!gameSession->CreateWorld(name, seed, worldType, customPtr)) {
+        wait_for_world_entry_readers();
+        const bool created = gameSession->CreateWorld(name, seed, worldType, customPtr);
+        finish_world_replacement();
+        if (!created) {
             refuse_world_entry("Could not create this world. Check the save location and preset.");
             return;
         }
@@ -2830,10 +2850,11 @@ int main(int argc, char* argv[]) {
                 return;
             }
         }
-        // Verify the snapshot before draining or changing the current world.
-        prepare_world_entry();
+        // Verify the snapshot before waiting for readers or changing the current world.
+        wait_for_world_entry_readers();
         const bool loaded = snapshot ? gameSession->LoadWorldFrom(id, snapshot->root())
                                      : gameSession->LoadWorld(id);
+        finish_world_replacement();
         if (!loaded) {
             refuse_world_entry("Could not load this world.");
             return;
@@ -2864,11 +2885,14 @@ int main(int argc, char* argv[]) {
     static double entry_cursor_y = 0.0;
     std::string entry_preset;
     std::unique_ptr<Measurement::VerifiedSaveSnapshot> entry_load_snapshot;
+    std::shared_ptr<Luminumbra::world::GameSession::WorldPreparation> entry_prepared_world;
+    std::stop_source entry_stop;
     Luminumbra::JobHandle entry_cpu_job;
     std::optional<Luminumbra::Rendering::WaterfallPass::PreparedGeometry> entry_geometry;
     std::string entry_worker_error;
     bool entry_validation_started = false;
     bool entry_validation_complete = false;
+    bool entry_restore_started = false;
     bool entry_worker_started = false;
     bool entry_adoption_started = false;
     std::chrono::steady_clock::time_point entry_stage_started{};
@@ -2919,11 +2943,16 @@ int main(int argc, char* argv[]) {
             try {
                 const std::filesystem::path pf = std::filesystem::path(root_path_str) / "worlds" /
                                                  "atlas" / "presets" / (worldType + ".json");
-                std::ifstream in(pf);
-                if (!in)
-                    return "";
                 nlohmann::json j;
-                in >> j;
+                bool missing = false;
+                if (!Luminumbra::Persistence::ReadSavedJson(
+                        pf,
+                        Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                        j,
+                        missing,
+                        false) ||
+                    missing)
+                    return "";
                 j = Luminumbra::world::ResolveTerrainPresetDefaults(j);
                 //  seed a semantic knob from the preset's persisted
                 // knob layer (path "knob.<id>"). Curated presets carry none -> "" ->
@@ -2978,17 +3007,21 @@ int main(int argc, char* argv[]) {
                        const std::string& baseType,
                        const std::vector<Luminumbra::Client::WorldGenParam>& params,
                        bool overwrite_confirmed) -> std::string {
+                if (displayName.size() > Luminumbra::Persistence::SavedInputLimits::kPresetBytes)
+                    return "";
                 try {
                     const std::filesystem::path presets_dir =
                         root_dir / "worlds" / "atlas" / "presets";
-                    std::ifstream in(presets_dir / (baseType + ".json"));
-                    if (!in)
-                        return "";
-                    const auto base = nlohmann::json::parse(in);
-                    // The base may be the preset being overwritten. Release its
-                    // read handle before atomic replacement on Windows.
-                    in.close();
-                    if (in.fail())
+                    nlohmann::json base;
+                    bool missing = false;
+                    // ReadSavedJson releases the base handle before replacement on Windows.
+                    if (!Luminumbra::Persistence::ReadSavedJson(
+                            presets_dir / (baseType + ".json"),
+                            Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                            base,
+                            missing,
+                            false) ||
+                        missing)
                         return "";
                     //  persist BOTH the knob layer (knob vector +
                     // baseline + override diff) AND the resolved params, so reloading
@@ -3009,7 +3042,14 @@ int main(int argc, char* argv[]) {
                     const std::string worldType = "user_" + UserPresetSlug(displayName);
                     saved["name"] = displayName.empty() ? std::string("Custom") : displayName;
                     const auto destination = presets_dir / (worldType + ".json");
-                    const auto bytes = saved.dump(2);
+                    std::string bytes;
+                    if (!Luminumbra::Persistence::BoundedJsonDump(
+                            saved,
+                            Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                            bytes,
+                            2,
+                            false))
+                        return "";
                     using Writer = Luminumbra::Persistence::WorldSaveService;
                     const bool published = overwrite_confirmed
                                                ? Writer::write_file_durably(destination, bytes)
@@ -3040,10 +3080,16 @@ int main(int argc, char* argv[]) {
                             continue;
                         std::string name = stem;
                         try {
-                            std::ifstream f(entry.path());
                             nlohmann::json j;
-                            f >> j;
-                            name = j.value("name", stem);
+                            bool missing = false;
+                            if (Luminumbra::Persistence::ReadSavedJson(
+                                    entry.path(),
+                                    Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                                    j,
+                                    missing,
+                                    false) &&
+                                !missing)
+                                name = j.value("name", stem);
                         } catch (...) {}
                         out.emplace_back(name, stem);
                     }
@@ -3270,8 +3316,8 @@ int main(int argc, char* argv[]) {
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
-                // Complete accepted cache writes before saving authoritative state.
-                prepare_world_entry();
+                // Complete accepted cache writes without dismantling the live world.
+                renderPipeline.wait_for_accepted_far_tile_writes();
                 if (!gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -3717,15 +3763,14 @@ int main(int argc, char* argv[]) {
                                    !HasCommandLineFlag(argc, argv, "--no-menu-backdrop") &&
                                    gameStateManager.GetCurrentState() == GameState::MAIN_MENU;
         if (want_backdrop) {
-            renderPipeline.prepare_world_swap();
             // Use a deterministic golden-hour mountain vista behind the menu:
             // fixed seed, camera, dusk time-of-day, and cloud cover.
-            // drain any in-flight  scan before replacing the world.
-            DrainBackgroundWorldScan(jobSystem);
-            // same contract for the world-dressing placement job.
-            DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
-            if (gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains") &&
-                gameSession->LoadWorldState()) {
+            entry_world_revision = gameSession->WorldRevision();
+            wait_for_world_entry_readers();
+            const bool created =
+                gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains");
+            finish_world_replacement();
+            if (created && gameSession->LoadWorldState()) {
                 // Prepare the fixed vantage before publishing the backdrop as ready.
                 if (auto* ws = gameSession->GetWorldSystem();
                     ws && gameSession->GetPhysicsSystem() &&
@@ -3997,8 +4042,10 @@ int main(int argc, char* argv[]) {
         entry_save_allowed = false;
         // The worker owns references into the pass and world until completion.
         // Keep the existing reader drains before clearing/replacing either owner.
+        entry_stop.request_stop();
         jobSystem.wait(entry_cpu_job);
         entry_cpu_job = {};
+        entry_prepared_world.reset();
         if (gameSession->WorldRevision() != entry_world_revision) {
             prepare_world_entry();
             renderPipeline.cancel_waterfall_adoption();
@@ -4062,11 +4109,13 @@ int main(int argc, char* argv[]) {
                     // worker and cancellation drain; no form or DOM references.
                     // Snapshot inputs are copied before dispatch; the worker never
                     // reads session authority or a mutable saved-digest string.
-                    entry_cpu_job =
-                        jobSystem.dispatch_batch({[&,
-                                                   entry_request = &request,
-                                                   save_directory = gameSession->GetWorldSaveDir(),
-                                                   saved_digest = benchmark_saved_world_digest] {
+                    entry_cpu_job = jobSystem.dispatch_batch(
+                        {[&,
+                          entry_request = &request,
+                          save_directory = gameSession->GetWorldSaveDir(),
+                          saved_digest = benchmark_saved_world_digest,
+                          options = gameSession->CaptureWorldPreparationOptions(),
+                          stop = entry_stop.get_token()]() mutable {
                             const auto started = std::chrono::steady_clock::now();
                             try {
                                 entry_preset = entry_request->create
@@ -4081,7 +4130,33 @@ int main(int argc, char* argv[]) {
                                     !entry_request->create)
                                     entry_load_snapshot =
                                         std::make_unique<Measurement::VerifiedSaveSnapshot>(
-                                            save_directory, saved_digest, entry_request->id);
+                                            save_directory, saved_digest, entry_request->id, stop);
+                                if (entry_worker_error.empty() && !stop.stop_requested()) {
+                                    if (entry_request->create) {
+                                        entry_prepared_world =
+                                            Luminumbra::world::GameSession::PrepareWorldCreation(
+                                                options,
+                                                entry_request->name,
+                                                entry_request->seed,
+                                                entry_request->world_type,
+                                                entry_preset.empty() &&
+                                                        !scenario_config.preset_json_override
+                                                    ? nullptr
+                                                    : &entry_preset,
+                                                Luminumbra::world::TerrainPresetUse::NewWorld,
+                                                {},
+                                                stop);
+                                    } else {
+                                        if (entry_load_snapshot)
+                                            options.save_root = entry_load_snapshot->root();
+                                        entry_prepared_world =
+                                            Luminumbra::world::GameSession::PrepareWorldLoad(
+                                                options, entry_request->id, stop);
+                                    }
+                                    entry_worker_error =
+                                        Luminumbra::world::GameSession::WorldPreparationError(
+                                            *entry_prepared_world);
+                                }
                             } catch (const std::exception& error) {
                                 entry_worker_error = error.what();
                             } catch (...) {
@@ -4112,22 +4187,13 @@ int main(int argc, char* argv[]) {
                 break;
             }
             case WorldEntryStage::DrainReaders:
-                prepare_world_entry();
+                wait_for_world_entry_readers();
                 break;
             case WorldEntryStage::OpenWorld: {
-                const bool opened =
-                    request.create
-                        ? gameSession->CreateWorld(request.name,
-                                                   request.seed,
-                                                   request.world_type,
-                                                   entry_preset.empty() &&
-                                                           !scenario_config.preset_json_override
-                                                       ? nullptr
-                                                       : &entry_preset,
-                                                   entry_artifacts)
-                        : (entry_load_snapshot
-                               ? gameSession->LoadWorldFrom(request.id, entry_load_snapshot->root())
-                               : gameSession->LoadWorld(request.id));
+                const bool opened = gameSession->AdoptPreparedWorld(
+                    entry_prepared_world, request.create ? &entry_artifacts : nullptr);
+                entry_prepared_world.reset();
+                finish_world_replacement();
                 if (!opened) {
                     refuse_world_entry(
                         request.create
@@ -4140,15 +4206,50 @@ int main(int argc, char* argv[]) {
                 break;
             }
             case WorldEntryStage::RestoreState: {
-                // LoadWorld already restores saved authority. Creation keeps its
-                // original explicit restoration step, before any generation.
-                const bool restored =
-                    !request.create ||
-                    (scenario_config.persistence_roundtrip_smoke() &&
-                             scenario_config.persistence_phase == "load" &&
-                             !scenario_config.persistence_session_dir.empty()
-                         ? gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir)
-                         : gameSession->LoadWorldState());
+                if (!request.create)
+                    break; // Loaded worlds already adopted their prepared state.
+                if (!entry_restore_started) {
+                    entry_restore_started = true;
+                    const auto save_directory =
+                        scenario_config.persistence_roundtrip_smoke() &&
+                                scenario_config.persistence_phase == "load" &&
+                                !scenario_config.persistence_session_dir.empty()
+                            ? scenario_config.persistence_session_dir
+                            : gameSession->GetWorldSaveDir();
+                    entry_cpu_job = jobSystem.dispatch_batch(
+                        {[&,
+                          options = gameSession->CaptureWorldPreparationOptions(),
+                          save_directory,
+                          stop = entry_stop.get_token()] {
+                            const auto started = std::chrono::steady_clock::now();
+                            try {
+                                entry_prepared_world =
+                                    Luminumbra::world::GameSession::PrepareWorldState(
+                                        options, save_directory, stop);
+                            } catch (const std::exception& error) {
+                                entry_worker_error = error.what();
+                            } catch (...) {
+                                entry_worker_error = "Could not restore saved world state.";
+                            }
+                            LUMINUMBRA_CORE_INFO(
+                                "World entry stage: Restore state worker_ms={:.3f}",
+                                std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - started)
+                                    .count());
+                        }});
+                    return WorldEntryResult::Pending;
+                }
+                if (entry_cpu_job.counter &&
+                    entry_cpu_job.counter->load(std::memory_order_acquire) != 0)
+                    return WorldEntryResult::Pending;
+                jobSystem.wait(entry_cpu_job);
+                entry_cpu_job = {};
+                if (!entry_worker_error.empty()) {
+                    refuse_world_entry(entry_worker_error, false);
+                    return WorldEntryResult::Failed;
+                }
+                const bool restored = gameSession->AdoptPreparedWorld(entry_prepared_world);
+                entry_prepared_world.reset();
                 if (!restored) {
                     refuse_world_entry("Could not restore saved world state.");
                     return WorldEntryResult::Failed;
@@ -4348,8 +4449,7 @@ int main(int argc, char* argv[]) {
                                                                gameSession->GetMetadata().worldId);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
-                std::ifstream input(saved.preset_path, std::ios::binary);
-                const auto preset = nlohmann::json::parse(input);
+                const auto preset = nlohmann::json::parse(saved.preset_json);
                 const auto* world = gameSession->GetWorldSystem();
                 benchmark_world_identity = {
                     {"seed", static_cast<std::uint32_t>(world->get_seed())},
@@ -4436,7 +4536,7 @@ int main(int argc, char* argv[]) {
                     [&](bool main_menu) {
                         if (!session_persistence_allowed())
                             return Measurement::ActionResult{false, 0};
-                        prepare_world_entry();
+                        renderPipeline.wait_for_accepted_far_tile_writes();
                         const bool saved = gameSession->SaveWorld();
                         if (saved) {
                             benchmark_loaded_snapshot.reset();
@@ -4634,8 +4734,11 @@ int main(int argc, char* argv[]) {
             entry_cancel_visible = false;
             world_entry_error.clear();
             entry_worker_error.clear();
+            entry_stop = std::stop_source{};
+            entry_prepared_world.reset();
             entry_validation_started = false;
             entry_validation_complete = false;
+            entry_restore_started = false;
             entry_worker_started = false;
             entry_adoption_started = false;
             entry_stage_started = {};
@@ -7263,6 +7366,13 @@ int main(int argc, char* argv[]) {
         scenario_runner->onShutdown();
     }
 
+    // Entry preparation can still own the waterfall pass and world. Its drain
+    // joins that worker before any renderer cleanup, including its own rollback.
+    if (world_entry.active()) {
+        world_entry.cancel();
+        world_entry.advance(run_entry_stage, drain_entry);
+    }
+
     trace_shutdown("world_readers_drain_started");
     // Same drain order as prepare_world_entry, with the far-LOD wait visible.
     renderPipeline.prepare_world_swap();
@@ -7270,11 +7380,6 @@ int main(int argc, char* argv[]) {
     DrainBackgroundWorldScan(jobSystem);
     DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     trace_shutdown("world_readers_drained");
-
-    if (world_entry.active()) {
-        world_entry.cancel();
-        world_entry.advance(run_entry_stage, drain_entry);
-    }
 
     // persist unsaved voxel edits on the world-exit/shutdown path,
     // before the streamed chunks are torn down. No-op when no world session

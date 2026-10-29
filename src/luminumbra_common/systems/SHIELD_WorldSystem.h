@@ -240,6 +240,9 @@ struct FarLodSdfSnapshot {
     u64 params_hash = 0;
     u64 authority_revision = 0;
     u64 region_authority_revision = 0;
+    // Validated lower corner of the fixed region-plus-halo capture footprint.
+    // Transient owner-thread validation metadata; never serialized or hashed.
+    IVec2 min_chunk_coords{0};
     std::vector<FarLodSdfSnapshotEntry> entries;
 };
 
@@ -846,6 +849,7 @@ public:
     // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
     // Returns the number of chunks modified.
+    // Observers run under SaveOwnership and must not dispatch or wait for jobs.
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
@@ -972,6 +976,9 @@ public:
         return m_far_lod_authority_revision.load(std::memory_order_acquire);
     }
     u64 far_lod_region_authority_revision(i32 rx, i32 rz) const;
+    // External owner-thread edits hold SaveOwnership before changing any bytes
+    // and through this notification, exactly like EditTerrainVoxel.
+    void notify_far_lod_authority_changed(const IVec3& chunk_coords);
     // Phase-A persistence transition: a successful authoritative chunk rewrite
     // changes the durable source observed by far workers even when voxel bytes
     // themselves were edited earlier. Bump the generation so any worker that

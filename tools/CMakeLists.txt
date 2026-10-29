@@ -1906,6 +1906,7 @@ if(BUILD_TESTING)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.
     # Partition 9 reserves two slots for its bounded route-grid overlap.
+    # Partitions 10 and 11 isolate required aggregates and UCRT64 classifiers.
     add_test(
         NAME WorkflowPolicyContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0)
@@ -1956,6 +1957,26 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 9 --case-workers 2)
     set_tests_properties(WorkflowPolicyContractPart9
         PROPERTIES LABELS "ci;tools" TIMEOUT 30 PROCESSORS 2)
+    add_test(
+        NAME WorkflowPolicyContractPart10
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 10)
+    set_tests_properties(WorkflowPolicyContractPart10
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart11
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 11)
+    set_tests_properties(WorkflowPolicyContractPart11
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart12
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 12)
+    set_tests_properties(WorkflowPolicyContractPart12
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart13
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 13)
+    set_tests_properties(WorkflowPolicyContractPart13
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     add_test(
         NAME SoftwareGlEvidenceContract
         COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -2039,7 +2060,7 @@ if(BUILD_TESTING)
         NAME RmlUiSourceCommandContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
                 DeliveryRefusals PairedWorkflowInitialization HostedConfigurationContracts BootstrapInterpreterBinding
-                OwnedCommandLifetime WindowsContainmentRefusal OwnershipFieldDiagnostics RootMismatchObservations
+                OwnedCommandLifetime CommandCancellationContract WindowsContainmentRefusal OwnershipFieldDiagnostics RootMismatchObservations
                 ConfigureCallerBoundaries Utf8SourceReads FixtureCleanupCustody)
     set_tests_properties(RmlUiSourceCommandContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
@@ -2119,6 +2140,8 @@ if(BUILD_TESTING)
             WorkflowPolicyContractPart4 WorkflowPolicyContractPart5
             WorkflowPolicyContractPart6 WorkflowPolicyContractPart7
             WorkflowPolicyContractPart8 WorkflowPolicyContractPart9
+            WorkflowPolicyContractPart10 WorkflowPolicyContractPart11
+            WorkflowPolicyContractPart12 WorkflowPolicyContractPart13
             QualificationCaptureContract SlowestTestsScriptContract
             LocalCheckRegistrationContract
             ${_rmlui_source_contracts}
@@ -2132,5 +2155,9 @@ if(BUILD_TESTING)
         set_property(TEST WorkflowPolicyContractPart1 PROPERTY COST 21)
         set_property(TEST WorkflowPolicyContractPart8 PROPERTY COST 20)
         set_property(TEST WorkflowPolicyContractPart9 PROPERTY COST 19)
+        set_property(TEST WorkflowPolicyContractPart10 PROPERTY COST 17)
+        set_property(TEST WorkflowPolicyContractPart11 PROPERTY COST 16)
+        set_property(TEST WorkflowPolicyContractPart12 PROPERTY COST 15)
+        set_property(TEST WorkflowPolicyContractPart13 PROPERTY COST 14)
     endif()
 endif()

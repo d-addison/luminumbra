@@ -5,8 +5,10 @@ simulation, a GPU client, and a headless authoritative server. This site starts
 with the engine model and development contracts; the generated namespace,
 class, and file indexes are the lower-level API reference.
 
-v0.3.0 is in release preparation. The [release notes](release-notes-v0.3.0.md)
-separate included source from planned v0.3.1 work and pending Windows acceptance.
+v0.3.0 was published on 2026-10-16 as a signed source-only tag; v0.3.1 is in
+preparation. The [release notes](release-notes-v0.3.0.md) separate included source
+from planned work and pending Windows acceptance, and the
+[roadmap](roadmap.md) records the current milestone assignments.
 
 ## v0.3.0 world format break
 

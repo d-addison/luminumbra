@@ -286,7 +286,8 @@ def snapshot_files(
     SNAPSHOT_TOTAL_READ_BYTES. Allocate the remainder in sorted path order.
     Deadline expiry always propagates, even when inspection errors are collected.
     Failed stat entries retain their paths with unknown metadata; a later
-    successful inspection makes them eligible as changed rather than new files.
+    successful inspection cannot attribute them to this run: collectors exclude
+    baseline entries with unknown metadata even if that name is later replaced.
     Directory inspection and traversal failures mark the inventory incomplete.
     When given, writer_probe must succeed for the inventory before any reads;
     busy handles are retryable, while probe errors and failed reads are fatal.
@@ -547,13 +548,13 @@ def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
     if not after.read_complete or not after.metadata_complete:
         return False
     if not before.metadata_complete:
-        return True
+        return False  # This name existed, but its baseline identity is unknown.
     if before[:4] != after[:4]:
         return True
     if not before.read_complete:
-        # Missing baseline bytes cannot establish that a readable file is stale.
-        # Keep it as a candidate for full verification or a settling refusal.
-        return True
+        # Readability recovering alone does not attribute unchanged metadata to
+        # this run. The metadata difference above still proves a rewrite.
+        return False
     # Only equal byte-range coverage can establish a content change. Two empty
     # samples rely on metadata; the settle writer probe covers deferred-timestamp
     # rewrites when there is no sampling budget.
@@ -563,6 +564,7 @@ def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
 
 
 def changed_files(before: dict[str, FileStamp], after: dict[str, FileStamp]) -> list[str]:
+    check_baseline_complete(before)
     return sorted(path for path, stamp in after.items()
                   if stamp.read_complete and
                   (path not in before or file_rewritten(before[path], stamp)))

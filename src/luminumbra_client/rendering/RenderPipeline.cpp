@@ -1290,8 +1290,23 @@ RenderPipeline::set_far_world_cave_policy(std::optional<World::FarCaveMode> requ
     return m_far_world->CavePolicy(FarWorldPurpose::World);
 }
 
+void RenderPipeline::wait_for_accepted_far_tile_writes() {
+    m_far_world->WaitForAcceptedCacheWrites();
+    if (m_farlod)
+        m_farlod->wait_for_accepted_cache_writes();
+}
+
+void RenderPipeline::wait_for_world_readers() {
+    // Volume renderers own immutable authority; legacy builds/writers borrow the live world.
+    m_far_world->WaitForAcceptedCacheWrites();
+    if (m_farlod)
+        m_farlod->wait_for_world_readers();
+}
+
 void RenderPipeline::prepare_world_swap() {
     m_far_world->PrepareWorldSwap();
+    m_waterfall_pass->destroy_geometry();
+    m_particle_pass->clear_waterfall_spray();
     ++m_far_world_epoch;
     m_frame_prepared.valid = false;
     m_taau_pass->invalidate_history();

@@ -18,17 +18,21 @@
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <ios>
 #include <iterator>
 #include <latch>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -363,6 +367,421 @@ TEST(FarLodPersistence, AsyncBytesMatchSynchronousIncludingOrderedSameTileWrites
     ExpectNoTemps(asynchronous.path());
 }
 
+TEST(FarLodPersistence, FirstWorkerSaveAndFlushCompleteWithinBoundedWait) {
+    // Run in a child so a lock regression fails promptly without joining a
+    // deadlocked worker during test cleanup. No native test timeout is raised.
+    ASSERT_EXIT(
+        {
+            {
+                const SaveDirectory world;
+                const auto params = Luminumbra::Test::SyntheticTerrainParams();
+                Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+                bool completed = false;
+                {
+                    AsyncFarLodStore writer;
+                    const auto revision = authority.far_lod_authority_revision();
+                    if (!writer.enqueue(
+                            world.path(), Tile(FarLodTier::F1, 100), &authority, revision) ||
+                        !writer.enqueue(
+                            world.path(), Tile(FarLodTier::F2, 200), &authority, revision))
+                        std::_Exit(1);
+                    // Two tiles bound the workload; the deadline bounds polling and
+                    // terminates even if a worker re-acquires a non-recursive lock.
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                    while (writer.diagnostics().pending != 0 &&
+                           std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::yield();
+                    if (writer.diagnostics().pending != 0)
+                        std::_Exit(2);
+                    writer.flush();
+                    writer.close();
+                    const auto result = writer.diagnostics();
+                    completed = result.saved == 2 && result.failed == 0 && result.closed;
+                }
+                // Leave the fixture scope before successful exit to remove its files.
+                if (!completed)
+                    std::_Exit(3);
+            }
+            std::_Exit(0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+TEST(FarLodPersistence, QueuedTilesRecheckAuthorityAfterAcquiringPersistenceOwnership) {
+    // Both tiers and both absent/present durable tiles must refuse an obsolete
+    // capture. Zero is a valid initial authority revision, never an unknown token.
+    for (const auto tier : {FarLodTier::F1, FarLodTier::F2}) {
+        for (const bool publish_newer : {false, true}) {
+            SCOPED_TRACE(static_cast<unsigned>(tier));
+            SCOPED_TRACE(publish_newer);
+            const SaveDirectory world;
+            const auto params = Luminumbra::Test::SyntheticTerrainParams();
+            Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+            AsyncFarLodStore writer;
+            const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+            FarLodSdfSnapshot source;
+            source.coords = IVec3(-1, 0, 64);
+            source.revision = 1;
+            constexpr std::size_t kSamples = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                             (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            source.sdf_data.assign(kSamples, -1.0f);
+            source.material_data.assign(kSamples, 11u);
+            auto obsolete = Tile(tier, 100);
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(obsolete, source), FarLodSdfReduceResult::Inserted);
+            auto newer = Tile(tier, 200);
+            source.revision = 2;
+            source.sdf_data.assign(kSamples, -2.0f);
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(newer, source), FarLodSdfReduceResult::Inserted);
+            std::string newer_bytes;
+            {
+                const RegionFileWriteGuard transaction(path);
+                ASSERT_TRUE(writer.enqueue(world.path(),
+                                           std::move(obsolete),
+                                           &authority,
+                                           authority.far_lod_authority_revision()));
+                WaitForCompetingWriter(transaction);
+                if (publish_newer) {
+                    WorldStreamingState state;
+                    auto chunk = state.get_or_create_chunk(IVec3(-1, 0, 64));
+                    chunk->sdf_data = {-2.0f, 3.0f};
+                    chunk->material_data = {7u, 11u};
+                    chunk->mark_voxel_data_dirty();
+                    ASSERT_TRUE(WorldSaveService{}.save_world(state, world.path()));
+                    ASSERT_TRUE(FarLodStore(world.path()).save_tile(newer));
+                    newer_bytes = Bytes(path);
+                }
+                // Matches the session's durable notification while it still
+                // owns the complete save, including partial-failure attempts.
+                authority.notify_far_lod_authority_durable(IVec3(-1, 0, 64));
+            }
+            writer.flush();
+            EXPECT_EQ(writer.diagnostics().failed, 1u);
+            EXPECT_EQ(writer.diagnostics().saved, 0u);
+            EXPECT_EQ(writer.diagnostics().pending, 0u);
+            if (publish_newer)
+                EXPECT_EQ(Bytes(path), newer_bytes);
+            else
+                EXPECT_TRUE(std::filesystem::is_empty(world.path()));
+            // A fresh capture can still commit and drain after stale rejection.
+            auto fresh = Tile(tier, 300);
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(fresh, source), FarLodSdfReduceResult::Inserted);
+            ASSERT_TRUE(writer.enqueue(world.path(),
+                                       std::move(fresh),
+                                       &authority,
+                                       authority.far_lod_authority_revision()));
+            writer.close();
+            EXPECT_EQ(writer.diagnostics().saved, 1u);
+            EXPECT_TRUE(writer.diagnostics().closed);
+            FarLodTile loaded;
+            ASSERT_TRUE(FarLodStore(world.path()).load_tile(tier, -1, 2, 1234, loaded));
+            EXPECT_EQ(loaded.height_q.front(), 300u);
+            EXPECT_TRUE(loaded.edited);
+            ASSERT_EQ(loaded.sdf_bricks.size(), 1u);
+            EXPECT_EQ(loaded.sdf_bricks.front().revision, 2u);
+            ExpectNoTemps(world.path());
+        }
+    }
+}
+
+namespace {
+struct AuthorityPublicationOverlap {
+    Systems::SHIELD_WorldSystem& authority;
+    std::filesystem::path path;
+    bool refuse_publication = false;
+    std::atomic<bool> bumped{false};
+    bool bump_blocked = false;
+    u64 publication_revision = 0;
+    std::jthread editor{};
+
+    static AuthorityPublicationOverlap*& Active() {
+        static AuthorityPublicationOverlap* overlap = nullptr;
+        return overlap;
+    }
+
+    static bool Publish(const std::filesystem::path& target, bool removing) {
+        auto& overlap = *Active();
+        if (removing || target != overlap.path)
+            return true;
+        // The tile's initial revision check has passed and staging is durable.
+        // Attempt the edit on another thread: a same-thread call would merely
+        // exercise recursive ownership and could not prove mutual exclusion.
+        overlap.editor = std::jthread([&overlap] {
+            overlap.authority.notify_far_lod_authority_durable(IVec3(-1, 0, 64));
+            overlap.bumped.store(true, std::memory_order_release);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!overlap.bumped.load(std::memory_order_acquire) &&
+               WorldSaveService::waiting_save_writers() == 0 &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        overlap.bump_blocked = WorldSaveService::waiting_save_writers() == 1 &&
+                               !overlap.bumped.load(std::memory_order_acquire);
+        overlap.publication_revision = overlap.authority.far_lod_authority_revision();
+        return !overlap.refuse_publication;
+    }
+};
+
+void CheckAuthorityPublication(FarLodTier tier, bool existing, bool refuse, bool closing) {
+    const SaveDirectory world;
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    if (existing) {
+        ASSERT_TRUE(FarLodStore(world.path()).save_tile(Tile(tier, 50)));
+    }
+    const auto before = Bytes(path);
+    const auto revision = authority.far_lod_authority_revision();
+    EXPECT_EQ(revision, 0u); // Zero is a valid captured revision.
+    auto tile = Tile(tier, 100);
+    FarLodSdfSnapshot source;
+    source.coords = IVec3(-1, 0, 64);
+    source.revision = 1;
+    // One full chunk lattice bounds the source and reduced SDF streams.
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    source.sdf_data.assign(kSamples, -1.0f);
+    source.material_data.assign(kSamples, 11u);
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, source), FarLodSdfReduceResult::Inserted);
+    const auto fresh = tile;
+    AsyncFarLodStore writer;
+    AuthorityPublicationOverlap overlap{
+        .authority = authority, .path = path, .refuse_publication = refuse};
+    AuthorityPublicationOverlap::Active() = &overlap;
+    Persistence::detail::set_file_publication_hook_for_testing(
+        &AuthorityPublicationOverlap::Publish);
+    if (!writer.enqueue(world.path(), std::move(tile), &authority, revision))
+        std::_Exit(1);
+    std::atomic<bool> drained{false};
+    std::jthread drain([&] {
+        if (!closing)
+            writer.flush();
+        writer.close();
+        drained.store(true, std::memory_order_release);
+    });
+    // Bound both lifecycle waits and editor cleanup, including a lock inversion.
+    // No sleep or unbounded join can mask a regression in the child process.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((!drained.load(std::memory_order_acquire) ||
+            !overlap.bumped.load(std::memory_order_acquire)) &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    if (!drained.load(std::memory_order_acquire) || !overlap.bumped.load(std::memory_order_acquire))
+        std::_Exit(2);
+    drain.join();
+    overlap.editor.join();
+    Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+    AuthorityPublicationOverlap::Active() = nullptr;
+    EXPECT_TRUE(overlap.bump_blocked);
+    EXPECT_EQ(overlap.publication_revision, revision);
+    EXPECT_EQ(authority.far_lod_authority_revision(), revision + 1u);
+    EXPECT_EQ(writer.diagnostics().saved, refuse ? 0u : 1u);
+    EXPECT_EQ(writer.diagnostics().failed, refuse ? 1u : 0u);
+    EXPECT_EQ(writer.diagnostics().pending, 0u);
+    EXPECT_TRUE(writer.diagnostics().closed);
+    FarLodTile loaded;
+    if (refuse) {
+        EXPECT_EQ(Bytes(path), before);
+        EXPECT_EQ(std::filesystem::exists(path), existing);
+    } else {
+        // Authoritative tiles intentionally bypass the params hash. Publication
+        // itself must therefore be ordered before the authority change.
+        ASSERT_TRUE(FarLodStore(world.path()).load_tile(tier, -1, 2, 9999, loaded));
+        EXPECT_EQ(loaded.height_q.front(), 100u);
+        EXPECT_TRUE(loaded.edited);
+    }
+    ExpectNoTemps(world.path());
+    // Session saves notify while already owning persistence. Bound that nested
+    // acquisition as well, so replacing recursive ownership cannot hang cleanup.
+    std::atomic<bool> nested_notified{false};
+    std::jthread notification([&] {
+        const WorldSaveService::SaveOwnership ownership;
+        authority.notify_far_lod_authority_durable(IVec3(-1, 0, 64));
+        nested_notified.store(true, std::memory_order_release);
+    });
+    const auto nested_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!nested_notified.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < nested_deadline)
+        std::this_thread::yield();
+    if (!nested_notified.load(std::memory_order_acquire))
+        std::_Exit(2);
+    notification.join();
+    EXPECT_EQ(authority.far_lod_authority_revision(), revision + 2u);
+    const auto published = Bytes(path);
+    EXPECT_FALSE(FarLodStore(world.path()).save_tile(fresh, nullptr, &authority, revision));
+    EXPECT_EQ(Bytes(path), published);
+    EXPECT_TRUE(FarLodStore(world.path())
+                    .save_tile(fresh, nullptr, &authority, authority.far_lod_authority_revision()));
+    ExpectNoTemps(world.path());
+}
+} // namespace
+
+TEST(FarLodPersistence, AuthorityBumpCannotCrossTilePublication) {
+    ASSERT_EXIT(
+        {
+            // Sixteen bounded cases cover both tiers, first/replacement writes,
+            // failed publication, and flush/shutdown draining an active worker.
+            for (const auto tier : {FarLodTier::F1, FarLodTier::F2})
+                for (const bool existing : {false, true})
+                    for (const bool refuse : {false, true})
+                        for (const bool closing : {false, true}) {
+                            CheckAuthorityPublication(tier, existing, refuse, closing);
+                            if (::testing::Test::HasFailure())
+                                std::_Exit(3);
+                        }
+            std::_Exit(0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+namespace {
+void CheckMutatedVoxelEdit(FarLodTier tier, bool fill, bool observer_fails) {
+    const SaveDirectory directory;
+    Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    auto chunk = std::make_shared<Chunk>(IVec3(-1, 0, 64));
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(kSamples, fill ? 1.0f : -1.0f);
+    chunk->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(FarLodStore(directory.path()).save_tile(Tile(tier, 50)));
+    const auto path = WorldSaveService::region_file_path(directory.path(), -1, 2);
+    const auto before = Bytes(path);
+    const auto snapshot = world.capture_far_lod_sdf_snapshot(-1, 2);
+    ASSERT_TRUE(snapshot);
+    const auto revision = world.far_lod_authority_revision();
+    std::atomic<bool> finished{false};
+    bool saved = true;
+    std::jthread writer;
+    unsigned observed = 0;
+    // The public edit observer runs after SDF mutation and dirty marking,
+    // before the world revision bump. No production test seam is needed.
+    world.SetVoxelEditObserver([&](const IVec3&) {
+        ++observed;
+        EXPECT_EQ(world.far_lod_authority_revision(), revision);
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*snapshot));
+        writer = std::jthread([&] {
+            saved =
+                FarLodStore(directory.path()).save_tile(Tile(tier, 100), nullptr, &world, revision);
+            finished.store(true, std::memory_order_release);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!finished.load(std::memory_order_acquire) &&
+               WorldSaveService::waiting_save_writers() == 0 &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (!finished.load(std::memory_order_acquire) &&
+            WorldSaveService::waiting_save_writers() == 0)
+            std::_Exit(2);
+        EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+        EXPECT_FALSE(finished.load(std::memory_order_acquire));
+        if (observer_fails)
+            throw std::runtime_error("edit observer failed");
+    });
+    if (observer_fails) {
+        EXPECT_THROW(world.EditTerrainVoxel(Vec3(-8.0f, 8.0f, 1032.0f), 2.0f, fill, nullptr),
+                     std::runtime_error);
+    } else {
+        EXPECT_EQ(world.EditTerrainVoxel(Vec3(-8.0f, 8.0f, 1032.0f), 2.0f, fill, nullptr), 1);
+    }
+    EXPECT_EQ(observed, 1u);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!finished.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    if (!finished.load(std::memory_order_acquire))
+        std::_Exit(2);
+    writer.join();
+    EXPECT_FALSE(saved);
+    EXPECT_GT(world.far_lod_authority_revision(), revision);
+    EXPECT_EQ(Bytes(path), before);
+    ExpectNoTemps(directory.path());
+}
+} // namespace
+
+TEST(FarLodPersistence, MutatedVoxelEditBlocksOldTileUntilAuthorityBump) {
+    ASSERT_EXIT(
+        {
+            for (const auto tier : {FarLodTier::F1, FarLodTier::F2})
+                for (const bool fill : {false, true})
+                    for (const bool observer_fails : {false, true}) {
+                        CheckMutatedVoxelEdit(tier, fill, observer_fails);
+                        if (::testing::Test::HasFailure())
+                            std::_Exit(3);
+                    }
+            std::_Exit(0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+TEST(FarLodPersistence, GenerationReplacementInvalidatesAuthorityAndEmptyFootprints) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    const auto empty = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(empty);
+    params.height_offset += 1.0f;
+    world.set_params(params);
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*empty));
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(kSamples, -1.0f);
+    chunk->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    const auto adopted = world.far_lod_authority_revision();
+    EXPECT_FALSE(world.adopt_streamed_chunk(nullptr));
+    EXPECT_FALSE(world.adopt_streamed_chunk(chunk));
+    EXPECT_EQ(world.far_lod_authority_revision(), adopted);
+    params.height_offset += 1.0f;
+    world.set_params(params);
+    EXPECT_GT(world.far_lod_authority_revision(), adopted);
+    const auto revision = world.far_lod_authority_revision();
+    world.set_seed(424242);
+    EXPECT_GT(world.far_lod_authority_revision(), revision);
+}
+
+TEST(FarLodPersistence, CurrentAuthorityStillValidatesPayloadAndSavedInputBeforePublishing) {
+    const SaveDirectory world;
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
+    AsyncFarLodStore writer;
+    const auto revision = authority.far_lod_authority_revision();
+    EXPECT_EQ(revision, 0u);
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 100), &authority, revision));
+    writer.flush();
+    ASSERT_EQ(writer.diagnostics().saved, 1u);
+    const auto before = Bytes(path);
+    auto malformed = Tile(FarLodTier::F1, 200);
+    malformed.material.pop_back();
+    ASSERT_TRUE(writer.enqueue(world.path(), std::move(malformed), &authority, revision));
+    writer.flush();
+    EXPECT_EQ(writer.diagnostics().failed, 1u);
+    EXPECT_EQ(Bytes(path), before);
+    // Both an unreadable directory and partial container bytes must retain the
+    // durable input, even when the captured authority itself is still current.
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(std::filesystem::create_directory(path));
+    ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 300), &authority, revision));
+    writer.flush();
+    EXPECT_EQ(writer.diagnostics().failed, 2u);
+    EXPECT_TRUE(std::filesystem::is_directory(path));
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, "LMR"));
+    ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 400), &authority, revision));
+    writer.close();
+    EXPECT_EQ(writer.diagnostics().failed, 3u);
+    EXPECT_EQ(writer.diagnostics().saved, 1u);
+    EXPECT_EQ(Bytes(path), "LMR");
+    EXPECT_EQ(writer.diagnostics().pending, 0u);
+    EXPECT_TRUE(writer.diagnostics().closed);
+    ExpectNoTemps(world.path());
+}
+
 TEST(FarLodPersistence, WorldBoundaryDrainsCapturedPathsAndCloseRejectsNewWork) {
     const SaveDirectory old_world;
     const SaveDirectory new_world;
@@ -640,9 +1059,12 @@ TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
     EXPECT_TRUE(pending->entries.empty());
     EXPECT_EQ(pending->bytes_copied, 0u);
     EXPECT_EQ(world.activation_index_counters().index_updates, before.index_updates);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*pending));
 
     world.activate_due(8);
     ASSERT_EQ(full->get_state(), ChunkState::Idle);
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*empty));
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*pending));
     const auto published = world.activation_index_counters();
     EXPECT_GT(published.index_updates, before.index_updates);
     const auto ready = world.capture_far_lod_sdf_snapshot(0, 0);
@@ -654,6 +1076,74 @@ TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
     EXPECT_EQ(ready->bytes_copied,
               full->sdf_data.size() * sizeof(f32) + full->material_data.size());
     EXPECT_EQ(world.activation_index_counters().index_updates, published.index_updates);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*ready));
+}
+
+TEST(FarLodPersistence, SnapshotFreshnessCoversNewPublicationsAndPreservesEvictedPayloads) {
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    constexpr int kSpan = kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    // Both signs, all four halo corners, and all immediately-outside edges.
+    for (const int region : {-1, 0}) {
+        for (const IVec3 offset : {IVec3(-1, 0, -1),
+                                   IVec3(kSpan, 0, -1),
+                                   IVec3(-1, 0, kSpan),
+                                   IVec3(kSpan, 0, kSpan),
+                                   IVec3(-2, 0, 0),
+                                   IVec3(kSpan + 1, 0, 0),
+                                   IVec3(0, 0, -2),
+                                   IVec3(0, 0, kSpan + 1)}) {
+            Systems::SHIELD_WorldSystem world(
+                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+            const auto before = world.capture_far_lod_sdf_snapshot(region, region);
+            ASSERT_TRUE(before);
+            ASSERT_TRUE(before->entries.empty());
+            auto chunk = std::make_shared<Chunk>(offset + IVec3(region * kSpan, 0, region * kSpan));
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            // Missing/partial SDF and material lattices are still ineligible.
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+            chunk->sdf_data.assign(kSamples - 1, -1.0f);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+            chunk->sdf_data.push_back(-1.0f);
+            chunk->material_data.assign(kSamples - 1, 7u);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+            chunk->material_data.push_back(7u);
+            const bool inside =
+                offset.x >= -1 && offset.x <= kSpan && offset.z >= -1 && offset.z <= kSpan;
+            EXPECT_EQ(world.is_far_lod_sdf_snapshot_current(*before), !inside);
+            const auto after = world.capture_far_lod_sdf_snapshot(region, region);
+            ASSERT_TRUE(after);
+            EXPECT_EQ(after->entries.size(), inside ? 1u : 0u);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+            if (inside) {
+                chunk->set_state(ChunkState::Loading);
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+                chunk->set_state(ChunkState::Idle);
+                chunk->sdf_data.pop_back();
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+                chunk->sdf_data.push_back(-1.0f);
+                chunk->material_data.pop_back();
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+                chunk->material_data.push_back(7u);
+                EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+            }
+            // Eviction preserves captured authority without requiring live storage.
+            world.clear_world(nullptr);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+            if (inside) {
+                EXPECT_EQ(after->entries.front().payload->sdf_data.size(), kSamples);
+            }
+
+            auto invalid = *after;
+            for (const int bad :
+                 {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
+                invalid.min_chunk_coords = IVec2(bad, 0);
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
+                invalid.min_chunk_coords = IVec2(0, bad);
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
+            }
+        }
+    }
 }
 
 TEST(FarLodPersistence, UnchangedAndOverlappingCapturesShareBytesAndEditsCopyOnce) {
@@ -760,6 +1250,138 @@ struct ScopedFarGl {
         glObjectLabel, static_cast<decltype(glObjectLabel)>(nullptr)};
 };
 } // namespace
+
+TEST(FarLodPersistence, PublicationAfterCaptureRefusesTilePersistence) {
+    const ScopedFarGl gl;
+    const SaveDirectory save;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    world.begin_tick(0);
+    world.dispatch_generation_jobs(
+        std::vector<Systems::SHIELD_WorldSystem::ChunkGenerationRequest>{{IVec3(0, 0, 0), 1}});
+    const auto chunk = world.find_streamed_chunk(IVec3(0, 0, 0));
+    ASSERT_TRUE(chunk);
+    ASSERT_EQ(chunk->get_state(), ChunkState::Loading);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(save.path());
+    const Vec3 camera(256, 100, 256);
+    far.update(world, camera);
+    ASSERT_GT(far.stats().builds_dispatched, 0u);
+    // Complete builds without accepting them, then publish the skipped chunk.
+    far.wait_for_world_readers();
+    world.activate_due(8);
+    ASSERT_EQ(chunk->get_state(), ChunkState::Idle);
+    // A local edit after publication is authoritative, but this chunk was
+    // absent from the capture. Neither captured-entry revisions nor its
+    // captured durability predicate can detect these newly contributing bytes.
+    const auto authority_revision = world.far_lod_authority_revision();
+    ASSERT_FALSE(chunk->sdf_data.empty());
+    chunk->sdf_data.front() += 1.0f;
+    chunk->mark_voxel_data_dirty();
+    EXPECT_EQ(world.far_lod_authority_revision(), authority_revision);
+    far.update(world, camera);
+    EXPECT_GT(far.stats().stale_results_rejected, 0u);
+    // Replacement builds have not been accepted; discard them and flush writes.
+    far.prepare_world_swap();
+    FarLodTile loaded;
+    EXPECT_FALSE(
+        FarLodStore(save.path())
+            .load_tile(FarLodTier::F1, 0, 0, ComputeTerrainParamsHash(params, 1337), loaded));
+    ExpectNoTemps(save.path());
+    far.shutdown();
+    jobs.shutdown();
+}
+
+TEST(FarLodPersistence, SaveFenceCompletesAcceptedWritesAndRetainsBindingAndDeferredUploads) {
+    const ScopedFarGl gl;
+    const SaveDirectory save;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    const Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(save.path());
+    far.wait_for_accepted_cache_writes(); // empty writer queue
+    far.wait_for_world_readers();         // no readers yet
+    const Vec3 camera(256, 100, 256);
+    far.update(world, camera);
+    jobs.wait(jobs.dispatch_batch({[] {
+    }}));
+    far.update(world, camera);
+    ASSERT_GT(far.stats().integration_uploads_deferred, 0u);
+    const auto resident = far.stats().regions_resident;
+    far.wait_for_accepted_cache_writes();
+    // The fence returns only after every accepted tile has reached its captured path.
+    // Dispatch admits at most kMaxBuildDispatchesPerFrame writes in this first batch.
+    std::size_t regions = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(save.path()))
+        if (entry.path().extension() == ".lmr")
+            ++regions;
+    EXPECT_EQ(regions, Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    FarLodTile loaded;
+    ASSERT_TRUE(
+        FarLodStore(save.path())
+            .load_tile(FarLodTier::F1, 0, 0, ComputeTerrainParamsHash(params, 1337), loaded));
+    EXPECT_FALSE(loaded.height_q.empty());
+    ExpectNoTemps(save.path());
+    EXPECT_EQ(far.stats().regions_resident, resident);
+    far.wait_for_world_readers(); // reader completion also retains unpublished results
+    // Resuming the identical world must integrate retained deferred work. An
+    // unbound world instead discards it and dispatches a fresh first batch.
+    far.update(world, camera);
+    EXPECT_GT(far.stats().builds_integrated_ok, 0u);
+    EXPECT_EQ(far.stats().tile_save_failures, 0u);
+    far.shutdown();
+    jobs.shutdown();
+}
+
+TEST(FarLodPersistence, SaveFenceFinishesFailedWritesWithoutDiscardingDeferredUploads) {
+    const ScopedFarGl gl;
+    const SaveDirectory save;
+    const auto blocked = save.path() / "blocked";
+    ASSERT_TRUE(std::filesystem::create_directory(blocked));
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    const Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(blocked);
+    const Vec3 camera(256, 100, 256);
+    far.update(world, camera);
+    jobs.wait(jobs.dispatch_batch({[] {
+    }}));
+    // Finish successful reads before making the captured destination unwritable.
+    // The completed batch is accepted for persistence only by the following update.
+    ASSERT_TRUE(std::filesystem::remove(blocked));
+    {
+        std::ofstream output(blocked);
+        output << "regular file prevents cache directory creation";
+        ASSERT_TRUE(output.good());
+    }
+    far.update(world, camera);
+    ASSERT_GT(far.stats().integration_uploads_deferred, 0u);
+    far.wait_for_accepted_cache_writes();
+    far.update(world, camera);
+    EXPECT_GT(far.stats().builds_integrated_ok, 0u);
+    EXPECT_GE(far.stats().tile_save_failures, Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    EXPECT_TRUE(std::filesystem::is_regular_file(blocked));
+    far.shutdown();
+    jobs.shutdown();
+}
 
 TEST(FarLodPersistence, ProductionWorldSwapFlushesSavesEvenWhenUploadsAreDeferred) {
     const ScopedFarGl gl;

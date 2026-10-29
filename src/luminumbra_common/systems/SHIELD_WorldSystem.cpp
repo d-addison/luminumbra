@@ -3,6 +3,7 @@
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../core/WaterSeedInputs.h"
+#include "../persistence/WorldSaveService.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
@@ -94,6 +95,18 @@ constexpr std::size_t kMaxMeshingBatchesInFlight =
     static_cast<std::size_t>(kActivationPipelineLatencyTicks) + 1;
 
 namespace {
+bool HasPublishedFarLodSdf(const Luminumbra::Chunk* chunk) {
+    // Loading vectors belong to the generation worker until owner publication.
+    return chunk && chunk->get_state() != Luminumbra::ChunkState::Loading &&
+           chunk->sdf_data.size() == kFullSdfLattice &&
+           (chunk->material_data.empty() || chunk->material_data.size() == kFullSdfLattice);
+}
+
+// Persistence may supply a rejected grid; bound before multiplying or indexing.
+bool IsBoundedWaterResolution(int resolution) {
+    return resolution > 1 && resolution <= 32 && 32 % resolution == 0;
+}
+
 // All dispatches nested in one update share the same byte allowance. Explicit
 // blocking drains start a fresh bounded pass for each finite request prefix.
 class MeshingSnapshotPass {
@@ -927,6 +940,9 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 // process_completed_meshing_jobs by ): pure
                 // generation output, not an edit — the dirty flag stays
                 // clear (matching GenerateChunkData's contract).
+                const Persistence::WorldSaveService::SaveOwnership ownership;
+                const bool replaced_authority =
+                    chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited;
                 chunk->sdf_data = std::move(chunk->pending_sdf_data);
                 chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
                 // publish the promoted structure material channel
@@ -934,6 +950,8 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->mark_sdf_generated_current_params();
                 chunk->clear_voxel_data_dirty();
+                if (replaced_authority)
+                    bump_far_lod_authority_revision(chunk->get_coords());
                 const auto resident = m_streaming_state.chunks.find(chunk->get_id());
                 if (resident != m_streaming_state.chunks.end() && resident->second == chunk)
                     publish_generated_column_span(*chunk);
@@ -1864,7 +1882,7 @@ bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
         if (coords.x != column.x || coords.z != column.z)
             continue;
         const int res = chunk->current_water_resolution.load(std::memory_order_relaxed);
-        if (res <= 1)
+        if (!IsBoundedWaterResolution(res))
             continue;
         const std::size_t side = static_cast<std::size_t>(res);
         if (chunk->water_bed_mm.size() != side * side ||
@@ -4294,38 +4312,52 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             // Detect it and clear the buffer so it REGENERATES a correct lattice below
             // (generation is a pure function of seed/params). Hash-neutral for valid worlds:
             // a well-formed full SDF is always exactly kFullSdfLattice, so this never fires.
-            const bool has_malformed_sdf =
-                !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
-            if (has_malformed_sdf) {
-                const IVec3 cc = chunk->get_coords();
-                LUMINUMBRA_CORE_WARN(
-                    "EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
-                    "SDF (size {} != {}); regenerating a full lattice before meshing",
-                    cc.x,
-                    cc.y,
-                    cc.z,
-                    chunk->sdf_data.size(),
-                    kFullSdfLattice);
-                chunk->sdf_data.clear();
-            }
-            const bool missing_required_data =
-                needs_full_sdf ? chunk->sdf_data.empty()
-                               : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
-            if (has_malformed_sdf) {
-                // A malformed non-empty lattice must not fall back to the
-                // coarse heightfield: rebuild exact SDF authority first.
-                GenerateChunkData(*chunk);
-            } else if (missing_required_data) {
-                // Chunks restored from a world save arrive with voxel data
-                // already populated (possibly carrying player edits);
-                // regeneration would clobber those edits. Generation is a
-                // pure function of seed/params, so skipping it for any chunk
-                // that already has the data its step needs is also a no-op
-                // for fresh chunks that merely need a LOD rebuild. Coarse
-                // (step > 1) horizon chunks generate the surface band only
-                // the heightfield mesher and seam fallback never
-                // read interior SDF.
-                GenerateChunkData(*chunk, build_chunk.step);
+            {
+                const bool has_malformed_sdf =
+                    !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
+                const bool missing_required_data =
+                    needs_full_sdf ? chunk->sdf_data.empty()
+                                   : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
+                const bool changes_authority =
+                    has_malformed_sdf ||
+                    (missing_required_data &&
+                     chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited);
+                // Fresh Loading generation is private to owner-thread publication;
+                // keep those independent jobs parallel. Replacements own persistence.
+                std::optional<Persistence::WorldSaveService::SaveOwnership> ownership;
+                if (changes_authority) {
+                    ownership.emplace();
+                    // Generation can throw after changing buffers; invalidate first.
+                    bump_far_lod_authority_revision(chunk->get_coords());
+                }
+                if (has_malformed_sdf) {
+                    const IVec3 cc = chunk->get_coords();
+                    LUMINUMBRA_CORE_WARN(
+                        "EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
+                        "SDF (size {} != {}); regenerating a full lattice before meshing",
+                        cc.x,
+                        cc.y,
+                        cc.z,
+                        chunk->sdf_data.size(),
+                        kFullSdfLattice);
+                    chunk->sdf_data.clear();
+                }
+                if (has_malformed_sdf) {
+                    // A malformed non-empty lattice must not fall back to the
+                    // coarse heightfield: rebuild exact SDF authority first.
+                    GenerateChunkData(*chunk);
+                } else if (missing_required_data) {
+                    // Chunks restored from a world save arrive with voxel data
+                    // already populated (possibly carrying player edits);
+                    // regeneration would clobber those edits. Generation is a
+                    // pure function of seed/params, so skipping it for any chunk
+                    // that already has the data its step needs is also a no-op
+                    // for fresh chunks that merely need a LOD rebuild. Coarse
+                    // (step > 1) horizon chunks generate the surface band only
+                    // the heightfield mesher and seam fallback never
+                    // read interior SDF.
+                    GenerateChunkData(*chunk, build_chunk.step);
+                }
             }
             if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
                 ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
@@ -4545,7 +4577,8 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
         if (!c || !c->has_water_sim.load(std::memory_order_acquire))
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res)
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -4596,7 +4629,7 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_bed_mm.size()) != res * res)
+        if (!IsBoundedWaterResolution(res) || static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -4641,7 +4674,8 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res ||
             static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
@@ -4656,7 +4690,8 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float surf =
-                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] +
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
                                        c->water_depth_mm[static_cast<std::size_t>(z * res + x)]) /
                     1000.0f;
                 for (int a = 0; a < 8; ++a) {
@@ -4708,7 +4743,8 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res ||
             static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
@@ -4725,7 +4761,9 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float surf_y =
-                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)] + d) /
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
+                                       d) /
                     1000.0f;
                 best_pos = Vec3(wx, surf_y, wz);
             }
@@ -4793,7 +4831,8 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return terrain;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    if (res <= 1 || static_cast<int>(c->water_level_data.size()) != res * res)
+    if (!IsBoundedWaterResolution(res) ||
+        c->water_level_data.size() < static_cast<std::size_t>(res) * static_cast<std::size_t>(res))
         return terrain;
     const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
     const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
@@ -4805,15 +4844,19 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
 }
 
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
-    // Mirrors the injection loop's precondition (has_water_sim + complete FLOAT
-    // grid). EMPIRICAL ground truth (the water-source staging hunt): water grids live on
-    // the 2.5D COLUMN's y=0 chunk regardless of the terrain sign — probe there.
+    // Match source injection: an integer pair plus all three float mirrors.
+    // Probe the 2.5D column's y=0 chunk regardless of terrain sign.
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
     const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return false;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    return res > 1 && static_cast<int>(c->water_level_data.size()) == res * res;
+    if (!IsBoundedWaterResolution(res))
+        return false;
+    const auto cells = static_cast<std::size_t>(res) * static_cast<std::size_t>(res);
+    return c->water_bed_mm.size() == cells && c->water_depth_mm.size() == cells &&
+           c->water_level_data.size() >= cells && c->water_flow_data.size() >= cells &&
+           c->water_sim_terrain_height.size() >= cells;
 }
 
 // boot-settle mode passthrough (lifts the live-play water caps during Boot only).
@@ -4901,6 +4944,8 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                 if (!chunk)
                     return false;
                 if (chunk->sdf_data.empty()) {
+                    const Persistence::WorldSaveService::SaveOwnership ownership;
+                    bump_far_lod_authority_revision(chunk->get_coords());
                     GenerateChunkData(*chunk, 1);
                     publish_generated_column_span(*chunk);
                     ++m_dirty_generation;
@@ -4968,6 +5013,10 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                     continue;
                 const IVec3 base =
                     chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                // Authority mutation owns persistence from the first byte through
+                // its revision bump. Never dispatch or wait for jobs under ownership;
+                // the lock order is save ownership, then region-revision mutex.
+                const Persistence::WorldSaveService::SaveOwnership ownership;
                 bool changed = false;
                 for (int z = 0; z < size_z; ++z)
                     for (int y = 0; y < size_y; ++y)
@@ -5003,10 +5052,15 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                         }
                 if (changed) {
                     chunk->mark_voxel_data_dirty();
-                    m_activation_index.content_changed(chunk->get_coords());
-                    ++m_dirty_generation;
-                    if (m_voxelEditObserver)
-                        m_voxelEditObserver(chunk->get_coords());
+                    try {
+                        m_activation_index.content_changed(chunk->get_coords());
+                        ++m_dirty_generation;
+                        if (m_voxelEditObserver)
+                            m_voxelEditObserver(chunk->get_coords());
+                    } catch (...) {
+                        bump_far_lod_authority_revision(chunk->get_coords());
+                        throw;
+                    }
                     bump_far_lod_authority_revision(chunk->get_coords());
                     chunk->current_lod.store(-1, std::memory_order_release);
                     ++edited;
@@ -6094,12 +6148,30 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
     // until the whole pipeline (including stage B) has settled.
     wait_for_streaming_jobs();
 
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            (void)id;
+            bump_far_lod_authority_revision(chunk->get_coords());
+        }
+    }
+    // Owner-thread capture cannot run during this setter. Invalidate first,
+    // releasing save ownership before acquiring the generator's exclusive epoch.
     reinitialize_noise(&params);
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
     wait_for_streaming_jobs();
 
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            (void)id;
+            bump_far_lod_authority_revision(chunk->get_coords());
+        }
+    }
+    // Owner-thread capture cannot run during this setter. Invalidate first,
+    // releasing save ownership before acquiring the generator's exclusive epoch.
     reinitialize_noise(nullptr, seed);
 }
 
@@ -6130,6 +6202,11 @@ void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
     coords_to_regenerate.reserve(m_streaming_state.chunks.size());
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         coords_to_regenerate.push_back(chunk->get_coords());
+    }
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& coords : coords_to_regenerate)
+            bump_far_lod_authority_revision(coords);
     }
     clear_world(physics_system);
     dispatch_generation_jobs(coords_to_regenerate);
@@ -6210,6 +6287,11 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
     else if (local_z == kChunksPerRegion - 1)
         affected_z[z_count++] = home_rz + 1;
 
+    // Serialize authority changes with the entire tile check/merge/publication.
+    // Take ownership before the region mutex, matching the durable-save path.
+    // Recursive ownership permits notification inside an existing session save;
+    // no jobs are dispatched or awaited while these locks are held.
+    const Persistence::WorldSaveService::SaveOwnership ownership;
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
                        lock,
@@ -6231,6 +6313,10 @@ u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const 
     return found == m_far_lod_region_revisions.end() ? 0u : found->second;
 }
 
+void SHIELD_WorldSystem::notify_far_lod_authority_changed(const IVec3& chunk_coords) {
+    bump_far_lod_authority_revision(chunk_coords);
+}
+
 void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coords) {
     bump_far_lod_authority_revision(chunk_coords);
 }
@@ -6238,10 +6324,6 @@ void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coo
 std::shared_ptr<const FarLodSdfSnapshot>
 SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     constexpr int kRegionChunkSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
-    constexpr std::size_t kFullSdfLatticeSize = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
-                                                static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
-
     const std::int64_t min_chunk_x64 = static_cast<std::int64_t>(rx) * kRegionChunkSpan - 1;
     const std::int64_t max_chunk_x64 =
         static_cast<std::int64_t>(rx) * kRegionChunkSpan + kRegionChunkSpan;
@@ -6262,6 +6344,7 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);
     snapshot->authority_revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
     snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);
+    snapshot->min_chunk_coords = IVec2(min_chunk_x, min_chunk_z);
 
     // Capture after streaming publication. Each chunk retains one immutable
     // payload; overlapping regions and unchanged captures share those bytes.
@@ -6269,9 +6352,7 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
         (void)id;
         // Generation writes live vectors while Loading. Only owner-thread
         // publication makes those bytes eligible, even if a worker is finished.
-        if (!chunk || chunk->get_state() == ChunkState::Loading ||
-            chunk->sdf_data.size() != kFullSdfLatticeSize ||
-            (!chunk->material_data.empty() && chunk->material_data.size() != kFullSdfLatticeSize)) {
+        if (!HasPublishedFarLodSdf(chunk.get())) {
             continue;
         }
         const IVec3& coords = chunk->get_coords();
@@ -6302,22 +6383,54 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
 }
 
 bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const {
+    constexpr int kFootprintSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X + 2;
     if (snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||
         snapshot.authority_revision !=
-            m_far_lod_authority_revision.load(std::memory_order_acquire)) {
+            m_far_lod_authority_revision.load(std::memory_order_acquire) ||
+        snapshot.min_chunk_coords.x < Chunk::kPackedMinXz ||
+        snapshot.min_chunk_coords.y < Chunk::kPackedMinXz ||
+        static_cast<std::int64_t>(snapshot.min_chunk_coords.x) + kFootprintSpan - 1 >
+            Chunk::kPackedMaxXz ||
+        static_cast<std::int64_t>(snapshot.min_chunk_coords.y) + kFootprintSpan - 1 >
+            Chunk::kPackedMaxXz) {
         return false;
     }
 
     // Eviction is safe because snapshot owns its bytes. A still-resident
     // chunk with a changed local revision/provenance, however, supersedes it.
+    std::size_t captured_resident_sdfs = 0;
     for (const FarLodSdfSnapshotEntry& entry : snapshot.entries) {
         const auto current = find_streamed_chunk(entry.coords);
-        if (current && (current->voxel_revision() != entry.voxel_revision ||
+        if (current && (!HasPublishedFarLodSdf(current.get()) ||
+                        current->voxel_revision() != entry.voxel_revision ||
                         current->sdf_provenance() != entry.provenance)) {
             return false;
         }
+        if (current)
+            ++captured_resident_sdfs;
     }
-    return true;
+
+    // Count the complete footprint, including chunks absent or Loading at capture.
+    // Every captured resident was checked above, so an additional published SDF
+    // makes the counts differ. Evicted captures still own their immutable bytes.
+    // Fixed bound: 34 x 34 columns, each containing only packed-Y resident chunks;
+    // no allocation or whole-world scan, and constant work per resident item.
+    std::size_t published_sdfs = 0;
+    const auto& columns = m_activation_index.columns();
+    for (int dz = 0; dz < kFootprintSpan; ++dz) {
+        for (int dx = 0; dx < kFootprintSpan; ++dx) {
+            const auto column = columns.find(World::ActivationResidencyIndex::column_key(
+                snapshot.min_chunk_coords.x + dx, snapshot.min_chunk_coords.y + dz));
+            if (column == columns.end())
+                continue;
+            for (const auto& [id, chunk] : column->second.residents) {
+                (void)id;
+                if (HasPublishedFarLodSdf(chunk.get()))
+                    ++published_sdfs;
+            }
+        }
+    }
+    return published_sdfs == captured_resident_sdfs;
 }
 
 std::shared_ptr<Luminumbra::Chunk>
@@ -6330,6 +6443,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     if (!chunk) {
         return false;
     }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
     //   lifecycle rule (streaming-owned, NOT the persistence
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
@@ -6341,6 +6455,9 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
+    if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+        bump_far_lod_authority_revision(chunk->get_coords());
+    }
     if (adopted) {
         // Derived payloads belong to the producing world, never to a saved or
         // externally adopted chunk (world-local generation numbers can coincide).
@@ -6348,9 +6465,6 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         m_activation_index.insert(chunk);
         m_activation_index.content_changed(chunk->get_coords());
         ++m_dirty_generation;
-    }
-    if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
-        bump_far_lod_authority_revision(chunk->get_coords());
     }
     return adopted;
 }
