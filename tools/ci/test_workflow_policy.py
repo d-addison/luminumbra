@@ -1279,7 +1279,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             "lint": "b32b7f25c8c59c2cdc664382725f86838f8aef9328f8cee52fd0741ba41b86e0",
             "tidy-shard": "53d7432d5fec3526d1f32296223f8a28541b584c3b3d5039ac8a2f9476a4a104",
             "tidy": "771a907ee610dfff3fb01bf35c7a34fe5fdf8b5300ab92dbcbbe813ea6ebc949",
-            "public-tree": "fac1e5b341a1fd73c12fffb8c215e3560f904a9302af168f82e70c5b35ab7b36",
+            "public-tree": "3881fa6241605c5bb5b7cfe57b8edee404e08ca2451f7f252093d3cc668d9b70",
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertTrue(all(not key.startswith("windows-") for key in actual))

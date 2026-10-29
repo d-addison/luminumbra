@@ -4,6 +4,7 @@
 #include "rendering/AttributedGl.h"
 #include <GLFW/glfw3.h>
 #include <cmath>
+#include <filesystem>
 #include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
 
@@ -189,7 +190,8 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time,
 bool DrawLoadingOverlay(const std::string& status_text,
                         float progress,
                         int dispatched_chunks,
-                        std::size_t total_chunks) {
+                        std::size_t total_chunks,
+                        const char* progress_unit) {
     if (ImGui::GetCurrentContext() == nullptr) {
         return false;
     }
@@ -209,7 +211,7 @@ bool DrawLoadingOverlay(const std::string& status_text,
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 10));
     ImGui::Text("%s", status_text.c_str());
     ImGui::ProgressBar(progress, ImVec2(500.0f, 20.0f));
-    ImGui::Text("%d / %zu Chunks Dispatched", dispatched_chunks, total_chunks);
+    ImGui::Text("%d / %zu %s", dispatched_chunks, total_chunks, progress_unit);
     ImGui::PopStyleVar();
 
     ImGui::End();

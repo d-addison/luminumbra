@@ -620,6 +620,7 @@ class PathGateTests(unittest.TestCase):
             "tools/ci/test_workflow_policy.py",
             "tools/perf/test_capture_sim_budget.py", "tools/perf/test_foliage_evidence.py",
             "tools/perf/test_terrain_aovs.py", "tools/perf/test_render_runner_evidence.py",
+            "tools/perf/test_check_gl_debug_log.py", "tools/perf/test_summarize_process_receipts.py",
             "tools/release/test_sbom.py", "tools/persistence/test_save_receipt.py",
             "tools/rendering/acceptance/test_scene_matrix.py",
             "tools/ci/test_check_acceptance_matrix.py",

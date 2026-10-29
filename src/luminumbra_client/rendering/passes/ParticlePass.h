@@ -195,6 +195,14 @@ public:
     static constexpr uint32_t kInvalidEmitter = 0xFFFFFFFFu;
     uint32_t add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin);
     void clear_emitters();
+    // Remove the previous world's waterfall spray and its live particles,
+    // preserving other emitters and their particle/template indices.
+    void clear_waterfall_spray();
+
+    // The pass owns this cache: full clears invalidate it, spray removal remaps it.
+    // Repeated updates recenter it in constant time; failed loads can be retried.
+    void update_ambient_motes(const std::filesystem::path& root_path,
+                              const glm::vec3& camera_position);
 
     //  RE-CENTER an existing emitter's spawn region on a
     // new base origin (render-only). `base_origin` is the same un-offset world
@@ -234,8 +242,6 @@ public:
                                  const glm::vec3& plunge_pos,
                                  float drop_height,
                                  float channel_width);
-    // Remove waterfall emitters and their mist while preserving other emitter handles.
-    void clear_waterfall_spray();
 
     // per-frame WIND velocity (world-space; horizontal XZ carried in
     // x/z, y usually 0) sampled by the client from the  wind field / replicated
@@ -323,6 +329,7 @@ private:
     // Per-frame instance count actually written to the mapping.
     std::size_t m_frame_instance_count = 0;
     uint32_t m_next_emitter_id = 0;
+    std::size_t m_ambient_emitter_index = kMaxEmitters;
     std::array<uint32_t, 2> m_precip_emitters{kInvalidEmitter, kInvalidEmitter};
     std::array<bool, 2> m_precip_load_attempted{};
 

@@ -104,8 +104,19 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                       "m_destination.c_str(),RENAME_NOREPLACE)", publish)
         self.assertIn("::renamex_np(m_temp.c_str(),m_destination.c_str(),RENAME_EXCL)", publish)
         self.assertIn("errno==ENOSYS||errno==EINVAL||errno==EOPNOTSUPP", publish)
-        self.assertIn("::MoveFileExW(m_temp.c_str(),m_destination.c_str(),"
-                      "MOVEFILE_WRITE_THROUGH)", publish)
+        self.assertIn("Detail::WindowsPublishWithoutReplacement(std::exchange(m_handle,INVALID_HANDLE_VALUE),"
+                      "m_temp,m_destination,GENERIC_WRITE|DELETE|FILE_READ_ATTRIBUTES)", publish)
+        self.assertIn("::FlushFileBuffers(m_handle)", publish)
+        journal = compact_cpp((ROOT / "src/luminumbra_common/persistence/CreatedWorldArtifacts.h")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("::CreateHardLinkW(bound_destination.c_str(),original_name.c_str(),nullptr)",
+                      journal)
+        self.assertIn("link->ReplaceIfExists=FALSE", journal)
+        self.assertIn("WindowsVacantPublicationNameError(bound_destination)", journal)
+        self.assertIn("WindowsPublicationLinkCount(original.get())!=2", journal)
+        self.assertIn("WindowsPublicationLinkCount(linked.get())!=1", journal)
+        self.assertNotIn("FileRenameInfo", journal)
+        self.assertNotIn("::MoveFileExW(", publish)
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", publish)
         self.assertNotIn("std::rename(", publish)
         self.assertIn("::fstat(m_descriptor,&published)==0", publish)
@@ -242,11 +253,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         start = service.index("boolWriteFileDurably(", service.index("boolWriteFileDurably(") + 1)
         write = service[start:service.index("boolWorldSaveService::write_file_durably(", start)]
         interrupt = "InterruptBeforeRegionReplaceForTesting().exchange(false,std::memory_order_acq_rel)"
-        self.assertLess(write.index("WriteDurableRegionTemp(staging,bytes,temp_path,errors)"),
+        self.assertLess(write.index("WriteDurableRegionTemp(staging,bytes,temp_path,errors,artifacts)"),
                         write.index(interrupt))
         self.assertLess(write.index(interrupt), write.index("ReplaceRegionFileAtomically("))
         interrupted = write[write.index(interrupt):write.index("ReplaceRegionFileAtomically(")]
-        self.assertIn("RemoveTemporaryFile(temp_path);", interrupted)
+        self.assertIn("RemoveTemporaryFile(temp_path,artifacts);", interrupted)
         self.assertIn("returnfalse;", interrupted)
         fixture = compact_cpp((ROOT / "test/common/GraphicsPresets_test.cpp")
                               .read_text(encoding="utf-8"))
@@ -401,9 +412,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         ordered = ("validate_save(save_dir,errors)", "ReclaimAbandonedStaging(staging)",
                    "LedgerStagingtemporary(staging)", "temporary.available(errors)", "temporary.prepare(bytes,errors)",
                    "BeforeActiveRegionsReplaceForTesting()", "temporary.valid(errors)",
-                   "ReplaceRegionFileAtomically(temporary.path(),path,errors)", "ledger=std::move(saved)")
+                   "temporary.record_payload(*artifacts)",
+                   "ReplaceRegionFileAtomically(temporary.path(),path,errors,artifacts,&temporary.payload())",
+                   "if(temporary.installed_at(path))temporary.published(errors)", "ledger=std::move(saved)")
         positions = [writer.index(value) for value in ordered]
         self.assertEqual(positions, sorted(positions))
+        self.assertIn("if(artifacts&&temporary.installed_at(path,2))temporary.published(errors)", writer)
         transaction = service[service.index("classLedgerStaging{"):service.index("std::size_tReclaimAbandonedStaging(")]
         ordered = ("m_claim.write(claim)", "FlushAncestorEntries(m_path,errors)",
                    "FlushRemovalDirectory(m_path,errors)", "m_payload.promote_seed(m_path,m_occupied,errors)",
@@ -420,6 +434,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                            "LedgerStagingPreservesSymlinkAndSpecialFileSubstitutions",
                            "LedgerStagingSubstitutionBeforePublishUsesFreshName",
                            "LedgerStagingPreservesUnreadableOwnership",
+                           "CreationLedgerStagingCleansFailuresAndJournalsPublication",
                            "LedgerStagingInterruptedWriteRemovesItsPairAndPreservesLiveLedger",
                            "LedgerOwnershipFlushFailurePreservesLiveLedgerAndRemovesOwnPair"):
             self.assertIn("TEST(WorldSaveService," + regression + ")", fixture)
@@ -441,6 +456,25 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("after==before", finish)
         self.assertIn("before[5]==after[5]", finish)
         self.assertIn("std::equal(before.begin(),before.begin()+4,after.begin())", finish)
+        retention = service[service.index("voidretain_publication_identity()"):
+                            service.index("voidrecord_artifact(CreatedWorldArtifacts&artifacts)")]
+        self.assertLess(retention.index("CreatedWorldArtifacts::retain_file_identity(m_handle)"),
+                        retention.index("constboolretired=close()"))
+        self.assertIn("m_handle=retained;if(!retired)throwstd::runtime_error(", retention)
+        record = service[service.index("voidrecord_artifact(CreatedWorldArtifacts&artifacts)"):
+                         service.index("boolremove(unsignedlinks=1)")]
+        self.assertLess(record.index("retain_publication_identity()"),
+                        record.index("artifacts.record_staged_file(m_path,m_handle)"))
+        self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
+        publication = service.split("boolReplaceRegionFileAtomically(", 2)[1]
+        ordered = ("if(artifacts){artifacts->publish_file(temp,destination);returntrue;}",
+                   "::ReplaceFileW(", "constDWORDattributes_error=::GetLastError()",
+                   "if(retained_payload)retained_payload->retain_publication_identity();",
+                   "autofile=::CreateFileW(temp.c_str(),",
+                   "Detail::WindowsPublishWithoutReplacement(")
+        positions = [publication.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("retain_file_identity", finish)
         prepare = service[service.index("boolprepare(conststd::string&bytes,"):
                           service.index("boolvalid(std::vector<std::string>*errors)")]
         ordered = ("m_payload.write(bytes)",
@@ -787,7 +821,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         start = service.index("if(m_empty){")
         end = service.index("returnFlushRemovalDirectory(path,errors);", start)
         empty_roster = service[start:end]
-        self.assertIn("std::filesystem::remove(path,ec);if(ec){", empty_roster)
+        self.assertIn("std::filesystem::remove(path,ec);}if(ec){", empty_roster)
+        self.assertLess(empty_roster.index("LockPublication(path)"),
+                        empty_roster.index("std::filesystem::remove(path,ec)"))
+        self.assertIn("if(!AllowPublication(path,true,errors)){", empty_roster)
         self.assertIn("returnfalse;", empty_roster)
         self.assertIn("returnFlushRemovalDirectory(path,errors);", service[end:])
 

@@ -2,6 +2,7 @@
 // SIMULATION requirements only (preset and worldgen dependencies); renderer/UI
 // asset requirements are caller-supplied by the client. Worldgen dependencies
 // are simulation assets and must be available even for a headless host.
+#include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
@@ -75,6 +76,7 @@
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -135,6 +137,44 @@ public:
 private:
     fs::path root_;
 };
+
+TEST(GameSessionHeadlessWorldTest, PlantDeletionFailureFailsLegacySaveWithoutDirtyChunks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateWorld("Plant deletion failure", "1337", "default"));
+        const auto save = session.GetWorldSaveDir();
+        const auto path = Luminumbra::Persistence::WorldSaveService::plant_entities_path(save);
+        Luminumbra::Ecs::EntityRegistrySnapshot plants;
+        plants.entities.push_back(Luminumbra::Ecs::EntitySnapshotRecord{
+            .entity_id = 1, .name = "stale plant", .components = {}});
+        ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_plant_entities(plants, save));
+        for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
+            ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(
+            [](const fs::path& destination, bool removing) {
+                return !(removing && destination.filename() == "plant-entities.json");
+            });
+        Luminumbra::world::WorldStateSaveReport report;
+        EXPECT_FALSE(session.SaveWorldStateTo(save, &report));
+        EXPECT_EQ(report.chunks_dirty, 0u);
+        EXPECT_FALSE(report.saved);
+        Luminumbra::Ecs::EntityRegistrySnapshot retained;
+        EXPECT_TRUE(Luminumbra::Persistence::WorldSaveService::load_plant_entities(retained, save));
+        EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(retained),
+                  Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(plants));
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+        EXPECT_TRUE(session.SaveWorldStateTo(save));
+        EXPECT_FALSE(fs::exists(path));
+    }
+    jobs.shutdown();
+}
 
 // Fault injection exercises scan errors on every platform and under elevated users.
 // No permission-dependent fixture or skipped assertion is needed.
@@ -2295,6 +2335,42 @@ TEST_P(SavedWorldPresetTest, InvalidPlantProjectionRefusesAllLoadPathsWithoutAdo
     EXPECT_TRUE(session.SaveWorldStateTo(Root().path() / "after-refused-plant"));
 }
 
+TEST_P(SavedWorldPresetTest, GenericPartialPlantRecordsRefuseAllLoadPathsBeforeAdoption) {
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, true));
+    const PendingSnapshotState pending(session);
+    const RetainedCreationState retained(session);
+    const auto save = session.GetWorldSaveDir();
+    const auto original = luminumbra::foliage::BuildPlantEntitySnapshot(session.GetRegistry());
+    ASSERT_FALSE(original.entities.empty());
+    const auto world_id = session.GetMetadata().worldId;
+    for (unsigned mask = 0; mask < 7; ++mask) {
+        SCOPED_TRACE(mask);
+        auto snapshot = original;
+        std::erase_if(snapshot.entities.front().components, [mask](const auto& component) {
+            return (component.type == "Transform" && (mask & 1u) == 0) ||
+                   (component.type == "PlantGenome" && (mask & 2u) == 0) ||
+                   (component.type == "PlantGrowth" && (mask & 4u) == 0);
+        });
+        ASSERT_TRUE(P::WorldSaveService::save_plant_entities(snapshot, save));
+        const auto disk = SavedPresetTestDiskBytes(Root().path());
+        for (int entry = 0; entry < 3; ++entry) {
+            SCOPED_TRACE(entry);
+            const bool loaded = entry == 0   ? session.LoadWorld(world_id)
+                                : entry == 1 ? session.LoadWorldFrom(world_id, Root().path())
+                                             : session.LoadWorldStateFrom(save);
+            EXPECT_FALSE(loaded);
+            EXPECT_NE(session.GetWorldOpenError().find("invalid plant snapshot"),
+                      std::string::npos);
+            retained.ExpectUnchanged(session);
+            pending.ExpectUnchanged(session, *chunk);
+            EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+        }
+    }
+}
+
 #if !defined(_WIN32)
 TEST_P(SavedWorldPresetTest, NonRegularPlantFilesRefuseAllLoadPathsBeforeAdoption) {
     GameSession session;
@@ -2329,8 +2405,9 @@ TEST_P(SavedWorldPresetTest, NonRegularPlantFilesRefuseAllLoadPathsBeforeAdoptio
                     ::close(descriptor);
             }
         } close_reader{keeper};
-        if (kind == 0)
+        if (kind == 0) {
             ASSERT_GE(keeper, 0);
+        }
         for (int entry = 0; entry < 3; ++entry) {
             SCOPED_TRACE(entry);
             if (kind == 0) {

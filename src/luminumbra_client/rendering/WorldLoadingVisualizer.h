@@ -70,6 +70,7 @@ private:
 bool DrawLoadingOverlay(const std::string& status_text,
                         float progress,
                         int dispatched_chunks,
-                        std::size_t total_chunks);
+                        std::size_t total_chunks,
+                        const char* progress_unit = "Chunks Dispatched");
 
 } // namespace Luminumbra::Client

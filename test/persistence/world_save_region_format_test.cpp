@@ -4,11 +4,14 @@
 // design decisions, section 3.
 #include "gtest/gtest.h"
 
+#include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
 
+#include "ecs/EntitySnapshot.h"
 #include "persistence/SavedJsonAdmission.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
+#include "world/ActiveRegionLedger.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
@@ -19,6 +22,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -48,6 +52,55 @@ struct TempSaveDir {
     }
 
     std::filesystem::path path;
+};
+
+// Cancel at a real open boundary, without scheduling or filesystem timing assumptions.
+class CancelSavedRead {
+public:
+    explicit CancelSavedRead(const std::filesystem::path& path,
+                             bool at_close = false,
+                             unsigned occurrence = 1)
+        : m_path(path)
+        , m_at_close(at_close)
+        , m_occurrence(occurrence) {
+        Active() = this;
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(&Observe);
+    }
+    ~CancelSavedRead() {
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(nullptr);
+        Active() = nullptr;
+    }
+    CancelSavedRead(const CancelSavedRead&) = delete;
+    CancelSavedRead& operator=(const CancelSavedRead&) = delete;
+
+    std::stop_token token() const {
+        return m_stop.get_token();
+    }
+    unsigned opens = 0;
+    unsigned closes = 0;
+
+private:
+    static CancelSavedRead*& Active() {
+        static CancelSavedRead* active = nullptr;
+        return active;
+    }
+    static void Observe(const std::filesystem::path& path, bool opening) {
+        auto* active = Active();
+        if (!active || path != active->m_path)
+            return;
+        if (opening) {
+            ++active->opens;
+        } else {
+            ++active->closes;
+        }
+        if ((active->m_at_close ? !opening : opening) &&
+            (active->m_at_close ? active->closes : active->opens) == active->m_occurrence)
+            active->m_stop.request_stop();
+    }
+    std::filesystem::path m_path;
+    const bool m_at_close;
+    const unsigned m_occurrence;
+    std::stop_source m_stop;
 };
 
 std::shared_ptr<Chunk>
@@ -673,6 +726,370 @@ TEST(WorldSaveRegionFormat, JsonAdmissionDistinguishesLimitsFromMalformedSavedDa
     }
 }
 
+TEST(WorldSaveRegionFormat, CancellationAtJsonOpenPreservesAdmissionOutputsAndClosesTheHandle) {
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("cancel_json_open");
+    const auto path = directory.path / "world_info.json";
+    // Exercise exact-limit, over-limit and malformed inputs under cancellation.
+    std::string exact = "{}";
+    exact.resize(SavedInputLimits::kMetadataBytes, ' ');
+    for (const auto& bytes :
+         {exact, std::string(SavedInputLimits::kMetadataBytes + 1, ' '), std::string("{")}) {
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, bytes));
+        CancelSavedRead cancellation(path);
+        nlohmann::json value = {{"unchanged", true}};
+        const auto original = value;
+        bool missing = true;
+        SavedJsonFailure failure = SavedJsonFailure::None;
+        EXPECT_FALSE(ReadSavedJson(path,
+                                   SavedInputLimits::kMetadataBytes,
+                                   value,
+                                   missing,
+                                   true,
+                                   &failure,
+                                   cancellation.token()));
+        EXPECT_EQ(failure, SavedJsonFailure::Cancelled);
+        EXPECT_FALSE(missing);
+        EXPECT_EQ(value, original);
+        EXPECT_EQ(cancellation.opens, 1u);
+        EXPECT_EQ(cancellation.closes, 1u);
+        EXPECT_EQ(ReadFileBytes(path), bytes);
+    }
+    std::stop_source stopped;
+    stopped.request_stop();
+    for (const auto& refused_path : {directory.path / "absent", directory.path}) {
+        nlohmann::json value = {{"unchanged", true}};
+        const auto original = value;
+        bool missing = true;
+        SavedJsonFailure failure = SavedJsonFailure::None;
+        EXPECT_FALSE(ReadSavedJson(refused_path,
+                                   SavedInputLimits::kMetadataBytes,
+                                   value,
+                                   missing,
+                                   true,
+                                   &failure,
+                                   stopped.get_token()));
+        EXPECT_EQ(failure, SavedJsonFailure::Cancelled);
+        EXPECT_FALSE(missing);
+        EXPECT_EQ(value, original);
+    }
+}
+
+TEST(WorldSaveRegionFormat, CancellationAtEachSavedPayloadOpenDiscardsStagedAuthority) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Persistence;
+    TempSaveDir directory("cancel_payload_open");
+    WorldStreamingState state;
+    AddFixtureChunk(state, IVec3(0, 0, 0), 1);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, directory.path));
+    world::WorldClock clock(100);
+    world::ActiveRegionLedger ledger({}, clock);
+    // Empty anchorless ledgers intentionally have no file. Persist authority so
+    // cancellation actually fires at this payload's open rather than a clean miss.
+    ledger.set_local_anchor(Vec3(1, 2, 3));
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
+    clock.write_metadata(metadata);
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, directory.path));
+    Ecs::EntityRegistrySnapshot plants;
+    plants.entities.push_back(
+        Ecs::EntitySnapshotRecord{.entity_id = 1, .name = "plant", .components = {}});
+    ASSERT_TRUE(WorldSaveService::save_plant_entities(plants, directory.path));
+    for (const auto& path : {directory.path / "world_info.json",
+                             WorldSaveService::world_manifest_path(directory.path),
+                             WorldSaveService::region_file_path(directory.path, 0, 0),
+                             WorldSaveService::active_regions_path(directory.path),
+                             WorldSaveService::plant_entities_path(directory.path)}) {
+        SCOPED_TRACE(path);
+        ASSERT_TRUE(std::filesystem::is_regular_file(path));
+        const auto before = ReadFileBytes(path);
+        // Metadata is also opened for the clock/ledger pair comparison. All
+        // other payloads open once. Exercise both reads and their close boundaries.
+        const unsigned occurrences = path.filename() == "world_info.json" ? 2u : 1u;
+        for (const bool at_close : {false, true}) {
+            for (unsigned occurrence = 1; occurrence <= occurrences; ++occurrence) {
+                SCOPED_TRACE(at_close);
+                SCOPED_TRACE(occurrence);
+                CancelSavedRead cancellation(path, at_close, occurrence);
+                WorldStreamingState loaded;
+                loaded.get_or_create_chunk(IVec3(1, 0, 1));
+                std::vector<std::string> errors;
+                EXPECT_FALSE(WorldSaveService{}.load_world(
+                    loaded, directory.path, errors, cancellation.token()));
+                EXPECT_TRUE(loaded.empty());
+                ASSERT_FALSE(errors.empty());
+                EXPECT_EQ(errors.front(), "Saved-world validation cancelled.");
+                EXPECT_EQ(cancellation.opens, occurrence);
+                EXPECT_EQ(cancellation.closes, occurrence);
+                EXPECT_EQ(ReadFileBytes(path), before);
+            }
+        }
+    }
+}
+
+TEST(WorldSaveRegionFormat, CancellationAtMetadataCloseWithoutPayloadsIsNotACleanMiss) {
+    TempSaveDir directory("metadata_close_cancellation");
+    const auto path = directory.path / "world_info.json";
+    const std::string metadata = R"({"container_version":2})";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, metadata));
+    CancelSavedRead cancellation(path, true);
+    WorldStreamingState loaded;
+    loaded.get_or_create_chunk(IVec3(1, 0, 1));
+    std::vector<std::string> errors;
+    EXPECT_FALSE(
+        WorldSaveService{}.load_world(loaded, directory.path, errors, cancellation.token()));
+    EXPECT_TRUE(loaded.empty());
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), "Saved-world validation cancelled.");
+    EXPECT_EQ(cancellation.opens, 1u);
+    EXPECT_EQ(cancellation.closes, 1u);
+    EXPECT_EQ(ReadFileBytes(path), metadata);
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "chunks"));
+}
+
+TEST(WorldSaveRegionFormat, MissingPersistenceDirectoriesAreQuietButWrongTypesRefuse) {
+    for (const bool chunks_leaf : {false, true}) {
+        TempSaveDir directory("directory_admission");
+        SCOPED_TRACE(chunks_leaf);
+        const auto path = chunks_leaf ? directory.path / "chunks"
+                                      : WorldSaveService::region_directory(directory.path);
+        std::filesystem::create_directories(path.parent_path());
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_TRUE(errors.empty());
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, "not a directory"));
+        loaded.get_or_create_chunk(IVec3(1, 0, 1));
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(ReadFileBytes(path), "not a directory");
+    }
+}
+
+#if !defined(_WIN32)
+TEST(WorldSaveRegionFormat, PersistenceDirectoryLinksAreRefusalsIncludingDanglingTargets) {
+    for (const bool link_chunks : {false, true}) {
+        for (const bool dangling : {false, true}) {
+            SCOPED_TRACE(link_chunks);
+            SCOPED_TRACE(dangling);
+            TempSaveDir directory("linked_persistence_directory");
+            const auto target = directory.path / "target";
+            WorldStreamingState empty;
+            ASSERT_TRUE(WorldSaveService{}.save_world(empty, target));
+            const auto alias = directory.path / "alias";
+            std::filesystem::create_directories(alias);
+            const auto leaf =
+                link_chunks ? alias / "chunks" : WorldSaveService::region_directory(alias);
+            std::filesystem::create_directories(leaf.parent_path());
+            const auto destination = dangling      ? directory.path / "absent"
+                                     : link_chunks ? target / "chunks"
+                                                   : WorldSaveService::region_directory(target);
+            std::filesystem::create_directory_symlink(destination, leaf);
+            const auto manifest = WorldSaveService::world_manifest_path(target);
+            const auto before = ReadFileBytes(manifest);
+            WorldStreamingState loaded;
+            loaded.get_or_create_chunk(IVec3(1, 0, 1));
+            std::vector<std::string> errors;
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, alias, errors));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_TRUE(std::filesystem::is_symlink(leaf));
+            EXPECT_EQ(ReadFileBytes(manifest), before);
+        }
+    }
+}
+TEST(WorldSaveRegionFormat, InternalDirectoryLinksPreservePayloadAdmissionAndCancellation) {
+    // Both directory positions and both target spellings must resolve inside
+    // the root. Leaf files, including plant rosters, keep strict admission.
+    for (const bool link_chunks : {false, true}) {
+        for (const bool relative_target : {false, true}) {
+            TempSaveDir directory("internal_persistence_directory");
+            SCOPED_TRACE(link_chunks);
+            SCOPED_TRACE(relative_target);
+            const auto storage = directory.path / "storage";
+            const auto leaf = link_chunks ? directory.path / "chunks"
+                                          : WorldSaveService::region_directory(directory.path);
+            const auto target = link_chunks ? storage : storage / "region";
+            std::filesystem::create_directories(target);
+            std::filesystem::create_directories(leaf.parent_path());
+            std::filesystem::create_directory_symlink(
+                relative_target ? target.lexically_relative(leaf.parent_path()) : target, leaf);
+            WorldStreamingState loaded;
+            std::vector<std::string> errors;
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_TRUE(errors.empty());
+            WorldStreamingState original;
+            AddFixtureChunk(original, IVec3(0, 0, 0), 1);
+            ASSERT_TRUE(WorldSaveService{}.save_world(original, directory.path));
+            ASSERT_TRUE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+            EXPECT_TRUE(errors.empty());
+            EXPECT_EQ(WorldSaveService{}.world_hash(loaded),
+                      WorldSaveService{}.world_hash(original));
+            const auto region = WorldSaveService::region_file_path(directory.path, 0, 0);
+            {
+                CancelSavedRead cancellation(region);
+                EXPECT_FALSE(WorldSaveService{}.load_world(
+                    loaded, directory.path, errors, cancellation.token()));
+                EXPECT_TRUE(loaded.empty());
+                ASSERT_FALSE(errors.empty());
+                EXPECT_EQ(errors.front(), "Saved-world validation cancelled.");
+                EXPECT_EQ(cancellation.opens, 1u);
+                EXPECT_EQ(cancellation.closes, 1u);
+            }
+            // Partial payloads and unknown inventory in an allowed directory
+            // remain refusals, with no destination rewrite on failed preflight.
+            errors.clear();
+            ASSERT_TRUE(WorldSaveService::write_file_durably(region, "LMR"));
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_FALSE(WorldSaveService{}.save_world(original, directory.path));
+            EXPECT_EQ(ReadFileBytes(region), "LMR");
+            ASSERT_TRUE(std::filesystem::remove(region));
+            const auto unknown = WorldSaveService::region_directory(directory.path) / "unknown";
+            ASSERT_TRUE(WorldSaveService::write_file_durably(unknown, "unknown authority"));
+            errors.clear();
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_EQ(ReadFileBytes(unknown), "unknown authority");
+        }
+    }
+}
+
+TEST(WorldSaveRegionFormat, DirectoryLinkReplacementAtPayloadOpenDiscardsStagedAuthority) {
+    class ReplaceDirectoryOnOpen {
+    public:
+        ReplaceDirectoryOnOpen(const std::filesystem::path& payload,
+                               const std::filesystem::path& link,
+                               const std::filesystem::path& replacement)
+            : m_payload(payload)
+            , m_link(link)
+            , m_replacement(replacement) {
+            Active() = this;
+            Luminumbra::Persistence::detail::set_file_read_observer_for_testing(&Observe);
+        }
+        ~ReplaceDirectoryOnOpen() {
+            Luminumbra::Persistence::detail::set_file_read_observer_for_testing(nullptr);
+            Active() = nullptr;
+        }
+        ReplaceDirectoryOnOpen(const ReplaceDirectoryOnOpen&) = delete;
+        ReplaceDirectoryOnOpen& operator=(const ReplaceDirectoryOnOpen&) = delete;
+        bool replaced = false;
+
+    private:
+        static ReplaceDirectoryOnOpen*& Active() {
+            static ReplaceDirectoryOnOpen* active = nullptr;
+            return active;
+        }
+        static void Observe(const std::filesystem::path& path, bool opening) {
+            auto* active = Active();
+            if (!active || !opening || path != active->m_payload || active->replaced)
+                return;
+            std::filesystem::remove(active->m_link);
+            std::filesystem::create_directory_symlink(active->m_replacement, active->m_link);
+            active->replaced = true;
+        }
+        const std::filesystem::path m_payload;
+        const std::filesystem::path m_link;
+        const std::filesystem::path m_replacement;
+    };
+    // Internal replacement exercises identity mismatch; external and dangling
+    // replacements exercise containment and failed resolution after discovery.
+    for (const unsigned replacement_kind : {0u, 1u, 2u}) {
+        SCOPED_TRACE(replacement_kind);
+        TempSaveDir directory("directory_replacement");
+        TempSaveDir outside("directory_replacement_external");
+        WorldStreamingState original;
+        AddFixtureChunk(original, IVec3(0, 0, 0), 1);
+        ASSERT_TRUE(WorldSaveService{}.save_world(original, directory.path));
+        const auto leaf = WorldSaveService::region_directory(directory.path);
+        const auto initial = directory.path / "initial";
+        std::filesystem::rename(leaf, initial);
+        const auto replacement = replacement_kind == 0   ? directory.path / "replacement"
+                                 : replacement_kind == 1 ? outside.path
+                                                         : directory.path / "absent";
+        if (replacement_kind != 2) {
+            std::filesystem::create_directories(replacement);
+            // The fixture has exactly one region and one manifest. A second
+            // complete roster cannot hide an identity change behind equal bytes.
+            for (const auto* filename : {"r.0.0.lmr", "world-manifest.json"})
+                ASSERT_TRUE(WorldSaveService::write_file_durably(
+                    replacement / filename, ReadFileBytes(initial / filename)));
+        }
+        std::filesystem::create_directory_symlink(initial, leaf);
+        const auto region = WorldSaveService::region_file_path(directory.path, 0, 0);
+        const auto before = ReadFileBytes(initial / region.filename());
+        ReplaceDirectoryOnOpen replacing(region, leaf, replacement);
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, directory.path, errors));
+        EXPECT_TRUE(replacing.replaced);
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(ReadFileBytes(initial / region.filename()), before);
+        if (replacement_kind != 2) {
+            EXPECT_EQ(ReadFileBytes(replacement / region.filename()), before);
+        }
+    }
+}
+
+TEST(WorldSaveRegionFormat, DirectoryLinksToWrongTypesAndEscapesRefuseWithoutPayloadReads) {
+    for (const bool link_chunks : {false, true}) {
+        TempSaveDir directory("unsafe_directory_target");
+        const auto save_root = directory.path / "save";
+        std::filesystem::create_directories(save_root);
+        const auto leaf =
+            link_chunks ? save_root / "chunks" : WorldSaveService::region_directory(save_root);
+        std::filesystem::create_directories(leaf.parent_path());
+        const auto file = save_root / "ordinary-file";
+        ASSERT_TRUE(WorldSaveService::write_file_durably(file, "not a directory"));
+        // A component-prefix sibling is outside the root too; a string-prefix
+        // comparison must not admit it. Existing tests cover valid external saves.
+        const auto outside = directory.path / "save-sibling";
+        std::filesystem::create_directories(outside);
+        for (const auto& target : {file,
+                                   save_root / "absent",
+                                   std::filesystem::path("/dev/zero"),
+                                   outside,
+                                   save_root,
+                                   leaf}) {
+            SCOPED_TRACE(link_chunks);
+            SCOPED_TRACE(target);
+            std::filesystem::create_directory_symlink(target, leaf);
+            WorldStreamingState loaded;
+            loaded.get_or_create_chunk(IVec3(1, 0, 1));
+            std::vector<std::string> errors;
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save_root, errors));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_FALSE(WorldSaveService{}.save_world(loaded, save_root));
+            // The same invalid parents must not turn an absent optional roster
+            // or a raw record writer's missing input into a successful clean miss.
+            Luminumbra::Ecs::EntityRegistrySnapshot plants;
+            plants.entities.push_back(Luminumbra::Ecs::EntitySnapshotRecord{
+                .entity_id = 1, .name = "unchanged", .components = {}});
+            const auto original_plants =
+                Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(plants);
+            errors.clear();
+            EXPECT_FALSE(WorldSaveService::load_plant_entities(plants, save_root, &errors));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(plants),
+                      original_plants);
+            const WorldSaveService::ContainerRecord record{
+                .id = 1, .lod_level = 1, .flags = 0, .payload = "unpublished"};
+            EXPECT_FALSE(WorldSaveService::upsert_container_records(
+                WorldSaveService::region_file_path(save_root, 0, 0), {record}));
+            EXPECT_TRUE(std::filesystem::is_empty(outside));
+            EXPECT_TRUE(std::filesystem::is_symlink(leaf));
+            ASSERT_TRUE(std::filesystem::remove(leaf));
+        }
+    }
+}
+
+#endif
+
 TEST(WorldSaveRegionFormat, ManifestExactCompatibilityLimitLoadsButOneMoreByteRefuses) {
     using namespace Luminumbra::Persistence;
     TempSaveDir directory("manifest_limits");
@@ -932,8 +1349,9 @@ TEST(WorldSaveRegionFormat, SavedJsonDepthBoundaryCoversMetadataManifestAndPrese
                 !over);
             EXPECT_FALSE(missing);
             EXPECT_EQ(failure, over ? SavedJsonFailure::Limit : SavedJsonFailure::None);
-            if (over)
+            if (over) {
                 EXPECT_EQ(loaded, original);
+            }
         }
         // Exercise the real service consumers as well as their shared reader.
         for (const bool metadata_input : {false, true}) {
@@ -962,8 +1380,9 @@ TEST(WorldSaveRegionFormat, SavedJsonDepthBoundaryCoversMetadataManifestAndPrese
         ASSERT_TRUE(std::filesystem::create_directory(destination));
         EXPECT_EQ(WorldSaveService::save_metadata(metadata, destination), !over);
         EXPECT_EQ(std::filesystem::exists(destination / "world_info.json"), !over);
-        if (over)
+        if (over) {
             EXPECT_TRUE(std::filesystem::is_empty(destination));
+        }
     }
     EXPECT_TRUE(SavedInputLimits::JsonDepthAllowed(nested(SavedInputLimits::kJsonNestingDepth)));
     EXPECT_FALSE(

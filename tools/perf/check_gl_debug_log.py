@@ -50,13 +50,27 @@ def open_input(path):
     """Open a regular file with a byte cap; reject malformed path arguments."""
     try:
         candidate = Path(path)
-        if not stat.S_ISREG(candidate.stat().st_mode):
+        before = candidate.lstat()
+        if (not stat.S_ISREG(before.st_mode)
+                or getattr(before, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
             raise InputError(f'input is not a regular file: {path}')
-        source = candidate.open('rb')
+        # A replaced FIFO must not block before fstat can reject it. Read only
+        # the verified descriptor; both log and artifact readers use this gate.
+        flags = (os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                 | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        descriptor = os.open(candidate, flags)
+        try:
+            source = os.fdopen(descriptor, 'rb')
+        except BaseException:
+            os.close(descriptor)
+            raise
         try:
             info = os.fstat(source.fileno())
             if not stat.S_ISREG(info.st_mode):
                 raise InputError(f'input is not a regular file: {path}')
+            if (not info.st_ino or not before.st_ino
+                    or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)):
+                raise InputError(f'input changed while opening or identity unavailable: {path}')
             if info.st_size > MAX_FILE_BYTES:
                 raise InputError(f'input exceeds {MAX_FILE_BYTES} byte cap: {path}')
         except (OSError, InputError):
