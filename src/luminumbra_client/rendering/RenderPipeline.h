@@ -513,6 +513,11 @@ public:
     void set_authored_static_draws(std::shared_ptr<const StaticDrawSnapshot> draws) {
         m_authored_draws = std::move(draws);
     }
+    // Const diagnostic of the camera that produced the prepared frame. The live
+    // camera may already have moved when CLI capture runs after rendering.
+    const FarReplayCamera* capture_camera() const {
+        return m_frame_prepared.valid ? &m_frame_prepared.replay_camera : nullptr;
+    }
     void set_taau_enabled(bool e);
     bool taau_enabled() const {
         return m_taau_enabled;
