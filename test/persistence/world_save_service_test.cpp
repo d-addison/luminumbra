@@ -50,6 +50,7 @@
 #include <windows.h>
 #else
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -1414,53 +1415,113 @@ TEST(WorldSaveService, LedgerStagingPublishesCreatesAndReplacementsWithoutDebris
     }
 }
 
-TEST(WorldSaveService, CreationLedgerStagingCleansFailuresAndJournalsPublication) {
-    {
-        const TempSaveDir save_dir("creation_staging_registration");
-        const auto directory = save_dir.path() / "created-world";
-        Luminumbra::Persistence::CreatedWorldArtifacts artifacts;
-        artifacts.create_root(directory);
-        const auto payload = directory / "payload";
+namespace {
+void CheckStagingRegistrationRefusals(
+    Luminumbra::Persistence::CreatedWorldArtifacts& artifacts,
+    const std::filesystem::path& directory,
+    const std::filesystem::path& payload,
+    const std::filesystem::path& foreign,
+    Luminumbra::Persistence::CreatedWorldArtifacts::NativeFile native,
+    Luminumbra::Persistence::CreatedWorldArtifacts::NativeFile invalid_native) {
+    EXPECT_THROW(artifacts.record_staged_file(directory / "missing", native), std::runtime_error);
+    EXPECT_THROW(artifacts.record_staged_file(foreign, native), std::runtime_error);
+    EXPECT_THROW(artifacts.record_staged_file(directory, native), std::runtime_error);
+    EXPECT_THROW(artifacts.record_staged_file(payload, invalid_native), std::runtime_error);
+}
+
+void CheckStagingRegistration(bool scoped_removal) {
+    SCOPED_TRACE(scoped_removal);
+    const TempSaveDir save_dir("creation_staging_registration");
+    const auto directory = save_dir.path() / "created-world";
+    Luminumbra::Persistence::CreatedWorldArtifacts artifacts;
+    artifacts.create_root(directory);
+    const auto payload = directory / "payload";
 #if defined(_WIN32)
-        const auto close_file = [](HANDLE handle) {
-            ::CloseHandle(handle);
-        };
-        std::unique_ptr<void, decltype(close_file)> file(
-            ::CreateFileW(payload.c_str(),
-                          GENERIC_READ | GENERIC_WRITE,
-                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                          nullptr,
-                          CREATE_NEW,
-                          FILE_ATTRIBUTE_NORMAL,
-                          nullptr),
-            close_file);
-        ASSERT_NE(file.get(), INVALID_HANDLE_VALUE);
-        const auto native = file.get();
-        const auto invalid_native = INVALID_HANDLE_VALUE;
+    const auto close_file = [](HANDLE handle) {
+        ::CloseHandle(handle);
+    };
+    std::unique_ptr<void, decltype(close_file)> file(
+        ::CreateFileW(payload.c_str(),
+                      GENERIC_READ | GENERIC_WRITE | DELETE,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr,
+                      CREATE_NEW,
+                      FILE_ATTRIBUTE_NORMAL,
+                      nullptr),
+        close_file);
+    ASSERT_NE(file.get(), INVALID_HANDLE_VALUE);
+    const auto native = file.get();
+    const auto invalid_native = INVALID_HANDLE_VALUE;
 #else
-        const auto close_file = [](std::FILE* stream) {
-            std::fclose(stream);
-        };
-        std::unique_ptr<std::FILE, decltype(close_file)> file(std::fopen(payload.c_str(), "wb+"),
-                                                              close_file);
-        ASSERT_TRUE(file);
-        const auto native = ::fileno(file.get());
-        const int invalid_native = -1;
+    const auto close_file = [](std::FILE* stream) {
+        std::fclose(stream);
+    };
+    std::unique_ptr<std::FILE, decltype(close_file)> file(std::fopen(payload.c_str(), "wb+"),
+                                                          close_file);
+    ASSERT_TRUE(file);
+    const auto native = ::fileno(file.get());
+    const int invalid_native = -1;
 #endif
-        const auto foreign = directory / "foreign";
-        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(foreign, "foreign bytes"));
-        EXPECT_THROW(artifacts.record_staged_file(directory / "missing", native),
-                     std::runtime_error);
-        EXPECT_THROW(artifacts.record_staged_file(foreign, native), std::runtime_error);
-        EXPECT_THROW(artifacts.record_staged_file(directory, native), std::runtime_error);
-        EXPECT_THROW(artifacts.record_staged_file(payload, invalid_native), std::runtime_error);
-        EXPECT_EQ(ReadFileBytes(foreign), "foreign bytes");
-        ASSERT_TRUE(std::filesystem::remove(foreign));
-        artifacts.record_staged_file(payload, native);
-        file.reset();
-        EXPECT_TRUE(artifacts.rollback().empty());
-        EXPECT_FALSE(std::filesystem::exists(directory));
+    const auto foreign = directory / "foreign";
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(foreign, "foreign bytes"));
+    ASSERT_NO_FATAL_FAILURE(CheckStagingRegistrationRefusals(
+        artifacts, directory, payload, foreign, native, invalid_native));
+    EXPECT_EQ(ReadFileBytes(foreign), "foreign bytes");
+    artifacts.record_staged_file(payload, native);
+#if defined(_WIN32)
+    std::unique_ptr<void, decltype(close_file)> foreign_file(
+        ::CreateFileW(foreign.c_str(),
+                      FILE_READ_ATTRIBUTES,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr,
+                      OPEN_EXISTING,
+                      FILE_ATTRIBUTE_NORMAL,
+                      nullptr),
+        close_file);
+    ASSERT_NE(foreign_file.get(), INVALID_HANDLE_VALUE);
+    const auto foreign_native = foreign_file.get();
+#else
+    std::unique_ptr<std::FILE, decltype(close_file)> foreign_file(std::fopen(foreign.c_str(), "rb"),
+                                                                  close_file);
+    ASSERT_TRUE(foreign_file);
+    const auto foreign_native = ::fileno(foreign_file.get());
+#endif
+    EXPECT_THROW(artifacts.forget_removed_staged_file(payload, foreign_native), std::runtime_error);
+    foreign_file.reset();
+    EXPECT_EQ(ReadFileBytes(foreign), "foreign bytes");
+    ASSERT_TRUE(std::filesystem::remove(foreign));
+    EXPECT_THROW(artifacts.forget_removed_staged_file(directory / "missing", native),
+                 std::runtime_error);
+    EXPECT_THROW(artifacts.forget_removed_staged_file(directory, native), std::runtime_error);
+    EXPECT_THROW(artifacts.forget_removed_staged_file(payload, invalid_native), std::runtime_error);
+    if (scoped_removal) {
+#if defined(_WIN32)
+        FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
+        ASSERT_TRUE(::SetFileInformationByHandle(
+            native, FileDispositionInfo, &disposition, static_cast<DWORD>(sizeof(disposition))));
+#else
+        ASSERT_EQ(::unlink(payload.c_str()), 0);
+#endif
+        artifacts.forget_removed_staged_file(payload, native);
+        EXPECT_THROW(artifacts.forget_removed_staged_file(payload, native), std::runtime_error);
     }
+    file.reset();
+    if (scoped_removal)
+        EXPECT_TRUE(std::filesystem::is_empty(directory));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(directory));
+}
+} // namespace
+
+TEST(WorldSaveService, StagedFileRegistrationRetainsIdentityUntilRollback) {
+    CheckStagingRegistration(false);
+}
+
+TEST(WorldSaveService, RemovedStagedFileReleasesJournalIdentityBeforeRollback) {
+    CheckStagingRegistration(true);
+}
+
+TEST(WorldSaveService, CreationLedgerStagingCleansFailuresAndJournalsPublication) {
     struct Observation {
         std::filesystem::path directory;
         std::filesystem::path payload;

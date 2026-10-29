@@ -142,6 +142,11 @@ class UploadBudgetWiring(unittest.TestCase):
         build = compact(body(source, "WaterfallPass::build_geometry("))
         self.assertLess(build.index("m_sites.clear();"), build.index("waterfall_sites(world)"))
         begin = compact(body(source, "void WaterfallPass::begin_adoption("))
+        preserve = begin.index("auto prepared_sites = std::move(m_sites);")
+        destroy_prepared = begin.index("destroy_geometry();")
+        restore = begin.index("m_sites = std::move(prepared_sites);")
+        self.assertLess(preserve, destroy_prepared)
+        self.assertLess(destroy_prepared, restore)
         self.assertIn("m_replace_spray = true;", begin)
         # Adoption, not preparation, replaces the spray, and it does so even for empty site sets.
         adopt = compact(body(source, "bool WaterfallPass::adopt_next("))

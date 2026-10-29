@@ -438,6 +438,18 @@ public:
         m_artifacts[m_count++] = std::move(artifact);
     }
 
+    // The scoped writer has removed this name through a verified native handle
+    // and still retains the object. Release this name's journal reference before
+    // its last handle closes, so Windows completes deletion before rollback.
+    // Published aliases keep their separate journal records.
+    void forget_removed_staged_file(const std::filesystem::path& path, NativeFile file) {
+        auto& artifact = find_artifact(path);
+        if (artifact.directory || !artifact.identity || identity_from(file) != *artifact.identity)
+            throw std::runtime_error("Invalid removed staging artifact identity.");
+        artifact.retained = ScopedFile{};
+        artifact.identity.reset();
+    }
+
     // Retain the source before exclusive publication. Claim the destination
     // only after exclusive publication succeeds, before any caller's directory
     // flush. Even a racing hard link to the source remains unowned on refusal.

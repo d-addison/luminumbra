@@ -975,9 +975,10 @@ public:
 #else
         artifacts.record_staged_file(m_path, m_descriptor);
 #endif
+        m_artifacts = &artifacts;
     }
 
-    bool remove(unsigned links = 1) const {
+    bool remove(unsigned links = 1) {
         StagingIdentity held{};
         if (!identity(held, false, links) || !matches_name(links))
             return false;
@@ -1006,8 +1007,13 @@ public:
                                                           FileDispositionInfo,
                                                           &disposition,
                                                           static_cast<DWORD>(sizeof(disposition)));
+        // Disposition alone leaves the name enumerable until ALL retained
+        // handles close, including the creation journal's open-by-ID handle.
+        // Keep retiring open while releasing those references, so identity
+        // cannot be recycled between the removal and journal retirement.
+        const bool finished = removed && finish_removal();
         const bool closed = ::CloseHandle(retiring) != 0;
-        return removed && closed;
+        return finished && closed;
 #else
         struct stat named {};
         // SaveGuard excludes cooperating writers. Recheck at unlink itself;
@@ -1015,7 +1021,8 @@ public:
         return ::lstat(m_path.c_str(), &named) == 0 && S_ISREG(named.st_mode) &&
                named.st_nlink > 0 && named.st_nlink <= links &&
                static_cast<std::uint64_t>(named.st_dev) == held[0] &&
-               static_cast<std::uint64_t>(named.st_ino) == held[1] && ::unlink(m_path.c_str()) == 0;
+               static_cast<std::uint64_t>(named.st_ino) == held[1] &&
+               ::unlink(m_path.c_str()) == 0 && finish_removal();
 #endif
     }
 
@@ -1025,7 +1032,24 @@ public:
     }
 
 private:
+    bool finish_removal() {
+        if (m_artifacts) {
+            try {
+#if defined(_WIN32)
+                m_artifacts->forget_removed_staged_file(m_path, m_handle);
+#else
+                m_artifacts->forget_removed_staged_file(m_path, m_descriptor);
+#endif
+                m_artifacts = nullptr;
+            } catch (const std::exception&) {
+                return false;
+            }
+        }
+        return close();
+    }
+
     std::filesystem::path m_path;
+    CreatedWorldArtifacts* m_artifacts = nullptr;
 #if defined(_WIN32)
     HANDLE m_handle = INVALID_HANDLE_VALUE;
 #else
@@ -1134,8 +1158,8 @@ bool ValidStagingOwnership(const std::filesystem::path& staging,
 }
 
 bool ReclaimOwnedLedgerStaging(const std::filesystem::path& staging) {
-    const StagingFile payload(staging, StagingFile::Mode::Inspect);
-    const StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
+    StagingFile payload(staging, StagingFile::Mode::Inspect);
+    StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
     if (!ValidStagingOwnership(staging, payload, record))
         return false;
     if (!payload.remove())
@@ -1209,7 +1233,7 @@ bool StagingPathMissing(const std::filesystem::path& staging) {
 }
 
 bool ReclaimOrphanedLedgerStaging(const std::filesystem::path& staging) {
-    const StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
+    StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
     if (!ValidOrphanedStagingOwnership(staging, record) || !StagingPathMissing(staging))
         return false;
     if (!record.remove())
@@ -1219,7 +1243,7 @@ bool ReclaimOrphanedLedgerStaging(const std::filesystem::path& staging) {
 }
 
 bool ReclaimClaimedLedgerStaging(const std::filesystem::path& staging) {
-    const StagingFile claim(ClaimPath(staging), StagingFile::Mode::Inspect);
+    StagingFile claim(ClaimPath(staging), StagingFile::Mode::Inspect);
     StagingIdentity reserved{};
     if (!ValidOrphanedStagingOwnership(staging, claim, &reserved) ||
         reserved != StablePayloadIdentity(reserved) || (reserved[1] == 0 && reserved[2] == 0))
