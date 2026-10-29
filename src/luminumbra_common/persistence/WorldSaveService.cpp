@@ -955,16 +955,22 @@ public:
         return matches_path(m_path, links);
     }
 
-    void record_artifact(CreatedWorldArtifacts& artifacts) {
+    void retain_publication_identity() {
 #if defined(_WIN32)
-        // Creation publishes through hard links. A named payload handle keeps
-        // the source link delete-pending even with delete sharing; retain only
-        // the file identity before the journal retires that source link.
+        // Both first installation and journal creation publish through hard
+        // links. A named payload handle keeps the source link delete-pending
+        // even with delete sharing; retain only its identity before publication.
         const auto retained = CreatedWorldArtifacts::retain_file_identity(m_handle);
         const bool retired = close();
         m_handle = retained;
         if (!retired)
             throw std::runtime_error("Cannot close named staging payload handle.");
+#endif
+    }
+
+    void record_artifact(CreatedWorldArtifacts& artifacts) {
+        retain_publication_identity();
+#if defined(_WIN32)
         artifacts.record_staged_file(m_path, m_handle);
 #else
         artifacts.record_staged_file(m_path, m_descriptor);
@@ -1389,6 +1395,9 @@ public:
     const std::filesystem::path& path() const {
         return m_path;
     }
+    StagingFile& payload() {
+        return m_payload;
+    }
     void record_payload(CreatedWorldArtifacts& artifacts) {
         // Register only the validated attempt immediately before publication.
         // Staging still owns identity-checked payload/sidecar cleanup on failure;
@@ -1591,7 +1600,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors,
-                                 CreatedWorldArtifacts* artifacts = nullptr) {
+                                 CreatedWorldArtifacts* artifacts = nullptr,
+                                 StagingFile* retained_payload = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
@@ -1628,6 +1638,10 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                      WindowsErrorMessage(attributes_error));
         return false;
     }
+    // ReplaceFileW above permits the retained attributes handle. First install
+    // retires a hard-link source, so release its named handle while keeping ID.
+    if (retained_payload)
+        retained_payload->retain_publication_identity();
     auto file = ::CreateFileW(temp.c_str(),
                               GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
                               FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1757,7 +1771,9 @@ bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors,
-                                 CreatedWorldArtifacts* artifacts = nullptr) {
+                                 CreatedWorldArtifacts* artifacts = nullptr,
+                                 StagingFile* retained_payload = nullptr) {
+    (void)retained_payload; // POSIX open descriptors do not delay source unlink.
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
@@ -3024,7 +3040,8 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
             if (artifacts)
                 temporary.record_payload(*artifacts);
             try {
-                replaced = ReplaceRegionFileAtomically(temporary.path(), path, errors, artifacts);
+                replaced = ReplaceRegionFileAtomically(
+                    temporary.path(), path, errors, artifacts, &temporary.payload());
             } catch (...) {
                 // Windows recovery can retain both verified publication links.
                 // The journal owns those links; retire the scoped sidecar too.

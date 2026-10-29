@@ -413,7 +413,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                    "LedgerStagingtemporary(staging)", "temporary.available(errors)", "temporary.prepare(bytes,errors)",
                    "BeforeActiveRegionsReplaceForTesting()", "temporary.valid(errors)",
                    "temporary.record_payload(*artifacts)",
-                   "ReplaceRegionFileAtomically(temporary.path(),path,errors,artifacts)",
+                   "ReplaceRegionFileAtomically(temporary.path(),path,errors,artifacts,&temporary.payload())",
                    "if(temporary.installed_at(path))temporary.published(errors)", "ledger=std::move(saved)")
         positions = [writer.index(value) for value in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -456,13 +456,24 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("after==before", finish)
         self.assertIn("before[5]==after[5]", finish)
         self.assertIn("std::equal(before.begin(),before.begin()+4,after.begin())", finish)
+        retention = service[service.index("voidretain_publication_identity()"):
+                            service.index("voidrecord_artifact(CreatedWorldArtifacts&artifacts)")]
+        self.assertLess(retention.index("CreatedWorldArtifacts::retain_file_identity(m_handle)"),
+                        retention.index("constboolretired=close()"))
+        self.assertIn("m_handle=retained;if(!retired)throwstd::runtime_error(", retention)
         record = service[service.index("voidrecord_artifact(CreatedWorldArtifacts&artifacts)"):
                          service.index("boolremove(unsignedlinks=1)")]
-        self.assertLess(record.index("CreatedWorldArtifacts::retain_file_identity(m_handle)"),
-                        record.index("constboolretired=close()"))
-        self.assertIn("m_handle=retained;if(!retired)throwstd::runtime_error(", record)
-        self.assertIn("artifacts.record_staged_file(m_path,m_handle)", record)
+        self.assertLess(record.index("retain_publication_identity()"),
+                        record.index("artifacts.record_staged_file(m_path,m_handle)"))
         self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
+        publication = service.split("boolReplaceRegionFileAtomically(", 2)[1]
+        ordered = ("if(artifacts){artifacts->publish_file(temp,destination);returntrue;}",
+                   "::ReplaceFileW(", "constDWORDattributes_error=::GetLastError()",
+                   "if(retained_payload)retained_payload->retain_publication_identity();",
+                   "autofile=::CreateFileW(temp.c_str(),",
+                   "Detail::WindowsPublishWithoutReplacement(")
+        positions = [publication.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
         self.assertNotIn("retain_file_identity", finish)
         prepare = service[service.index("boolprepare(conststd::string&bytes,"):
                           service.index("boolvalid(std::vector<std::string>*errors)")]
