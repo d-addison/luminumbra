@@ -5,7 +5,7 @@
     {
       "id": "ci.base-edit-routing",
       "source": "issue #637",
-      "statement": "CI admits pull-request edited events only when changes.base is present. Metadata-only edits skip every job before runner allocation, use unique non-cancelling concurrency groups, and publish distinct skipped check names so required check names retain their validation results. Real base edits preserve normal routing; every ready pull request retargeted to main enables Windows/UCRT64 regardless of labels or changed paths. Offline behavioural regressions cover missing and partial edit metadata, dependency failures and cancellation, concurrency isolation, check names, draft guards and retarget admission. Hosted check publication remains pending qualification.",
+      "statement": "CI admits pull-request edited events only when changes.base is present. Metadata-only edits skip every job before runner allocation, use unique non-cancelling concurrency groups, and publish distinct skipped check names so required check names retain their validation results. Real base edits preserve normal routing; every ready pull request retargeted to main enables Windows/UCRT64 regardless of labels, Windows-sensitive paths or C++ classification, including confirmed non-C++ changes. MSVC runs when C++ or Python classification is required or uncertain. Offline behavioural regressions cover missing and partial edit metadata, dependency failures and cancellation, concurrency isolation, check names, draft guards and retarget admission. Hosted check publication remains pending qualification.",
       "status": "covered",
       "evidence": [
         {
@@ -117,7 +117,7 @@
     {
       "id": "ci.workflow-policy-partitions",
       "source": "tools/ci/test_workflow_policy.py",
-      "statement": "Twelve disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates UCRT64 route and classifier fixtures. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "statement": "Thirteen disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates UCRT64 route and classifier fixtures, Windows docs skips and standalone Python contract placement; WorkflowPolicyContractPart12 isolates the aggregate refusal of uncertain classification. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
       "status": "covered",
       "evidence": [
         {
@@ -167,6 +167,10 @@
         {
           "kind": "ctest",
           "ref": "WorkflowPolicyContractPart11"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart12"
         }
       ]
     },
@@ -179,6 +183,31 @@
         {
           "kind": "script",
           "ref": "tools/ci/test_cache_retention.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.ucrt64-routing",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "Every ready main-bound PR requires successful UCRT64 native producers, including confirmed non-C++ changes and base retargets. Main/devel pushes, manual dispatches, and ready devel-bound PRs admitted by the windows-proof label or Windows-sensitive paths require C++ classification; unknown outputs keep those native routes, while confirmed non-C++ changes skip them. The aggregate refuses skipped expected producers, drafts, missing draft metadata and unsuccessful classification. MSVC retains its native route for Python-only changes.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_ci_paths.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart11"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart12"
         },
         {
           "kind": "doc",

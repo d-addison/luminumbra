@@ -552,7 +552,7 @@ jobs:
   windows-msvc:
     name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     needs: changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
     runs-on: windows-2025
     timeout-minutes: 90
     strategy:
@@ -901,8 +901,9 @@ jobs:
     name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
     # Main/devel pushes seed the cache; manual dispatches, every ready PR into main
     # and ready PRs with Windows paths or the windows-proof label qualify on demand.
+    # Main-bound PRs require native evidence even for confirmed non-C++ changes.
     needs: changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')))) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && (needs.changes.outputs.needs_cpp != 'false' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof')))) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')))) }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -1286,7 +1287,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: "true"
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
@@ -1364,7 +1365,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true')) }}
+          CI_ENABLED: ${{ (needs.changes.outputs.needs_cpp != 'false' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof')))) && ((github.event_name == 'push' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-proof') || needs.changes.outputs.needs_ucrt64 == 'true'))) }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
