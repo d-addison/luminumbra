@@ -1041,6 +1041,10 @@ public:
         if (!m_record_created)
             return m_record.refuse("cannot exclusively create and identify staging completion",
                                    errors);
+        // The record is still empty here. Its size and change stamps move as it is
+        // written, so bind only the device and file index, which are what the
+        // encoder and every validator compare.
+        instance_identity = StablePayloadIdentity(instance_identity);
         const auto ownership =
             StagingOwnershipBytes(m_path, world_identity, staging_identity, instance_identity);
         if (ownership.empty())
