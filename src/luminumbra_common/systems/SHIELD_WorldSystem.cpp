@@ -95,6 +95,13 @@ constexpr std::size_t kMaxMeshingBatchesInFlight =
     static_cast<std::size_t>(kActivationPipelineLatencyTicks) + 1;
 
 namespace {
+bool HasPublishedFarLodSdf(const Luminumbra::Chunk* chunk) {
+    // Loading vectors belong to the generation worker until owner publication.
+    return chunk && chunk->get_state() != Luminumbra::ChunkState::Loading &&
+           chunk->sdf_data.size() == kFullSdfLattice &&
+           (chunk->material_data.empty() || chunk->material_data.size() == kFullSdfLattice);
+}
+
 // Persistence may supply a rejected grid; bound before multiplying or indexing.
 bool IsBoundedWaterResolution(int resolution) {
     return resolution > 1 && resolution <= 32 && 32 % resolution == 0;
@@ -6260,10 +6267,6 @@ void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coo
 std::shared_ptr<const FarLodSdfSnapshot>
 SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     constexpr int kRegionChunkSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
-    constexpr std::size_t kFullSdfLatticeSize = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
-                                                static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
-
     const std::int64_t min_chunk_x64 = static_cast<std::int64_t>(rx) * kRegionChunkSpan - 1;
     const std::int64_t max_chunk_x64 =
         static_cast<std::int64_t>(rx) * kRegionChunkSpan + kRegionChunkSpan;
@@ -6284,6 +6287,7 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);
     snapshot->authority_revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
     snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);
+    snapshot->min_chunk_coords = IVec2(min_chunk_x, min_chunk_z);
 
     // Capture after streaming publication. Each chunk retains one immutable
     // payload; overlapping regions and unchanged captures share those bytes.
@@ -6291,9 +6295,7 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
         (void)id;
         // Generation writes live vectors while Loading. Only owner-thread
         // publication makes those bytes eligible, even if a worker is finished.
-        if (!chunk || chunk->get_state() == ChunkState::Loading ||
-            chunk->sdf_data.size() != kFullSdfLatticeSize ||
-            (!chunk->material_data.empty() && chunk->material_data.size() != kFullSdfLatticeSize)) {
+        if (!HasPublishedFarLodSdf(chunk.get())) {
             continue;
         }
         const IVec3& coords = chunk->get_coords();
@@ -6324,22 +6326,54 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
 }
 
 bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const {
+    constexpr int kFootprintSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X + 2;
     if (snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||
         snapshot.authority_revision !=
-            m_far_lod_authority_revision.load(std::memory_order_acquire)) {
+            m_far_lod_authority_revision.load(std::memory_order_acquire) ||
+        snapshot.min_chunk_coords.x < Chunk::kPackedMinXz ||
+        snapshot.min_chunk_coords.y < Chunk::kPackedMinXz ||
+        static_cast<std::int64_t>(snapshot.min_chunk_coords.x) + kFootprintSpan - 1 >
+            Chunk::kPackedMaxXz ||
+        static_cast<std::int64_t>(snapshot.min_chunk_coords.y) + kFootprintSpan - 1 >
+            Chunk::kPackedMaxXz) {
         return false;
     }
 
     // Eviction is safe because snapshot owns its bytes. A still-resident
     // chunk with a changed local revision/provenance, however, supersedes it.
+    std::size_t captured_resident_sdfs = 0;
     for (const FarLodSdfSnapshotEntry& entry : snapshot.entries) {
         const auto current = find_streamed_chunk(entry.coords);
-        if (current && (current->voxel_revision() != entry.voxel_revision ||
+        if (current && (!HasPublishedFarLodSdf(current.get()) ||
+                        current->voxel_revision() != entry.voxel_revision ||
                         current->sdf_provenance() != entry.provenance)) {
             return false;
         }
+        if (current)
+            ++captured_resident_sdfs;
     }
-    return true;
+
+    // Count the complete footprint, including chunks absent or Loading at capture.
+    // Every captured resident was checked above, so an additional published SDF
+    // makes the counts differ. Evicted captures still own their immutable bytes.
+    // Fixed bound: 34 x 34 columns, each containing only packed-Y resident chunks;
+    // no allocation or whole-world scan, and constant work per resident item.
+    std::size_t published_sdfs = 0;
+    const auto& columns = m_activation_index.columns();
+    for (int dz = 0; dz < kFootprintSpan; ++dz) {
+        for (int dx = 0; dx < kFootprintSpan; ++dx) {
+            const auto column = columns.find(World::ActivationResidencyIndex::column_key(
+                snapshot.min_chunk_coords.x + dx, snapshot.min_chunk_coords.y + dz));
+            if (column == columns.end())
+                continue;
+            for (const auto& [id, chunk] : column->second.residents) {
+                (void)id;
+                if (HasPublishedFarLodSdf(chunk.get()))
+                    ++published_sdfs;
+            }
+        }
+    }
+    return published_sdfs == captured_resident_sdfs;
 }
 
 std::shared_ptr<Luminumbra::Chunk>

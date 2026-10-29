@@ -240,6 +240,9 @@ struct FarLodSdfSnapshot {
     u64 params_hash = 0;
     u64 authority_revision = 0;
     u64 region_authority_revision = 0;
+    // Validated lower corner of the fixed region-plus-halo capture footprint.
+    // Transient owner-thread validation metadata; never serialized or hashed.
+    IVec2 min_chunk_coords{0};
     std::vector<FarLodSdfSnapshotEntry> entries;
 };
 

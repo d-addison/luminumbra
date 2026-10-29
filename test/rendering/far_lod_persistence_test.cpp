@@ -28,6 +28,7 @@
 #include <ios>
 #include <iterator>
 #include <latch>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -948,9 +949,12 @@ TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
     EXPECT_TRUE(pending->entries.empty());
     EXPECT_EQ(pending->bytes_copied, 0u);
     EXPECT_EQ(world.activation_index_counters().index_updates, before.index_updates);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*pending));
 
     world.activate_due(8);
     ASSERT_EQ(full->get_state(), ChunkState::Idle);
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*empty));
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*pending));
     const auto published = world.activation_index_counters();
     EXPECT_GT(published.index_updates, before.index_updates);
     const auto ready = world.capture_far_lod_sdf_snapshot(0, 0);
@@ -962,6 +966,73 @@ TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
     EXPECT_EQ(ready->bytes_copied,
               full->sdf_data.size() * sizeof(f32) + full->material_data.size());
     EXPECT_EQ(world.activation_index_counters().index_updates, published.index_updates);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*ready));
+}
+
+TEST(FarLodPersistence, SnapshotFreshnessCoversNewPublicationsAndPreservesEvictedPayloads) {
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    constexpr int kSpan = kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    // Both signs, all four halo corners, and all immediately-outside edges.
+    for (const int region : {-1, 0}) {
+        for (const IVec3 offset : {IVec3(-1, 0, -1),
+                                   IVec3(kSpan, 0, -1),
+                                   IVec3(-1, 0, kSpan),
+                                   IVec3(kSpan, 0, kSpan),
+                                   IVec3(-2, 0, 0),
+                                   IVec3(kSpan + 1, 0, 0),
+                                   IVec3(0, 0, -2),
+                                   IVec3(0, 0, kSpan + 1)}) {
+            Systems::SHIELD_WorldSystem world(
+                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+            const auto before = world.capture_far_lod_sdf_snapshot(region, region);
+            ASSERT_TRUE(before);
+            ASSERT_TRUE(before->entries.empty());
+            auto chunk = std::make_shared<Chunk>(offset + IVec3(region * kSpan, 0, region * kSpan));
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            // Missing/partial SDF and material lattices are still ineligible.
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+            chunk->sdf_data.assign(kSamples - 1, -1.0f);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+            chunk->sdf_data.push_back(-1.0f);
+            chunk->material_data.assign(kSamples - 1, 7u);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+            chunk->material_data.push_back(7u);
+            const bool inside =
+                offset.x >= -1 && offset.x <= kSpan && offset.z >= -1 && offset.z <= kSpan;
+            EXPECT_EQ(world.is_far_lod_sdf_snapshot_current(*before), !inside);
+            const auto after = world.capture_far_lod_sdf_snapshot(region, region);
+            ASSERT_TRUE(after);
+            EXPECT_EQ(after->entries.size(), inside ? 1u : 0u);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+            if (inside) {
+                chunk->set_state(ChunkState::Loading);
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+                chunk->set_state(ChunkState::Idle);
+                chunk->sdf_data.pop_back();
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+                chunk->sdf_data.push_back(-1.0f);
+                chunk->material_data.pop_back();
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+                chunk->material_data.push_back(7u);
+                EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+            }
+            // Eviction preserves captured authority without requiring live storage.
+            world.clear_world(nullptr);
+            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+            if (inside)
+                EXPECT_EQ(after->entries.front().payload->sdf_data.size(), kSamples);
+
+            auto invalid = *after;
+            for (const int bad :
+                 {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
+                invalid.min_chunk_coords = IVec2(bad, 0);
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
+                invalid.min_chunk_coords = IVec2(0, bad);
+                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
+            }
+        }
+    }
 }
 
 TEST(FarLodPersistence, UnchangedAndOverlappingCapturesShareBytesAndEditsCopyOnce) {
@@ -1068,6 +1139,53 @@ struct ScopedFarGl {
         glObjectLabel, static_cast<decltype(glObjectLabel)>(nullptr)};
 };
 } // namespace
+
+TEST(FarLodPersistence, PublicationAfterCaptureRefusesTilePersistence) {
+    const ScopedFarGl gl;
+    const SaveDirectory save;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    world.begin_tick(0);
+    world.dispatch_generation_jobs(
+        std::vector<Systems::SHIELD_WorldSystem::ChunkGenerationRequest>{{IVec3(0, 0, 0), 1}});
+    const auto chunk = world.find_streamed_chunk(IVec3(0, 0, 0));
+    ASSERT_TRUE(chunk);
+    ASSERT_EQ(chunk->get_state(), ChunkState::Loading);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(save.path());
+    const Vec3 camera(256, 100, 256);
+    far.update(world, camera);
+    ASSERT_GT(far.stats().builds_dispatched, 0u);
+    // Complete builds without accepting them, then publish the skipped chunk.
+    far.wait_for_world_readers();
+    world.activate_due(8);
+    ASSERT_EQ(chunk->get_state(), ChunkState::Idle);
+    // A local edit after publication is authoritative, but this chunk was
+    // absent from the capture. Neither captured-entry revisions nor its
+    // captured durability predicate can detect these newly contributing bytes.
+    const auto authority_revision = world.far_lod_authority_revision();
+    ASSERT_FALSE(chunk->sdf_data.empty());
+    chunk->sdf_data.front() += 1.0f;
+    chunk->mark_voxel_data_dirty();
+    EXPECT_EQ(world.far_lod_authority_revision(), authority_revision);
+    far.update(world, camera);
+    EXPECT_GT(far.stats().stale_results_rejected, 0u);
+    // Replacement builds have not been accepted; discard them and flush writes.
+    far.prepare_world_swap();
+    FarLodTile loaded;
+    EXPECT_FALSE(
+        FarLodStore(save.path())
+            .load_tile(FarLodTier::F1, 0, 0, ComputeTerrainParamsHash(params, 1337), loaded));
+    ExpectNoTemps(save.path());
+    far.shutdown();
+    jobs.shutdown();
+}
 
 TEST(FarLodPersistence, SaveFenceCompletesAcceptedWritesAndRetainsBindingAndDeferredUploads) {
     const ScopedFarGl gl;

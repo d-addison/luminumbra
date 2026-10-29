@@ -7304,6 +7304,13 @@ int main(int argc, char* argv[]) {
         scenario_runner->onShutdown();
     }
 
+    // Entry preparation can still own the waterfall pass and world. Its drain
+    // joins that worker before any renderer cleanup, including its own rollback.
+    if (world_entry.active()) {
+        world_entry.cancel();
+        world_entry.advance(run_entry_stage, drain_entry);
+    }
+
     trace_shutdown("world_readers_drain_started");
     // Same drain order as prepare_world_entry, with the far-LOD wait visible.
     renderPipeline.prepare_world_swap();
@@ -7311,11 +7318,6 @@ int main(int argc, char* argv[]) {
     DrainBackgroundWorldScan(jobSystem);
     DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     trace_shutdown("world_readers_drained");
-
-    if (world_entry.active()) {
-        world_entry.cancel();
-        world_entry.advance(run_entry_stage, drain_entry);
-    }
 
     // persist unsaved voxel edits on the world-exit/shutdown path,
     // before the streamed chunks are torn down. No-op when no world session

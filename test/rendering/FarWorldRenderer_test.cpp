@@ -585,6 +585,7 @@ TEST(FarWorldRenderer, SaveFencePreservesBindingOwnershipAndDraws) {
     foreign.join();
     renderer.PrepareWorldSwap();
     EXPECT_NO_THROW(renderer.WaitForAcceptedCacheWrites()); // no binding or accepted writes
+    EXPECT_TRUE(owner.State().fixture_released);
 }
 
 TEST(FarWorldRenderer, WorldSwapDrainsBeforeAuthorityMemoryDriverAndContextRelease) {
@@ -1969,6 +1970,10 @@ TEST(FarWorldHandoffRenderer, SaveFencePreservesBindingOwnershipAndDraws) {
     std::thread foreign(
         [&] { EXPECT_THROW(renderer.WaitForAcceptedCacheWrites(), std::logic_error); });
     foreign.join();
+    renderer.PrepareWorldSwap();
+    EXPECT_EQ(state.live, 0u);
+    EXPECT_TRUE(state.released_with_context);
+    state.fixture_released = true; // Handoff inputs do not install a Fixture owner.
     renderer.Shutdown();
     jobs.shutdown();
 }

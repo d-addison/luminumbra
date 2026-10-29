@@ -160,6 +160,53 @@ class UploadBudgetWiring(unittest.TestCase):
         preview = read(ROOT / "src/luminumbra_client/world/WorldgenPreview.cpp")
         self.assertIn("pipeline.prepare_world_swap();", preview)
 
+    def test_native_save_fences_release_owners_before_driver_destruction(self):
+        native = read(ROOT / "test/rendering/FarWorldRenderer_test.cpp")
+        handoff = body(native, "TEST(FarWorldHandoffRenderer, SaveFencePreservesBindingOwnershipAndDraws)")
+        calls = ("renderer.PrepareWorldSwap();", "EXPECT_EQ(state.live, 0u);",
+                 "EXPECT_TRUE(state.released_with_context);", "state.fixture_released = true;",
+                 "renderer.Shutdown();", "jobs.shutdown();")
+        positions = [handoff.index(call) for call in calls]
+        self.assertEqual(positions, sorted(positions))
+        fixture = body(native, "TEST(FarWorldRenderer, SaveFencePreservesBindingOwnershipAndDraws)")
+        self.assertLess(fixture.index("renderer.PrepareWorldSwap();"),
+                        fixture.index("EXPECT_TRUE(owner.State().fixture_released);"))
+        driver = body(native, "~Driver() override")
+        self.assertIn("EXPECT_TRUE(state_.fixture_released);", driver)
+        self.assertIn("EXPECT_EQ(state_.live, 0u);", driver)
+
+    def test_shutdown_joins_entry_worker_before_first_destructive_drain(self):
+        shutdown = self.main.split('trace_shutdown("query_cleanup_started");', 1)[1]
+        cancel = shutdown.index("world_entry.cancel();")
+        advance = shutdown.index("world_entry.advance(run_entry_stage, drain_entry);")
+        first_swap = shutdown.index("renderPipeline.prepare_world_swap();")
+        self.assertLess(cancel, advance)
+        self.assertLess(advance, first_swap)
+        self.assertLess(advance, shutdown.index("DrainBackgroundWorldScan(jobSystem);"))
+        self.assertLess(advance, shutdown.index("DrainWorldDressing("))
+        drain = body(self.main, "auto drain_entry =")
+        self.assertLess(drain.index("jobSystem.wait(entry_cpu_job);"),
+                        drain.index("prepare_world_entry();"))
+        self.assertLess(drain.index("jobSystem.wait(entry_cpu_job);"),
+                        drain.index("renderPipeline.cancel_waterfall_adoption();"))
+
+    def test_live_regeneration_retires_far_results_and_rebuilds_waterfalls(self):
+        viewer = read(ROOT / "src/luminumbra_client/debug/WorldGenViewer.cpp")
+        apply = body(viewer, 'if (ImGui::Button("Apply & Regenerate"))')
+        calls = ("pipeline.prepare_world_swap();", "main_world_system->set_params(m_params);",
+                 "main_world_system->set_seed(m_seed);",
+                 "main_world_system->regenerate_all_chunks(nullptr);",
+                 "pipeline.prepare_waterfalls(*main_world_system);")
+        positions = [apply.index(call) for call in calls]
+        self.assertEqual(positions, sorted(positions))
+        swap = body(self.pipeline, "void RenderPipeline::prepare_world_swap()")
+        self.assertIn("m_far_world->PrepareWorldSwap();", swap)
+        self.assertIn("m_farlod->prepare_world_swap();", swap)
+        legacy = body(read(RENDERING / "FarLodSystem.cpp"),
+                      "void FarLodSystem::prepare_world_swap()")
+        self.assertIn("wait_for_builds();", legacy)
+        self.assertIn("++m_epoch;", legacy)
+
     def test_waterfall_spray_cleanup_preserves_other_emitter_handles_and_indices(self):
         source = read(RENDERING / "passes/ParticlePass.cpp")
         add = body(source, "uint32_t ParticlePass::add_waterfall_spray(")

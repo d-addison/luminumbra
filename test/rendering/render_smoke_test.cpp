@@ -4542,6 +4542,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          ("snapshot->authority_revision = "
           "m_far_lod_authority_revision.load(std::memory_order_acquire);"),
          "snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);",
+         "snapshot->min_chunk_coords = IVec2(min_chunk_x, min_chunk_z);",
          "entry.voxel_revision = chunk->voxel_revision();",
          "entry.authority_durable = !chunk->is_voxel_data_dirty();",
          "entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);",
@@ -4708,10 +4709,16 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
                     "snapshot.authority_revision !=",
                     "m_far_lod_authority_revision.load(std::memory_order_acquire)",
                     "return false;",
+                    "!HasPublishedFarLodSdf(current.get()) ||",
                     "current->voxel_revision() != entry.voxel_revision ||",
                     "current->sdf_provenance() != entry.provenance",
                     "return false;",
-                    "return true;"});
+                    "++captured_resident_sdfs;",
+                    "m_activation_index.columns();",
+                    "snapshot.min_chunk_coords.x + dx, snapshot.min_chunk_coords.y + dz",
+                    "HasPublishedFarLodSdf(chunk.get())",
+                    "++published_sdfs;",
+                    "return published_sdfs == captured_resident_sdfs;"});
     const auto drain = section(
         source, "void FarLodSystem::prepare_world_swap()", "void FarLodSystem::release_region(");
     expect_ordered(drain, {"wait_for_builds();", "m_world = nullptr;", "++m_epoch;"});

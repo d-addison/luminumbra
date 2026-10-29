@@ -377,15 +377,25 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(
             encoding="utf-8")
         capture = body(source, "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
-        self.assertRegex(capture, r"if \(!chunk \|\| chunk->get_state\(\) == ChunkState::Loading \|\|")
-        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
-                        capture.index("chunk->sdf_data.size()"))
-        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
-                        capture.index("chunk->material_data.size()"))
-        self.assertLess(capture.index("chunk->get_state() == ChunkState::Loading"),
+        published = body(source, "bool HasPublishedFarLodSdf(")
+        self.assertIn("chunk && chunk->get_state() != Luminumbra::ChunkState::Loading &&", published)
+        self.assertLess(published.index("chunk->get_state()"),
+                        published.index("chunk->sdf_data.size()"))
+        self.assertLess(published.index("chunk->get_state()"),
+                        published.index("chunk->material_data.size()"))
+        self.assertLess(capture.index("if (!HasPublishedFarLodSdf(chunk.get()))"),
                         capture.index("chunk->capture_far_lod_sdf("))
+        current = body(source, "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(")
+        self.assertIn("m_activation_index.columns()", current)
+        self.assertIn("snapshot.min_chunk_coords.x + dx", current)
+        self.assertIn("snapshot.min_chunk_coords.y + dz", current)
+        self.assertIn("HasPublishedFarLodSdf(chunk.get())", current)
+        self.assertIn("return published_sdfs == captured_resident_sdfs;", current)
         native = (ROOT / "test/rendering/far_lod_persistence_test.cpp").read_text(encoding="utf-8")
-        self.assertIn("CapturesWaitForGenerationPublication", native)
+        for name in ("CapturesWaitForGenerationPublication",
+                     "SnapshotFreshnessCoversNewPublicationsAndPreservesEvictedPayloads",
+                     "PublicationAfterCaptureRefusesTilePersistence"):
+            self.assertIn("TEST(FarLodPersistence, " + name + ")", native)
 
     def test_native_regressions_and_legacy_fault_discrimination_remain_registered(self):
         native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
