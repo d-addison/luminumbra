@@ -5,6 +5,8 @@
 #include "../support/UniqueTempPath.h"
 
 #include "core/FilesystemPath.h"
+#include "core/Log.h"
+#include "core/LogDispatcherSink.h"
 #include "luminumbra/core/Types.h"
 #include "persistence/SavedInputFile.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -32,6 +34,7 @@
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <span>
+#include <spdlog/sinks/ostream_sink.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -902,10 +905,11 @@ TEST(WorldSaveService, SharedWritesAndEmptyRemovalReclaimStagingOnEverySave) {
     ASSERT_TRUE(WorldSaveService::write_file_durably(unrelated, "keep"));
     for (const bool empty : {false, true}) {
         ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial field"));
-        if (empty)
+        if (empty) {
             ASSERT_TRUE(WorldSaveService::remove_file_and_staging(file));
-        else
+        } else {
             ASSERT_TRUE(WorldSaveService::write_file_durably(file, "complete field"));
+        }
         EXPECT_FALSE(std::filesystem::exists(abandoned));
         EXPECT_TRUE(std::filesystem::exists(unrelated));
         EXPECT_TRUE(std::filesystem::is_directory(retained_directory));
@@ -1195,8 +1199,9 @@ TEST(WorldSaveService, LedgerStagingPreservesInvalidOrphanOwnership) {
             const std::array<std::size_t, 7> positions{
                 0, 8, 80, 104, 112, changed.size() - 9, changed.size() - 1};
             changed[positions[static_cast<std::size_t>(mutation - 4)]] ^= 1;
-            if (mutation != 10)
+            if (mutation != 10) {
                 ASSERT_NO_FATAL_FAILURE(RefreshOwnershipChecksum(changed));
+            }
         }
         ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(capture.record, changed));
         ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
@@ -1291,8 +1296,9 @@ TEST(WorldSaveService, LedgerStagingPreservesMalformedAndMismatchedOwnership) {
             const std::array<std::size_t, 8> positions{
                 0, 8, 32, 80, 104, 112, changed.size() - 9, changed.size() - 1};
             changed[positions[static_cast<std::size_t>(mutation - 3)]] ^= 1;
-            if (mutation != 10)
+            if (mutation != 10) {
                 ASSERT_NO_FATAL_FAILURE(RefreshOwnershipChecksum(changed));
+            }
         }
         ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(capture.record, changed));
         const auto payload = ReadFileBytes(capture.payload);
@@ -1332,16 +1338,18 @@ TEST(WorldSaveService, LedgerStagingPreservesMissingOrSubstitutedProofAndPayload
             std::filesystem::create_hard_link(capture.record, save_dir.path() / "foreign-link");
         }
         ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
-        if (substitution == 3)
+        if (substitution == 3) {
             EXPECT_EQ(ReadFileBytes(capture.payload / "keep"), "keep");
-        else
+        } else {
             EXPECT_EQ(ReadFileBytes(capture.payload), payload);
-        if (substitution == 0)
+        }
+        if (substitution == 0) {
             EXPECT_FALSE(std::filesystem::exists(capture.record));
-        else if (substitution == 5)
+        } else if (substitution == 5) {
             EXPECT_EQ(ReadFileBytes(capture.record / "keep"), "keep");
-        else
+        } else {
             EXPECT_EQ(ReadFileBytes(capture.record), capture.ownership);
+        }
     }
 }
 
@@ -1368,6 +1376,74 @@ TEST(WorldSaveService, LedgerStagingPreservesPairCopiedFromAnotherWorldOrFilenam
 }
 
 #ifndef _WIN32
+TEST(WorldSaveService, LedgerStagingReclaimsOrphansAfterDirectoryChangesAndReportsOccupiedLeaves) {
+    // No timing or symlink privilege assumptions: POSIX exercises both absence
+    // and occupied leaves, while the source contract covers the Windows open.
+    for (const int occupant : {0, 1, 2, 3, 4, 5}) {
+        SCOPED_TRACE(occupant);
+        const TempSaveDir save_dir("changed_directory_ownership");
+        ASSERT_NO_FATAL_FAILURE(LeavePublishedLedgerSidecar(save_dir.path()));
+        const auto capture = CapturedLedgerStaging::current();
+        const auto live_path = WorldSaveService::active_regions_path(save_dir.path());
+        const auto published = ReadFileBytes(live_path);
+        const auto entry = save_dir.path() / "unrelated-entry";
+        const auto moved = save_dir.path() / "renamed-entry";
+        ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(entry, "directory change"));
+        std::filesystem::rename(entry, moved);
+        ASSERT_TRUE(std::filesystem::remove(moved));
+        const auto target = save_dir.path() / "symlink-target";
+        if (occupant == 1 || occupant == 2) {
+            if (occupant == 2) {
+                ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(target, "foreign target"));
+            }
+            std::filesystem::create_symlink(target.filename(), capture.payload);
+        } else if (occupant == 3) {
+            ASSERT_TRUE(std::filesystem::create_directory(capture.payload));
+        } else if (occupant == 4) {
+            ASSERT_EQ(::mkfifo(capture.payload.c_str(), 0600), 0);
+        } else if (occupant == 5) {
+            ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(capture.payload, "foreign payload"));
+        }
+        std::ostringstream messages;
+        const auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(messages);
+        const auto dispatcher = Log::GetDispatcherSink();
+        dispatcher->Attach(sink);
+        // Use the staging base to reclaim debris without deleting the live ledger.
+        const bool removed =
+            WorldSaveService::remove_file_and_staging(save_dir.path() / "active-regions.arl");
+        dispatcher->Detach(sink);
+        ASSERT_TRUE(removed);
+        EXPECT_EQ(ReadFileBytes(live_path), published);
+        if (occupant == 0) {
+            EXPECT_FALSE(std::filesystem::exists(capture.record));
+            EXPECT_EQ(std::filesystem::symlink_status(capture.payload).type(),
+                      std::filesystem::file_type::not_found);
+        } else {
+            EXPECT_EQ(ReadFileBytes(capture.record), capture.ownership);
+            EXPECT_NE(
+                messages.str().find("preserving staging ownership: payload leaf is still present"),
+                std::string::npos);
+            if (occupant == 1 || occupant == 2) {
+                EXPECT_TRUE(
+                    std::filesystem::is_symlink(std::filesystem::symlink_status(capture.payload)));
+                EXPECT_EQ(std::filesystem::read_symlink(capture.payload), target.filename());
+                if (occupant == 1) {
+                    EXPECT_FALSE(std::filesystem::exists(target));
+                } else {
+                    EXPECT_EQ(ReadFileBytes(target), "foreign target");
+                }
+            } else if (occupant == 3) {
+                EXPECT_TRUE(std::filesystem::is_directory(capture.payload));
+            } else if (occupant == 4) {
+                EXPECT_EQ(std::filesystem::symlink_status(capture.payload).type(),
+                          std::filesystem::file_type::fifo);
+            } else {
+                EXPECT_EQ(ReadFileBytes(capture.payload), "foreign payload");
+            }
+        }
+    }
+}
+
 TEST(WorldSaveService, LedgerStagingPreservesSymlinkAndSpecialFileSubstitutions) {
     for (const int substitution : {0, 1, 2, 3}) {
         SCOPED_TRACE(substitution);
@@ -1378,20 +1454,23 @@ TEST(WorldSaveService, LedgerStagingPreservesSymlinkAndSpecialFileSubstitutions)
         const auto target = save_dir.path() / "foreign-target";
         ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(target, "foreign target"));
         ASSERT_TRUE(std::filesystem::remove(replaced));
-        if (substitution < 2)
+        if (substitution < 2) {
             std::filesystem::create_symlink(target.filename(), replaced);
-        else
+        } else {
             ASSERT_EQ(::mkfifo(replaced.c_str(), 0600), 0);
+        }
         ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
         const auto kind = std::filesystem::symlink_status(replaced).type();
         EXPECT_EQ(kind,
                   substitution < 2 ? std::filesystem::file_type::symlink
                                    : std::filesystem::file_type::fifo);
         EXPECT_EQ(ReadFileBytes(target), "foreign target");
-        if (replaced != capture.payload)
+        if (replaced != capture.payload) {
             EXPECT_TRUE(std::filesystem::is_regular_file(capture.payload));
-        if (replaced != capture.record)
+        }
+        if (replaced != capture.record) {
             EXPECT_EQ(ReadFileBytes(capture.record), capture.ownership);
+        }
     }
 }
 #endif
@@ -1849,10 +1928,11 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
             chunk->set_state(ChunkState::Idle);
             const auto settled = WorldSaveService::region_simulation_digest(
                 {}, {0, 0}, RegionDigestInputs{{chunk}, {}});
-            if (edited)
+            if (edited) {
                 ASSERT_NE(settled, empty);
-            else
+            } else {
                 ASSERT_EQ(settled, empty);
+            }
             chunk->set_state(lifecycle);
             const auto in_memory = lifecycle == ChunkState::Loading ? empty : settled;
             EXPECT_EQ(WorldSaveService::region_simulation_digest(

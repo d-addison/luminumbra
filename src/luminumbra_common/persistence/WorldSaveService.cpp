@@ -410,31 +410,39 @@ public:
             ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory ||
             (!directory && info.nNumberOfLinks != 1))
             return false;
-        result = {info.dwVolumeSerialNumber,
-                  info.nFileIndexHigh,
-                  info.nFileIndexLow,
-                  (static_cast<std::uint64_t>(info.ftCreationTime.dwHighDateTime) << 32) |
-                      info.ftCreationTime.dwLowDateTime,
-                  (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
-                      info.ftLastWriteTime.dwLowDateTime,
-                  (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow};
+        result = {info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow, 0, 0, 0};
+        // Directory contents may change between recording and orphan cleanup.
+        // Bind only volume/index; retain timestamps and length for ordinary files.
+        if (directory)
+            return true;
+        result[3] = (static_cast<std::uint64_t>(info.ftCreationTime.dwHighDateTime) << 32) |
+                    info.ftCreationTime.dwLowDateTime;
+        result[4] = (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
+                    info.ftLastWriteTime.dwLowDateTime;
+        result[5] = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
 #else
         struct stat info {};
         if (m_descriptor < 0 || ::fstat(m_descriptor, &info) != 0 || info.st_ino == 0 ||
             (directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode)) ||
             (!directory && (info.st_nlink != 1 || info.st_size < 0)))
             return false;
+        result = {static_cast<std::uint64_t>(info.st_dev),
+                  static_cast<std::uint64_t>(info.st_ino),
+                  0,
+                  0,
+                  0,
+                  0};
+        // ctime changes on entry creation, rename and removal within a directory.
+        if (directory)
+            return true;
 #if defined(__APPLE__)
         const auto changed = info.st_ctimespec;
 #else
         const auto changed = info.st_ctim;
 #endif
-        result = {static_cast<std::uint64_t>(info.st_dev),
-                  static_cast<std::uint64_t>(info.st_ino),
-                  0,
-                  static_cast<std::uint64_t>(changed.tv_sec),
-                  static_cast<std::uint64_t>(changed.tv_nsec),
-                  directory ? 0 : static_cast<std::uint64_t>(info.st_size)};
+        result[3] = static_cast<std::uint64_t>(changed.tv_sec);
+        result[4] = static_cast<std::uint64_t>(changed.tv_nsec);
+        result[5] = static_cast<std::uint64_t>(info.st_size);
 #endif
         return true;
     }
@@ -655,6 +663,9 @@ std::string StagingOwnershipBytes(const std::filesystem::path& staging,
         }))
         return {};
     const auto name = Filesystem::GenericUtf8PathString(filename);
+    // Version 1 already stores only the directory's three stable identity words.
+    // At most 408 bytes: 8 magic + 12 identity words + name length + 256 name
+    // bytes + 32 instance bytes + checksum. This stays within the 512-byte reader bound.
     std::string bytes = "AROWN001";
     for (std::size_t index = 0; index < 3; ++index)
         AppendU64(bytes, world_identity[index]);
@@ -758,13 +769,34 @@ bool ValidOrphanedStagingOwnership(const std::filesystem::path& staging,
 bool StagingPathMissing(const std::filesystem::path& staging) {
     // A failed open is not absence: preserve inaccessible and nonregular leaves,
     // including dangling symlinks and reparse points.
+    const auto refuse = [&staging](const char* reason) {
+        AddError(nullptr, std::string(reason) + ": " + Filesystem::GenericUtf8PathString(staging));
+        return false;
+    };
 #if defined(_WIN32)
-    return ::GetFileAttributesW(staging.c_str()) == INVALID_FILE_ATTRIBUTES &&
-           ::GetLastError() == ERROR_FILE_NOT_FOUND;
+    const HANDLE leaf = ::CreateFileW(staging.c_str(),
+                                      FILE_READ_ATTRIBUTES,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                                      nullptr);
+    if (leaf != INVALID_HANDLE_VALUE) {
+        if (!::CloseHandle(leaf))
+            return refuse("cannot close staging leaf inspection handle during orphan cleanup");
+        return refuse("preserving staging ownership: payload leaf is still present");
+    }
+    const DWORD error = ::GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+        return true;
 #else
     struct stat named {};
-    return ::lstat(staging.c_str(), &named) != 0 && errno == ENOENT;
+    if (::lstat(staging.c_str(), &named) == 0)
+        return refuse("preserving staging ownership: payload leaf is still present");
+    if (errno == ENOENT)
+        return true;
 #endif
+    return refuse("cannot inspect staging payload leaf during orphan cleanup");
 }
 
 bool ReclaimOrphanedLedgerStaging(const std::filesystem::path& staging) {
