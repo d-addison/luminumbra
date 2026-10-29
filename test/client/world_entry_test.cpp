@@ -384,7 +384,7 @@ TEST_F(WorldEntryFilesystem, PreparationNeedsNoLiveSessionAndCancellationNeverAd
         EXPECT_EQ(session.GetWorldSystem(), world);
         EXPECT_EQ(session.WorldRevision(), live_revision);
         auto stale_state = GameSession::PrepareWorldState(state_options, session.GetWorldSaveDir());
-        auto valid = GameSession::PrepareWorldLoad(options, id);
+        auto valid = GameSession::PrepareWorldLoad(state_options, id);
         ASSERT_TRUE(session.AdoptPreparedWorld(valid)) << session.GetWorldOpenError();
         const auto adopted_revision = session.WorldRevision();
         EXPECT_FALSE(session.AdoptPreparedWorld(valid));
