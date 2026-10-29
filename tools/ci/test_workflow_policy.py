@@ -1010,8 +1010,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             "gns-compile-probe": "7add7cbd1528a989a68922e779bf47e1bd867d8812e911ea6c0261dcf6762057",
             "diligent-rhi": "dcd14e3c82e44abaa18c301cb39cad12a342fd23f13dbe2fef729ce1c46d73a8",
             # Pin the selected Python, partitioned local checks, render failure symbols,
-            # shard-1-only Python contracts and verbose compiler cache statistics.
-            "windows-msvc": "d9311645c58369a0490bad97a53e51c780fde15f0b323aca595ba0e023b055cd",
+            # shard-2-only Python contracts and verbose compiler cache statistics.
+            "windows-msvc": "24a6cdc76e869e3f7f94e5d13f5a0115a80dd48497f6540564f436b293d8a963",
             # Pin UCRT64 opt-in routing, native evidence and minimal debug information.
             "windows-ucrt64": "82cf7628440b44c13aed1c120ba293b1072b17f67108b6d4eef1cafabedb8b18",
             "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
