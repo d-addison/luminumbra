@@ -269,9 +269,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         service = compact_cpp(source)
         cleanup = service[service.index("std::size_tReclaimAbandonedStaging("):]
         cleanup = cleanup[:cleanup.index("#ifdefined(_WIN32)")]
-        self.assertIn('if(destination.filename()=="active-regions.arl")', cleanup)
+        self.assertIn('if(StagingNameEquals(destination.filename(),"active-regions.arl"))', cleanup)
         self.assertIn('elseif(ReclaimOwnedLedgerStaging(entry.path()))', cleanup)
-        self.assertLess(cleanup.index('destination.filename()=="active-regions.arl"'),
+        self.assertLess(cleanup.index('StagingNameEquals(destination.filename(),"active-regions.arl")'),
                         cleanup.index('entry.is_regular_file(kind_error)'))
         owned = service[service.index("boolReclaimOwnedLedgerStaging("):service.index("std::filesystem::pathNextLedgerTempPath(")]
         self.assertLess(owned.index("ValidStagingOwnership(staging,payload,record)"),
@@ -282,7 +282,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                       "directory.identity(world_identity,true)", "payload.identity(staging_identity)",
                       "record.identity(instance_identity)", "record.read_record(recorded)"):
             self.assertIn(proof, validator)
-        self.assertIn("!expected.empty()&&recorded==expected", validator)
+        self.assertIn("if(expected.empty())returnrefuse(", validator)
+        self.assertIn("if(recorded!=expected)returnrefuse(", validator)
         encoder = service[service.index("std::stringStagingOwnershipBytes("):service.index("boolValidStagingOwnership(")]
         for field in ("world_identity[index]", "staging_identity", "instance_identity[index]",
                       "bytes+=name;", "bytes+=instance;", "AppendU64(bytes,checksum)"):
@@ -300,7 +301,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
         cleanup = service[service.index("std::size_tReclaimAbandonedStaging("):]
-        self.assertIn('if(entry.path().extension()==".owner")', cleanup)
+        self.assertIn('if(StagingNameEquals(entry.path().extension(),".owner"))', cleanup)
         self.assertIn('staging.replace_extension();if(ReclaimOrphanedLedgerStaging(staging))', cleanup)
         validator = service[service.index("boolValidOrphanedStagingOwnership("):
                             service.index("boolStagingPathMissing(")]
@@ -336,8 +337,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         writer = service[service.index("boolWorldSaveService::save_active_regions("):]
         writer = writer[:writer.index("std::uint64_tWorldSaveService::region_simulation_digest(")]
         ordered = ("validate_save(save_dir,errors)", "ReclaimAbandonedStaging(staging)",
-                   "LedgerStagingtemporary(staging)", "temporary.available()", "temporary.prepare(bytes,errors)",
-                   "BeforeActiveRegionsReplaceForTesting()", "temporary.valid()",
+                   "LedgerStagingtemporary(staging)", "temporary.available(errors)", "temporary.prepare(bytes,errors)",
+                   "BeforeActiveRegionsReplaceForTesting()", "temporary.valid(errors)",
                    "ReplaceRegionFileAtomically(temporary.path(),path,errors)", "ledger=std::move(saved)")
         positions = [writer.index(value) for value in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -362,6 +363,73 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         restart = compact_cpp((ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(encoding="utf-8"))
         self.assertIn('ASSERT_TRUE(fs::is_regular_file(ownership));', restart)
         self.assertIn('EXPECT_FALSE(fs::exists(ownership));', restart)
+
+    def test_ledger_payload_retains_only_identity_access_through_windows_publication(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        finish = service[service.index("boolfinish_write("):service.index("boolread_record(")]
+        ordered = ("identity(before)", "::CloseHandle(m_handle)",
+                   "m_handle=INVALID_HANDLE_VALUE", "::CreateFileW(m_path.c_str(),",
+                   "access==RetainedAccess::Read?GENERIC_READ:FILE_READ_ATTRIBUTES",
+                   "FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE", "identity(after)")
+        positions = [finish.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", finish)
+        self.assertIn("after==before", finish)
+        self.assertIn("before[5]==after[5]", finish)
+        self.assertIn("std::equal(before.begin(),before.begin()+4,after.begin())", finish)
+        prepare = service[service.index("boolprepare(conststd::string&bytes,"):
+                          service.index("boolvalid(std::vector<std::string>*errors)")]
+        ordered = ("m_payload.write(bytes)",
+                   "m_payload.finish_write(StagingFile::RetainedAccess::Identity,errors)",
+                   "m_payload.identity(staging_identity)", "StagingOwnershipBytes(",
+                   "m_record.write(ownership)",
+                   "m_record.finish_write(StagingFile::RetainedAccess::Read,errors)",
+                   "m_ready=true")
+        positions = [prepare.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        fixture = compact_cpp((ROOT / "test/persistence/world_save_service_test.cpp")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("TEST(WorldSaveService,LedgerStagingPublishesCreatesAndReplacementsWithoutDebris)", fixture)
+
+    def test_staging_refusals_preserve_specific_diagnostics_without_an_errors_vector(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        add_error = service[service.index("voidAddError("):service.index("boolReadAmbientAnchor(")]
+        self.assertIn('else{LUMINUMBRA_CORE_ERROR("{}",message);}', add_error)
+        for reason in ("cannot identify staging file before closing writer",
+                       "cannot close staging writer",
+                       "cannot retain unchanged staging identity after closing writer",
+                       "cannot write and flush staging payload",
+                       "cannot identify staging save directory",
+                       "cannot identify completed staging payload",
+                       "cannot identify staging ownership instance",
+                       "cannot encode staging ownership filename or instance",
+                       "cannot write and flush staging ownership",
+                       "cannot exclusively create and identify staging payload",
+                       "cannot exclusively create and identify staging ownership",
+                       "staging ownership has not been prepared",
+                       "cannot read complete unchanged staging ownership within 512-byte limit",
+                       "staging payload name no longer matches retained identity",
+                       "staging ownership name no longer matches retained identity",
+                       "staging ownership bytes do not match directory, payload, instance or filename"):
+            self.assertIn('refuse("' + re.sub(r"\s+", "", reason) + '"', service)
+
+    def test_windows_case_aliases_cannot_bypass_ledger_ownership_cleanup(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        matching = service[service.index("boolStagingNameHasPrefix("):
+                           service.index("std::size_tReclaimAbandonedStaging(")]
+        self.assertIn("if(native_name.size()<native_prefix.size())returnfalse;", matching)
+        self.assertIn("#ifdefined(_WIN32)", matching)
+        self.assertIn("unit>='A'&&unit<='Z'?unit+('a'-'A'):unit", matching)
+        self.assertIn("returnfold(left)==fold(right);#elsereturnleft==right;", matching)
+        self.assertIn("name.native().size()==expected.native().size()&&StagingNameHasPrefix(name,expected)", matching)
+        cleanup = service[service.index("std::size_tReclaimAbandonedStaging("):]
+        for call in ('StagingNameHasPrefix(entry.path().filename(),prefix)',
+                     'StagingNameEquals(destination.filename(),"active-regions.arl")',
+                     'StagingNameEquals(entry.path().extension(),".owner")'):
+            self.assertLess(cleanup.index(call), cleanup.index("entry.is_regular_file(kind_error)"))
 
     def test_metadata_cleanup_fixture_exercises_validated_clock_bytes(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")

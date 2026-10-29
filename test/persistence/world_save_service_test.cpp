@@ -159,6 +159,42 @@ TEST(WorldSaveService, NoReplacePublicationPreservesOccupiedEntriesAndRetries) {
             std::string::npos);
 }
 
+TEST(WorldSaveService, DurablePublicationFailuresExplainRefusals) {
+    const TempSaveDir save_dir("publication_diagnostics");
+    const auto source = save_dir.path() / "source";
+    const auto destination = save_dir.path() / "destination";
+    const DirectoryFlushReset reset;
+    std::vector<std::string> errors;
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(WorldSaveService::create_file_durably(destination, "new", &errors));
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), "interrupted before exclusive file publication");
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(source, "original"));
+    errors.clear();
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(
+        WorldSaveService::rename_file_durably(source, destination, "original", "new", &errors));
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), "interrupted before rename publication");
+    EXPECT_EQ(ReadFileBytes(source), "original");
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService::rename_file_durably(
+        source, source / "child" / "file", "original", "new", &errors));
+    ASSERT_EQ(errors.size(), 1u);
+    // Libraries report a non-directory ancestor either during leaf inspection
+    // or during directory creation. Both paths must explain the refusal.
+    EXPECT_TRUE(errors.front() == "rename destination is occupied or cannot be inspected" ||
+                errors.front().starts_with("cannot create rename publication directory:"));
+    EXPECT_EQ(ReadFileBytes(source), "original");
+    errors.clear();
+    WorldSaveService::PreparedWorldWrite prepared;
+    EXPECT_FALSE(prepared.publish(&errors));
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), "world write has not been prepared or was already consumed");
+}
+
 TEST(WorldSaveService, ConcurrentNoReplacePublicationHasExactlyOneWinner) {
     const TempSaveDir save_dir("no_replace_race");
     const auto destination = save_dir.path() / "winner";
@@ -1024,6 +1060,66 @@ void RefreshOwnershipChecksum(std::string& bytes) {
 }
 } // namespace
 
+TEST(WorldSaveService, LedgerStagingPublishesCreatesAndReplacementsWithoutDebris) {
+    const TempSaveDir save_dir("ledger_repeated_publication");
+    Luminumbra::world::ActiveRegionLedger ledger;
+    const auto destination = WorldSaveService::active_regions_path(save_dir.path());
+    ASSERT_FALSE(std::filesystem::exists(destination));
+    // Exercise missing-destination publication, replacement, and an empty ledger.
+    for (int pass = 0; pass < 3; ++pass) {
+        SCOPED_TRACE(pass);
+        ledger = Luminumbra::world::ActiveRegionLedger{};
+        if (pass < 2)
+            ledger.set_local_anchor(Vec3(static_cast<float>(pass), 2, 3));
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService::save_active_regions(
+            ledger, Luminumbra::world::WorldClock{}, save_dir.path(), &errors));
+        EXPECT_TRUE(errors.empty());
+        EXPECT_EQ(ReadFileBytes(destination), ledger.encode());
+        Luminumbra::world::ActiveRegionLedger loaded;
+        ASSERT_TRUE(WorldSaveService::load_active_regions(loaded, save_dir.path(), &errors));
+        EXPECT_EQ(loaded.encode(), ledger.encode());
+        for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+            EXPECT_FALSE(entry.path().filename().string().starts_with("active-regions.arl.tmp."));
+    }
+}
+
+TEST(WorldSaveService, LedgerStagingReportsPartialAndEmptyOwnershipBeforeRetry) {
+    for (const std::string& damaged : {std::string{}, std::string{"partial"}}) {
+        const TempSaveDir save_dir("ledger_ownership_diagnostic");
+        auto& capture = CapturedLedgerStaging::current();
+        capture = {.directory = save_dir.path(), .payload = {}, .record = {}, .ownership = damaged};
+        WorldSaveService::set_before_active_regions_replace_for_testing([] {
+            auto& staged = CapturedLedgerStaging::current();
+            for (const auto& entry : std::filesystem::directory_iterator(staged.directory)) {
+                if (entry.path().filename().string().starts_with("active-regions.arl.tmp.") &&
+                    entry.path().extension() != ".owner") {
+                    staged.payload = entry.path();
+                    staged.record = entry.path();
+                    staged.record += ".owner";
+                    WriteStagingFixture(staged.record, staged.ownership);
+                    break;
+                }
+            }
+            return true;
+        });
+        Luminumbra::world::ActiveRegionLedger ledger;
+        ledger.set_local_anchor(Vec3(1, 2, 3));
+        std::vector<std::string> errors;
+        const bool saved = WorldSaveService::save_active_regions(
+            ledger, Luminumbra::world::WorldClock{}, save_dir.path(), &errors);
+        WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+        ASSERT_TRUE(saved);
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors.front().find("staging ownership bytes do not match"), std::string::npos);
+        ASSERT_FALSE(capture.record.empty());
+        EXPECT_EQ(ReadFileBytes(capture.record), damaged);
+        EXPECT_TRUE(std::filesystem::exists(capture.payload));
+        EXPECT_EQ(ReadFileBytes(WorldSaveService::active_regions_path(save_dir.path())),
+                  ledger.encode());
+    }
+}
+
 TEST(WorldSaveService, LedgerStagingPreservesUnknownOccupantsAndEmptySave) {
     const TempSaveDir save_dir("unknown_ledger_staging");
     const auto unknown = save_dir.path() / "active-regions.arl.tmp.abandoned";
@@ -1336,6 +1432,23 @@ TEST(WorldSaveService, LedgerStagingSubstitutionBeforePublishUsesFreshName) {
 }
 
 #if defined(_WIN32)
+TEST(WorldSaveService, LedgerStagingCaseAliasesPreserveUnknownOccupants) {
+    const TempSaveDir save_dir("ledger_case_ownership");
+    const auto payload = save_dir.path() / "ACTIVE-REGIONS.ARL.TMP.unknown";
+    auto record = payload;
+    record += ".OWNER";
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(payload, "unknown payload"));
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(record, "unknown ownership"));
+    // An alias must take the ledger ownership branch, never generic temp deletion.
+    ASSERT_TRUE(
+        WorldSaveService::write_file_durably(save_dir.path() / "ACTIVE-REGIONS.ARL", "standalone"));
+    EXPECT_EQ(ReadFileBytes(payload), "unknown payload");
+    EXPECT_EQ(ReadFileBytes(record), "unknown ownership");
+    ASSERT_NO_FATAL_FAILURE(SaveLedgerAfterStaging(save_dir.path()));
+    EXPECT_EQ(ReadFileBytes(payload), "unknown payload");
+    EXPECT_EQ(ReadFileBytes(record), "unknown ownership");
+}
+
 TEST(WorldSaveService, LedgerStagingPreservesUnreadableOrphanOwnershipUntilRetry) {
     const TempSaveDir save_dir("locked_orphan_ownership");
     ASSERT_NO_FATAL_FAILURE(LeavePublishedLedgerSidecar(save_dir.path()));

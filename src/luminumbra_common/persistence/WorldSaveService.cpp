@@ -8,6 +8,7 @@
 #include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "core/FilesystemPath.h"
+#include "core/Log.h"
 #include "luminumbra/core/Types.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
@@ -289,6 +290,8 @@ std::uint64_t ReadU64(const unsigned char* bytes) {
 void AddError(std::vector<std::string>* errors, std::string message) {
     if (errors) {
         errors->push_back(std::move(message));
+    } else {
+        LUMINUMBRA_CORE_ERROR("{}", message);
     }
 }
 
@@ -349,6 +352,10 @@ using StagingIdentity = std::array<std::uint64_t, 6>;
 
 class StagingFile {
 public:
+    enum class RetainedAccess {
+        Identity,
+        Read
+    };
     enum class Mode {
         Inspect,
         Create,
@@ -464,29 +471,35 @@ public:
 #endif
     }
 
-    bool finish_write() {
+    bool finish_write(RetainedAccess access, std::vector<std::string>* errors) {
         // Check close errors before use, then retain only the same file through
         // publication. A replacement observed during reopening is never adopted.
         StagingIdentity before{};
         if (!identity(before))
-            return false;
+            return refuse("cannot identify staging file before closing writer", errors);
 #if defined(_WIN32)
         const bool closed = ::CloseHandle(m_handle) != 0;
         m_handle = INVALID_HANDLE_VALUE;
         if (!closed)
-            return false;
-        m_handle = ::CreateFileW(m_path.c_str(),
-                                 GENERIC_READ,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                 nullptr,
-                                 OPEN_EXISTING,
-                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                                 nullptr);
+            return refuse("cannot close staging writer", errors);
+        // ReplaceFileW opens the replacement without sharing read/write/delete
+        // access. Retain attributes only for a payload: a GENERIC_READ handle
+        // conflicts even when that handle itself grants FILE_SHARE_DELETE.
+        // Sidecars need read access but are never replacement payloads.
+        m_handle =
+            ::CreateFileW(m_path.c_str(),
+                          access == RetainedAccess::Read ? GENERIC_READ : FILE_READ_ATTRIBUTES,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                          nullptr);
 #else
         const bool closed = ::close(m_descriptor) == 0;
         m_descriptor = -1;
         if (!closed)
-            return false;
+            return refuse("cannot close staging writer", errors);
+        (void)access;
         m_descriptor = ::open(m_path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
 #endif
         StagingIdentity after{};
@@ -509,7 +522,7 @@ public:
             ::close(m_descriptor);
         m_descriptor = -1;
 #endif
-        return false;
+        return refuse("cannot retain unchanged staging identity after closing writer", errors);
     }
 
     bool read_record(std::string& bytes) const {
@@ -608,6 +621,11 @@ public:
 #endif
     }
 
+    bool refuse(const char* reason, std::vector<std::string>* errors) const {
+        AddError(errors, std::string(reason) + ": " + Filesystem::GenericUtf8PathString(m_path));
+        return false;
+    }
+
 private:
     std::filesystem::path m_path;
 #if defined(_WIN32)
@@ -664,7 +682,8 @@ std::string StagingOwnershipBytes(const std::filesystem::path& staging,
 
 bool ValidStagingOwnership(const std::filesystem::path& staging,
                            const StagingFile& payload,
-                           const StagingFile& record) {
+                           const StagingFile& record,
+                           std::string* reason = nullptr) {
     // This detects invalid/altered records, not deliberate valid fabrication by
     // an actor already able to write the save directory; that is outside scope.
     const auto parent =
@@ -672,21 +691,42 @@ bool ValidStagingOwnership(const std::filesystem::path& staging,
     const StagingFile directory(parent, StagingFile::Mode::Directory);
     StagingIdentity world_identity{}, staging_identity{}, instance_identity{};
     std::string recorded;
-    if (!payload.matches_name() || !record.matches_name() ||
-        !directory.identity(world_identity, true) || !payload.identity(staging_identity) ||
-        !record.identity(instance_identity) || !record.read_record(recorded))
+    const auto refuse = [reason](const char* message) {
+        if (reason)
+            *reason = message;
         return false;
+    };
+    if (!payload.matches_name())
+        return refuse("staging payload name no longer matches retained identity");
+    if (!record.matches_name())
+        return refuse("staging ownership name no longer matches retained identity");
+    if (!directory.identity(world_identity, true))
+        return refuse("cannot identify staging save directory during ownership validation");
+    if (!payload.identity(staging_identity))
+        return refuse("cannot identify staging payload during ownership validation");
+    if (!record.identity(instance_identity))
+        return refuse("cannot identify staging ownership instance during validation");
+    if (!record.read_record(recorded))
+        return refuse("cannot read complete unchanged staging ownership within 512-byte limit");
     const auto expected =
         StagingOwnershipBytes(staging, world_identity, staging_identity, instance_identity);
-    return !expected.empty() && recorded == expected;
+    if (expected.empty())
+        return refuse("cannot encode staging ownership filename or instance during validation");
+    if (recorded != expected)
+        return refuse(
+            "staging ownership bytes do not match directory, payload, instance or filename");
+    return true;
 }
 
 bool ReclaimOwnedLedgerStaging(const std::filesystem::path& staging) {
     const StagingFile payload(staging, StagingFile::Mode::Inspect);
     const StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
-    if (!ValidStagingOwnership(staging, payload, record) || !payload.remove())
+    if (!ValidStagingOwnership(staging, payload, record))
         return false;
-    record.remove();
+    if (!payload.remove())
+        return payload.refuse("cannot reclaim verified abandoned staging payload", nullptr);
+    if (!record.remove())
+        record.refuse("cannot reclaim staging ownership after payload removal", nullptr);
     FlushRemovalDirectory(staging, nullptr);
     return true;
 }
@@ -729,9 +769,10 @@ bool StagingPathMissing(const std::filesystem::path& staging) {
 
 bool ReclaimOrphanedLedgerStaging(const std::filesystem::path& staging) {
     const StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
-    if (!ValidOrphanedStagingOwnership(staging, record) || !StagingPathMissing(staging) ||
-        !record.remove())
+    if (!ValidOrphanedStagingOwnership(staging, record) || !StagingPathMissing(staging))
         return false;
+    if (!record.remove())
+        return record.refuse("cannot reclaim verified orphaned staging ownership", nullptr);
     FlushRemovalDirectory(staging, nullptr);
     return true;
 }
@@ -762,43 +803,70 @@ public:
         // Only remove objects created by this call. A substituted payload or
         // record has lost proof and both occupants must survive untouched.
         if (m_ready) {
-            if (ValidStagingOwnership(m_path, m_payload, m_record) && m_payload.remove())
-                m_record.remove();
+            if (!ValidStagingOwnership(m_path, m_payload, m_record)) {
+                m_record.refuse("preserving staging pair: ownership changed before rollback",
+                                nullptr);
+            } else if (!m_payload.remove()) {
+                m_payload.refuse("cannot remove verified staging payload during rollback", nullptr);
+            } else if (!m_record.remove()) {
+                m_record.refuse("cannot remove staging ownership after payload rollback", nullptr);
+            }
         } else {
-            if (m_payload_created)
-                m_payload.remove();
-            if (m_record_created)
-                m_record.remove();
+            if (m_payload_created && !m_payload.remove())
+                m_payload.refuse("cannot remove newly created staging payload", nullptr);
+            if (m_record_created && !m_record.remove())
+                m_record.refuse("cannot remove newly created staging ownership", nullptr);
         }
     }
     LedgerStaging(const LedgerStaging&) = delete;
     LedgerStaging& operator=(const LedgerStaging&) = delete;
 
-    bool available() {
+    bool available(std::vector<std::string>* errors) {
         StagingIdentity payload_identity{}, record_identity{};
         m_payload_created = m_payload.identity(payload_identity);
         m_record_created = m_record.identity(record_identity);
-        return m_payload_created && m_record_created;
+        if (!m_payload_created)
+            return m_payload.refuse("cannot exclusively create and identify staging payload",
+                                    errors);
+        if (!m_record_created)
+            return m_record.refuse("cannot exclusively create and identify staging ownership",
+                                   errors);
+        return true;
     }
     bool prepare(const std::string& bytes, std::vector<std::string>* errors) {
         const auto parent =
             m_path.has_parent_path() ? m_path.parent_path() : std::filesystem::path(".");
         const StagingFile directory(parent, StagingFile::Mode::Directory);
         StagingIdentity world_identity{}, staging_identity{}, instance_identity{};
-        if (!m_payload.write(bytes) || !m_payload.finish_write() ||
-            !directory.identity(world_identity, true) || !m_payload.identity(staging_identity) ||
-            !m_record.identity(instance_identity))
+        if (!m_payload.write(bytes))
+            return m_payload.refuse("cannot write and flush staging payload", errors);
+        if (!m_payload.finish_write(StagingFile::RetainedAccess::Identity, errors))
             return false;
+        if (!directory.identity(world_identity, true))
+            return directory.refuse("cannot identify staging save directory", errors);
+        if (!m_payload.identity(staging_identity))
+            return m_payload.refuse("cannot identify completed staging payload", errors);
+        if (!m_record.identity(instance_identity))
+            return m_record.refuse("cannot identify staging ownership instance", errors);
         const auto ownership =
             StagingOwnershipBytes(m_path, world_identity, staging_identity, instance_identity);
-        if (ownership.empty() || !m_record.write(ownership) || !m_record.finish_write() ||
+        if (ownership.empty())
+            return m_record.refuse("cannot encode staging ownership filename or instance", errors);
+        if (!m_record.write(ownership))
+            return m_record.refuse("cannot write and flush staging ownership", errors);
+        if (!m_record.finish_write(StagingFile::RetainedAccess::Read, errors) ||
             !FlushAncestorEntries(m_path, errors) || !FlushRemovalDirectory(m_path, errors))
             return false;
         m_ready = true;
         return true;
     }
-    bool valid() const {
-        return m_ready && ValidStagingOwnership(m_path, m_payload, m_record);
+    bool valid(std::vector<std::string>* errors) const {
+        if (!m_ready)
+            return m_record.refuse("staging ownership has not been prepared", errors);
+        std::string reason;
+        if (!ValidStagingOwnership(m_path, m_payload, m_record, &reason))
+            return m_record.refuse(reason.c_str(), errors);
+        return true;
     }
     const std::filesystem::path& path() const {
         return m_path;
@@ -806,14 +874,16 @@ public:
     bool installed_at(const std::filesystem::path& destination) const {
         return m_payload.matches_path(destination);
     }
-    void published() {
+    void published(std::vector<std::string>* errors) {
         // The payload was renamed (including a post-rename flush failure).
         // The caller's live ledger is never retired through this handle.
         m_ready = false;
         m_payload_created = false;
         if (m_record.remove())
             m_record_created = false;
-        FlushRemovalDirectory(m_path, nullptr);
+        else
+            m_record.refuse("cannot remove staging ownership after publication", errors);
+        FlushRemovalDirectory(m_path, errors);
     }
 
 private:
@@ -824,6 +894,30 @@ private:
     bool m_record_created = false;
     bool m_ready = false;
 };
+
+bool StagingNameHasPrefix(const std::filesystem::path& name, const std::filesystem::path& prefix) {
+    const auto& native_name = name.native();
+    const auto& native_prefix = prefix.native();
+    if (native_name.size() < native_prefix.size())
+        return false;
+    return std::equal(
+        native_prefix.begin(), native_prefix.end(), native_name.begin(), [](auto left, auto right) {
+#if defined(_WIN32)
+            // Generated names are ASCII. Recognize their case aliases
+            // before choosing ownership-aware cleanup on Windows.
+            const auto fold = [](auto unit) {
+                return unit >= 'A' && unit <= 'Z' ? unit + ('a' - 'A') : unit;
+            };
+            return fold(left) == fold(right);
+#else
+                          return left == right;
+#endif
+        });
+}
+
+bool StagingNameEquals(const std::filesystem::path& name, const std::filesystem::path& expected) {
+    return name.native().size() == expected.native().size() && StagingNameHasPrefix(name, expected);
+}
 
 // SaveGuard spans enumeration through replacement/removal for every writer.
 // Existing staging belongs to a completed or terminated save, never another
@@ -844,10 +938,10 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     for (const std::filesystem::directory_iterator end; !list_error && it != end;
          it.increment(list_error)) {
         const auto& entry = *it;
-        if (entry.path().filename().native().rfind(prefix.native(), 0) != 0)
+        if (!StagingNameHasPrefix(entry.path().filename(), prefix))
             continue;
-        if (destination.filename() == "active-regions.arl") {
-            if (entry.path().extension() == ".owner") {
+        if (StagingNameEquals(destination.filename(), "active-regions.arl")) {
+            if (StagingNameEquals(entry.path().extension(), ".owner")) {
                 auto staging = entry.path();
                 staging.replace_extension();
                 if (ReclaimOrphanedLedgerStaging(staging))
@@ -2180,7 +2274,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         bool replaced = false;
         for (int attempt = 0; attempt < 128; ++attempt) {
             LedgerStaging temporary(staging);
-            if (!temporary.available())
+            if (!temporary.available(errors))
                 continue;
             if (!temporary.prepare(bytes, errors)) {
                 AddError(errors, "Cannot durably record active-region staging ownership");
@@ -2193,13 +2287,13 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                     return false;
                 }
             }
-            if (!temporary.valid())
+            if (!temporary.valid(errors))
                 continue;
             replaced = ReplaceRegionFileAtomically(temporary.path(), path, errors);
             // A failed final directory flush can leave the complete new ledger
             // installed. Retiring the sidecar never removes that live file.
             if (temporary.installed_at(path))
-                temporary.published();
+                temporary.published(errors);
             if (!replaced)
                 return false;
             break;
@@ -2520,8 +2614,10 @@ bool WorldSaveService::create_file_durably(const std::filesystem::path& destinat
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
     NewFilePublication publication(temp, destination);
-    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel))
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        AddError(errors, "interrupted before exclusive file publication");
         return false;
+    }
     if (!publication.Publish(errors))
         return false;
     publication.Commit();
@@ -2634,11 +2730,17 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // existing writer; parent aliases and UNC roots must retain their meaning.
     if (destination.has_parent_path())
         std::filesystem::create_directories(destination.parent_path(), error);
-    if (error || !WriteDurableRegionTemp(destination, bytes, temp, errors))
+    if (error) {
+        AddError(errors, "cannot create rename publication directory: " + error.message());
+        return false;
+    }
+    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
     NewFilePublication publication(temp, destination);
-    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel))
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        AddError(errors, "interrupted before rename publication");
         return false;
+    }
     if (!publication.Publish(errors))
         return false;
     if (!std::filesystem::remove(source, error) || error) {
@@ -3028,8 +3130,10 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
 bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* errors,
                                                    std::size_t* regions_written) {
     auto prepared = std::move(m_data);
-    if (!prepared)
+    if (!prepared) {
+        AddError(errors, "world write has not been prepared or was already consumed");
         return false;
+    }
     if (regions_written)
         *regions_written = 0;
     if (!prepared->write_manifest)
