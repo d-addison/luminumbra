@@ -2160,6 +2160,86 @@ TEST_P(SavedWorldPresetTest, RefusedOpenAndMissingJobsPreserveSaveEligibility) {
     ExpectSnapshotReloaded(pending, *chunk, session.GetWorldSaveDir(), id);
 }
 
+TEST_P(SavedWorldPresetTest, CandidateLatticeRefusalPreservesLiveWorldAndSaveEligibility) {
+    GameSession live, candidate;
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(live));
+    Configure(candidate);
+    ASSERT_TRUE(candidate.CreateWorld("Candidate lattice", "7331", "default"));
+    const auto candidate_save = candidate.GetWorldSaveDir();
+    Luminumbra::WorldStreamingState snapshot;
+    auto malformed = snapshot.get_or_create_chunk(Luminumbra::IVec3(40, 0, 40));
+    malformed->set_state(Luminumbra::ChunkState::Idle);
+    malformed->sdf_data = {-2.0f, 0.25f};
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(snapshot, candidate_save));
+    // The container is readable; only the session's final lattice check refuses it.
+    ASSERT_TRUE(P::InspectSavedWorld(Root().path(), candidate.GetMetadata().worldId).error.empty());
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(live, chunk, true));
+    const PendingSnapshotState pending(live);
+    const RetainedCreationState retained(live);
+    const auto disk = SavedPresetTestDiskBytes(Root().path());
+    for (const bool explicit_root : {false, true}) {
+        SCOPED_TRACE(explicit_root);
+        EXPECT_FALSE(explicit_root
+                         ? live.LoadWorldFrom(candidate.GetMetadata().worldId, Root().path())
+                         : live.LoadWorld(candidate.GetMetadata().worldId));
+        EXPECT_EQ(live.GetWorldOpenError(), "corrupt world chunk SDF lattice");
+        retained.ExpectUnchanged(live);
+        pending.ExpectUnchanged(live, *chunk);
+        const auto residents = live.GetWorldSystem()->snapshot_streamed_chunks();
+        ASSERT_EQ(residents.size(), 1u);
+        EXPECT_EQ(residents.front(), chunk);
+        EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+    }
+    ASSERT_TRUE(live.SaveWorld());
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    ASSERT_NO_FATAL_FAILURE(ExpectSnapshotReloaded(
+        pending, *chunk, live.GetWorldSaveDir(), live.GetMetadata().worldId));
+}
+
+TEST_P(SavedWorldPresetTest, CandidateSchedulerRefusalsPreservePendingLiveState) {
+    GameSession live, candidate;
+    live.SetRegionSchedulerConfig({2, 2, 1});
+    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(live));
+    Configure(candidate);
+    candidate.SetActiveRegionsEnabled(true);
+    candidate.SetRegionSchedulerConfig({1, 2, 1});
+    ASSERT_TRUE(candidate.CreateWorld("Candidate scheduler", "7331", "default"));
+    const auto save = candidate.GetWorldSaveDir();
+    const auto path = P::WorldSaveService::active_regions_path(save);
+    const auto valid = ReadClockTestFile(path);
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(live, chunk, true));
+    const PendingSnapshotState pending(live);
+    const RetainedCreationState retained(live);
+    for (const bool malformed : {false, true}) {
+        SCOPED_TRACE(malformed);
+        ASSERT_TRUE(
+            P::WorldSaveService::write_file_durably(path, malformed ? std::string("ARL") : valid));
+        const auto disk = SavedPresetTestDiskBytes(Root().path());
+        for (const bool explicit_root : {false, true}) {
+            SCOPED_TRACE(explicit_root);
+            EXPECT_FALSE(explicit_root
+                             ? live.LoadWorldFrom(candidate.GetMetadata().worldId, Root().path())
+                             : live.LoadWorld(candidate.GetMetadata().worldId));
+            if (GetParam() && !malformed)
+                EXPECT_NE(live.GetWorldOpenError().find("scheduler differs"), std::string::npos);
+            else
+                EXPECT_FALSE(live.GetWorldOpenError().empty());
+            retained.ExpectUnchanged(live);
+            pending.ExpectUnchanged(live, *chunk);
+            const auto residents = live.GetWorldSystem()->snapshot_streamed_chunks();
+            ASSERT_EQ(residents.size(), 1u);
+            EXPECT_EQ(residents.front(), chunk);
+            EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+        }
+    }
+    ASSERT_TRUE(live.SaveWorld());
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    ASSERT_NO_FATAL_FAILURE(ExpectSnapshotReloaded(
+        pending, *chunk, live.GetWorldSaveDir(), live.GetMetadata().worldId));
+}
+
 TEST_P(SavedWorldPresetTest, InvalidLivePlantRefusesBeforeAnySnapshotPayloadWrite) {
     GameSession session;
     ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(session));

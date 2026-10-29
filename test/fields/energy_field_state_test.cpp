@@ -115,6 +115,37 @@ TEST(AetherEmitterDeterminism, SaturationAccounting) {
     EXPECT_EQ(f.at_cell(0, 0), 65535u);
 }
 
+TEST(AetherEmitterDeterminism, FullWidthDepositsSaturateBothChannelsWithoutWrapping) {
+    constexpr std::uint32_t kMaxDeposit = (std::numeric_limits<std::uint32_t>::max)();
+    for (const std::uint32_t stored : {0u, 1u, 65534u, 65535u}) {
+        for (const std::uint32_t amount : {0u,
+                                           1u,
+                                           65534u,
+                                           65535u,
+                                           65536u,
+                                           kMaxDeposit - 65535u,
+                                           kMaxDeposit - 1u,
+                                           kMaxDeposit}) {
+            SCOPED_TRACE(stored);
+            SCOPED_TRACE(amount);
+            EnergyFieldState field(2);
+            field.SetAnchorCell(0, 0);
+            for (int channel = 0; channel < 2; ++channel) {
+                field.QueueDeposit(1, 0, 0, channel, stored);
+                field.QueueDeposit(2, 0, 0, channel, amount);
+            }
+            const std::uint64_t sum = static_cast<std::uint64_t>(stored) + amount;
+            const std::uint64_t retained = sum > 65535u ? 65535u : sum;
+            EXPECT_EQ(field.Tick(1), 2u * (sum - retained));
+            EXPECT_EQ(field.at_cell(0, 0, 0), retained);
+            EXPECT_EQ(field.at_cell(0, 0, 1), retained);
+            EXPECT_EQ(field.total_raw(), 2u * retained);
+            EXPECT_EQ(field.Tick(2), 0u);
+            EXPECT_EQ(field.total_raw(), 2u * retained);
+        }
+    }
+}
+
 TEST(AetherEmitterDeterminism, DepositOrderIndependence) {
     // Proving signal (b): registration order can never reach the field bytes.
     EnergyFieldState a, b;
