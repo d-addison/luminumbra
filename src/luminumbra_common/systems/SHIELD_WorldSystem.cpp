@@ -940,6 +940,9 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 // process_completed_meshing_jobs by ): pure
                 // generation output, not an edit — the dirty flag stays
                 // clear (matching GenerateChunkData's contract).
+                const Persistence::WorldSaveService::SaveOwnership ownership;
+                const bool replaced_authority =
+                    chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited;
                 chunk->sdf_data = std::move(chunk->pending_sdf_data);
                 chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
                 // publish the promoted structure material channel
@@ -947,6 +950,8 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->mark_sdf_generated_current_params();
                 chunk->clear_voxel_data_dirty();
+                if (replaced_authority)
+                    bump_far_lod_authority_revision(chunk->get_coords());
                 const auto resident = m_streaming_state.chunks.find(chunk->get_id());
                 if (resident != m_streaming_state.chunks.end() && resident->second == chunk)
                     publish_generated_column_span(*chunk);
@@ -4307,38 +4312,52 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             // Detect it and clear the buffer so it REGENERATES a correct lattice below
             // (generation is a pure function of seed/params). Hash-neutral for valid worlds:
             // a well-formed full SDF is always exactly kFullSdfLattice, so this never fires.
-            const bool has_malformed_sdf =
-                !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
-            if (has_malformed_sdf) {
-                const IVec3 cc = chunk->get_coords();
-                LUMINUMBRA_CORE_WARN(
-                    "EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
-                    "SDF (size {} != {}); regenerating a full lattice before meshing",
-                    cc.x,
-                    cc.y,
-                    cc.z,
-                    chunk->sdf_data.size(),
-                    kFullSdfLattice);
-                chunk->sdf_data.clear();
-            }
-            const bool missing_required_data =
-                needs_full_sdf ? chunk->sdf_data.empty()
-                               : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
-            if (has_malformed_sdf) {
-                // A malformed non-empty lattice must not fall back to the
-                // coarse heightfield: rebuild exact SDF authority first.
-                GenerateChunkData(*chunk);
-            } else if (missing_required_data) {
-                // Chunks restored from a world save arrive with voxel data
-                // already populated (possibly carrying player edits);
-                // regeneration would clobber those edits. Generation is a
-                // pure function of seed/params, so skipping it for any chunk
-                // that already has the data its step needs is also a no-op
-                // for fresh chunks that merely need a LOD rebuild. Coarse
-                // (step > 1) horizon chunks generate the surface band only
-                // the heightfield mesher and seam fallback never
-                // read interior SDF.
-                GenerateChunkData(*chunk, build_chunk.step);
+            {
+                const bool has_malformed_sdf =
+                    !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
+                const bool missing_required_data =
+                    needs_full_sdf ? chunk->sdf_data.empty()
+                                   : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
+                const bool changes_authority =
+                    has_malformed_sdf ||
+                    (missing_required_data &&
+                     chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited);
+                // Fresh Loading generation is private to owner-thread publication;
+                // keep those independent jobs parallel. Replacements own persistence.
+                std::optional<Persistence::WorldSaveService::SaveOwnership> ownership;
+                if (changes_authority) {
+                    ownership.emplace();
+                    // Generation can throw after changing buffers; invalidate first.
+                    bump_far_lod_authority_revision(chunk->get_coords());
+                }
+                if (has_malformed_sdf) {
+                    const IVec3 cc = chunk->get_coords();
+                    LUMINUMBRA_CORE_WARN(
+                        "EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
+                        "SDF (size {} != {}); regenerating a full lattice before meshing",
+                        cc.x,
+                        cc.y,
+                        cc.z,
+                        chunk->sdf_data.size(),
+                        kFullSdfLattice);
+                    chunk->sdf_data.clear();
+                }
+                if (has_malformed_sdf) {
+                    // A malformed non-empty lattice must not fall back to the
+                    // coarse heightfield: rebuild exact SDF authority first.
+                    GenerateChunkData(*chunk);
+                } else if (missing_required_data) {
+                    // Chunks restored from a world save arrive with voxel data
+                    // already populated (possibly carrying player edits);
+                    // regeneration would clobber those edits. Generation is a
+                    // pure function of seed/params, so skipping it for any chunk
+                    // that already has the data its step needs is also a no-op
+                    // for fresh chunks that merely need a LOD rebuild. Coarse
+                    // (step > 1) horizon chunks generate the surface band only
+                    // the heightfield mesher and seam fallback never
+                    // read interior SDF.
+                    GenerateChunkData(*chunk, build_chunk.step);
+                }
             }
             if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
                 ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
@@ -4925,6 +4944,8 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                 if (!chunk)
                     return false;
                 if (chunk->sdf_data.empty()) {
+                    const Persistence::WorldSaveService::SaveOwnership ownership;
+                    bump_far_lod_authority_revision(chunk->get_coords());
                     GenerateChunkData(*chunk, 1);
                     publish_generated_column_span(*chunk);
                     ++m_dirty_generation;
@@ -4992,6 +5013,10 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                     continue;
                 const IVec3 base =
                     chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                // Authority mutation owns persistence from the first byte through
+                // its revision bump. Never dispatch or wait for jobs under ownership;
+                // the lock order is save ownership, then region-revision mutex.
+                const Persistence::WorldSaveService::SaveOwnership ownership;
                 bool changed = false;
                 for (int z = 0; z < size_z; ++z)
                     for (int y = 0; y < size_y; ++y)
@@ -5027,10 +5052,15 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                         }
                 if (changed) {
                     chunk->mark_voxel_data_dirty();
-                    m_activation_index.content_changed(chunk->get_coords());
-                    ++m_dirty_generation;
-                    if (m_voxelEditObserver)
-                        m_voxelEditObserver(chunk->get_coords());
+                    try {
+                        m_activation_index.content_changed(chunk->get_coords());
+                        ++m_dirty_generation;
+                        if (m_voxelEditObserver)
+                            m_voxelEditObserver(chunk->get_coords());
+                    } catch (...) {
+                        bump_far_lod_authority_revision(chunk->get_coords());
+                        throw;
+                    }
                     bump_far_lod_authority_revision(chunk->get_coords());
                     chunk->current_lod.store(-1, std::memory_order_release);
                     ++edited;
@@ -6118,12 +6148,30 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
     // until the whole pipeline (including stage B) has settled.
     wait_for_streaming_jobs();
 
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            (void)id;
+            bump_far_lod_authority_revision(chunk->get_coords());
+        }
+    }
+    // Owner-thread capture cannot run during this setter. Invalidate first,
+    // releasing save ownership before acquiring the generator's exclusive epoch.
     reinitialize_noise(&params);
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
     wait_for_streaming_jobs();
 
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            (void)id;
+            bump_far_lod_authority_revision(chunk->get_coords());
+        }
+    }
+    // Owner-thread capture cannot run during this setter. Invalidate first,
+    // releasing save ownership before acquiring the generator's exclusive epoch.
     reinitialize_noise(nullptr, seed);
 }
 
@@ -6154,6 +6202,11 @@ void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
     coords_to_regenerate.reserve(m_streaming_state.chunks.size());
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         coords_to_regenerate.push_back(chunk->get_coords());
+    }
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& coords : coords_to_regenerate)
+            bump_far_lod_authority_revision(coords);
     }
     clear_world(physics_system);
     dispatch_generation_jobs(coords_to_regenerate);
@@ -6258,6 +6311,10 @@ u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const 
                        "Far region revision lock wait");
     const auto found = m_far_lod_region_revisions.find({rx, rz});
     return found == m_far_lod_region_revisions.end() ? 0u : found->second;
+}
+
+void SHIELD_WorldSystem::notify_far_lod_authority_changed(const IVec3& chunk_coords) {
+    bump_far_lod_authority_revision(chunk_coords);
 }
 
 void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coords) {
@@ -6386,6 +6443,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     if (!chunk) {
         return false;
     }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
     //   lifecycle rule (streaming-owned, NOT the persistence
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
@@ -6397,6 +6455,9 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
+    if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+        bump_far_lod_authority_revision(chunk->get_coords());
+    }
     if (adopted) {
         // Derived payloads belong to the producing world, never to a saved or
         // externally adopted chunk (world-local generation numbers can coincide).
@@ -6404,9 +6465,6 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         m_activation_index.insert(chunk);
         m_activation_index.content_changed(chunk->get_coords());
         ++m_dirty_generation;
-    }
-    if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
-        bump_far_lod_authority_revision(chunk->get_coords());
     }
     return adopted;
 }

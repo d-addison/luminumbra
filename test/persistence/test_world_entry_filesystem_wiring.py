@@ -205,7 +205,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         for source in (self.journal, writer, session):
             self.assertNotRegex(source, r"\.(?:string|generic_string)\(")
             self.assertIn("Filesystem::GenericUtf8PathString(", source)
-        self.assertIn('const fs::path worldPath = GetSaveRootPath() / "worlds/saves" / worldId;',
+        self.assertIn('const fs::path worldPath = options.save_root / "worlds/saves" / worldId;',
                       session)
         reclaim = body(writer, "std::size_t ReclaimAbandonedStaging(")
         self.assertIn("destination.filename().native()", reclaim)
@@ -229,13 +229,17 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
 
     def test_snapshot_refusals_keep_the_live_world_or_change_revision_when_it_is_torn_down(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
+        preparation = body(session, "GameSession::PrepareWorldLoad(")
+        self.assertIn("ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop)",
+                      preparation)
+        self.assertNotIn("ResetWorldSystems();", preparation)
+        self.assertLess(preparation.index("ReadPreparedWorldState("),
+                        preparation.index("prepared->ready = true;"))
         for method in ("LoadWorld", "LoadWorldFrom"):
             with self.subTest(method=method):
                 loading = body(session, f"bool GameSession::{method}(")
-                match = re.search(r"if \(!ReadWorldStateFrom\([^;]*,\s*loaded,\s*true\)\)\s*return false;", loading)
-                self.assertIsNotNone(match)
-                # A refused candidate never touches the live world, so the revision stays put.
-                self.assertLess(match.start(), loading.index("ResetWorldSystems();"))
+                self.assertIn("AdoptPreparedWorld(PrepareWorldLoad(", loading)
+                self.assertNotIn("ResetWorldSystems();", loading)
         with self.subTest(method="LoadWorldStateFrom"):
             loading = body(session, "bool GameSession::LoadWorldStateFrom(")
             match = re.search(r"if \(!ReadWorldStateFrom\([^;]*,\s*state\)\) \{", loading)
@@ -294,17 +298,27 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertIn("entry_worker_error.empty() && benchmark_v4 &&", validation)
         self.assertIn("!entry_request->create", validation)
         self.assertRegex(validation, r"std::make_unique<Measurement::VerifiedSaveSnapshot>\(\s*"
-                         r"save_directory, saved_digest, entry_request->id\)")
+                         r"save_directory, saved_digest, entry_request->id, stop\)")
         self.assertLess(validation.index("jobSystem.wait(entry_cpu_job)"),
                         validation.index("if (!error.empty())"))
         self.assertIn('std::string("Could not schedule world validation.")', validation)
         opening = stages.split("case WorldEntryStage::OpenWorld:", 1)[1].split(
             "case WorldEntryStage::RestoreState:", 1)[0]
-        self.assertIn("gameSession->LoadWorldFrom(request.id, entry_load_snapshot->root())", opening)
-        self.assertIn("gameSession->LoadWorld(request.id)", opening)
+        self.assertIn("gameSession->AdoptPreparedWorld(", opening)
+        for inline_io in ("LoadWorld(", "LoadWorldFrom(", "CreateWorld("):
+            self.assertNotIn(inline_io, opening)
+        self.assertIn("options = gameSession->CaptureWorldPreparationOptions()", validation)
+        self.assertIn("stop = entry_stop.get_token()", validation)
+        self.assertIn("options.save_root = entry_load_snapshot->root()", validation)
+        for prepare in ("PrepareWorldLoad(", "PrepareWorldCreation("):
+            self.assertGreater(validation.index(prepare), validation.index("jobSystem.dispatch_batch("))
         self.assertLess(opening.index("return WorldEntryResult::Failed;"),
                         opening.index("benchmark_loaded_snapshot = std::move(entry_load_snapshot)"))
         drain = body(source, "auto drain_entry =")
+        self.assertLess(drain.index("entry_stop.request_stop()"),
+                        drain.index("jobSystem.wait(entry_cpu_job)"))
+        self.assertLess(drain.index("jobSystem.wait(entry_cpu_job)"),
+                        drain.index("entry_prepared_world.reset()"))
         self.assertLess(drain.index("jobSystem.wait(entry_cpu_job)"),
                         drain.index("entry_load_snapshot.reset()"))
         self.assertLess(drain.index("prepare_world_entry()"),
@@ -315,13 +329,21 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         stages = body(source, "auto run_entry_stage =")
         restoration = stages.split("case WorldEntryStage::RestoreState:", 1)[1].split(
             "case WorldEntryStage::PrepareWaterfalls:", 1)[0]
-        self.assertIn("!request.create ||", restoration)
+        self.assertIn("if (!request.create)", restoration)
         self.assertIn("scenario_config.persistence_roundtrip_smoke() &&", restoration)
         self.assertIn('scenario_config.persistence_phase == "load" &&', restoration)
         self.assertIn("!scenario_config.persistence_session_dir.empty()", restoration)
-        self.assertIn("gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir)",
-                      restoration)
-        self.assertIn("gameSession->LoadWorldState()", restoration)
+        self.assertIn("? scenario_config.persistence_session_dir", restoration)
+        self.assertIn(": gameSession->GetWorldSaveDir()", restoration)
+        self.assertIn("options = gameSession->CaptureWorldPreparationOptions()", restoration)
+        self.assertIn("stop = entry_stop.get_token()", restoration)
+        self.assertLess(restoration.index("jobSystem.dispatch_batch("),
+                        restoration.index("::PrepareWorldState("))
+        self.assertLess(restoration.index("::PrepareWorldState("),
+                        restoration.index("return WorldEntryResult::Pending;"))
+        self.assertLess(restoration.index("jobSystem.wait(entry_cpu_job)"),
+                        restoration.index("gameSession->AdoptPreparedWorld("))
+        self.assertNotIn("gameSession->LoadWorldState", restoration)
         self.assertRegex(restoration, r"if \(!restored\) \{[^}]*return WorldEntryResult::Failed;")
         activation = stages.split("case WorldEntryStage::Activate:", 1)[1]
         self.assertRegex(activation, r"if \(benchmark_v4 && request.create\)\s*"

@@ -32,6 +32,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -527,8 +528,9 @@ void CheckAuthorityPublication(FarLodTier tier, bool existing, bool refuse, bool
     const auto params = Luminumbra::Test::SyntheticTerrainParams();
     Systems::SHIELD_WorldSystem authority(nullptr, nullptr, params, 1337);
     const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
-    if (existing)
+    if (existing) {
         ASSERT_TRUE(FarLodStore(world.path()).save_tile(Tile(tier, 50)));
+    }
     const auto before = Bytes(path);
     const auto revision = authority.far_lod_authority_revision();
     EXPECT_EQ(revision, 0u); // Zero is a valid captured revision.
@@ -632,6 +634,114 @@ TEST(FarLodPersistence, AuthorityBumpCannotCrossTilePublication) {
         },
         ::testing::ExitedWithCode(0),
         "");
+}
+
+namespace {
+void CheckMutatedVoxelEdit(FarLodTier tier, bool fill, bool observer_fails) {
+    const SaveDirectory directory;
+    Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    auto chunk = std::make_shared<Chunk>(IVec3(-1, 0, 64));
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(kSamples, fill ? 1.0f : -1.0f);
+    chunk->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(FarLodStore(directory.path()).save_tile(Tile(tier, 50)));
+    const auto path = WorldSaveService::region_file_path(directory.path(), -1, 2);
+    const auto before = Bytes(path);
+    const auto snapshot = world.capture_far_lod_sdf_snapshot(-1, 2);
+    ASSERT_TRUE(snapshot);
+    const auto revision = world.far_lod_authority_revision();
+    std::atomic<bool> finished{false};
+    bool saved = true;
+    std::jthread writer;
+    unsigned observed = 0;
+    // The public edit observer runs after SDF mutation and dirty marking,
+    // before the world revision bump. No production test seam is needed.
+    world.SetVoxelEditObserver([&](const IVec3&) {
+        ++observed;
+        EXPECT_EQ(world.far_lod_authority_revision(), revision);
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*snapshot));
+        writer = std::jthread([&] {
+            saved =
+                FarLodStore(directory.path()).save_tile(Tile(tier, 100), nullptr, &world, revision);
+            finished.store(true, std::memory_order_release);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!finished.load(std::memory_order_acquire) &&
+               WorldSaveService::waiting_save_writers() == 0 &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (!finished.load(std::memory_order_acquire) &&
+            WorldSaveService::waiting_save_writers() == 0)
+            std::_Exit(2);
+        EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+        EXPECT_FALSE(finished.load(std::memory_order_acquire));
+        if (observer_fails)
+            throw std::runtime_error("edit observer failed");
+    });
+    if (observer_fails) {
+        EXPECT_THROW(world.EditTerrainVoxel(Vec3(-8.0f, 8.0f, 1032.0f), 2.0f, fill, nullptr),
+                     std::runtime_error);
+    } else {
+        EXPECT_EQ(world.EditTerrainVoxel(Vec3(-8.0f, 8.0f, 1032.0f), 2.0f, fill, nullptr), 1);
+    }
+    EXPECT_EQ(observed, 1u);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!finished.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    if (!finished.load(std::memory_order_acquire))
+        std::_Exit(2);
+    writer.join();
+    EXPECT_FALSE(saved);
+    EXPECT_GT(world.far_lod_authority_revision(), revision);
+    EXPECT_EQ(Bytes(path), before);
+    ExpectNoTemps(directory.path());
+}
+} // namespace
+
+TEST(FarLodPersistence, MutatedVoxelEditBlocksOldTileUntilAuthorityBump) {
+    ASSERT_EXIT(
+        {
+            for (const auto tier : {FarLodTier::F1, FarLodTier::F2})
+                for (const bool fill : {false, true})
+                    for (const bool observer_fails : {false, true}) {
+                        CheckMutatedVoxelEdit(tier, fill, observer_fails);
+                        if (::testing::Test::HasFailure())
+                            std::_Exit(3);
+                    }
+            std::_Exit(0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+TEST(FarLodPersistence, GenerationReplacementInvalidatesAuthorityAndEmptyFootprints) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    const auto empty = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(empty);
+    params.height_offset += 1.0f;
+    world.set_params(params);
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*empty));
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(kSamples, -1.0f);
+    chunk->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    const auto adopted = world.far_lod_authority_revision();
+    EXPECT_FALSE(world.adopt_streamed_chunk(nullptr));
+    EXPECT_FALSE(world.adopt_streamed_chunk(chunk));
+    EXPECT_EQ(world.far_lod_authority_revision(), adopted);
+    params.height_offset += 1.0f;
+    world.set_params(params);
+    EXPECT_GT(world.far_lod_authority_revision(), adopted);
+    const auto revision = world.far_lod_authority_revision();
+    world.set_seed(424242);
+    EXPECT_GT(world.far_lod_authority_revision(), revision);
 }
 
 TEST(FarLodPersistence, CurrentAuthorityStillValidatesPayloadAndSavedInputBeforePublishing) {
@@ -1020,8 +1130,9 @@ TEST(FarLodPersistence, SnapshotFreshnessCoversNewPublicationsAndPreservesEvicte
             // Eviction preserves captured authority without requiring live storage.
             world.clear_world(nullptr);
             EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
-            if (inside)
+            if (inside) {
                 EXPECT_EQ(after->entries.front().payload->sdf_data.size(), kSamples);
+            }
 
             auto invalid = *after;
             for (const int bad :

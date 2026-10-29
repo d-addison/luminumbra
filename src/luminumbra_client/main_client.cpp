@@ -162,6 +162,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -2884,11 +2885,14 @@ int main(int argc, char* argv[]) {
     static double entry_cursor_y = 0.0;
     std::string entry_preset;
     std::unique_ptr<Measurement::VerifiedSaveSnapshot> entry_load_snapshot;
+    std::shared_ptr<Luminumbra::world::GameSession::WorldPreparation> entry_prepared_world;
+    std::stop_source entry_stop;
     Luminumbra::JobHandle entry_cpu_job;
     std::optional<Luminumbra::Rendering::WaterfallPass::PreparedGeometry> entry_geometry;
     std::string entry_worker_error;
     bool entry_validation_started = false;
     bool entry_validation_complete = false;
+    bool entry_restore_started = false;
     bool entry_worker_started = false;
     bool entry_adoption_started = false;
     std::chrono::steady_clock::time_point entry_stage_started{};
@@ -4038,8 +4042,10 @@ int main(int argc, char* argv[]) {
         entry_save_allowed = false;
         // The worker owns references into the pass and world until completion.
         // Keep the existing reader drains before clearing/replacing either owner.
+        entry_stop.request_stop();
         jobSystem.wait(entry_cpu_job);
         entry_cpu_job = {};
+        entry_prepared_world.reset();
         if (gameSession->WorldRevision() != entry_world_revision) {
             prepare_world_entry();
             renderPipeline.cancel_waterfall_adoption();
@@ -4103,11 +4109,13 @@ int main(int argc, char* argv[]) {
                     // worker and cancellation drain; no form or DOM references.
                     // Snapshot inputs are copied before dispatch; the worker never
                     // reads session authority or a mutable saved-digest string.
-                    entry_cpu_job =
-                        jobSystem.dispatch_batch({[&,
-                                                   entry_request = &request,
-                                                   save_directory = gameSession->GetWorldSaveDir(),
-                                                   saved_digest = benchmark_saved_world_digest] {
+                    entry_cpu_job = jobSystem.dispatch_batch(
+                        {[&,
+                          entry_request = &request,
+                          save_directory = gameSession->GetWorldSaveDir(),
+                          saved_digest = benchmark_saved_world_digest,
+                          options = gameSession->CaptureWorldPreparationOptions(),
+                          stop = entry_stop.get_token()]() mutable {
                             const auto started = std::chrono::steady_clock::now();
                             try {
                                 entry_preset = entry_request->create
@@ -4122,7 +4130,33 @@ int main(int argc, char* argv[]) {
                                     !entry_request->create)
                                     entry_load_snapshot =
                                         std::make_unique<Measurement::VerifiedSaveSnapshot>(
-                                            save_directory, saved_digest, entry_request->id);
+                                            save_directory, saved_digest, entry_request->id, stop);
+                                if (entry_worker_error.empty() && !stop.stop_requested()) {
+                                    if (entry_request->create) {
+                                        entry_prepared_world =
+                                            Luminumbra::world::GameSession::PrepareWorldCreation(
+                                                options,
+                                                entry_request->name,
+                                                entry_request->seed,
+                                                entry_request->world_type,
+                                                entry_preset.empty() &&
+                                                        !scenario_config.preset_json_override
+                                                    ? nullptr
+                                                    : &entry_preset,
+                                                Luminumbra::world::TerrainPresetUse::NewWorld,
+                                                {},
+                                                stop);
+                                    } else {
+                                        if (entry_load_snapshot)
+                                            options.save_root = entry_load_snapshot->root();
+                                        entry_prepared_world =
+                                            Luminumbra::world::GameSession::PrepareWorldLoad(
+                                                options, entry_request->id, stop);
+                                    }
+                                    entry_worker_error =
+                                        Luminumbra::world::GameSession::WorldPreparationError(
+                                            *entry_prepared_world);
+                                }
                             } catch (const std::exception& error) {
                                 entry_worker_error = error.what();
                             } catch (...) {
@@ -4156,19 +4190,9 @@ int main(int argc, char* argv[]) {
                 wait_for_world_entry_readers();
                 break;
             case WorldEntryStage::OpenWorld: {
-                const bool opened =
-                    request.create
-                        ? gameSession->CreateWorld(request.name,
-                                                   request.seed,
-                                                   request.world_type,
-                                                   entry_preset.empty() &&
-                                                           !scenario_config.preset_json_override
-                                                       ? nullptr
-                                                       : &entry_preset,
-                                                   entry_artifacts)
-                        : (entry_load_snapshot
-                               ? gameSession->LoadWorldFrom(request.id, entry_load_snapshot->root())
-                               : gameSession->LoadWorld(request.id));
+                const bool opened = gameSession->AdoptPreparedWorld(
+                    entry_prepared_world, request.create ? &entry_artifacts : nullptr);
+                entry_prepared_world.reset();
                 finish_world_replacement();
                 if (!opened) {
                     refuse_world_entry(
@@ -4182,15 +4206,50 @@ int main(int argc, char* argv[]) {
                 break;
             }
             case WorldEntryStage::RestoreState: {
-                // LoadWorld already restores saved authority. Creation keeps its
-                // original explicit restoration step, before any generation.
-                const bool restored =
-                    !request.create ||
-                    (scenario_config.persistence_roundtrip_smoke() &&
-                             scenario_config.persistence_phase == "load" &&
-                             !scenario_config.persistence_session_dir.empty()
-                         ? gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir)
-                         : gameSession->LoadWorldState());
+                if (!request.create)
+                    break; // Loaded worlds already adopted their prepared state.
+                if (!entry_restore_started) {
+                    entry_restore_started = true;
+                    const auto save_directory =
+                        scenario_config.persistence_roundtrip_smoke() &&
+                                scenario_config.persistence_phase == "load" &&
+                                !scenario_config.persistence_session_dir.empty()
+                            ? scenario_config.persistence_session_dir
+                            : gameSession->GetWorldSaveDir();
+                    entry_cpu_job = jobSystem.dispatch_batch(
+                        {[&,
+                          options = gameSession->CaptureWorldPreparationOptions(),
+                          save_directory,
+                          stop = entry_stop.get_token()] {
+                            const auto started = std::chrono::steady_clock::now();
+                            try {
+                                entry_prepared_world =
+                                    Luminumbra::world::GameSession::PrepareWorldState(
+                                        options, save_directory, stop);
+                            } catch (const std::exception& error) {
+                                entry_worker_error = error.what();
+                            } catch (...) {
+                                entry_worker_error = "Could not restore saved world state.";
+                            }
+                            LUMINUMBRA_CORE_INFO(
+                                "World entry stage: Restore state worker_ms={:.3f}",
+                                std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - started)
+                                    .count());
+                        }});
+                    return WorldEntryResult::Pending;
+                }
+                if (entry_cpu_job.counter &&
+                    entry_cpu_job.counter->load(std::memory_order_acquire) != 0)
+                    return WorldEntryResult::Pending;
+                jobSystem.wait(entry_cpu_job);
+                entry_cpu_job = {};
+                if (!entry_worker_error.empty()) {
+                    refuse_world_entry(entry_worker_error, false);
+                    return WorldEntryResult::Failed;
+                }
+                const bool restored = gameSession->AdoptPreparedWorld(entry_prepared_world);
+                entry_prepared_world.reset();
                 if (!restored) {
                     refuse_world_entry("Could not restore saved world state.");
                     return WorldEntryResult::Failed;
@@ -4675,8 +4734,11 @@ int main(int argc, char* argv[]) {
             entry_cancel_visible = false;
             world_entry_error.clear();
             entry_worker_error.clear();
+            entry_stop = std::stop_source{};
+            entry_prepared_world.reset();
             entry_validation_started = false;
             entry_validation_complete = false;
+            entry_restore_started = false;
             entry_worker_started = false;
             entry_adoption_started = false;
             entry_stage_started = {};

@@ -95,7 +95,10 @@ bool ResolveSavedPreset(const fs::path& runtime_root,
     const auto preset =
         world::LoadTerrainPresetFromJson(embedded_json,
                                          runtime_root / "data",
-                                         Filesystem::GenericUtf8PathString(result.preset_path));
+                                         Filesystem::GenericUtf8PathString(result.preset_path),
+                                         World::ReadWorldgenSymlinkStatus,
+                                         World::ReadWorldgenFile,
+                                         stop);
     if (!preset.ok) {
         result.error =
             preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();

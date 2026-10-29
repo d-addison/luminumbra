@@ -200,6 +200,74 @@ struct GameSession::LoadedWorldState {
     std::optional<luminumbra::fields::EnergyFieldState> energy;
 };
 
+struct GameSession::WorldPreparation {
+    WorldPreparationOptions options;
+    std::stop_token stop;
+    std::string error;
+    WorldMetadata metadata;
+    TerrainPresetLoadResult preset;
+    std::string preset_json;
+    fs::path state_directory;
+    LoadedWorldState loaded;
+    bool create = false;
+    bool state_only = false;
+    bool transient = false;
+    bool has_spawn_point = false;
+    bool ready = false;
+};
+
+GameSession::WorldPreparationOptions GameSession::CaptureWorldPreparationOptions() const {
+    return {.root_path = m_rootPath,
+            .save_root = GetSaveRootPath(),
+            .configured_save_root = GetSaveRootPath(),
+            .required_assets = m_requiredClientAssets,
+            .ledger_config = m_activeRegionLedger.config(),
+            .scheduler_override = m_regionSchedulerOverride,
+            .simulation_tick = GetSimulationTickCount(),
+            .world_revision = WorldRevision(),
+            .active_regions = m_activeRegionsEnabled,
+            .aether_state = m_aetherStateEnabled,
+            .job_system_available = m_jobSystem != nullptr,
+            .transient_creation = false};
+}
+
+std::string GameSession::WorldPreparationError(const WorldPreparation& prepared) {
+    return prepared.stop.stop_requested() ? "Saved-world validation cancelled." : prepared.error;
+}
+
+bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
+                                     Persistence::CreatedWorldArtifacts* artifacts) {
+    if (!prepared || (!prepared->create && !IsSimulationTickBoundary()))
+        return false;
+    m_worldOpenError = WorldPreparationError(*prepared);
+    if (!prepared->ready || !m_worldOpenError.empty())
+        return false;
+    if (!m_jobSystem) {
+        m_worldOpenError = prepared->create ? "JobSystem not set before creating world."
+                                            : "JobSystem not set before loading world.";
+        return false;
+    }
+    const auto& options = prepared->options;
+    if (options.root_path != m_rootPath || options.configured_save_root != GetSaveRootPath() ||
+        options.required_assets != m_requiredClientAssets ||
+        options.active_regions != m_activeRegionsEnabled ||
+        options.aether_state != m_aetherStateEnabled ||
+        options.ledger_config != m_activeRegionLedger.config() ||
+        options.scheduler_override != m_regionSchedulerOverride ||
+        (prepared->state_only &&
+         (!m_worldUsable || !m_worldSystem || options.world_revision != WorldRevision()))) {
+        m_worldOpenError = "World preparation no longer matches session configuration.";
+        return false;
+    }
+    // Consuming a prepared result twice must never replace live state twice.
+    prepared->ready = false;
+    if (prepared->state_only) {
+        AdoptWorldStateFrom(prepared->state_directory, prepared->loaded);
+        return true;
+    }
+    return prepared->create ? AdoptCreatedWorld(*prepared, artifacts) : AdoptLoadedWorld(*prepared);
+}
+
 GameSession::GameSession() {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
 }
@@ -1156,7 +1224,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
 WorldConfigValidationResult
 GameSession::ValidateWorldConfig(const std::string& root_path,
                                  const std::string& worldType,
-                                 const std::vector<std::filesystem::path>& required_assets) {
+                                 const std::vector<std::filesystem::path>& required_assets,
+                                 const std::stop_token& stop) {
     WorldConfigValidationResult result;
     result.ok = true;
 
@@ -1188,7 +1257,8 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     }
 
     if (result.ok) {
-        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path, root / "data");
+        const TerrainPresetLoadResult preset =
+            LoadTerrainPreset(result.preset_path, root / "data", stop);
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1238,55 +1308,61 @@ bool GameSession::CreateTransientWorld(const std::string& name,
         name, seed, worldType, nullptr, true, nullptr, TerrainPresetUse::NewWorld);
 }
 
-bool GameSession::CreateWorldInternal(const std::string& name,
-                                      const std::string& seed,
-                                      const std::string& worldType,
-                                      const std::string* customPresetJson,
-                                      bool transient,
-                                      Persistence::CreatedWorldArtifacts* artifacts,
-                                      TerrainPresetUse presetUse,
-                                      const std::string& requiredPresetContentHash) {
-    m_worldOpenError.clear();
+std::shared_ptr<GameSession::WorldPreparation>
+GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
+                                  const std::string& name,
+                                  const std::string& seed,
+                                  const std::string& worldType,
+                                  const std::string* customPresetJson,
+                                  TerrainPresetUse presetUse,
+                                  const std::string& requiredPresetContentHash,
+                                  const std::stop_token& stop) {
+    auto prepared = std::make_shared<WorldPreparation>();
+    prepared->options = options;
+    prepared->stop = stop;
+    prepared->create = true;
+    prepared->transient = options.transient_creation;
+    if (stop.stop_requested())
+        return prepared;
     if (name.size() > Persistence::SavedInputLimits::kWorldNameBytes ||
         seed.size() > Persistence::SavedInputLimits::kWorldSeedBytes) {
-        m_worldOpenError =
+        prepared->error =
             "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.";
-        return false;
+        return prepared;
     }
 
-    if (!m_jobSystem) {
-        m_worldOpenError = "JobSystem not set before creating world.";
-        LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
-        return false;
+    if (!options.job_system_available) {
+        prepared->error = "JobSystem not set before creating world.";
+        LUMINUMBRA_CORE_ERROR("{}", prepared->error);
+        return prepared;
     }
 
     const WorldConfigValidationResult validation =
-        ValidateWorldConfig(m_rootPath, worldType, m_requiredClientAssets);
+        ValidateWorldConfig(options.root_path, worldType, options.required_assets, stop);
     if (!validation.ok) {
-        m_worldOpenError =
+        prepared->error =
             validation.errors.empty() ? "Invalid world configuration." : validation.errors.front();
         for (const std::string& error : validation.errors) {
             LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);
         }
-        return false;
+        return prepared;
     }
 
     WorldMetadata metadata;
     metadata.name = name;
     metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
     metadata.worldType = worldType;
-    metadata.worldId = transient ? std::string{} : GenerateWorldId();
+    metadata.worldId = options.transient_creation ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
-    const auto worldPath = GetSaveRootPath() / "worlds/saves" / metadata.worldId;
 
     nlohmann::json resolved;
     try {
         if (customPresetJson) {
             if (customPresetJson->size() > Persistence::SavedInputLimits::kPresetBytes ||
                 !Persistence::SavedInputLimits::JsonDepthAllowed(*customPresetJson)) {
-                m_worldOpenError = "Saved-input admission refused: preset compatibility limit.";
-                return false;
+                prepared->error = "Saved-input admission refused: preset compatibility limit.";
+                return prepared;
             }
             resolved = nlohmann::json::parse(*customPresetJson);
         } else {
@@ -1295,16 +1371,18 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                             Persistence::SavedInputLimits::kPresetBytes,
                                             resolved,
                                             missing,
-                                            false) ||
+                                            false,
+                                            nullptr,
+                                            stop) ||
                 missing) {
-                m_worldOpenError = "Could not read this world's preset.";
-                return false;
+                prepared->error = "Could not read this world's preset.";
+                return prepared;
             }
         }
         resolved = ResolveEffectivePreset(resolved, presetUse);
     } catch (const nlohmann::json::exception& error) {
-        m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
-        return false;
+        prepared->error = "Could not parse this world's preset: " + std::string(error.what());
+        return prepared;
     }
     // Admit the exact compact encoding plus its trailing newline before any
     // directory creation, recursive preset validation or live-world replacement.
@@ -1314,27 +1392,64 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                       saved_preset_json,
                                       -1,
                                       false)) {
-        m_worldOpenError = "Saved-input admission refused: preset compatibility limit.";
-        return false;
+        prepared->error = "Saved-input admission refused: preset compatibility limit.";
+        return prepared;
     }
     // Both persisted and transient worlds adopt the parameters and identity of
     // these same resolved bytes. Explicit revision 1 remains authoritative.
-    const TerrainPresetLoadResult preset =
-        LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath) / "data");
+    TerrainPresetLoadResult preset =
+        LoadTerrainPresetFromJson(resolved,
+                                  RuntimeRoot(options.root_path) / "data",
+                                  "<memory>",
+                                  World::ReadWorldgenSymlinkStatus,
+                                  World::ReadWorldgenFile,
+                                  stop);
     if (!preset.ok) {
-        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
+        prepared->error = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
-        return false;
+        return prepared;
     }
     // Use the identity of the dependency snapshot generation will adopt. A
     // replay preflight cannot admit dependency changes between resolution and boot.
     if (!requiredPresetContentHash.empty() &&
         preset.preset_content_hash != requiredPresetContentHash) {
-        m_worldOpenError = "This world's resolved preset content does not match the recording.";
-        return false;
+        prepared->error = "This world's resolved preset content does not match the recording.";
+        return prepared;
     }
+
+    if (stop.stop_requested())
+        return prepared;
+    prepared->metadata = std::move(metadata);
+    prepared->preset = std::move(preset);
+    prepared->preset_json = std::move(saved_preset_json);
+    prepared->ready = true;
+    return prepared;
+}
+
+bool GameSession::CreateWorldInternal(const std::string& name,
+                                      const std::string& seed,
+                                      const std::string& worldType,
+                                      const std::string* customPresetJson,
+                                      bool transient,
+                                      Persistence::CreatedWorldArtifacts* artifacts,
+                                      TerrainPresetUse presetUse,
+                                      const std::string& requiredPresetContentHash) {
+    auto options = CaptureWorldPreparationOptions();
+    options.transient_creation = transient;
+    auto prepared = PrepareWorldCreation(
+        options, name, seed, worldType, customPresetJson, presetUse, requiredPresetContentHash);
+    return AdoptPreparedWorld(prepared, artifacts);
+}
+
+bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
+                                    Persistence::CreatedWorldArtifacts* artifacts) {
+    auto& metadata = prepared.metadata;
+    auto& preset = prepared.preset;
+    auto& saved_preset_json = prepared.preset_json;
+    const bool transient = prepared.transient;
+    const auto worldPath = prepared.options.save_root / "worlds/saves" / metadata.worldId;
     if (!transient) {
         try {
             fs::create_directories(worldPath.parent_path());
@@ -1380,7 +1495,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
-                         worldType,
+                         m_metadata.worldType,
                          params.height_offset,
                          params.base_amplitude,
                          params.caves_enabled);
@@ -1474,158 +1589,105 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
-    const auto saved =
-        Persistence::InspectSavedWorld(GetSaveRootPath(), RuntimeRoot(m_rootPath), worldId);
-    m_worldOpenError = saved.error;
-    if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
-        m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
-    if (!m_worldOpenError.empty()) {
-        LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
-        return false;
-    }
-    if (!m_jobSystem) {
-        m_worldOpenError = "JobSystem not set before loading world.";
-        return false;
-    }
-    for (const auto& asset : m_requiredClientAssets) {
-        if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
-            m_worldOpenError =
-                "Missing required runtime asset: " + Filesystem::GenericUtf8PathString(asset);
-            return false;
-        }
-    }
-    const fs::path worldPath = GetSaveRootPath() / "worlds/saves" / worldId;
-    // Generate from the same canonical bytes whose saved identity was verified.
-    const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
-        nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
-    if (!preset.ok) {
-        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
-        for (const std::string& error : preset.errors) {
-            LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
-        }
-        return false;
-    }
-    // Saved-world adoption also keeps the loader's inputs through generation.
-    TerrainGenParams params = preset.params;
-    ClampTerrainParams(params);
-
-    // Validate all refusing state readers before replacing the live world.
-    LoadedWorldState loaded;
-    if (!ReadWorldStateFrom(worldPath, loaded, true))
-        return false;
-
-    ResetWorldSystems();
-    m_presetContentHash = preset.preset_content_hash;
-    m_savedPresetJson = saved.preset_json;
-    m_metadata = saved.metadata;
-    m_renderCalendar = loaded.render_calendar;
-    if (m_activeRegionsEnabled) {
-        m_worldClock = loaded.clock;
-        m_simulationClock.reset(m_worldClock.tick());
-    }
-    m_transientWorld = false;
-    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
-
-    // Initialize Physics System after config and preset validation passes.
-    m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
-    m_physicsSystem->startup();
-
-    m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
-    // Worldgen seam for audio-raycast surface materials (non-owning; physics
-    // is destroyed before the world system by member order, so the pointer
-    // cannot dangle).
-    m_physicsSystem->set_world_system(m_worldSystem.get());
-    m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
-    m_worldSystem->SetWaterSystem(m_waterSystem.get());
-    m_worldSystem->SetWaterHydrology(m_finiteHydrologyEnabled, 0, 0);
-
-    // sim.water_high_res: raise the solver to High BEFORE any chunk is adopted
-    // or seeded (explicit OFF = selected Medium = byte-identical). A loaded save
-    // at another resolution migrates in LoadWorldStateFrom's boot pass.
-    ApplyWaterResolutionWiring();
-
-    // The legacy path starts at zero. Active-region clocks restore the ambient
-    // fields at the saved absolute tick in LoadWorldStateFrom, before any tick.
-    m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
-    m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
-    m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
-
-    // unlike the re-derivable trio above, the stateful
-    // energy layer is AUTHORITATIVE state — when enabled, a persisted record
-    // restores it (epoch-rebased onto the session clock); an absent
-    // record is all-zeros by contract. OFF -> null -> byte-identical.
-    InitializeEnergyFieldState();
-
-    // Legacy saves without a persisted spawnPoint: derive it from terrain
-    // height exactly like CreateWorld does (pure function of seed/params).
-    if (!saved.has_spawn_point) {
-        const float spawn_x = 8.0f;
-        const float spawn_z = 8.0f;
-        const float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
-        m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
-    }
-    InitializeScentField(m_metadata.spawnPoint);
-
-    // Saved worlds adopt the same captured session content as new worlds.
-    m_speciesTable = preset.params.worldgen_dependencies->species_table;
-
-    // same weather-rain wiring as CreateWorld (explicit OFF = no-op).
-    ApplyWeatherRainWiring();
-
-    m_worldOpenError.clear();
-    AttachRegionEditObserver();
-    AdoptWorldStateFrom(worldPath, loaded);
-    m_worldUsable = true;
-    LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
-    return true;
+    return AdoptPreparedWorld(PrepareWorldLoad(CaptureWorldPreparationOptions(), worldId));
 }
 
 bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save_root) {
     if (!IsSimulationTickBoundary())
         return false;
-    const auto saved = Persistence::InspectSavedWorld(save_root, RuntimeRoot(m_rootPath), worldId);
-    m_worldOpenError = saved.error;
-    if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
-        m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
-    if (!m_worldOpenError.empty()) {
-        LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
-        return false;
+    auto options = CaptureWorldPreparationOptions();
+    options.save_root = save_root;
+    return AdoptPreparedWorld(PrepareWorldLoad(options, worldId));
+}
+
+std::shared_ptr<GameSession::WorldPreparation>
+GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
+                              const std::string& worldId,
+                              const std::stop_token& stop) {
+    auto prepared = std::make_shared<WorldPreparation>();
+    prepared->options = options;
+    prepared->stop = stop;
+    if (stop.stop_requested())
+        return prepared;
+    const auto saved = Persistence::InspectSavedWorld(
+        options.save_root, RuntimeRoot(options.root_path), worldId, stop);
+    prepared->error = saved.error;
+    if (prepared->error.empty() && saved.requires_active_regions && !options.active_regions)
+        prepared->error = "Incompatible configuration: this world requires sim.active_regions.";
+    if (!prepared->error.empty()) {
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", prepared->error);
+        return prepared;
     }
-    if (!m_jobSystem) {
-        m_worldOpenError = "JobSystem not set before loading world.";
-        return false;
+    if (!options.job_system_available) {
+        prepared->error = "JobSystem not set before loading world.";
+        return prepared;
     }
-    for (const auto& asset : m_requiredClientAssets) {
-        if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
-            m_worldOpenError =
+    for (const auto& asset : options.required_assets) {
+        if (!fs::exists(RuntimeRoot(options.root_path) / asset)) {
+            prepared->error =
                 "Missing required runtime asset: " + Filesystem::GenericUtf8PathString(asset);
-            return false;
+            return prepared;
         }
     }
-    const auto worldPath = save_root / "worlds/saves" / worldId;
+    const fs::path worldPath = options.save_root / "worlds/saves" / worldId;
     // Generate from the same canonical bytes whose saved identity was verified.
-    const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
-        nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
+    TerrainPresetLoadResult preset =
+        LoadTerrainPresetFromJson(nlohmann::json::parse(saved.preset_json),
+                                  RuntimeRoot(options.root_path) / "data",
+                                  "<memory>",
+                                  World::ReadWorldgenSymlinkStatus,
+                                  World::ReadWorldgenFile,
+                                  stop);
     if (!preset.ok) {
-        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
+        prepared->error = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
-        return false;
+        return prepared;
     }
-    // Saved-world adoption also keeps the loader's inputs through generation.
+    // Validate all refusing state readers before replacing the live world.
+    auto& loaded = prepared->loaded;
+    if (!ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop))
+        return prepared;
+
+    if (stop.stop_requested())
+        return prepared;
+    prepared->metadata = saved.metadata;
+    prepared->has_spawn_point = saved.has_spawn_point;
+    prepared->preset_json = saved.preset_json;
+    prepared->preset = std::move(preset);
+    prepared->ready = true;
+    return prepared;
+}
+
+std::shared_ptr<GameSession::WorldPreparation>
+GameSession::PrepareWorldState(const WorldPreparationOptions& options,
+                               const fs::path& save_directory,
+                               const std::stop_token& stop) {
+    auto prepared = std::make_shared<WorldPreparation>();
+    prepared->options = options;
+    prepared->stop = stop;
+    prepared->state_only = true;
+    prepared->state_directory = save_directory;
+    if (save_directory.empty()) {
+        prepared->error = "World state directory is empty.";
+        return prepared;
+    }
+    prepared->ready = ReadPreparedWorldState(
+        save_directory, options, prepared->loaded, prepared->error, false, stop);
+    return prepared;
+}
+
+bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
+    auto& saved = prepared;
+    auto& preset = prepared.preset;
+    auto& loaded = prepared.loaded;
+    const auto worldPath = prepared.options.save_root / "worlds/saves" / prepared.metadata.worldId;
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
-
-    // Validate all refusing state readers before replacing the live world.
-    LoadedWorldState loaded;
-    if (!ReadWorldStateFrom(worldPath, loaded, true))
-        return false;
-
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
-    m_savedPresetJson = saved.preset_json;
+    m_savedPresetJson = std::move(saved.preset_json);
     m_metadata = saved.metadata;
     m_renderCalendar = loaded.render_calendar;
     if (m_activeRegionsEnabled) {
@@ -2243,24 +2305,52 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 bool GameSession::ReadWorldStateFrom(const fs::path& save_dir,
                                      LoadedWorldState& state,
                                      bool resetting_clock) {
+    return ReadPreparedWorldState(save_dir,
+                                  CaptureWorldPreparationOptions(),
+                                  state,
+                                  m_worldOpenError,
+                                  resetting_clock,
+                                  {},
+                                  resetting_clock ? nullptr : m_energyFieldState.get());
+}
+
+bool GameSession::ReadPreparedWorldState(
+    const fs::path& save_dir,
+    const WorldPreparationOptions& options,
+    LoadedWorldState& state,
+    std::string& error,
+    bool resetting_clock,
+    const std::stop_token& stop,
+    const luminumbra::fields::EnergyFieldState* current_energy) {
     const Persistence::WorldSaveService service;
+    const auto cancelled = [&] {
+        if (!stop.stop_requested())
+            return false;
+        error = "Saved-world validation cancelled.";
+        return true;
+    };
+    if (cancelled())
+        return false;
     std::vector<std::string> errors;
-    if (!Persistence::WorldSaveService::load_plant_entities(state.plants, save_dir, &errors) ||
+    if (!Persistence::WorldSaveService::load_plant_entities(
+            state.plants, save_dir, &errors, stop) ||
         !luminumbra::foliage::ValidatePlantEntitySnapshot(state.plants)) {
         state.input_refused = true;
-        m_worldOpenError = errors.empty() ? "Saved-input admission refused: invalid plant snapshot."
-                                          : errors.front();
+        error = errors.empty() ? "Saved-input admission refused: invalid plant snapshot."
+                               : errors.front();
         return false;
     }
-    state.snapshot_present = service.load_world(state.chunks, save_dir, errors);
+    state.snapshot_present = service.load_world(state.chunks, save_dir, errors, stop);
     if (!state.snapshot_present && !errors.empty()) {
-        m_worldOpenError = errors.front();
-        state.input_refused = m_worldOpenError.find("Saved-input admission refused:") == 0;
-        for (const std::string& error : errors)
-            LUMINUMBRA_CORE_ERROR("World state load failed: {}", error);
+        error = errors.front();
+        state.input_refused = error.find("Saved-input admission refused:") == 0;
+        for (const std::string& diagnostic : errors)
+            LUMINUMBRA_CORE_ERROR("World state load failed: {}", diagnostic);
         return false;
     }
 
+    if (cancelled())
+        return false;
     bool requires_active_regions = false;
     if (!Persistence::WorldSaveService::read_clock_metadata(save_dir,
                                                             state.clock,
@@ -2268,50 +2358,52 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir,
                                                             &errors,
                                                             &state.ambient_anchor,
                                                             &state.render_calendar,
-                                                            &state.water_sim_cursor) ||
-        (requires_active_regions && !m_activeRegionsEnabled)) {
-        m_worldOpenError =
-            errors.empty() ? "Incompatible configuration: this world requires sim.active_regions."
-                           : errors.front();
-        state.input_refused = m_worldOpenError.find("Saved-input admission refused:") == 0;
+                                                            &state.water_sim_cursor,
+                                                            stop) ||
+        (requires_active_regions && !options.active_regions)) {
+        error = errors.empty()
+                    ? "Incompatible configuration: this world requires sim.active_regions."
+                    : errors.front();
+        state.input_refused = error.find("Saved-input admission refused:") == 0;
         return false;
     }
-    if (m_activeRegionsEnabled) {
+    if (options.active_regions) {
         // Presentation-only saves recorded the calendar but no simulation tick.
         if (state.render_calendar)
             state.clock = WorldClock(0, *state.render_calendar);
-        state.ledger.emplace(m_activeRegionLedger.config());
+        state.ledger.emplace(options.ledger_config);
         if (!Persistence::WorldSaveService::load_active_regions(
-                *state.ledger, save_dir, &errors, state.clock)) {
-            m_worldOpenError =
+                *state.ledger, save_dir, &errors, state.clock, stop)) {
+            error =
                 errors.empty() ? std::string(ActiveRegionLedger::kCorruptMessage) : errors.front();
             return false;
         }
-        if (m_regionSchedulerOverride && state.ledger->config() != *m_regionSchedulerOverride) {
-            m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
-                               "from explicit override.";
+        if (options.scheduler_override && state.ledger->config() != *options.scheduler_override) {
+            error = "Incompatible configuration: persisted region scheduler differs "
+                    "from explicit override.";
             return false;
         }
     }
 
-    if (m_aetherStateEnabled) {
+    if (options.aether_state) {
         const Persistence::SavedInputFile input(save_dir / "aether_state.efs");
-        const auto tick_base =
-            m_activeRegionsEnabled
-                ? state.clock.tick()
-                : (resetting_clock ? std::uint64_t{0} : GetSimulationTickCount());
-        if (!resetting_clock && m_energyFieldState)
-            state.energy.emplace(*m_energyFieldState);
+        const auto tick_base = options.active_regions
+                                   ? state.clock.tick()
+                                   : (resetting_clock ? std::uint64_t{0} : options.simulation_tick);
+        // Only the synchronous snapshot wrapper supplies existing energy. Worker
+        // preparation passes nullptr and never reads a live session object.
+        if (current_energy)
+            state.energy.emplace(*current_energy);
         else
             state.energy.emplace(2);
         if (input.missing()) {
             state.energy->ResetEmptyAtTick(tick_base);
         } else {
             std::string record;
-            if (!Persistence::ReadSavedEnergy(input, record) ||
+            if (!Persistence::ReadSavedEnergy(input, record, stop) ||
                 !state.energy->DeserializeRecord(record, tick_base)) {
                 state.input_refused = true;
-                m_worldOpenError =
+                error =
                     "Saved-input admission refused: malformed energy record or compatibility limit "
                     "(16 channels, 8192 pages, 360218644 bytes).";
                 return false;
@@ -2324,13 +2416,15 @@ bool GameSession::ReadWorldStateFrom(const fs::path& save_dir,
     constexpr std::size_t kFullSdfLattice =
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     for (const auto& chunk : state.chunks.snapshot_chunks()) {
+        if (cancelled())
+            return false;
         if (chunk && !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
-            m_worldOpenError = "corrupt world chunk SDF lattice";
-            LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+            error = "corrupt world chunk SDF lattice";
+            LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
             return false;
         }
     }
-    return true;
+    return !cancelled();
 }
 
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {

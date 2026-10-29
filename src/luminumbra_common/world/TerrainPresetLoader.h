@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -143,7 +144,8 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // tables must be readable and valid. Enabled structure pools must exist.
 // Runtime callers supply data_root independently of the preset's storage location.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
-                                          const std::filesystem::path& data_root);
+                                          const std::filesystem::path& data_root,
+                                          const std::stop_token& stop = {});
 // Convenience for presets in the standard worlds/atlas/presets layout.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
@@ -168,6 +170,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(
     const std::filesystem::path& data_root,
     const std::string& provenance = "<memory>",
     const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus,
-    const World::WorldgenFileReader& dependency_reader = World::ReadWorldgenFile);
+    const World::WorldgenFileReader& dependency_reader = World::ReadWorldgenFile,
+    const std::stop_token& stop = {});
 
 } // namespace Luminumbra::world

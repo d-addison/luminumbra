@@ -112,7 +112,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertNotIn("prepare_world_entry();", readers)
         opening = stages.split("case WorldEntryStage::OpenWorld:", 1)[1].split(
             "case WorldEntryStage::RestoreState:", 1)[0]
-        self.assertLess(opening.index("gameSession->LoadWorld(request.id)"),
+        self.assertLess(opening.index("gameSession->AdoptPreparedWorld("),
                         opening.index("finish_world_replacement();"))
         self.assertLess(opening.index("finish_world_replacement();"), opening.index("if (!opened)"))
         backdrop = body(self.main, "if (want_backdrop)")
