@@ -7,6 +7,8 @@
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/Shader.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #define GLFW_INCLUDE_NONE
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -139,56 +141,6 @@ std::vector<PlaneSegmentBits> SharedPlaneSegments(const FarLodRegionMesh& mesh,
     return segments;
 }
 
-std::size_t CountIndexedWorldVertex(const FarLodRegionMesh& mesh,
-                                    int region_x,
-                                    int region_z,
-                                    float world_x,
-                                    float world_y,
-                                    float world_z,
-                                    u32 material) {
-    const float local_x = world_x - static_cast<float>(region_x * kFarLodRegionSizeMeters);
-    const float local_z = world_z - static_cast<float>(region_z * kFarLodRegionSizeMeters);
-    std::set<u32> matches;
-    for (const u32 index : mesh.indices) {
-        if (index >= mesh.vertices.size())
-            continue;
-        const VoxelVertex& vertex = mesh.vertices[index];
-        if (vertex.position.x == local_x && vertex.position.y == world_y &&
-            vertex.position.z == local_z && vertex.material_id == material) {
-            matches.insert(index);
-        }
-    }
-    return matches.size();
-}
-
-std::size_t CountIndexedWorldPosition(const FarLodRegionMesh& mesh,
-                                      int region_x,
-                                      int region_z,
-                                      float world_x,
-                                      float world_y,
-                                      float world_z) {
-    const float local_x = world_x - static_cast<float>(region_x * kFarLodRegionSizeMeters);
-    const float local_z = world_z - static_cast<float>(region_z * kFarLodRegionSizeMeters);
-    std::set<u32> matches;
-    for (const u32 index : mesh.indices) {
-        if (index >= mesh.vertices.size())
-            continue;
-        const VoxelVertex& vertex = mesh.vertices[index];
-        if (vertex.position.x == local_x && vertex.position.y == world_y &&
-            vertex.position.z == local_z) {
-            matches.insert(index);
-        }
-    }
-    return matches.size();
-}
-
-bool PlaneSegmentsContainHeight(const std::vector<PlaneSegmentBits>& segments, float world_y) {
-    const u32 height_bits = std::bit_cast<u32>(world_y);
-    return std::any_of(segments.begin(), segments.end(), [&](const auto& segment) {
-        return segment[0][1] == height_bits || segment[1][1] == height_bits;
-    });
-}
-
 struct CrossRegionBuildResult {
     bool ok = false;
     std::string error;
@@ -222,27 +174,6 @@ bool SetPlanarAuthority(Chunk& chunk, float surface_y, u8 material) {
                                           static_cast<std::size_t>(y) * side +
                                           static_cast<std::size_t>(z) * side * side;
                 chunk.sdf_data[index] = static_cast<float>(y) - surface_y;
-            }
-        }
-    }
-    chunk.mark_voxel_data_dirty();
-    return true;
-}
-
-bool SetBoundaryRampedAuthority(Chunk& chunk, float shared_face_y, float interior_y, u8 material) {
-    const int side = CHUNK_SIZE_X + 1;
-    const std::size_t expected_samples = static_cast<std::size_t>(side) * side * side;
-    if (chunk.sdf_data.size() != expected_samples)
-        return false;
-    chunk.material_data.assign(expected_samples, material);
-    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
-        for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
-            for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
-                const float surface = x == 0 ? shared_face_y : interior_y;
-                const std::size_t index = static_cast<std::size_t>(x) +
-                                          static_cast<std::size_t>(y) * side +
-                                          static_cast<std::size_t>(z) * side * side;
-                chunk.sdf_data[index] = static_cast<float>(y) - surface;
             }
         }
     }
@@ -1358,6 +1289,9 @@ void main() { color = vec4(1); }
     SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
     FarLodSystem far;
     far.attach_job_system(&jobs);
+    // Exercise camera-region ownership without a distant-tier upload backlog.
+    // The full-horizon byte/count admission policy has its own FIFO regressions.
+    far.set_horizon(FarLodSystem::kF1OuterRangeMeters, FarLodSystem::kF1OuterRangeMeters + 50.0f);
     const glm::vec3 camera(256, 1200, 256);
     for (int frame = 0; frame < 12; ++frame) {
         far.update(world, camera);
@@ -1529,6 +1463,10 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
         SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
         FarLodSystem far;
         far.attach_job_system(&jobs);
+        // Keep all nine neighbouring regions, including boundary crossings,
+        // while isolating ownership from the full-horizon FIFO upload budget.
+        far.set_horizon(FarLodSystem::kF1OuterRangeMeters,
+                        FarLodSystem::kF1OuterRangeMeters + 50.0f);
         far.set_coverage_diagnostics_enabled(true);
         const glm::mat4 projection =
             ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);
@@ -1713,4 +1651,21 @@ TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {
         }
     }
     jobs.shutdown();
+}
+
+TEST(FarLodWorker, MissingImmutableAuthorityPayloadIsRejected) {
+    const SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
+    Systems::FarLodSdfSnapshot snapshot;
+    snapshot.params_hash = ComputeTerrainParamsHash(world.get_params(), world.get_seed());
+    snapshot.entries.push_back(FarLodSdfSnapshotEntry{
+        .coords = IVec3(0, 0, 0),
+        .provenance = ChunkSdfProvenance::LoadedOrEdited,
+        .voxel_revision = 1,
+        .authority_durable = true,
+        .payload = {},
+    });
+    const auto outcome = BuildFarLodWorkerTile(world, snapshot, FarLodTier::F1, 0, 0, {});
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_FALSE(outcome.error.empty());
+    EXPECT_TRUE(outcome.mesh.vertices.empty());
 }

@@ -1290,6 +1290,19 @@ RenderPipeline::set_far_world_cave_policy(std::optional<World::FarCaveMode> requ
     return m_far_world->CavePolicy(FarWorldPurpose::World);
 }
 
+void RenderPipeline::wait_for_accepted_far_tile_writes() {
+    m_far_world->WaitForAcceptedCacheWrites();
+    if (m_farlod)
+        m_farlod->wait_for_accepted_cache_writes();
+}
+
+void RenderPipeline::wait_for_world_readers() {
+    // Volume renderers own immutable authority; legacy builds/writers borrow the live world.
+    m_far_world->WaitForAcceptedCacheWrites();
+    if (m_farlod)
+        m_farlod->wait_for_world_readers();
+}
+
 void RenderPipeline::prepare_world_swap() {
     m_far_world->PrepareWorldSwap();
     m_waterfall_pass->destroy_geometry();
@@ -4337,6 +4350,13 @@ void RenderPipeline::cleanup_gpu_resources() {
 }
 
 // Bake the live waterfall dressing in the pass that owns its geometry and draw.
+void RenderPipeline::cancel_waterfall_adoption() {
+    m_waterfall_pass->destroy_geometry();
+    m_waterfall_pass->waterfall_cache().clear();
+    if (m_particle_pass)
+        m_particle_pass->clear_emitters();
+}
+
 void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
     m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);
 }

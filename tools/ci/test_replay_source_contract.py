@@ -111,6 +111,15 @@ class ReplaySourceContract(unittest.TestCase):
         self.assert_shipping_owner(read_source("test/CMakeLists.txt"),
                                    read_source("test/common/EffectivePresetIdentity_test.cpp"))
 
+    def test_headless_session_test_has_source_specific_windows_section_capacity(self):
+        cmake = read_source("test/CMakeLists.txt")
+        self.assertRegex(cmake, r'if\(MSVC\)\s+set_source_files_properties\('
+                         r'common/GameSessionHeadlessWorld_test\.cpp PROPERTIES\s+'
+                         r'COMPILE_OPTIONS "/bigobj"\)\s+elseif\(MINGW\)\s+'
+                         r'set_source_files_properties\('
+                         r'common/GameSessionHeadlessWorld_test\.cpp PROPERTIES\s+'
+                         r'COMPILE_OPTIONS "-Wa,-mbig-obj"\)\s+endif\(\)')
+
     def test_removing_shipping_replay_coverage_is_detected(self):
         cmake = read_source("test/CMakeLists.txt")
         identity = read_source("test/common/EffectivePresetIdentity_test.cpp")
@@ -168,15 +177,15 @@ class ReplaySourceContract(unittest.TestCase):
             # defaults when active regions are off; admission needs creation values.
             self.assertRegex(body, r'SystemConfigIdentity\(Luminumbra::world::WorldCalendar\{\}\)')
         creation = read_source("src/luminumbra_common/world/GameSession.cpp").split(
-            "bool GameSession::CreateWorldInternal(", 1)[1].split(
+            "GameSession::PrepareWorldCreation(", 1)[1].split(
                 "bool GameSession::LoadWorld(", 1)[0]
         self.assertIn("std::string saved_preset_json;", creation)
         self.assertRegex(creation, r'BoundedJsonDump\(\s*resolved,\s*'
                          r'Persistence::SavedInputLimits::kPresetBytes - 1,\s*saved_preset_json,\s*-1,\s*false\)')
         self.assertLess(creation.index("BoundedJsonDump("),
-                        creation.index("fs::create_directories(worldPath)"))
+                        creation.index("fs::create_directories(worldPath.parent_path())"))
         self.assertLess(creation.index("requiredPresetContentHash"),
-                        creation.index("fs::create_directories(worldPath)"))
+                        creation.index("fs::create_directories(worldPath.parent_path())"))
         self.assertLess(creation.index("LoadTerrainPresetFromJson(resolved"),
                         creation.index("ResetWorldSystems();"))
         self.assertIn("m_savedPresetJson = std::move(saved_preset_json);", creation)
@@ -184,6 +193,58 @@ class ReplaySourceContract(unittest.TestCase):
         for name in ("ReplayAdmissionUsesTheCreatedCalendarWithActiveRegionsOnAndOff",
                      "TransientSnapshotsRetainTheEffectivePresetAndRenderCalendar"):
             self.assertIn(f"TEST_F(EffectivePresetIdentity, {name})", native)
+
+    def test_voxel_edit_preparation_indexes_and_publishes_synchronous_generation(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        prepare = source.split("bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(", 1)[1].split(
+            "int SHIELD_WorldSystem::EditTerrainVoxel(", 1)[0]
+        insertion = prepare.split("if (iterator == m_streaming_state.chunks.end()) {", 1)[1].split(
+            "auto& chunk = iterator->second;", 1)[0]
+        self.assertIn("m_activation_index.insert(iterator->second);", insertion)
+        self.assertIn("++m_dirty_generation;", insertion)
+        generation = prepare.split("if (chunk->sdf_data.empty()) {", 1)[1].split(
+            "if (chunk->sdf_data.size() != kFullSdfLattice)", 1)[0]
+        self.assertRegex(generation, r'bump_far_lod_authority_revision\(chunk->get_coords\(\)\);\s*'
+                         r'GenerateChunkData\(\*chunk, 1\);\s*'
+                         r'publish_generated_column_span\(\*chunk\);\s*'
+                         r'\+\+m_dirty_generation;')
+        self.assertLess(prepare.index("return false;"), prepare.index("wait_for_streaming_jobs();"))
+        native = read_source("test/common/ActivationResidencyIndex_test.cpp")
+        self.assertIn("VoxelEditPreparationMaintainsResidencyAndPublication", native)
+        for token in ("EXPECT_FALSE(world.PrepareTerrainVoxelEdit(anchor, 0.0f));",
+                      "EXPECT_FALSE(world.PrepareTerrainVoxelEdit(anchor, 17.0f));",
+                      "EXPECT_EQ(loaded->sdf_data, partial_sdf);",
+                      "EXPECT_EQ(prepared.index_updates, initial.index_updates + 2u);",
+                      "const auto missing = FullScan(world, {anchor}, 1);",
+                      "ASSERT_EQ(missing.size(), 14u);",
+                      "EXPECT_TRUE(FullScan(world, {anchor}, 1).empty());",
+                      "world.get_last_streaming_budget_stats().generation_candidates, missing.size()"):
+            self.assertIn(token, native)
+        self.assertIn("common/ActivationResidencyIndex_test.cpp", read_source("test/CMakeLists.txt"))
+        self.assertNotRegex(native, r'(?<![\w:])Test::SyntheticTerrainParams\(')
+
+    def test_surface_span_cache_preserves_revision_and_owner_publication(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        sampler = source.split("SHIELD_WorldSystem::compute_column_surface_span(", 1)[1].split(
+            "SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span_from_heights(", 1)[0]
+        self.assertRegex(sampler, r'ComputeShapedHeightsAtPositionsImpl<true>\('
+                         r'[^;]*m_params.surface_sampling_revision >=\s*kSurfaceSamplingRevision\);')
+        self.assertIn("return column_surface_span_from_heights(chunk_x, chunk_z, heights);", sampler)
+        publication = source.split("void SHIELD_WorldSystem::publish_generated_column_span(", 1)[1].split(
+            "SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span(", 1)[0]
+        self.assertRegex(publication, r'if \(m_params.surface_sampling_revision < kSurfaceSamplingRevision &&\s*'
+                         r'\(m_params.biome_relief_enabled \|\| m_params.cliffs_enabled \|\| m_params.lakes_enabled \|\|\s*'
+                         r'm_params.surface_breaks_enabled\)\)\s*return;')
+        adoption = source.split("bool SHIELD_WorldSystem::adopt_streamed_chunk(", 1)[1]
+        for token in ("chunk->stage_water_seed_inputs({});", "m_activation_index.insert(chunk);",
+                      "m_activation_index.content_changed(chunk->get_coords());"):
+            self.assertIn(token, adoption)
+        native = read_source("test/common/ActivationResidencyIndex_test.cpp")
+        for token in ("params.surface_sampling_revision < Systems::kSurfaceSamplingRevision",
+                      "legacy_params.cliffs_enabled = false;",
+                      "GeneratedCliffHeightmapsPreserveFullScanActivationPolicy",
+                      "CurrentRevisionPublishesCompleteGeneratedCliffSpans"):
+            self.assertIn(token, native)
 
     def test_surface_admission_precedes_boot_output_and_allocation(self):
         helper = read_source(MODES + "ModeHelpers.cpp").split("ReplayRunnerConfigFrom(", 1)[1]
@@ -455,12 +516,23 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertLess(entry.index("if (!horizon_ready)"), entry.index("g_camera ="))
         self.assertRegex(main, r'if \(!gameSession->GetWorldSystem\(\)->EnsureSurfaceReadyNear\('
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
-        loading = main.split('"CONSTRUCTING WORLD GEOMETRY..."', 1)[1].split(
-            '"World generation phase complete. Entering world."', 1)[0]
-        self.assertRegex(loading, r'if \(!gameSession->GetWorldSystem\(\)->'
-                         r'EnsureSurfaceReadyNear\([\s\S]*?\)\)\s*\{[\s\S]*'
+        horizon = main.split("auto prepare_entry_horizon =", 1)[1].split(
+            "auto drain_entry =", 1)[0]
+        self.assertRegex(horizon, r'return gameSession->GetWorldSystem\(\)->'
+                         r'EnsureSurfaceReadyNear\([^;]*,\s*'
+                         r'capture_horizon \? scenario_config.horizon_radius : 12,\s*'
+                         r'capture_horizon \? scenario_config.collision_radius : 4\);')
+        staged = main.split("case WorldEntryStage::PrepareHorizon:", 1)[1].split(
+            "case WorldEntryStage::Activate:", 1)[0]
+        self.assertRegex(staged, r'if \(!prepare_entry_horizon\(\)\)\s*\{\s*'
+                         r'refuse_world_entry\([^;]*;\s*return WorldEntryResult::Failed;')
+        loading = main.split("case GameState::WORLD_LOADING: {", 1)[1].split(
+            "case GameState::IN_GAME:", 1)[0]
+        self.assertRegex(loading, r'if \(!prepare_entry_horizon\(\)\)\s*\{[\s\S]*'
                          r'refuse_world_entry\([^;]*;\s*break;')
         self.assertIn('g_uiManager->RequestLoadDocument("main_menu.rml");', loading)
+        self.assertLess(loading.index("if (!prepare_entry_horizon())"),
+                        loading.index("activate_loaded_world();"))
         backdrop = main.split('CreateTransientWorld("Menu Vista"', 1)[1].split(
             "int exit_code = 0;", 1)[0]
         self.assertRegex(backdrop, r'if \(auto\* ws = gameSession->GetWorldSystem\(\);\s*'
@@ -538,8 +610,20 @@ class ReplaySourceContract(unittest.TestCase):
 class SessionUsabilitySourceContract(unittest.TestCase):
     @staticmethod
     def function(source, name, prefix="GameSession::"):
-        start = source.index(prefix + name + "(")
-        opening = source.index("{", start)
+        signature = re.escape(prefix).replace(r"\ ", r"\s+") + re.escape(name) + r"\("
+        match = re.search(signature, source)
+        if match is None:
+            raise AssertionError("missing function " + prefix + name)
+        start = match.start()
+        cursor = match.end()
+        parameter_depth = 1
+        while parameter_depth:
+            if source[cursor] == "(":
+                parameter_depth += 1
+            elif source[cursor] == ")":
+                parameter_depth -= 1
+            cursor += 1
+        opening = source.index("{", cursor)
         # Ignore braces inside diagnostics and comments when locating the body.
         tokens = re.finditer(r'"(?:\\.|[^"\\])*"|\{|\}', source[opening:])
         depth = 0
@@ -558,9 +642,10 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("const SavedInputFile input(path);", reader)
         self.assertNotIn("std::filesystem::exists(", reader)
         self.assertNotIn("ifstream", reader)
-        self.assertLess(reader.index("input.read(bytes, SavedInputLimits::kPlantFileBytes)"),
+        self.assertLess(reader.index("input.read(bytes, SavedInputLimits::kPlantFileBytes, stop)"),
                         reader.index("LoadEntityRegistrySnapshotJson(bytes,"))
-        admission = read_source("src/luminumbra_common/persistence/SavedInputFile.h")
+        admission = (self.function(source, "SavedInputFile", "SavedInputFile::") +
+                     read_source("src/luminumbra_common/persistence/SavedInputFile.h"))
         self.assertIn("O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC", admission)
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS", admission)
         for check in ("::fstat(m_descriptor, &information)", "S_ISREG(information.st_mode)",
@@ -586,11 +671,120 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
                       admission)
         world = self.function(source, "load_world", "WorldSaveService::")
-        self.assertIn("load_plant_entities(plants, save_dir, &errors)", world)
+        self.assertIn("load_plant_entities(plants, save_dir, &errors, stop)", world)
         session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
-                                "ReadWorldStateFrom")
-        self.assertIn("WorldSaveService::load_plant_entities(state.plants, save_dir, &errors)",
-                      session)
+                                "ReadPreparedWorldState")
+        self.assertRegex(session, r"WorldSaveService::load_plant_entities\(\s*state.plants, "
+                         r"save_dir, &errors, stop\)")
+
+    def test_native_saved_input_holds_publication_until_after_close(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        header = read_source("src/luminumbra_common/persistence/SavedInputFile.h")
+        constructor = self.function(source, "SavedInputFile", "SavedInputFile::")
+        destructor = self.function(source, "~SavedInputFile", "SavedInputFile::")
+        self.assertIn("detail::FilePublicationReadGuard m_publication;", header)
+        for opening in ("::CreateFileW(", "::open("):
+            self.assertLess(constructor.index("m_publication(path)"), constructor.index(opening))
+        for closing in ("::CloseHandle(m_handle)", "::close(m_descriptor)"):
+            self.assertLess(destructor.index(closing), destructor.index("observer(m_path, false)"))
+        reader = self.function(header, "read_exact", "bool ")
+        self.assertLess(reader.index("stop.stop_requested()"), reader.index("::ReadFile("))
+        self.assertLess(reader.index("stop.stop_requested()"), reader.index("::read("))
+
+    def test_far_tile_authority_check_and_publication_share_one_ownership(self):
+        source = read_source("src/luminumbra_common/world/FarLodStore.cpp")
+        worker = source.split("void AsyncFarLodStore::run()", 1)[1]
+        self.assertNotIn("SaveOwnership", worker)
+        tile = self.function(source, "save_tile", "FarLodStore::")
+        self.assertEqual(tile.count("SaveOwnership ownership;"), 1)
+        self.assertLess(tile.index("SaveOwnership ownership;"),
+                        tile.index("authority->far_lod_authority_revision()"))
+        self.assertLess(tile.index("authority->far_lod_authority_revision()"),
+                        tile.index("upsert_container_records("))
+        self.assertRegex(tile, r"upsert_container_records\(\s*ownership, region_file,")
+        persistence = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        owned = persistence.split(
+            "bool WorldSaveService::upsert_container_records(const SaveOwnership&", 1)[1].split(
+                "void WorldSaveService::set_interrupt_before_region_replace_for_testing", 1)[0]
+        for recursive_guard in ("SaveGuard ", "SaveOwnership ", "RegionFileWriteGuard "):
+            self.assertNotIn(recursive_guard, owned)
+        self.assertIn("WriteRegionFile(region_file, raw_records, errors)", owned)
+        native = read_source("test/rendering/far_lod_persistence_test.cpp")
+        bounded = native.split("FirstWorkerSaveAndFlushCompleteWithinBoundedWait)", 1)[1].split(
+            "TEST(FarLodPersistence, QueuedTilesRecheckAuthority", 1)[0]
+        for contract in ("ASSERT_EXIT(", "std::chrono::steady_clock::now() < deadline",
+                         "std::_Exit(2)", "writer.flush()", "writer.close()"):
+            self.assertIn(contract, bounded)
+
+    def test_authority_changes_serialize_with_tile_publication(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        bump = self.function(source, "bump_far_lod_authority_revision", "SHIELD_WorldSystem::")
+        self.assertEqual(source.count("m_far_lod_authority_revision.fetch_add("), 1)
+        self.assertEqual(bump.count("SaveOwnership ownership;"), 1)
+        self.assertLess(bump.index("SaveOwnership ownership;"),
+                        bump.index("m_far_lod_authority_revision.fetch_add("))
+        self.assertLess(bump.index("SaveOwnership ownership;"),
+                        bump.index("m_far_lod_region_revision_mutex"))
+        native = read_source("test/rendering/far_lod_persistence_test.cpp")
+        self.assertIn("TEST(FarLodPersistence, AuthorityBumpCannotCrossTilePublication)", native)
+        self.assertRegex(native, r"set_file_publication_hook_for_testing\(\s*"
+                                 r"&AuthorityPublicationOverlap::Publish\)")
+        for contract in ("waiting_save_writers()", "overlap.bump_blocked", "overlap.publication_revision",
+                         "std::chrono::steady_clock::now() < deadline", "std::_Exit(2)"):
+            self.assertIn(contract, native)
+
+    def test_every_visible_authority_mutation_owns_persistence_before_changing_bytes(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        edit = self.function(source, "EditTerrainVoxel", "SHIELD_WorldSystem::")
+        self.assertLess(edit.index("SaveOwnership ownership;"),
+                        edit.index("chunk->sdf_data[idx] ="))
+        self.assertLess(edit.index("chunk->sdf_data[idx] ="),
+                        edit.index("bump_far_lod_authority_revision(chunk->get_coords())"))
+        adopt = self.function(source, "adopt_streamed_chunk", "SHIELD_WorldSystem::")
+        self.assertLess(adopt.index("SaveOwnership ownership;"),
+                        adopt.index("m_streaming_state.chunks.emplace("))
+        self.assertLess(adopt.index("m_streaming_state.chunks.emplace("),
+                        adopt.index("bump_far_lod_authority_revision("))
+        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty())", 1)[1]
+        self.assertLess(promotion.index("SaveOwnership ownership;"),
+                        promotion.index("chunk->sdf_data ="))
+        self.assertLess(promotion.index("chunk->sdf_data ="),
+                        promotion.index("bump_far_lod_authority_revision("))
+        brush = self.function(source, "PrepareTerrainVoxelEdit", "SHIELD_WorldSystem::")
+        self.assertLess(brush.index("SaveOwnership ownership;"),
+                        brush.index("GenerateChunkData(*chunk, 1)"))
+        self.assertLess(brush.index("bump_far_lod_authority_revision("),
+                        brush.index("GenerateChunkData(*chunk, 1)"))
+        surface = self.function(source, "EnsureSurfaceReadyNear", "SHIELD_WorldSystem::")
+        self.assertIn("ChunkSdfProvenance::LoadedOrEdited", surface)
+        self.assertLess(surface.index("ownership.emplace()"), surface.index("chunk->sdf_data.clear()"))
+        self.assertLess(surface.index("ownership.emplace()"), surface.index("GenerateChunkData(*chunk)"))
+        self.assertLess(surface.index("ownership.emplace()"),
+                        surface.index("bump_far_lod_authority_revision("))
+        self.assertLess(surface.index("bump_far_lod_authority_revision("),
+                        surface.index("chunk->sdf_data.clear()"))
+        self.assertLess(adopt.index("bump_far_lod_authority_revision("),
+                        adopt.index("m_activation_index.insert(chunk)"))
+        self.assertIn("catch (...) {\n                        bump_far_lod_authority_revision", edit)
+        for name in ("set_params", "set_seed", "regenerate_all_chunks"):
+            replacement = self.function(source, name, "SHIELD_WorldSystem::")
+            self.assertLess(replacement.index("SaveOwnership ownership;"),
+                            replacement.index("bump_far_lod_authority_revision("))
+            self.assertLess(replacement.index("bump_far_lod_authority_revision("),
+                            replacement.index("clear_world(" if name == "regenerate_all_chunks"
+                                              else "reinitialize_noise("))
+        scenario = read_source("src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp")
+        fence = scenario.index("SaveOwnership ownership;")
+        self.assertLess(fence, scenario.index("if (!CarveSphereIntoChunk(*chunk,"))
+        self.assertLess(scenario.index("chunk->mark_voxel_data_dirty();"),
+                        scenario.index("notify_far_lod_authority_changed(chunk->get_coords())"))
+        native = read_source("test/rendering/far_lod_persistence_test.cpp")
+        self.assertIn("MutatedVoxelEditBlocksOldTileUntilAuthorityBump", native)
+        regression = native.split("void CheckMutatedVoxelEdit(", 1)[1].split(
+            "TEST(FarLodPersistence, CurrentAuthorityStillValidatesPayload", 1)[0]
+        for proof in ("world.SetVoxelEditObserver(", "WorldSaveService::waiting_save_writers()",
+                      "EXPECT_FALSE(saved)", "EXPECT_EQ(Bytes(path), before)"):
+            self.assertIn(proof, regression)
 
     def test_saved_input_budgets_precede_allocations_and_publication(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -619,9 +813,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertNotIn("save_dirty_chunks(", save)
         metadata = self.function(session, "SaveWorldMetadataTo")
         self.assertLess(metadata.index("PrepareWorldMetadataTo("), metadata.index("PersistSavedPreset("))
-        reader = self.function(session, "ReadWorldStateFrom")
-        self.assertIn('m_worldOpenError.find("Saved-input admission refused:") == 0', reader)
-        self.assertNotIn('m_worldOpenError.find("oversized")', reader)
+        reader = self.function(session, "ReadPreparedWorldState")
+        self.assertIn('error.find("Saved-input admission refused:") == 0', reader)
+        self.assertNotIn('error.find("oversized")', reader)
         metadata_admission = self.function(source, "admit_metadata_bytes", "WorldSaveService::")
         self.assertLess(metadata_admission.index("clock.write_metadata(metadata)"),
                         metadata_admission.index("BoundedJsonDump("))
@@ -653,7 +847,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         limits = read_source("src/luminumbra_common/persistence/SavedInputLimits.h")
         self.assertNotIn("kCatalogMetadataBytes", limits)
         catalog = read_source("src/luminumbra_common/persistence/SavedWorldCatalog.cpp")
-        self.assertIn("ReadSavedJson(metadata_path, SavedInputLimits::kMetadataBytes,", catalog)
+        self.assertRegex(catalog, r"ReadSavedJson\(\s*metadata_path, SavedInputLimits::kMetadataBytes,")
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         writer = self.function(source, "save_metadata", "WorldSaveService::")
         self.assertNotIn("create_directories", writer)
@@ -670,7 +864,15 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("SavedInputFile input(source, SavedInputFile::LeafSymlinks::Follow)", rename)
         reader = read_source("src/luminumbra_common/persistence/SavedInputFile.h")
         self.assertIn("LeafSymlinks leaf_symlinks = LeafSymlinks::Refuse", reader)
-        self.assertEqual(reader.count("leaf_symlinks == LeafSymlinks::Refuse"), 2)
+        constructor = self.function(source, "SavedInputFile", "SavedInputFile::")
+        self.assertEqual(constructor.count("leaf_symlinks == LeafSymlinks::Refuse"), 4)
+        self.assertIn("m_missing = MissingSavedInputAncestorsAreValid(m_path);", constructor)
+        self.assertIn("m_location_admitted = is_within_save_root();", constructor)
+        location = self.function(source, "is_within_save_root", "SavedInputFile::")
+        for verification in ("::GetFinalPathNameByHandleW(", "OpenResolvedSavedInput(resolved)",
+                             "actual.st_dev == expected.st_dev", "actual.st_ino == expected.st_ino"):
+            self.assertIn(verification, location)
+        self.assertIn("!m_location_admitted", reader)
         self.assertLess(rename.index("input.read(contents, expected_bytes.size())"),
                         rename.index("ReclaimAbandonedStaging("))
 
@@ -685,14 +887,14 @@ class SessionUsabilitySourceContract(unittest.TestCase):
 
     def test_preset_hash_encoding_and_existing_exact_limit_are_consistent(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
-        create = self.function(source, "CreateWorldInternal")
+        create = self.function(source, "PrepareWorldCreation")
         self.assertRegex(create, r'kPresetBytes - 1,\s*saved_preset_json,\s*-1,\s*false\)')
         compatible = self.function(source, "SavedPresetCompatible")
         self.assertNotIn("canonical.size()", compatible.split("if (has_preset)", 1)[0])
         self.assertIn("canonical.size() < Persistence::SavedInputLimits::kPresetBytes", compatible)
         persist = self.function(source, "PersistSavedPreset", "bool ")
         self.assertLess(persist.index("if (!missing)"), persist.index("canonical.size() >="))
-        self.assertIn('write_file_durably(path, canonical + "\\n")', persist)
+        self.assertRegex(persist, r'write_file_durably\(\s*path, canonical \+ "\\n", nullptr, artifacts\)')
 
     def test_energy_writer_counts_normalized_pages_and_plants_publish_prepared_bytes(self):
         energy = read_source("src/luminumbra_common/fields/EnergyFieldState.cpp")
@@ -719,48 +921,42 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("return m_worldOpenError;", header)
         reset = self.function(source, "ResetWorldSystems")
         self.assertIn("m_worldUsable = false;", reset)
-        for name in ("CreateWorldInternal", "LoadWorld", "LoadWorldFrom"):
-            body = self.function(source, name)
-            preparation, adoption = body.split("ResetWorldSystems();", 1)
-            if name in ("LoadWorld", "LoadWorldFrom"):
-                self.assertIn("LoadedWorldState loaded;", preparation)
-                preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
-                self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded, true))", state_read)
-                self.assertNotIn("m_worldUsable", state_read)
-                self.assertNotIn("clear_world(", state_read)
-                self.assertNotIn("m_lastLoadedChunkCount =", state_read)
+        for preparation_name, adoption_name in (("PrepareWorldCreation", "AdoptCreatedWorld"),
+                                                 ("PrepareWorldLoad", "AdoptLoadedWorld")):
+            preparation = self.function(source, preparation_name)
+            adoption = self.function(source, adoption_name)
+            self.assertNotIn("ResetWorldSystems();", preparation)
             self.assertNotIn("m_worldUsable", preparation)
-            self.assertIn("m_worldOpenError =", preparation)
+            self.assertIn("prepared->error =", preparation)
             self.assertLess(adoption.index("m_speciesTable ="),
                             adoption.index("m_worldUsable = true;"))
-        creation = self.function(source, "CreateWorldInternal")
-        metadata_failure = creation.split("if (!transient && !SaveWorld())", 1)[1]
+            self.assertIn("ResetWorldSystems();", adoption)
+        creation = self.function(source, "AdoptCreatedWorld")
+        metadata_failure = creation.split("if (!transient && !SaveWorldMetadataTo(GetWorldSaveDir(), artifacts))", 1)[1]
         self.assertLess(metadata_failure.index("m_worldUsable = false;"),
                         metadata_failure.index("return false;"))
-        opening = self.function(source, "LoadWorld")
-        self.assertLess(opening.index("ReadWorldStateFrom(worldPath, loaded, true)"),
-                        opening.index("ResetWorldSystems();"))
-        self.assertLess(opening.index("AdoptWorldStateFrom(worldPath, loaded);"),
-                        opening.index("m_worldUsable = true;"))
-
-        body = self.function(source, "LoadWorldFrom")
-        preparation, adoption = body.split("ResetWorldSystems();", 1)
-        preparation, state_read = preparation.split("LoadedWorldState loaded;", 1)
-        self.assertNotIn("m_worldUsable", preparation)
-        self.assertIn("m_worldOpenError =", preparation)
-        self.assertIn("Persistence::InspectSavedWorld(save_root, RuntimeRoot(m_rootPath), worldId)",
-                      preparation)
-        self.assertIn('const auto worldPath = save_root / "worlds/saves" / worldId;', preparation)
-        self.assertNotIn("m_saveRootPath =", body)
-        self.assertLess(adoption.index("m_speciesTable ="),
-                        adoption.index("m_worldUsable = true;"))
-        self.assertIn("if (!ReadWorldStateFrom(worldPath, loaded, true))", state_read)
-        self.assertLess(body.index("ReadWorldStateFrom(worldPath, loaded, true)"),
-                        body.index("ResetWorldSystems();"))
+        prepare = self.function(source, "PrepareWorldLoad")
+        self.assertIn("ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop)",
+                      prepare)
+        self.assertLess(prepare.index("ReadPreparedWorldState("),
+                        prepare.index("prepared->ready = true;"))
+        for name in ("LoadWorld", "LoadWorldFrom"):
+            body = self.function(source, name)
+            self.assertIn("AdoptPreparedWorld(PrepareWorldLoad(", body)
+            self.assertNotIn("m_saveRootPath =", body)
+            self.assertNotIn("clear_world(", body)
+            self.assertIn("!IsSimulationTickBoundary()", body)
+        self.assertIn("options.save_root = save_root;", self.function(source, "LoadWorldFrom"))
+        self.assertRegex(prepare, r"Persistence::InspectSavedWorld\(\s*options.save_root, "
+                         r"RuntimeRoot\(options.root_path\), worldId, stop\)")
+        adoption = self.function(source, "AdoptLoadedWorld")
         self.assertLess(adoption.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         adoption.index("m_worldUsable = true;"))
         self.assertIn("m_renderCalendar = loaded.render_calendar;", adoption)
         self.assertIn("m_worldClock = loaded.clock;", adoption)
+        gate = self.function(source, "AdoptPreparedWorld")
+        self.assertLess(gate.index("!prepared->ready || !m_worldOpenError.empty()"),
+                        gate.index("AdoptLoadedWorld(*prepared)"))
 
     def test_persistence_uses_session_state_and_fatal_snapshot_refusals_latch_it(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
@@ -791,16 +987,20 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             self.assertNotIn("clear_world(", preparation)
             self.assertNotIn("m_worldUsable =", preparation)
             self.assertNotIn("m_lastLoadedChunkCount =", preparation)
-        reader = self.function(source, "ReadWorldStateFrom")
-        self.assertEqual(reader.count("return false;"), 7)
-        self.assertEqual(reader.count("m_worldOpenError ="), 7)
+        reader = self.function(source, "ReadPreparedWorldState")
+        for name in ("PrepareWorldLoad", "PrepareWorldCreation", "PrepareWorldState", "ReadPreparedWorldState"):
+            self.assertNotRegex(self.function(source, name), r"\bm_[A-Za-z]")
+        wrapper = self.function(source, "ReadWorldStateFrom")
+        self.assertRegex(wrapper, r"ReadPreparedWorldState\(\s*save_dir,\s*CaptureWorldPreparationOptions\(\),")
+        self.assertRegex(wrapper, r"m_worldOpenError,\s*resetting_clock,\s*\{\}")
+        self.assertIn("resetting_clock ? nullptr : m_energyFieldState.get()", wrapper)
         for validation in ("service.load_world(", "WorldSaveService::read_clock_metadata(",
-                           "WorldSaveService::load_active_regions(", "m_regionSchedulerOverride",
+                           "WorldSaveService::load_active_regions(", "options.scheduler_override",
                            "chunk->sdf_data.size() != kFullSdfLattice",
-                           "ReadSavedEnergy(input, record)",
+                           "ReadSavedEnergy(input, record, stop)",
                            "state.energy->DeserializeRecord(record, tick_base)"):
             self.assertIn(validation, reader)
-        self.assertLess(reader.index("load_plant_entities(state.plants"),
+        self.assertLess(reader.index("load_plant_entities("),
                         reader.index("service.load_world("))
         adoption = self.function(source, "AdoptWorldStateFrom")
         self.assertNotIn("load_plant_entities(", adoption)
@@ -825,11 +1025,12 @@ class SessionUsabilitySourceContract(unittest.TestCase):
 
     def test_normal_custom_validation_precedes_directory_and_uses_prepared_identity(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
-        creation = self.function(source, "CreateWorldInternal")
-        directory = creation.index("fs::create_directories(worldPath)")
+        creation = (self.function(source, "PrepareWorldCreation") +
+                    self.function(source, "AdoptCreatedWorld"))
+        directory = creation.index("fs::create_directories(worldPath.parent_path())")
         for validation in ("nlohmann::json::parse(*customPresetJson)",
                            "ResolveEffectivePreset(resolved, presetUse)",
-                           "LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath)",
+                           "RuntimeRoot(options.root_path)",
                            "if (!preset.ok)",
                            "preset.preset_content_hash != requiredPresetContentHash"):
             self.assertLess(creation.index(validation), directory)

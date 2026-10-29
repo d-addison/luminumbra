@@ -13,6 +13,7 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <system_error>
 
@@ -61,6 +62,30 @@ protected:
         ASSERT_EQ(record.state, Luminumbra::world::RegionState::Frozen);
     }
 };
+
+TEST_F(VerifiedSnapshotRegion, CancelledPreparationNeverMaterializesOrChangesSavedAuthority) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(root) + "/");
+    ASSERT_TRUE(session.CreateWorld("Cancel snapshot", "1337", "default"));
+    const auto directory = session.GetWorldSaveDir();
+    const auto before = Measurement::saved_world_digest(directory);
+    const auto revision = session.WorldRevision();
+    std::stop_source stop;
+    stop.request_stop();
+    EXPECT_THROW(Measurement::VerifiedSaveSnapshot(
+                     directory, before, session.GetMetadata().worldId, stop.get_token()),
+                 std::runtime_error);
+    std::vector<Measurement::SavedFileBytes> bytes;
+    EXPECT_THROW(Measurement::read_saved_world(directory, &bytes, stop.get_token()),
+                 std::runtime_error);
+    EXPECT_TRUE(bytes.empty());
+    EXPECT_EQ(Measurement::saved_world_digest(directory), before);
+    EXPECT_EQ(session.WorldRevision(), revision);
+    jobs.shutdown();
+}
 
 TEST_F(VerifiedSnapshotRegion, LivePartialRegionCannotChangeFreezeAfterFailedSave) {
     Luminumbra::JobSystem jobs;

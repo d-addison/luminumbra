@@ -138,6 +138,12 @@ public:
 
     void RequestLoadDocument(std::string path);
 
+    // Runs synchronously when navigation is requested, before a queued entry
+    // can advance in the host's next frame. Also covers the menu quit action.
+    void SetNavigationAwayCallback(std::function<void()> callback) {
+        m_navigationAwayCallback = std::move(callback);
+    }
+
     // Hot reload : clear RmlUi's stylesheet/template caches and reload the active document
     // so.rml/.rcss edits show without a restart. Called from the UIHotReload watcher callback.
     void ReloadActiveDocument();
@@ -308,6 +314,7 @@ private:
     bool m_settingsSaveFailed = false;
     bool m_developerDebuggerVisible = false;
     PauseActionCallback m_pauseActionCallback;
+    std::function<void()> m_navigationAwayCallback;
 
     std::string m_documentToLoad;
     std::string m_activeDocument;

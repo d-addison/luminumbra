@@ -21,6 +21,8 @@ struct EntityRegistrySnapshot;
 
 namespace Luminumbra::Persistence {
 
+class CreatedWorldArtifacts;
+
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
     std::size_t chunks_total = 0;
@@ -102,20 +104,23 @@ public:
     // A missing file is a clean miss: out is emptied, returns true.
     static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    const std::stop_token& stop = {});
 
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
                                     const world::WorldClock& clock,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    CreatedWorldArtifacts* artifacts = nullptr);
     // Missing file: clear region state at absent_clock and preserve ledger.config().
     // Present file: decode its persisted scheduler settings along with the region state.
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
-                                    const world::WorldClock& absent_clock = world::WorldClock{
-                                        0, world::WorldCalendar::Legacy()});
+                                    const world::WorldClock& absent_clock =
+                                        world::WorldClock{0, world::WorldCalendar::Legacy()},
+                                    const std::stop_token& stop = {});
     // Content-only projection region_content_v2: live over parked over durable records flagged
     // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
@@ -151,7 +156,8 @@ public:
     // Refuses an unsupported existing save before touching its metadata.
     static bool save_metadata(const std::string& bytes,
                               const std::filesystem::path& save_dir,
-                              std::vector<std::string>* errors = nullptr);
+                              std::vector<std::string>* errors = nullptr,
+                              CreatedWorldArtifacts* artifacts = nullptr);
     // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
     // between replacements, including when an explicit snapshot rewinds the clock.
     // Writes are serialized within the process, including nested pair saves and
@@ -159,7 +165,8 @@ public:
     static bool save_metadata_and_active_regions(const std::string& bytes,
                                                  world::ActiveRegionLedger& ledger,
                                                  const std::filesystem::path& save_dir,
-                                                 std::vector<std::string>* errors = nullptr);
+                                                 std::vector<std::string>* errors = nullptr,
+                                                 CreatedWorldArtifacts* artifacts = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
     // Missing metadata is a legacy snapshot with a pinned legacy clock and zero water cursor.
@@ -170,7 +177,8 @@ public:
                                     std::vector<std::string>* errors = nullptr,
                                     std::optional<Vec3>* ambient_anchor = nullptr,
                                     std::optional<world::WorldCalendar>* render_calendar = nullptr,
-                                    std::size_t* water_sim_cursor = nullptr);
+                                    std::size_t* water_sim_cursor = nullptr,
+                                    const std::stop_token& stop = {});
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
@@ -213,6 +221,13 @@ public:
                                          const std::vector<ContainerRecord>& records,
                                          std::vector<std::string>* errors = nullptr);
 
+    // Compose a record update with an authority check under existing ownership.
+    // The token must remain on its acquiring thread through publication.
+    static bool upsert_container_records(const SaveOwnership& ownership,
+                                         const std::filesystem::path& region_file,
+                                         const std::vector<ContainerRecord>& records,
+                                         std::vector<std::string>* errors = nullptr);
+
     // Read-only diagnostic of the staging filename base used by region/manifest
     // writers, before the unique temporary suffix. Region members stage in the
     // save root outside strict scans when the original suffix is chunks/region.
@@ -248,9 +263,12 @@ public:
     // reclaim abandoned staging. All process writers serialize through cleanup
     // and replacement, independent of destination spelling. Independently launched
     // processes sharing a destination are outside this ownership contract.
+    // With a creation journal, the parent must already be owned. Temporary and
+    // published files remain journal-owned on failure until writers drain and rollback runs.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
-                                   std::vector<std::string>* errors = nullptr);
+                                   std::vector<std::string>* errors = nullptr,
+                                   CreatedWorldArtifacts* artifacts = nullptr);
 
     // Create a new file with checked, atomic no-replace publication. An occupied
     // entry (including a dangling symlink) is refused without changing its bytes.

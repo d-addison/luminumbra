@@ -23,8 +23,13 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <vector>
+
+namespace Luminumbra::Persistence {
+class CreatedWorldArtifacts;
+}
 
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
@@ -94,6 +99,12 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Staged entry retains the journal until activation or drained rollback.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     Persistence::CreatedWorldArtifacts& artifacts);
     // Replay must preserve omitted historical selectors and their identity bytes.
     // A required content identity is checked before directory creation or live-world replacement.
     bool CreateWorld(const std::string& name,
@@ -122,6 +133,54 @@ public:
     // canonical save or world replacement: region freezes also read its durable directory.
     // Runtime content and subsequent persistence retain this session's configured roots.
     bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
+
+    // Copy on the owner thread, then prepare without reading any live session.
+    // The opaque result owns all admitted input; cancellation never adopts it.
+    struct WorldPreparationOptions {
+        std::string root_path;
+        // Reading a private snapshot must not retarget subsequent persistence.
+        std::filesystem::path save_root;
+        std::filesystem::path configured_save_root;
+        std::vector<std::filesystem::path> required_assets;
+        RegionSchedulerConfig ledger_config;
+        std::optional<RegionSchedulerConfig> scheduler_override;
+        std::uint64_t simulation_tick = 0;
+        std::uint64_t world_revision = 0;
+        bool active_regions = true;
+        bool aether_state = false;
+        bool job_system_available = false;
+        bool transient_creation = false;
+    };
+    struct WorldPreparation;
+    WorldPreparationOptions CaptureWorldPreparationOptions() const;
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldLoad(const WorldPreparationOptions& options,
+                     const std::string& world_id,
+                     const std::stop_token& stop = {});
+    // Initial snapshot restoration into a newly created, paused world, with its
+    // default energy state. Adoption refuses if that world's revision changed.
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldState(const WorldPreparationOptions& options,
+                      const std::filesystem::path& save_directory,
+                      const std::stop_token& stop = {});
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldCreation(const WorldPreparationOptions& options,
+                         const std::string& name,
+                         const std::string& seed,
+                         const std::string& world_type,
+                         const std::string* custom_preset,
+                         TerrainPresetUse preset_use = TerrainPresetUse::NewWorld,
+                         const std::string& required_identity = {},
+                         const std::stop_token& stop = {});
+    static std::string WorldPreparationError(const WorldPreparation& prepared);
+    bool AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
+                            Persistence::CreatedWorldArtifacts* artifacts = nullptr);
+
+    // Changes when create/load invalidates or releases the previous world, including a
+    // replacement that subsequently fails. Preflight refusal preserves it.
+    std::uint64_t WorldRevision() const {
+        return m_worldRevision;
+    }
 
     // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
@@ -175,7 +234,8 @@ public:
     static WorldConfigValidationResult
     ValidateWorldConfig(const std::string& root_path,
                         const std::string& worldType,
-                        const std::vector<std::filesystem::path>& required_assets = {});
+                        const std::vector<std::filesystem::path>& required_assets = {},
+                        const std::stop_token& stop = {});
 
     // Registers the caller's required runtime assets (relative to the root
     // path) checked by CreateWorld/LoadWorld validation. The client populates
@@ -512,10 +572,12 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir) const;
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
+                             Persistence::CreatedWorldArtifacts* artifacts = nullptr) const;
     bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                               WorldStateSaveReport* report,
                               bool full_snapshot,
@@ -528,6 +590,17 @@ private:
     bool ReadWorldStateFrom(const std::filesystem::path& save_dir,
                             LoadedWorldState& state,
                             bool resetting_clock = false);
+    static bool
+    ReadPreparedWorldState(const std::filesystem::path& save_dir,
+                           const WorldPreparationOptions& options,
+                           LoadedWorldState& state,
+                           std::string& error,
+                           bool resetting_clock,
+                           const std::stop_token& stop,
+                           const luminumbra::fields::EnergyFieldState* current_energy = nullptr);
+    bool AdoptCreatedWorld(WorldPreparation& prepared,
+                           Persistence::CreatedWorldArtifacts* artifacts);
+    bool AdoptLoadedWorld(WorldPreparation& prepared);
     void AdoptWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
@@ -560,6 +633,7 @@ private:
                              const std::string& worldType,
                              const std::string* customPresetJson,
                              bool transient,
+                             Persistence::CreatedWorldArtifacts* artifacts,
                              TerrainPresetUse presetUse,
                              const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a
@@ -594,7 +668,7 @@ private:
     JobSystem* m_jobSystem = nullptr;
 
     // Generate a unique world ID
-    std::string GenerateWorldId();
+    static std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
     // False for fresh, incomplete, or fatally refused snapshot adoption. Operation

@@ -196,7 +196,8 @@ enum class SavedJsonFailure {
     None,
     Unreadable,
     Limit,
-    Malformed
+    Malformed,
+    Cancelled
 };
 
 inline bool ReadSavedJson(const std::filesystem::path& path,
@@ -204,10 +205,23 @@ inline bool ReadSavedJson(const std::filesystem::path& path,
                           nlohmann::json& value,
                           bool& missing,
                           bool metadata_input = true,
-                          SavedJsonFailure* failure = nullptr) {
+                          SavedJsonFailure* failure = nullptr,
+                          const std::stop_token& stop = {}) {
     if (failure)
         *failure = SavedJsonFailure::None;
+    missing = false;
+    const auto cancelled = [&] {
+        if (!stop.stop_requested())
+            return false;
+        if (failure)
+            *failure = SavedJsonFailure::Cancelled;
+        return true;
+    };
+    if (cancelled())
+        return false;
     const SavedInputFile input(path);
+    if (cancelled())
+        return false;
     missing = input.missing();
     if (missing)
         return true;
@@ -223,7 +237,9 @@ inline bool ReadSavedJson(const std::filesystem::path& path,
             *failure = SavedJsonFailure::Limit;
         return false;
     }
-    if (!input.read(bytes, maximum)) {
+    if (!input.read(bytes, maximum, stop)) {
+        if (cancelled())
+            return false;
         if (failure)
             *failure = SavedJsonFailure::Unreadable;
         return false;
@@ -240,6 +256,8 @@ inline bool ReadSavedJson(const std::filesystem::path& path,
             *failure = SavedJsonFailure::Malformed;
         return false;
     }
+    if (cancelled())
+        return false;
     value = std::move(candidate);
     return true;
 }
