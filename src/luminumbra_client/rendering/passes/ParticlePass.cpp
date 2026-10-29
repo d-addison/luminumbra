@@ -290,6 +290,7 @@ void ParticlePass::clear_emitters() {
     m_active_emitters.clear();
     m_descriptors.clear();
     m_next_emitter_id = 0;
+    m_ambient_emitter_index = kMaxEmitters;
     m_precip_emitters.fill(kInvalidEmitter);
     m_precip_load_attempted.fill(false);
     m_splash_emitter_index = kNoSplashEmitter;
@@ -299,6 +300,39 @@ void ParticlePass::clear_emitters() {
         p.alive = false;
     m_ring_head = 0;
     m_live_count = 0;
+}
+
+void ParticlePass::clear_waterfall_spray() {
+    // add_emitter caps the vector at kMaxEmitters; this fixed remap needs no
+    // allocation and keeps removal linear in emitters plus the particle ring.
+    std::array<uint32_t, kMaxEmitters> remap{};
+    uint32_t retained = 0;
+    for (std::size_t index = 0; index < m_active_emitters.size(); ++index) {
+        remap[index] = m_active_emitters[index].waterfall_spray ? kInvalidEmitter : retained++;
+    }
+    if (retained == m_active_emitters.size())
+        return;
+    m_live_count = 0;
+    for (auto& particle : m_particles) {
+        if (!particle.alive)
+            continue;
+        const auto replacement = remap[particle.emitter_index];
+        if (replacement == kInvalidEmitter) {
+            particle.alive = false;
+        } else {
+            particle.emitter_index = replacement;
+            ++m_live_count;
+        }
+    }
+    if (m_splash_emitter_index != kNoSplashEmitter)
+        m_splash_emitter_index = remap[m_splash_emitter_index];
+    if (m_ambient_emitter_index != kMaxEmitters)
+        m_ambient_emitter_index = remap[m_ambient_emitter_index];
+    std::erase_if(m_active_emitters,
+                  [](const ActiveEmitter& emitter) { return emitter.waterfall_spray; });
+    m_descriptors.clear();
+    // The prepared instance records can still contain the removed spray.
+    m_frame_instance_count = 0;
 }
 
 void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base_origin) {
@@ -314,6 +348,18 @@ void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base
             emitter.world_origin = base_origin + emitter.data.origin;
             return;
         }
+    }
+}
+
+void ParticlePass::update_ambient_motes(const std::filesystem::path& root_path,
+                                        const glm::vec3& camera_position) {
+    if (m_ambient_emitter_index == kMaxEmitters) {
+        if (add_emitter(root_path / "data/common/particles/ambient_motes.json", camera_position) !=
+            kInvalidEmitter)
+            m_ambient_emitter_index = m_active_emitters.size() - 1;
+    } else {
+        auto& emitter = m_active_emitters[m_ambient_emitter_index];
+        emitter.world_origin = camera_position + emitter.data.origin;
     }
 }
 
@@ -385,43 +431,6 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
     spray.data.base_velocity.y = std::max(spray.data.base_velocity.y, 1.5f * intensity);
     spray.data.wind_response = std::max(spray.data.wind_response, 0.4f); // mist drifts on wind
     return id;
-}
-
-void ParticlePass::clear_waterfall_spray() {
-    // At world replacement only: one pass over at most kMaxEmitters emitters and
-    // kMaxInstances particles. Stable compaction preserves unrelated emitter ids.
-    std::array<std::size_t, kMaxEmitters> remap{};
-    std::size_t kept = 0;
-    const auto old_size = m_active_emitters.size();
-    for (std::size_t index = 0; index < old_size; ++index) {
-        if (m_active_emitters[index].waterfall_spray) {
-            remap[index] = kNoSplashEmitter;
-            continue;
-        }
-        remap[index] = kept;
-        if (kept != index)
-            m_active_emitters[kept] = std::move(m_active_emitters[index]);
-        ++kept;
-    }
-    if (kept == old_size)
-        return;
-    m_live_count = 0;
-    for (auto& particle : m_particles) {
-        if (!particle.alive)
-            continue;
-        const auto mapped = remap[particle.emitter_index];
-        if (mapped == kNoSplashEmitter) {
-            particle.alive = false;
-        } else {
-            particle.emitter_index = static_cast<uint32_t>(mapped);
-            ++m_live_count;
-        }
-    }
-    if (m_splash_emitter_index != kNoSplashEmitter)
-        m_splash_emitter_index = remap[m_splash_emitter_index];
-    m_active_emitters.resize(kept);
-    m_descriptors.clear();
-    m_frame_instance_count = 0;
 }
 
 uint64_t

@@ -2,6 +2,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
+#include "../world/ActivationResidencyIndex.h"
 #include "../world/BiomeTable.h"
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
@@ -220,33 +221,28 @@ struct TerrainGenParams {
 };
 
 // Immutable value data handed to far-LOD workers.  The capture owns these
-// vectors and never exposes a mutable streamed Chunk beyond the owner thread.
+// payloads and never exposes a mutable streamed Chunk beyond the owner thread.
 struct FarLodSdfSnapshotEntry {
     IVec3 coords{};
     ChunkSdfProvenance provenance = ChunkSdfProvenance::GeneratedCurrentParams;
     u32 voxel_revision = 0;
     bool authority_durable = true;
-    std::vector<f32> sdf_data;
-    std::vector<u8> material_data;
+    std::shared_ptr<const World::FarLodSdfSnapshot> payload;
 
-    World::FarLodSdfSnapshot as_reduction_snapshot() const {
-        World::FarLodSdfSnapshot snapshot;
-        snapshot.coords = coords;
-        snapshot.revision = voxel_revision;
-        snapshot.source_kind = provenance == ChunkSdfProvenance::LoadedOrEdited
-                                   ? World::FarLodBrickSourceKind::Authoritative
-                                   : World::FarLodBrickSourceKind::RegenerableCache;
-        snapshot.sdf_data = sdf_data;
-        snapshot.material_data = material_data;
-        return snapshot;
+    const World::FarLodSdfSnapshot& as_reduction_snapshot() const {
+        return *payload;
     }
 };
 
 struct FarLodSdfSnapshot {
+    std::size_t bytes_copied = 0; // this capture only; render diagnostic, never hashed
     u64 capture_epoch = 0;
     u64 params_hash = 0;
     u64 authority_revision = 0;
     u64 region_authority_revision = 0;
+    // Validated lower corner of the fixed region-plus-halo capture footprint.
+    // Transient owner-thread validation metadata; never serialized or hashed.
+    IVec2 min_chunk_coords{0};
     std::vector<FarLodSdfSnapshotEntry> entries;
 };
 
@@ -803,6 +799,14 @@ public:
         m_streaming_radius_cap = cap_chunks;
     }
 
+    // Owner-thread cumulative diagnostics; derived indexes never enter world_hash.
+    const World::ActivationResidencyIndex::Counters& activation_index_counters() const {
+        return m_activation_index.counters();
+    }
+    // Owner-thread diagnostic in dispatch/publication order. Returns at most
+    // 1024 coordinates, including unpublished batches whose workers finished.
+    std::vector<IVec3> generation_queue_prefix(std::size_t max_count) const;
+
     //  ( T.1): the water epoch (terraform bed edits increment it) —
     // folded into the waterfall site-cache key for bounded re-surveys.
     std::uint64_t water_epoch() const;
@@ -845,6 +849,7 @@ public:
     // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
     // Returns the number of chunks modified.
+    // Observers run under SaveOwnership and must not dispatch or wait for jobs.
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
@@ -962,7 +967,7 @@ public:
         return m_snapshot_copies.load(std::memory_order_relaxed);
     }
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
-    // halo. Only exact full SDF lattices are copied into the immutable result.
+    // halo. Only exact full SDF lattices enter the shared immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
     // Eviction does not stale a copied snapshot; changed SDF authority or
     // worldgen parameters do.
@@ -971,6 +976,9 @@ public:
         return m_far_lod_authority_revision.load(std::memory_order_acquire);
     }
     u64 far_lod_region_authority_revision(i32 rx, i32 rz) const;
+    // External owner-thread edits hold SaveOwnership before changing any bytes
+    // and through this notification, exactly like EditTerrainVoxel.
+    void notify_far_lod_authority_changed(const IVec3& chunk_coords);
     // Phase-A persistence transition: a successful authoritative chunk rewrite
     // changes the durable source observed by far workers even when voxel bytes
     // themselves were edited earlier. Bump the generation so any worker that
@@ -1163,20 +1171,21 @@ private:
     // wall between columns of different surface height is always inside one
     // of the two spans. center_y preserves the old single-point sample for
     // ordering (drain center-out) and collision selection.
-    struct ColumnSurfaceSpan {
-        int min_y = 0;
-        int max_y = 0;
-        int center_y = 0;
-        // cached surface biome id for the column (u8, 255 = none).
-        // Filled from BiomeIdAt when biomes are enabled, kNoBiome otherwise.
-        u8 biome_id = 255u;
-    };
-    // Pure 5-point sampling (no cache) - usable from const initial-load paths.
+    using ColumnSurfaceSpan = World::ActivationResidencyIndex::SurfaceSpan;
+    // The policy span remains the procedural five-point span, even after edits;
+    // changing that policy would change residency and the simulation hash.
     ColumnSurfaceSpan compute_column_surface_span(int chunk_x, int chunk_z) const;
-    // Cached for the lifetime of the current seed/params (terrain height is
-    // deterministic).
+    ColumnSurfaceSpan column_surface_span_from_heights(int chunk_x,
+                                                       int chunk_z,
+                                                       const std::array<float, 5>& heights) const;
     ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
-    std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
+    void publish_generated_column_span(const ::Luminumbra::Chunk& chunk);
+    World::ActivationResidencyIndex m_activation_index;
+    bool m_activation_plan_valid = false;
+    int m_activation_plan_radius = -1;
+    std::vector<IVec3> m_activation_plan_camera_chunks;
+    std::size_t m_activation_plan_surface_columns = 0;
+    int m_last_eviction_radius = -1;
 
     // --- Helper Functions ---
     // Returns true if it actually ran the activation pass (false if it was elided because the

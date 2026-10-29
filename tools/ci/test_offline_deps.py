@@ -4844,7 +4844,7 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
         cmake = "\n".join(path.read_text(encoding="utf-8") for path in (
             ROOT / "tools/ci/local_check_contracts.cmake", ROOT / "tools/CMakeLists.txt"))
         names = re.findall(r"NAME ((?:OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
-        self.assertEqual(len(names), 24)
+        self.assertEqual(len(names), 25)
         self.assertEqual(len(set(names)), len(names))
         for profile in shards.PROFILES:
             # The real inventory floor bounds this synthetic roster.

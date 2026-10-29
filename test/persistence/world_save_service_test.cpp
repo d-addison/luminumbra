@@ -2,12 +2,14 @@
 #include "gtest/gtest.h"
 
 #include "../support/CalendarMetadataCases.h"
+#include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
 
 #include "core/FilesystemPath.h"
 #include "core/Log.h"
 #include "core/LogDispatcherSink.h"
 #include "luminumbra/core/Types.h"
+#include "persistence/CreatedWorldArtifacts.h"
 #include "persistence/SavedInputFile.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
@@ -25,6 +27,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -37,6 +40,7 @@
 #include <spdlog/sinks/ostream_sink.h>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -46,6 +50,7 @@
 #include <windows.h>
 #else
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -377,6 +382,79 @@ TEST(WorldSaveService, FirstSnapshotRefusesUnflushedAncestorAndRepeatsOnRetry) {
     EXPECT_EQ(service.world_hash(state), service.world_hash(loaded));
 }
 
+class RacingStagingAlias {
+public:
+    explicit RacingStagingAlias(const std::filesystem::path& destination) {
+        Target() = destination;
+        Injected() = false;
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(&Publish);
+    }
+    ~RacingStagingAlias() {
+        Reset();
+    }
+    static void Reset() {
+        Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+    }
+    static bool& Injected() {
+        static bool injected = false;
+        return injected;
+    }
+
+private:
+    static std::filesystem::path& Target() {
+        static std::filesystem::path target;
+        return target;
+    }
+    static bool Publish(const std::filesystem::path& destination, bool removing) {
+        if (removing || destination != Target())
+            return true;
+        std::filesystem::path staged;
+        std::size_t inspected = 0;
+        // Private fixture: source, staging file and at most one publication.
+        for (const auto& entry : std::filesystem::directory_iterator(destination.parent_path())) {
+            if (++inspected > 3) {
+                ADD_FAILURE() << "Unexpected publication fixture entry";
+                return false;
+            }
+            const auto prefix =
+                destination.filename().native() + std::filesystem::path(".tmp.").native();
+            if (entry.path().filename().native().starts_with(prefix)) {
+                EXPECT_TRUE(staged.empty());
+                staged = entry.path();
+            }
+        }
+        EXPECT_FALSE(staged.empty());
+        if (staged.empty())
+            return false;
+        std::filesystem::create_hard_link(staged, destination);
+        Injected() = true;
+        return true;
+    }
+};
+
+TEST(WorldSaveService, RacingStagingAliasNeverTransfersPublicationOwnership) {
+    for (const bool rename_source : {false, true}) {
+        SCOPED_TRACE(rename_source);
+        const TempSaveDir save_dir("racing_staging_alias");
+        const auto source = save_dir.path() / "source";
+        const auto destination = save_dir.path() / "destination";
+        ASSERT_TRUE(WorldSaveService::create_file_durably(source, "original bytes"));
+        const RacingStagingAlias race(destination);
+        if (rename_source)
+            EXPECT_FALSE(WorldSaveService::rename_file_durably(
+                source, destination, "original bytes", "racing bytes"));
+        else
+            EXPECT_FALSE(WorldSaveService::create_file_durably(destination, "racing bytes"));
+        RacingStagingAlias::Reset();
+        ASSERT_TRUE(RacingStagingAlias::Injected());
+        EXPECT_EQ(ReadFileBytes(source), "original bytes");
+        EXPECT_EQ(ReadFileBytes(destination), "racing bytes");
+        ASSERT_TRUE(std::filesystem::remove(destination));
+        ASSERT_TRUE(WorldSaveService::create_file_durably(destination, "retry bytes"));
+        EXPECT_EQ(ReadFileBytes(destination), "retry bytes");
+    }
+}
+
 TEST(WorldSaveService, NewPublicationFlushFailureRollsBackAndCanRetry) {
     const TempSaveDir save_dir("publication_flush");
     const auto destination = save_dir.path() / "destination";
@@ -570,8 +648,8 @@ TEST(WorldSaveService, RegionStagingRetainsSymlinkParentTraversalWithoutFilesyst
 TEST(WorldSaveService, SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAncestors) {
     const TempSaveDir fixture("symlink_region_staging");
     const auto save_root = fixture.path() / "save";
-    const auto outside = fixture.path() / "outside";
-    const auto regions = outside / "regions";
+    const auto storage = save_root / "storage";
+    const auto regions = storage / "regions";
     const auto target = regions / "worldA";
     std::filesystem::create_directories(target);
     std::filesystem::create_directories(save_root / "chunks");
@@ -597,12 +675,12 @@ TEST(WorldSaveService, SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAnce
     };
     // Two ancestors bound this pass. Old timestamps detect even transient temp
     // creation when elevated privileges bypass the read-only permissions.
-    const auto old_time = std::filesystem::last_write_time(outside) - std::chrono::hours(24);
-    std::filesystem::last_write_time(outside, old_time);
+    const auto old_time = std::filesystem::last_write_time(storage) - std::chrono::hours(24);
+    std::filesystem::last_write_time(storage, old_time);
     std::filesystem::last_write_time(regions, old_time);
-    const auto outside_time = std::filesystem::last_write_time(outside);
+    const auto storage_time = std::filesystem::last_write_time(storage);
     const auto regions_time = std::filesystem::last_write_time(regions);
-    const ReadOnlyDirectory protect_outside(outside);
+    const ReadOnlyDirectory protect_storage(storage);
     const ReadOnlyDirectory protect_regions(regions);
 
     const auto region = WorldSaveService::region_file_path(save_root, 0, 0);
@@ -639,7 +717,7 @@ TEST(WorldSaveService, SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAnce
     ASSERT_TRUE(service.load_world(loaded, save_root, errors));
     EXPECT_EQ(service.world_hash(loaded), changed_hash);
     EXPECT_TRUE(errors.empty());
-    EXPECT_EQ(std::filesystem::last_write_time(outside), outside_time);
+    EXPECT_EQ(std::filesystem::last_write_time(storage), storage_time);
     EXPECT_EQ(std::filesystem::last_write_time(regions), regions_time);
     // The isolated fixture has three chunks, a manifest and five directories;
     // default iteration does not follow the region symlink.
@@ -1334,6 +1412,252 @@ TEST(WorldSaveService, LedgerStagingPublishesCreatesAndReplacementsWithoutDebris
         EXPECT_EQ(loaded.encode(), ledger.encode());
         for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
             EXPECT_FALSE(entry.path().filename().string().starts_with("active-regions.arl.tmp."));
+    }
+}
+
+namespace {
+void CheckStagingRegistrationRefusals(
+    Luminumbra::Persistence::CreatedWorldArtifacts& artifacts,
+    const std::filesystem::path& directory,
+    const std::filesystem::path& payload,
+    const std::filesystem::path& foreign,
+    Luminumbra::Persistence::CreatedWorldArtifacts::NativeFile native,
+    Luminumbra::Persistence::CreatedWorldArtifacts::NativeFile invalid_native) {
+    EXPECT_THROW(artifacts.record_staged_file(directory / "missing", native), std::runtime_error);
+    EXPECT_THROW(artifacts.record_staged_file(foreign, native), std::runtime_error);
+    EXPECT_THROW(artifacts.record_staged_file(directory, native), std::runtime_error);
+    EXPECT_THROW(artifacts.record_staged_file(payload, invalid_native), std::runtime_error);
+}
+
+void CheckStagingRegistration(bool scoped_removal) {
+    SCOPED_TRACE(scoped_removal);
+    const TempSaveDir save_dir("creation_staging_registration");
+    const auto directory = save_dir.path() / "created-world";
+    Luminumbra::Persistence::CreatedWorldArtifacts artifacts;
+    artifacts.create_root(directory);
+    const auto payload = directory / "payload";
+#if defined(_WIN32)
+    const auto close_file = [](HANDLE handle) {
+        ::CloseHandle(handle);
+    };
+    std::unique_ptr<void, decltype(close_file)> file(
+        ::CreateFileW(payload.c_str(),
+                      GENERIC_READ | GENERIC_WRITE | DELETE,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr,
+                      CREATE_NEW,
+                      FILE_ATTRIBUTE_NORMAL,
+                      nullptr),
+        close_file);
+    ASSERT_NE(file.get(), INVALID_HANDLE_VALUE);
+    const auto native = file.get();
+    const auto invalid_native = INVALID_HANDLE_VALUE;
+#else
+    const auto close_file = [](std::FILE* stream) {
+        std::fclose(stream);
+    };
+    std::unique_ptr<std::FILE, decltype(close_file)> file(std::fopen(payload.c_str(), "wb+"),
+                                                          close_file);
+    ASSERT_TRUE(file);
+    const auto native = ::fileno(file.get());
+    const int invalid_native = -1;
+#endif
+    const auto foreign = directory / "foreign";
+    ASSERT_NO_FATAL_FAILURE(WriteStagingFixture(foreign, "foreign bytes"));
+    ASSERT_NO_FATAL_FAILURE(CheckStagingRegistrationRefusals(
+        artifacts, directory, payload, foreign, native, invalid_native));
+    EXPECT_EQ(ReadFileBytes(foreign), "foreign bytes");
+    artifacts.record_staged_file(payload, native);
+#if defined(_WIN32)
+    std::unique_ptr<void, decltype(close_file)> foreign_file(
+        ::CreateFileW(foreign.c_str(),
+                      FILE_READ_ATTRIBUTES,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr,
+                      OPEN_EXISTING,
+                      FILE_ATTRIBUTE_NORMAL,
+                      nullptr),
+        close_file);
+    ASSERT_NE(foreign_file.get(), INVALID_HANDLE_VALUE);
+    const auto foreign_native = foreign_file.get();
+#else
+    std::unique_ptr<std::FILE, decltype(close_file)> foreign_file(std::fopen(foreign.c_str(), "rb"),
+                                                                  close_file);
+    ASSERT_TRUE(foreign_file);
+    const auto foreign_native = ::fileno(foreign_file.get());
+#endif
+    EXPECT_THROW(artifacts.forget_removed_staged_file(payload, foreign_native), std::runtime_error);
+    foreign_file.reset();
+    EXPECT_EQ(ReadFileBytes(foreign), "foreign bytes");
+    ASSERT_TRUE(std::filesystem::remove(foreign));
+    EXPECT_THROW(artifacts.forget_removed_staged_file(directory / "missing", native),
+                 std::runtime_error);
+    EXPECT_THROW(artifacts.forget_removed_staged_file(directory, native), std::runtime_error);
+    EXPECT_THROW(artifacts.forget_removed_staged_file(payload, invalid_native), std::runtime_error);
+    if (scoped_removal) {
+#if defined(_WIN32)
+        FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
+        ASSERT_TRUE(::SetFileInformationByHandle(
+            native, FileDispositionInfo, &disposition, static_cast<DWORD>(sizeof(disposition))));
+#else
+        ASSERT_EQ(::unlink(payload.c_str()), 0);
+#endif
+        artifacts.forget_removed_staged_file(payload, native);
+        EXPECT_THROW(artifacts.forget_removed_staged_file(payload, native), std::runtime_error);
+    }
+    file.reset();
+    if (scoped_removal)
+        EXPECT_TRUE(std::filesystem::is_empty(directory));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(directory));
+}
+} // namespace
+
+TEST(WorldSaveService, StagedFileRegistrationRetainsIdentityUntilRollback) {
+    CheckStagingRegistration(false);
+}
+
+TEST(WorldSaveService, RemovedStagedFileReleasesJournalIdentityBeforeRollback) {
+    CheckStagingRegistration(true);
+}
+
+TEST(WorldSaveService, CreationLedgerStagingCleansFailuresAndJournalsPublication) {
+    struct Observation {
+        std::filesystem::path directory;
+        std::filesystem::path payload;
+        Luminumbra::Persistence::CreatedWorldArtifacts* artifacts = nullptr;
+        bool allow_publication = false;
+        bool publish_before_throw = false;
+        unsigned hook_calls = 0;
+        static Observation& current() {
+            static Observation observation;
+            return observation;
+        }
+    };
+    struct HookReset {
+        ~HookReset() {
+            WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+            Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+        }
+    };
+    enum class Outcome {
+        Interrupted,
+        JournalFull,
+        PublicationThrows,
+        PublicationThrowsAfterInstall,
+        Published,
+#ifndef _WIN32
+        ClaimFlushFailed,
+        PublicationFlushFailed,
+#endif
+    };
+    for (const auto outcome : {
+             Outcome::Interrupted,
+             Outcome::JournalFull,
+             Outcome::PublicationThrows,
+             Outcome::PublicationThrowsAfterInstall,
+             Outcome::Published,
+#ifndef _WIN32
+             Outcome::ClaimFlushFailed,
+             Outcome::PublicationFlushFailed,
+#endif
+         }) {
+        SCOPED_TRACE(static_cast<int>(outcome));
+        const TempSaveDir save_dir("creation_ledger_staging");
+        const auto directory = save_dir.path() / "created-world";
+        Luminumbra::Persistence::CreatedWorldArtifacts artifacts;
+        artifacts.create_root(directory);
+        // Exercise the complete nine-entry creation budget: root, both chunk
+        // directories, and destination/temporary pairs for all three files.
+        ASSERT_TRUE(WorldSaveService::write_file_durably(
+            directory / "preset.json", "preset bytes\n", nullptr, &artifacts));
+        if (outcome == Outcome::JournalFull)
+            artifacts.write_file(directory / "partial.bin", "partial bytes\n");
+        const Luminumbra::world::WorldClock clock;
+        Luminumbra::world::ActiveRegionLedger ledger;
+        ledger.set_local_anchor(Vec3(1, 2, 3));
+        nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
+        clock.write_metadata(metadata);
+        ASSERT_TRUE(
+            WorldSaveService::save_metadata(metadata.dump(), directory, nullptr, &artifacts));
+        auto& observation = Observation::current();
+        observation = {.directory = directory,
+                       .payload = {},
+                       .artifacts = &artifacts,
+                       .allow_publication = outcome != Outcome::Interrupted,
+                       .publish_before_throw = outcome == Outcome::PublicationThrowsAfterInstall,
+                       .hook_calls = 0};
+        const HookReset hook_reset;
+        const DirectoryFlushReset flush_reset;
+        WorldSaveService::set_before_active_regions_replace_for_testing([] {
+            auto& observed = Observation::current();
+            ++observed.hook_calls;
+            unsigned payloads = 0;
+            unsigned owners = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(observed.directory)) {
+                if (!entry.path().filename().string().starts_with("active-regions.arl.tmp."))
+                    continue;
+                EXPECT_NE(entry.path().extension(), ".claim");
+                if (entry.path().extension() == ".owner")
+                    ++owners;
+                else {
+                    ++payloads;
+                    observed.payload = entry.path();
+                }
+            }
+            EXPECT_EQ(payloads, 1u);
+            EXPECT_EQ(owners, 1u);
+            return observed.allow_publication;
+        });
+        if (outcome == Outcome::PublicationThrows ||
+            outcome == Outcome::PublicationThrowsAfterInstall) {
+            Luminumbra::Persistence::detail::set_file_publication_hook_for_testing(
+                [](const std::filesystem::path& destination, bool) -> bool {
+                    auto& observed = Observation::current();
+                    if (observed.publish_before_throw)
+                        observed.artifacts->publish_file(observed.payload, destination);
+                    throw std::runtime_error("publication refused");
+                });
+        }
+#ifndef _WIN32
+        int staging_ancestors = 0;
+        for (auto ancestor = directory; !ancestor.empty() && ancestor != ancestor.root_path();
+             ancestor = ancestor.parent_path())
+            ++staging_ancestors;
+        if (outcome == Outcome::ClaimFlushFailed) {
+            // The durable claim precedes payload promotion and ledger bytes.
+            WorldSaveService::set_directory_flush_failure_for_testing(staging_ancestors);
+        } else if (outcome == Outcome::PublicationFlushFailed) {
+            // Four staging flushes, then the destination's ancestor entries.
+            WorldSaveService::set_directory_flush_failure_for_testing(2 * staging_ancestors + 6);
+        }
+#endif
+        std::vector<std::string> errors;
+        const bool saved =
+            WorldSaveService::save_active_regions(ledger, clock, directory, &errors, &artifacts);
+        EXPECT_EQ(saved, outcome == Outcome::Published);
+        EXPECT_EQ(errors.empty(), saved);
+        unsigned expected_hook_calls = 1;
+#ifndef _WIN32
+        if (outcome == Outcome::ClaimFlushFailed)
+            expected_hook_calls = 0;
+#endif
+        EXPECT_EQ(observation.hook_calls, expected_hook_calls);
+        for (const auto& entry : std::filesystem::directory_iterator(directory))
+            EXPECT_FALSE(entry.path().filename().string().starts_with("active-regions.arl.tmp."));
+        const auto destination = WorldSaveService::active_regions_path(directory);
+        bool installed = saved || outcome == Outcome::PublicationThrowsAfterInstall;
+#ifndef _WIN32
+        installed = installed || outcome == Outcome::PublicationFlushFailed;
+#endif
+        EXPECT_EQ(std::filesystem::exists(destination), installed);
+        if (installed) {
+            EXPECT_EQ(ReadFileBytes(destination), ledger.encode());
+        }
+        // A live ledger omitted from the journal makes rollback refuse, so
+        // successful rollback also proves publication recorded its identity.
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_FALSE(std::filesystem::exists(directory));
     }
 }
 
@@ -2422,5 +2746,20 @@ TEST(WorldSaveService, SavedInputReadRetriesInterruptionsForPayloadAndEofOnly) {
         EXPECT_EQ(result, final_result);
         EXPECT_EQ(attempts, 3);
     }
+}
+TEST(WorldSaveService, SavedInputReadCancellationStopsAnInterruptedRetry) {
+    using Luminumbra::Persistence::detail::ReadSavedInputRetryingInterrupt;
+    std::stop_source cancellation;
+    int attempts = 0;
+    const auto result = ReadSavedInputRetryingInterrupt(
+        [&] {
+            ++attempts;
+            cancellation.request_stop();
+            errno = EINTR;
+            return ssize_t{-1};
+        },
+        cancellation.get_token());
+    EXPECT_EQ(result, -1);
+    EXPECT_EQ(attempts, 1);
 }
 #endif
