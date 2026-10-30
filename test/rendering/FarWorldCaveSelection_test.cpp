@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <map>
 #include <tuple>
@@ -94,7 +95,7 @@ void ExpectSharedMeshFace(const FarVolumeMesh& a,
             vertex.position[0] += mesh.origin_meters.x;
             vertex.position[1] += mesh.origin_meters.y;
             vertex.position[2] += mesh.origin_meters.z;
-            if (vertex.position[axis] != plane)
+            if (vertex.position[static_cast<std::size_t>(axis)] != plane)
                 continue;
             // Central differences of this quadratic field equal its analytic
             // gradient. Wrong halo coordinates must also fail this oracle.

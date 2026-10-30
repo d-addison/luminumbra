@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -88,7 +89,7 @@ double ReliefMetric(const TerrainGenParams& params, int seed = 4242) {
             const float x = (ix - N / 2) * kStep;
             const float z = (iz - N / 2) * kStep;
             const float v = world.GetTerrainHeightAt(x, z);
-            h[iz][ix] = v;
+            h[static_cast<std::size_t>(iz)][static_cast<std::size_t>(ix)] = v;
             lo = std::min(lo, static_cast<double>(v));
             hi = std::max(hi, static_cast<double>(v));
         }
@@ -98,7 +99,8 @@ double ReliefMetric(const TerrainGenParams& params, int seed = 4242) {
     int count = 0;
     for (int iz = 0; iz < N; ++iz) {
         for (int ix = 1; ix < N; ++ix) {
-            rough += std::fabs(h[iz][ix] - h[iz][ix - 1]);
+            rough += std::fabs(h[static_cast<std::size_t>(iz)][static_cast<std::size_t>(ix)] -
+                               h[static_cast<std::size_t>(iz)][static_cast<std::size_t>(ix - 1)]);
             ++count;
         }
     }

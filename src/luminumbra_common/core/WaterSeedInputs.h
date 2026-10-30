@@ -55,7 +55,7 @@ void ComputeWaterSeedInputs(HighWaterSeedInputs& inputs,
     // unsupported sizes before indexing either fixed array or supplied terrain.
     if (!HighWaterSeedInputs::supports_resolution(resolution))
         return;
-    const auto cells = static_cast<std::size_t>(resolution) * resolution;
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
     if (!terrain.empty() && terrain.size() != cells)
         return;
     const float cell_width_x = CHUNK_SIZE_X / static_cast<float>(resolution);
@@ -66,8 +66,8 @@ void ComputeWaterSeedInputs(HighWaterSeedInputs& inputs,
                                   (static_cast<float>(x) + 0.5f) * cell_width_x;
             const float world_z = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
                                   (static_cast<float>(z) + 0.5f) * cell_width_z;
-            const auto cell =
-                static_cast<std::size_t>(z) * resolution + static_cast<std::size_t>(x);
+            const auto cell = static_cast<std::size_t>(z) * static_cast<std::size_t>(resolution) +
+                              static_cast<std::size_t>(x);
             inputs.rest[cell] = world.WaterLevelAt(world_x, world_z);
             inputs.terrain[cell] =
                 terrain.empty() ? world.GetTerrainHeightAt(world_x, world_z) : terrain[cell];
