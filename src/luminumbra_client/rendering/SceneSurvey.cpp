@@ -1,6 +1,7 @@
 #include "SceneSurvey.h"
 
 #include "Camera.h"
+#include "CaptureManifestLive.h"
 #include "FrameScan.h"
 #include "PixelIo.h"
 #include "RenderPipeline.h"
@@ -73,6 +74,7 @@ bool RunSceneSurvey(GLFWwindow* window,
                     Camera& camera,
                     const std::filesystem::path& out_dir,
                     const std::filesystem::path& materials_json,
+                    const luminumbra::core::ResolvedGraphics& graphics,
                     bool wireframe) {
     if (!WriteCaptureText(out_dir / "survey.json",
                           "{\"status\":\"failed\",\"capture_complete\":false,"
@@ -319,17 +321,26 @@ bool RunSceneSurvey(GLFWwindow* window,
                              t.label,
                              w->debug_max_water_depth_mm());
 
-        const FrameScanReport rep = ScanFrame(pipeline, fbw, fbh, materials_json);
-        if (!rep.ok)
-            return false;
+        // The image and scan share a capture stem and one joint completion verdict.
+        const bool captured = WithCaptureManifest(
+            out_dir / (t.label + ".ppm"),
+            ObserveCaptureManifest(session, pipeline, fbw, fbh, graphics, wireframe, false),
+            [&] {
+                const FrameScanReport rep = ScanFrame(pipeline, fbw, fbh, materials_json);
+                if (!rep.ok)
+                    return false;
 
-        std::vector<unsigned char> px(pixel_bytes);
-        glReadBuffer(GL_BACK);
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadPixels(0, 0, fbw, fbh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-        if (glGetError() != GL_NO_ERROR ||
-            !WritePixelBufferPpm(out_dir / (t.label + ".ppm"), fbw, fbh, px) ||
-            !WriteFrameScanReport(rep, out_dir / (t.label + ".json")))
+                std::vector<unsigned char> px(pixel_bytes);
+                glReadBuffer(GL_BACK);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, fbw, fbh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                if (glGetError() != GL_NO_ERROR ||
+                    !WritePixelBufferPpm(out_dir / (t.label + ".ppm"), fbw, fbh, px) ||
+                    !WriteFrameScanReport(rep, out_dir / (t.label + ".json")))
+                    return false;
+                return true;
+            });
+        if (!captured)
             return false;
 
         LUMINUMBRA_CORE_INFO(
