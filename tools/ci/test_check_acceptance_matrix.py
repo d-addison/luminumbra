@@ -742,11 +742,15 @@ class AcceptanceMatrixTests(AcceptanceFixture):
             with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory).resolve()
                 output, displaced = base / "output", base / "displaced"
+                original = base / "original"
                 output.write_bytes(b"original")
                 replace, restore = Path.replace, os.replace
                 active = False
                 def publish(source: Path, target: Path) -> Path:
                     nonlocal active
+                    # Retain the original identity, then substitute it below.
+                    # This deterministically models reuse of its released inode.
+                    output.rename(original)
                     replace(source, target)
                     active = True
                     raise KeyboardInterrupt("publication completed")
@@ -755,7 +759,10 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                         restore(source, target)
                         return
                     Path(source).rename(displaced)
-                    Path(source).write_bytes(contents)
+                    if contents == b"original":
+                        original.rename(source)
+                    else:
+                        Path(source).write_bytes(contents)
                     restore(source, target)
                     raise KeyboardInterrupt("foreign restore completed")
                 with mock.patch.object(Path, "replace", publish), mock.patch.object(os, "replace", substitute), \
