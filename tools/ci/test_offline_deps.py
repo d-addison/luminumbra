@@ -4748,7 +4748,6 @@ class CaseProgressRunner(_LifecycleRunner):
 
 # Keep launch-heavy Git cases and the real commit-boundary regression together,
 # leaving room for slower process launches in the remaining Windows partitions.
-OFFLINE_PARTITIONS = ("0", "1", "2")
 OFFLINE_CLASS_PARTITIONS = {
     "ContainmentTests": "0",
     "GitConfigScannerTests": "0",
@@ -4767,6 +4766,10 @@ OFFLINE_CASE_PARTITIONS = {
     "CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": "2",
     "CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": "2",
 }
+
+
+OFFLINE_PARTITIONS = tuple(sorted(set(OFFLINE_CLASS_PARTITIONS.values()) |
+                                  set(OFFLINE_CASE_PARTITIONS.values()), key=int))
 
 
 def offline_cases(suite):
@@ -4844,7 +4847,18 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
         cmake = "\n".join(path.read_text(encoding="utf-8") for path in (
             ROOT / "tools/ci/local_check_contracts.cmake", ROOT / "tools/CMakeLists.txt"))
         names = re.findall(r"NAME ((?:OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
-        self.assertEqual(len(names), 25)
+        # Routing tables, not the CMake names being checked, define the roster.
+        expected = []
+        for script, prefix, variable in (
+                ("test_offline_deps.py", "OfflineDependenciesContract", "OFFLINE_PARTITIONS"),
+                ("test_workflow_policy.py", "WorkflowPolicyContract", "POLICY_PARTITIONS"),
+                ("test_ctest_shards.py", "CTestShardContract", "CTEST_SHARD_PARTITIONS")):
+            spec = importlib.util.spec_from_file_location("contract_roster", ROOT / "tools/ci" / script)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            expected.extend(prefix + ("" if part == "0" else "Part" + part)
+                            for part in getattr(module, variable))
+        self.assertCountEqual(names, expected)
         self.assertEqual(len(set(names)), len(names))
         for profile in shards.PROFILES:
             # The real inventory floor bounds this synthetic roster.
@@ -4895,7 +4909,7 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "-1", "3", "01", "0/3", None, 0):
+        for invalid in ("", "-1", str(max(map(int, OFFLINE_PARTITIONS)) + 1), "01", "0/3", None, 0):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 offline_partition_suite(loader, module, invalid)
         complete = list(offline_cases(loader.loadTestsFromModule(module)))
@@ -4957,7 +4971,7 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
                 self.assertEqual(offline_main(["--partition", partition, "--list-tests"]), 0)
                 expected = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in offline_cases(expected)])
-        for argv in (["--partition"], ["--partition", "3"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", str(max(map(int, OFFLINE_PARTITIONS)) + 1)], ["--partition", "01"],
                      ["--partition", "0", "--partition", "1"], ["--list-tests"],
                      ["--partition", "0", "CachedGitSafetyTests"], ["--partition", "0", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:

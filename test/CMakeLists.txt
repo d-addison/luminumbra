@@ -859,10 +859,41 @@ endif()
 # ExpectedLayout. Slang replaces the former dxc + spirv-cross two-tool chain (one
 # tool that compiles for every backend and emits reflection data. slangc is
 # a STANDALONE binary (no mingw linkage), bundled with the Vulkan SDK since 1.3.296,
-# so gate the target on finding it -- an SDK-less configure just skips this GPU ctest.
+# so gate generation and the GPU ctest on finding it. Keep the executable in
+# compile databases without slangc, excluded from the default build in that case.
 find_program(LUMINUMBRA_SLANGC slangc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+set(_pilot_reflect_dir "${CMAKE_BINARY_DIR}/pilot_shaders")
+add_executable(pilot_shader_reflection_test EXCLUDE_FROM_ALL
+    rendering/pilot_shader_reflection_test.cpp
+../src/luminumbra_client/rendering/ShaderReflection.cpp
+../src/luminumbra_client/rendering/ShaderReflectionSpirv.cpp
+../src/luminumbra_client/rendering/PassShaderLayouts.cpp
+)
+target_compile_definitions(pilot_shader_reflection_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    PILOT_SHADER_REFLECT_DIR="${_pilot_reflect_dir}"
+)
+target_include_directories(pilot_shader_reflection_test PRIVATE
+../src
+../src/luminumbra_client
+)
+target_link_libraries(pilot_shader_reflection_test PRIVATE
+    gtest_main
+    glfw
+    glad
+    nlohmann_json::nlohmann_json
+)
+if(WIN32)
+    target_link_libraries(pilot_shader_reflection_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(pilot_shader_reflection_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(pilot_shader_reflection_test PRIVATE OpenGL::GL)
+endif()
+
 if(LUMINUMBRA_SLANGC)
-    set(_pilot_reflect_dir "${CMAKE_BINARY_DIR}/pilot_shaders")
     file(MAKE_DIRECTORY "${_pilot_reflect_dir}")
     set(_pilot_reflect_jsons "")
     foreach(_p ssao debug_view)
@@ -887,36 +918,8 @@ if(LUMINUMBRA_SLANGC)
     endforeach()
     add_custom_target(pilot_shader_reflect DEPENDS ${_pilot_reflect_jsons})
 
-    add_executable(pilot_shader_reflection_test
-        rendering/pilot_shader_reflection_test.cpp
-../src/luminumbra_client/rendering/ShaderReflection.cpp
-../src/luminumbra_client/rendering/ShaderReflectionSpirv.cpp
-../src/luminumbra_client/rendering/PassShaderLayouts.cpp
-    )
+    set_target_properties(pilot_shader_reflection_test PROPERTIES EXCLUDE_FROM_ALL FALSE)
     add_dependencies(pilot_shader_reflection_test pilot_shader_reflect)
-    target_compile_definitions(pilot_shader_reflection_test PRIVATE
-        LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
-        PILOT_SHADER_REFLECT_DIR="${_pilot_reflect_dir}"
-    )
-    target_include_directories(pilot_shader_reflection_test PRIVATE
-../src
-../src/luminumbra_client
-    )
-    target_link_libraries(pilot_shader_reflection_test PRIVATE
-        gtest_main
-        glfw
-        glad
-        nlohmann_json::nlohmann_json
-    )
-    if(WIN32)
-        target_link_libraries(pilot_shader_reflection_test PRIVATE opengl32)
-    elseif(APPLE)
-        find_package(OpenGL REQUIRED)
-        target_link_libraries(pilot_shader_reflection_test PRIVATE ${OPENGL_LIBRARIES})
-    else()
-        find_package(OpenGL REQUIRED)
-        target_link_libraries(pilot_shader_reflection_test PRIVATE OpenGL::GL)
-    endif()
     set(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE ON)
     message(STATUS " PilotShaderReflectionParity enabled (slangc=${LUMINUMBRA_SLANGC})")
 else()
@@ -2155,7 +2158,7 @@ if(LUMINUMBRA_ENABLE_DILIGENT)
     list(APPEND LUMINUMBRA_GTEST_TARGETS rhi_pilot_flip_test)
 endif()
 # register the pilot reflection-parity GPU ctest only when the
-# dxc + spirv-cross toolchain was found at configure time.
+# slangc toolchain was found at configure time.
 if(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE)
     list(APPEND LUMINUMBRA_GTEST_TARGETS pilot_shader_reflection_test)
 endif()

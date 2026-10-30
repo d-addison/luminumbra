@@ -238,6 +238,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_required_jobs_run_python_plan_on_mixed_changes_and_publish_route(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow += (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         for job in ("linux", "windows-msvc"):
             # Split on a job boundary, not nested YAML mappings.
             body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {job}:\n", 1)[1])[0]
@@ -263,6 +264,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_route_is_visible_in_log_summary_and_step_output(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow += (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         for job in ("linux", "windows-msvc"):
             script = run_block(workflow.split(f"  {job}:\n", 1)[1], "Report validation route")
             for cpp, route in (("false", "python-only"), ("true", "native"), ("", "native")):
@@ -281,18 +283,18 @@ class PathGateTests(unittest.TestCase):
     def test_job_routes_keep_draft_guards_and_fail_open_native_analysis(self):
         workflows = {
             name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
-            for name in ("ci", "asan", "performance")
+            for name in ("ci", "asan", "performance", "windows-build")
         }
         routes = (
             ("ci", "linux", "guarded-python"),
-            ("ci", "windows-msvc", "ready-native-or-python"),
+            ("windows-build", "windows-msvc", "ready-native-or-python"),
             ("ci", "gns-compile-probe", "ready-native"),
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
             ("ci", "linux-result", "required-aggregate"),
-            ("ci", "windows-msvc-result", "required-aggregate"),
-            ("ci", "windows-ucrt64-result", "required-aggregate"),
+            ("windows-build", "windows-msvc-result", "required-aggregate"),
+            ("windows-build", "windows-ucrt64-result", "required-aggregate"),
             ("asan", "asan-shard", "guarded-native"),
             ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
@@ -300,6 +302,7 @@ class PathGateTests(unittest.TestCase):
         for workflow, job, route in routes:
             body = re.split(r"\n  [\w-]+:\n", workflows[workflow].split(f"  {job}:\n", 1)[1])[0]
             condition = re.search(r"^    if: (.*)$", body, re.MULTILINE)[1]
+            condition = condition.replace("(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (", "(")
             expression = condition.removeprefix("${{ ").removesuffix(" }}")
             # Missing/failed classifier output is represented by the empty string.
             for event, action, base_changed in product(
@@ -335,6 +338,7 @@ class PathGateTests(unittest.TestCase):
                             ).replace("needs.changes.result", repr("success")).replace(
                                 "needs.asan-shard.result", repr("success")
                             ).replace("needs.tidy-shard.result", repr("success")
+                            ).replace("needs.changes.outputs.head_sha", repr("a" * 40)
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                                 "needs.changes.outputs.needs_python", repr(python)).replace(
                                 "== false", "== False"
@@ -345,7 +349,7 @@ class PathGateTests(unittest.TestCase):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
 
     def test_ucrt64_producer_and_gate_preserve_main_prs_and_classified_routes(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         producer = re.split(r"\n  [\w-]+:\n", workflow.split("  windows-ucrt64:\n", 1)[1])[0]
         aggregate = re.split(r"\n  [\w-]+:\n", workflow.split("  windows-ucrt64-result:\n", 1)[1])[0]
         gate_step = aggregate.split("      - name: Require expected producers and route\n", 1)[1].split(
@@ -354,7 +358,7 @@ class PathGateTests(unittest.TestCase):
         bindings = dict(re.findall(r"^          ([A-Z_]+): (.*)$", gate_step, re.MULTILINE))
         command = shlex.split(" ".join(re.search(r"        run: >-\n((?:          .*\n)+)", gate_step)[1].splitlines()))
         self.assertEqual(command[:3], ["python3", "tools/ci/ctest_shards.py", "gate"])
-        self.assertEqual(bindings["NEEDS_CPP"], '"true"')
+        self.assertEqual(bindings["NEEDS_CPP"], "${{ needs.changes.outputs.needs_cpp }}")
 
         def evaluate(expression, context):
             expression = expression.removeprefix("${{ ").removesuffix(" }}")
@@ -369,21 +373,21 @@ class PathGateTests(unittest.TestCase):
                 ("pull_request", "push", "workflow_dispatch", "schedule"), ("main", "devel"),
                 ("true", "false", "", "unknown"), (False, True, None), (False, True),
                 ("true", "false", "", "unknown", "TRUE")):
-            main_or_labelled_pr = event == "pull_request" and (base == "main" or label)
-            routed = (event in ("push", "workflow_dispatch") or
-                      (event == "pull_request" and (label or paths.lower() == "true")))
-            enabled = main_or_labelled_pr or (cpp != "false" and routed)
+            enabled = cpp != "false" and event in ("pull_request", "workflow_dispatch", "schedule")
+            authorized = event != "pull_request" or label
             ready = event != "pull_request" or draft is False
             context = {
                 "github.event_name": event, "github.base_ref": base, "github.ref": f"refs/heads/{base}",
                 "github.event.action": "synchronize", "github.event.changes.base": "",
                 "github.event.pull_request.draft": draft,
                 "github.event.pull_request.labels.*.name": ("windows-proof",) if label else (),
-                "needs.changes.outputs.needs_cpp": cpp, "needs.changes.outputs.needs_ucrt64": paths.lower(),
+                "github.event.pull_request.head.repo.full_name": "owner/repo", "github.repository": "owner/repo",
+                "needs.changes.outputs.head_sha": "a" * 40, "needs.changes.result": "success",
+                "needs.changes.outputs.needs_cpp": cpp,
                 "inputs.qualification_capture": False,
             }
             with self.subTest(event=event, base=base, cpp=cpp, draft=draft, label=label, paths=paths):
-                self.assertEqual(evaluate(condition, context), enabled and ready)
+                self.assertEqual(evaluate(condition, context), enabled and ready and authorized)
                 self.assertEqual(evaluate(bindings["CI_ENABLED"], context), enabled)
                 for classification, result in product(
                         ("success", "failure", "cancelled", "skipped", "", "unknown"),
@@ -405,8 +409,8 @@ class PathGateTests(unittest.TestCase):
     def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):
         for filename, producer, aggregate in (
             ("ci", "linux", "linux-result"),
-            ("ci", "windows-msvc", "windows-msvc-result"),
-            ("ci", "windows-ucrt64", "windows-ucrt64-result"),
+            ("windows-build", "windows-msvc", "windows-msvc-result"),
+            ("windows-build", "windows-ucrt64", "windows-ucrt64-result"),
             ("ci", "tidy-shard", "tidy"),
             ("asan", "asan-shard", "asan"),
         ):
@@ -417,7 +421,7 @@ class PathGateTests(unittest.TestCase):
                 for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                     invalid = classification != "success" or result not in ("success", "skipped")
                     for workflow_cancelled in (False, True):
-                        expression = condition.removeprefix("${{ ").removesuffix(" }}")
+                        expression = condition.replace("(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (", "(").removeprefix("${{ ").removesuffix(" }}")
                         expression = expression.replace("!cancelled()", repr(not workflow_cancelled))
                         expression = expression.replace("always()", "True").replace("failure()", repr("failure" in (classification, result)))
                         expression = expression.replace("needs.changes.result", repr(classification))

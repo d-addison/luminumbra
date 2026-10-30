@@ -1,0 +1,882 @@
+name: Windows build
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array'
+        required: true
+        type: string
+      qualification_capture:
+        type: boolean
+        default: false
+      expected_sha:
+        type: string
+        default: ''
+    outputs:
+      head_sha:
+        description: 'Exact tested revision (devel for schedules)'
+        value: ${{ jobs.changes.outputs.head_sha }}
+
+permissions:
+  contents: read
+
+env:
+  QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+  QUALIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
+  QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
+  CTEST_PARALLEL_LEVEL: "4"
+
+jobs:
+  # Daily proof always runs the full selection; retain fail-closed aggregate routing.
+  changes:
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 5
+    outputs:
+      head_sha: ${{ steps.source.outputs.head_sha }}
+      needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
+      needs_python: ${{ steps.paths.outputs.needs_python }}
+      needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
+      heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          ref: ${{ github.event_name == 'schedule' && 'devel' || github.sha }}
+      - name: Resolve exact tested revision
+        id: source
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') {
+            throw 'Git could not resolve the Windows candidate revision'
+          }
+          "head_sha=$sha" >> $env:GITHUB_OUTPUT
+      - name: Select full validation
+        id: paths
+        shell: pwsh
+        run: |
+          'needs_cpp=true' >> $env:GITHUB_OUTPUT
+          'needs_python=true' >> $env:GITHUB_OUTPUT
+          'needs_heavy=true' >> $env:GITHUB_OUTPUT
+          'heavy_reason=classification_uncertain' >> $env:GITHUB_OUTPUT
+
+  windows-msvc:
+    name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}
+    needs: changes
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && (needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Qualification captures keep one full, binary-bound producer.
+        shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1200M
+      # Only the main configure opts in via command-line launchers. Captures
+      # and packaging must not inherit a launcher from the environment.
+      CMAKE_C_COMPILER_LAUNCHER: ""
+      CMAKE_CXX_COMPILER_LAUNCHER: ""
+    outputs:
+      route: ${{ steps.route.outputs.route }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Select Python runtime
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.8'
+          architecture: x64
+          check-latest: false
+          allow-prereleases: false
+          freethreaded: false
+          update-environment: true
+      # Keep the cache outside the cleaned worktree and per-job temp.
+      - name: Verify runner prerequisites
+        shell: pwsh
+        run: '& "${{ steps.python.outputs.python-path }}" -I -B tools/ci/windows_runner_preflight.py --lane host-msvc'
+      - name: Locate compiler cache
+        shell: pwsh
+        run: '"CCACHE_DIR=$(Join-Path $env:LOCALAPPDATA ''Luminumbra/ccache-msvc'')" >> $env:GITHUB_ENV'
+      - name: Report validation route
+        id: route
+        shell: bash
+        env:
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+        run: |
+          if [ "$NEEDS_CPP" = false ]; then
+            route=python-only
+            message='route: python-only (native build skipped by Classify changed paths)'
+          else
+            route=native
+            message='route: native (full build and CTest enabled)'
+          fi
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          echo "route=$route" >> "$GITHUB_OUTPUT"
+      - name: Install standalone Python test dependencies
+        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" -m pip install --disable-pip-version-check numpy Pillow jsonschema
+      - name: Run registered local-check deadlines
+        id: local-contracts
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+          LOCAL_CHECK_JUNIT: ${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml
+        run: |
+          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
+          ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
+          ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
+          CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"
+          "$CI_PYTHON_EXECUTABLE" -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2
+      - name: Upload local-check deadline evidence
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-local-check-contracts-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
+          path: |
+            build/local-check-contracts/ctest-discovery.json
+            ${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml
+            build/local-check-contracts/Testing/Temporary
+          if-no-files-found: warn
+          retention-days: 14
+      # One Windows shard is enough: the contracts do not depend on the shard's test partition.
+      # Shard 2 carries them: with a warm compiler cache its build and test partition is the shorter one.
+      - name: Run standalone Python contracts (including CTest-registered suites)
+        if: ${{ matrix.shard != 1 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
+        shell: pwsh
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          $pythonExecutable = $env:CI_PYTHON_EXECUTABLE
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # Developer-shell setup can change PATH; retain the selected runtime.
+          Set-Alias -Name python -Value $pythonExecutable
+          python -B tools/ci/ci_paths.py python-tests
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
+      - name: Install Python test dependencies
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" -m pip install --disable-pip-version-check numpy Pillow
+      - name: Disable compiler cache for qualification captures
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        shell: pwsh
+        run: '"CCACHE_DISABLE=1" >> $env:GITHUB_ENV'
+      - name: Stage ccache
+        id: ccache-stage
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (!(github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = '4.14.1'
+          $sha256 = '6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4'
+          $archive = "ccache-$version-windows-x86_64.zip"
+          $url = "https://github.com/ccache/ccache/releases/download/v$version/$archive"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          Invoke-WebRequest -Uri $url -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "ccache archive sha256 mismatch: expected $sha256, got $actual"
+          }
+          $ccacheRoot = Join-Path $env:RUNNER_TEMP 'ccache-bin'
+          try { Remove-Item -Recurse -Force $ccacheRoot -ErrorAction Stop }
+          catch [System.Management.Automation.ItemNotFoundException] { }
+          7z x $archivePath "-o$ccacheRoot" | Out-Null
+          # Discover the executable whether the zip has a top-level directory
+          # or places it directly at the extraction root; refuse ambiguity.
+          $executables = @(Get-ChildItem -Path $ccacheRoot -Filter 'ccache.exe' -File -Recurse)
+          if ($executables.Count -ne 1) {
+            throw "Expected exactly one ccache.exe in the archive, found $($executables.Count)"
+          }
+          $executables[0].DirectoryName >> $env:GITHUB_PATH
+      - name: Verify compiler tools
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        shell: pwsh
+        run: '& "${{ steps.python.outputs.python-path }}" -I -B tools/ci/windows_runner_preflight.py --lane msvc'
+      - name: Stage software OpenGL (Mesa3D llvmpipe)
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        shell: pwsh
+        run: |
+          # Hosted Windows workers expose no GPU-backed GL. Stage the Mesa3D
+          # llvmpipe rasterizer (the same driver the Linux lanes use through
+          # LIBGL_ALWAYS_SOFTWARE=1) so the GL 4.5 core rendering/UI suites
+          # run here instead of skipping. Pinned by version + sha256.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = '26.1.7'
+          $sha256 = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
+          $archive = "mesa3d-$version-release-msvc.7z"
+          $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$version/$archive"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          Invoke-WebRequest -Uri $url -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "Mesa3D archive sha256 mismatch: expected $sha256, got $actual"
+          }
+          $mesaRoot = Join-Path $env:RUNNER_TEMP 'mesa3d'
+          try { Remove-Item -Recurse -Force $mesaRoot -ErrorAction Stop }
+          catch [System.Management.Automation.ItemNotFoundException] { }
+          # opengl32.dll is the WGL loader; libgallium_wgl.dll carries the
+          # llvmpipe driver itself. dxil.dll is only needed for the d3d12
+          # backends, which this lane does not use.
+          7z x $archivePath "-o$mesaRoot" 'x64\opengl32.dll' 'x64\libgallium_wgl.dll' | Out-Null
+          foreach ($dll in 'opengl32.dll', 'libgallium_wgl.dll') {
+            if (-not (Test-Path (Join-Path $mesaRoot 'x64' $dll))) {
+              throw "Mesa3D archive is missing x64/$dll"
+            }
+          }
+      - name: Reset compiler cache statistics
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache -z
+      - name: Configure, build, and test
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        id: native
+        shell: pwsh
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          $pythonExecutable = $env:CI_PYTHON_EXECUTABLE
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # Developer-shell setup can change PATH; retain the selected runtime.
+          Set-Alias -Name python -Value $pythonExecutable
+          python -I -B tools/ci/windows_runner_preflight.py --lane native
+          # Preserve Release optimization and retain embedded compiler symbols
+          # plus the linked PDB for render-child failure evidence. Dependency
+          # precompiled headers and Jolt's /Zi are disabled so ccache can cache them.
+          $compilerLaunchers = @()
+          if ($env:CCACHE_DISABLE -ne '1') {
+            $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
+          }
+          python -I -B tools/ci/rmlui_source.py init --root build/release
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
+            -DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `
+            '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF' @compilerLaunchers
+          cmake --build --preset release --parallel 4
+          # Require the file-only production writer/oracle integration even
+          # when optional PowerShell discovery would omit it from the suite.
+          ctest --preset release --no-tests=error `
+            -R '^FarLadderOracleWriterContract$' --output-on-failure
+          # Retain one CPU-only diagnostic binary with its compiler runtime so a
+          # terrain-hash failure can distinguish compiler output from host effects.
+          # This temporary CI artifact is not a software release or game package.
+          $diagnostic = 'build/release/worldgen-diagnostic'
+          New-Item -ItemType Directory -Force $diagnostic | Out-Null
+          Copy-Item build/release/bin/worldgen_layer_snapshot_test.exe $diagnostic
+          $crt = @(Get-ChildItem (Join-Path $env:VCToolsRedistDir 'x64') -Directory -Filter 'Microsoft.VC*.CRT')
+          if ($crt.Count -ne 1) { throw 'Expected exactly one x64 MSVC CRT directory' }
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            Copy-Item (Join-Path $crt[0].FullName $dll) $diagnostic
+          }
+          $files = @{}
+          Get-ChildItem $diagnostic -File | ForEach-Object {
+            $files[$_.Name] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          @{
+            revision = (git rev-parse HEAD)
+            purpose = 'CPU-only worldgen test diagnosis; not a release'
+            compiler = (Get-Item (Get-Command cl).Source).VersionInfo.FileVersion
+            portable_test_filter = 'WorldGenLayerSnapshotTest.DefaultShapingIsDeterministicAndAllSamplersAgree'
+            diagnostic_output_variable = 'LUMINUMBRA_WORLDGEN_DIAGNOSTIC_DIR'
+            limitation = 'Other cases may require the compile-time source checkout; the portable filter uses five synthetic presets only.'
+            file_sha256 = $files
+          } | ConvertTo-Json -Depth 4 | Set-Content "$diagnostic/identity.json"
+          # Deploy the staged Mesa3D llvmpipe runtime next to the test
+          # executables so glfwCreateWindow gets a GL 4.5 core context.
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'mesa3d/x64/opengl32.dll'), `
+            (Join-Path $env:RUNNER_TEMP 'mesa3d/x64/libgallium_wgl.dll') `
+            -Destination build/release/bin
+          $env:GALLIUM_DRIVER = 'llvmpipe'
+          ctest --preset release -LE manual --show-only=json-v1 | Set-Content -Encoding utf8 build/release/ctest.inventory.json
+          ctest --preset release --show-only=json-v1 | Set-Content -Encoding utf8 build/release/ctest.all.json
+          python tools/ci/ctest_shards.py plan --profile msvc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$env:CI_NEEDS_HEAVY"
+          python tools/ci/ctest_shards.py run --profile msvc --directory build/release
+          # With llvmpipe deployed this lane holds the same standard as the
+          # Linux software-GL lane: no GL-related skip is acceptable, and any
+          # remaining skip is a hard failure.
+          # Inventory floor: checked on the full suite here and the shard union below.
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          if (${{ matrix.shard }} -eq 0) {
+            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+          }
+      - name: Report compiler cache statistics
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache -s -v
+      - name: Clean compiler cache on disk
+        if: ${{ matrix.shard == 1 && always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache --cleanup
+      - name: Bind manual qualification evidence
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","native":"${{ steps.native.outcome }}"}'
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-windows-msvc-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload test evidence
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always()) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-msvc-test-evidence-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload native worldgen diagnostic
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always()) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-msvc-worldgen-diagnostic-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: build/release/worldgen-diagnostic
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Validate dormant and enabled Windows packaging
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.ref_name == 'main' || github.base_ref == 'main') }}
+        shell: pwsh
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          $pythonExecutable = $env:CI_PYTHON_EXECUTABLE
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Set-Alias -Name python -Value $pythonExecutable
+          python -I -B tools/ci/windows_runner_preflight.py --lane native
+          python -I -B tools/ci/rmlui_source.py init --root build/package-off
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
+          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"
+          if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
+          python -I -B tools/ci/rmlui_source.py init --root build/package-windows
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
+          cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
+            -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package-windows --target package --parallel 4
+
+      - name: Upload shard JUnit
+        if: always() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msvc-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.inventory.json
+            build/release/ctest.partition.json
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-ucrt64:
+    name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
+    needs: changes
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    # Measured 40.6 min end to end on the first post-release promotion run
+    # (previously two 135-minute cap kills, before the test streaming caps
+    # and parallel common_tests landed). Running the GL suites under
+    # llvmpipe added ~2 min to the MSVC lane; UCRT's slower worldgen and
+    # the Mesa3D download add a few more here, so the cap keeps ~1.9x
+    # headroom over the projected ~45 min.
+    timeout-minutes: 85
+    strategy:
+      fail-fast: false
+      matrix:
+        # Qualification captures keep one full, binary-bound producer.
+        shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1200M
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Select Python runtime
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.8'
+          architecture: x64
+          check-latest: false
+          allow-prereleases: false
+          freethreaded: false
+          update-environment: true
+      # Keep the native UCRT64 cache outside the cleaned worktree and per-job temp.
+      - name: Verify runner prerequisites
+        shell: pwsh
+        run: '& "${{ steps.python.outputs.python-path }}" -I -B tools/ci/windows_runner_preflight.py --lane host-ucrt64'
+      - name: Locate compiler cache
+        shell: pwsh
+        run: '"CCACHE_DIR=$(Join-Path $env:LOCALAPPDATA ''Luminumbra/ccache-ucrt64'')" >> $env:GITHUB_ENV'
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: python tools/ci/qualification_capture.py preflight --lane windows-ucrt64 --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          cache: false
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-numpy
+            mingw-w64-ucrt-x86_64-python-pillow
+      - name: Verify MSYS2 compiler tools
+        shell: msys2 {0}
+        run: python -I -B tools/ci/windows_runner_preflight.py --lane ucrt64
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        shell: msys2 {0}
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+      - name: Stage software OpenGL (Mesa3D llvmpipe)
+        shell: pwsh
+        run: |
+          # Hosted Windows workers expose no GPU-backed GL. Stage the Mesa3D
+          # llvmpipe rasterizer so the GL 4.5 core rendering/UI suites run
+          # here instead of skipping, exactly as on the MSVC lane. The
+          # release-msvc package also serves MinGW-built consumers: the WGL
+          # boundary is the flat stdcall C ABI (the system opengl32.dll that
+          # MinGW apps normally load is itself MSVC-built), and mesa-dist-win
+          # documents its MSVC and MinGW packages as drop-in interchangeable.
+          # Pinning the same artifact as the MSVC lane keeps one version and
+          # one sha256 across both Windows lanes.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = '26.1.7'
+          $sha256 = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
+          $archive = "mesa3d-$version-release-msvc.7z"
+          $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$version/$archive"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          Invoke-WebRequest -Uri $url -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "Mesa3D archive sha256 mismatch: expected $sha256, got $actual"
+          }
+          $mesaRoot = Join-Path $env:RUNNER_TEMP 'mesa3d'
+          try { Remove-Item -Recurse -Force $mesaRoot -ErrorAction Stop }
+          catch [System.Management.Automation.ItemNotFoundException] { }
+          # opengl32.dll is the WGL loader; libgallium_wgl.dll carries the
+          # llvmpipe driver itself. dxil.dll is only needed for the d3d12
+          # backends, which this lane does not use.
+          7z x $archivePath "-o$mesaRoot" 'x64\opengl32.dll' 'x64\libgallium_wgl.dll' | Out-Null
+          foreach ($dll in 'opengl32.dll', 'libgallium_wgl.dll') {
+            if (-not (Test-Path (Join-Path $mesaRoot 'x64' $dll))) {
+              throw "Mesa3D archive is missing x64/$dll"
+            }
+          }
+      - name: Prepare fresh RmlUi build root
+        shell: msys2 {0}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: '"$(cygpath -u "$CI_PYTHON_EXECUTABLE")" -I -B tools/ci/rmlui_source.py init --root build/release'
+      - name: Configure
+        id: configure
+        shell: msys2 {0}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: >-
+          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache -z || true
+      - name: Build
+        id: build
+        shell: msys2 {0}
+        run: cmake --build --preset release --parallel 4
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache -s -v || true
+      - name: Clean compiler cache on disk
+        if: ${{ matrix.shard == 1 && always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache --cleanup || true
+      - name: Test
+        id: tests
+        shell: msys2 {0}
+        run: |
+          # Deploy the staged Mesa3D llvmpipe runtime next to the test
+          # executables so glfwCreateWindow gets a GL 4.5 core context.
+          mesa_root="$(cygpath -u "$RUNNER_TEMP")/mesa3d/x64"
+          cp "$mesa_root/opengl32.dll" "$mesa_root/libgallium_wgl.dll" build/release/bin/
+          export GALLIUM_DRIVER=llvmpipe
+          # UCRT64 is a portability lane, not a machine-speed gate. World
+          # generation is materially slower here than on GCC/MSVC runners.
+          # Leash sized from the promotion-run evidence: the slowest cases
+          # (RuntimeWorldVisualValidation) spend 174-178 s in world
+          # generation, and their GL render portions complete in under a
+          # second on the MSVC llvmpipe lane, so the projected worst case
+          # stays near 190 s -> 360 s keeps ~2x runner-variance headroom
+          # while catching the multi-minute stalls the old 720 s leash was
+          # raised to paper over.
+          ctest --preset release -LE manual --show-only=json-v1 > build/release/ctest.inventory.json
+          ctest --preset release --show-only=json-v1 > build/release/ctest.all.json
+          python tools/ci/ctest_shards.py plan --profile ucrt64 --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"
+          python tools/ci/ctest_shards.py run --profile ucrt64 --directory build/release
+          # With llvmpipe deployed this lane holds the same standard as the
+          # other software-GL lanes: no GL-related skip is acceptable, and
+          # any remaining skip is a hard failure.
+          # Inventory floor: checked on the full suite here and the shard union below.
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          if [ '${{ matrix.shard }}' = 0 ]; then
+            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+          fi
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        shell: msys2 {0}
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","configure":"${{ steps.configure.outcome }}","build":"${{ steps.build.outcome }}","tests":"${{ steps.tests.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane windows-ucrt64 --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-windows-ucrt64-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-ucrt64-test-evidence-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Record toolchain identity
+        if: always()
+        continue-on-error: true
+        shell: msys2 {0}
+        run: |
+          # Diagnostic only. No command may fail this step, so none uses set -e.
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          {
+            echo "## UCRT64 toolchain identity"
+            echo ""
+            echo "- Runner image: \`${ImageVersion:-unknown}\`"
+            echo "- uname: \`$(uname -a 2>/dev/null || echo unknown)\`"
+            echo "- g++ path: \`$(which g++ 2>/dev/null || echo not-found)\`"
+            echo "- g++ version: \`$(g++ --version 2>/dev/null | head -1)\`"
+            echo "- cmake version: \`$(cmake --version 2>/dev/null | head -1)\`"
+            echo ""
+            echo "<details><summary>Full package manifest</summary>"
+            echo ""
+            echo '```text'
+            pacman -Q 2>/dev/null || true
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "Key packages:"
+            echo ""
+            echo '```text'
+            pacman -Q 2>/dev/null | grep -E '^mingw-w64-ucrt-x86_64-(gcc|binutils|crt|headers|winpthreads|libwinpthread|cmake|ninja|python) ' || true
+            echo '```'
+            echo ""
+          } >> "$summary" || true
+      - name: Report slowest tests
+        if: always()
+        continue-on-error: true
+        shell: msys2 {0}
+        run: python tools/ci/slowest_tests.py build/release/ctest.junit.xml --summary-file "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload shard JUnit
+        if: always() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ucrt64-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.inventory.json
+            build/release/ctest.partition.json
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-msvc-result:
+    name: Windows / MSVC
+    needs: [changes, windows-msvc]
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (!cancelled() || needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped')) }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 5
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
+    steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Select Python runtime
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.8'
+          architecture: x64
+          check-latest: false
+          allow-prereleases: false
+          freethreaded: false
+          update-environment: true
+      - name: Expose selected Python to Bash
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          python_path="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"
+          runner_temp="$(cygpath -u "$RUNNER_TEMP")"
+          shim_dir="$(mktemp -d "$runner_temp/python-shim-XXXXXX")"
+          printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$python_path" > "$shim_dir/python3"
+          chmod +x "$shim_dir/python3"
+          cygpath -w "$shim_dir" >> "$GITHUB_PATH"
+      - name: Verify runner prerequisites
+        shell: pwsh
+        run: '& "${{ steps.python.outputs.python-path }}" -I -B tools/ci/windows_runner_preflight.py --lane aggregate'
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped')) }}
+        run: |
+          echo "Aggregate dependencies did not pass" >&2
+          exit 1
+      - name: Require expected producers and route
+        env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
+          SHARD_RESULT: ${{ needs.windows-msvc.result }}
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: "false"
+          CI_EVENT: ${{ github.event_name }}
+          CI_DRAFT: ${{ github.event.pull_request.draft }}
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false' }}
+        run: >-
+          python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
+      - name: Download shard JUnit
+        if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: msvc-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-shard-*-attempt-*
+          path: build/msvc-shards
+      - name: Merge shard JUnit and check inventory
+        if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        env:
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+        run: |
+          full=()
+          if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi
+          python3 tools/ci/ctest_shards.py collect --directory build/msvc-shards \
+            --prefix msvc-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
+          python3 tools/ci/ctest_shards.py merge --profile msvc --directory build/msvc-shards \
+            --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+      - name: Upload merged JUnit
+        if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msvc-merged-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.junit.selection.json
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-ucrt64-result:
+    name: Windows / MSYS2 UCRT64
+    needs: [changes, windows-ucrt64]
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (!cancelled() || needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped')) }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 5
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
+    steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Select Python runtime
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.8'
+          architecture: x64
+          check-latest: false
+          allow-prereleases: false
+          freethreaded: false
+          update-environment: true
+      - name: Expose selected Python to Bash
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          python_path="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"
+          runner_temp="$(cygpath -u "$RUNNER_TEMP")"
+          shim_dir="$(mktemp -d "$runner_temp/python-shim-XXXXXX")"
+          printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$python_path" > "$shim_dir/python3"
+          chmod +x "$shim_dir/python3"
+          cygpath -w "$shim_dir" >> "$GITHUB_PATH"
+      - name: Verify runner prerequisites
+        shell: pwsh
+        run: '& "${{ steps.python.outputs.python-path }}" -I -B tools/ci/windows_runner_preflight.py --lane aggregate'
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped')) }}
+        run: |
+          echo "Aggregate dependencies did not pass" >&2
+          exit 1
+      - name: Require expected producers and route
+        env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
+          SHARD_RESULT: ${{ needs.windows-ucrt64.result }}
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: "false"
+          CI_EVENT: ${{ github.event_name }}
+          CI_DRAFT: ${{ github.event.pull_request.draft }}
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: >-
+          python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
+      - name: Download shard JUnit
+        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: ucrt64-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-shard-*-attempt-*
+          path: build/ucrt64-shards
+      - name: Merge shard JUnit and check inventory
+        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        env:
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+        run: |
+          full=()
+          if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi
+          python3 tools/ci/ctest_shards.py collect --directory build/ucrt64-shards \
+            --prefix ucrt64-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
+          python3 tools/ci/ctest_shards.py merge --profile ucrt64 --directory build/ucrt64-shards \
+            --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+      - name: Upload merged JUnit
+        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ucrt64-merged-junit-${{ needs.changes.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.junit.selection.json
+          if-no-files-found: error
+          retention-days: 30
