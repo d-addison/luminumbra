@@ -20,6 +20,20 @@
       "backlog_growth": 5,
       "drain_steps": 3
     },
+    "terrain_upload": {
+      "uploaded_bytes": 4194304,
+      "uploads": 8,
+      "backlog": 17,
+      "backlog_growth": 17,
+      "drain_steps": 3
+    },
+    "water_upload": {
+      "uploaded_bytes": 1048576,
+      "uploads": 4,
+      "backlog": 17,
+      "backlog_growth": 17,
+      "drain_steps": 5
+    },
     "simulation": {
       "water_cells": 64,
       "streaming_generation": 64,

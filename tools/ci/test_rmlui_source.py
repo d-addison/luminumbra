@@ -160,10 +160,25 @@ def remove_source_fixture(directory, expected_directory, sources):
     """Remove a verified fresh test allocation; foreign or busy files fail closed."""
     if file_identity(directory) != expected_directory or directory != M.canonical(directory):
         raise AssertionError("fixture directory custody changed")
-    identities = {directory / name: file_identity(directory / name) for name in M.inventory(directory)}
+    identities = {directory / name: (info.st_dev, info.st_ino)
+                  for name, info in M.inventory(directory).items()}
     def retry(function, filename, error_info):
         error = error_info[1]
         path = Path(filename)
+        # Recursive removal can observe an entry after it has disappeared.
+        # No mutation remains to authorize, but an occupied name still refuses.
+        if (isinstance(error, FileNotFoundError)
+                and (path == directory or path.is_relative_to(directory))):
+            try:
+                file_identity(path)
+            except FileNotFoundError:
+                try:
+                    current_directory = file_identity(directory)
+                except FileNotFoundError:
+                    return
+                if current_directory != expected_directory:
+                    raise AssertionError("fixture directory custody changed")
+                return
         if (function is not os.unlink or not isinstance(error, PermissionError)
                 or getattr(error, "winerror", None) != 5
                 or file_identity(directory) != expected_directory or path not in identities):
@@ -1130,6 +1145,34 @@ class DeliveryRefusals(unittest.TestCase):
         with mock.patch.object(M.os, "lstat", return_value=info):
             with self.assertRaises(M.Refusal):
                 M.canonical(self.w.root.parent)
+
+    def test_path_validation_observes_missing_without_hiding_other_refusals(self):
+        path = self.w.root.parent / ".git"
+        path.mkdir()
+        native = os.lstat(path)
+        lstat = os.lstat
+        for outcome in (FileNotFoundError("vanished"), PermissionError("unreadable"),
+                        StatFields(native, st_mode=stat.S_IFLNK),
+                        StatFields(native, st_file_attributes=M.REPARSE)):
+            with self.subTest(outcome=outcome):
+                def inspect(candidate, *args, **kwargs):
+                    if Path(candidate) == path:
+                        if isinstance(outcome, BaseException):
+                            raise outcome
+                        return outcome
+                    return lstat(candidate, *args, **kwargs)
+                # Hold resolution/existence stable to place disappearance at
+                # the metadata lookup, independent of platform path internals.
+                with mock.patch.object(Path, "resolve", autospec=True, side_effect=lambda candidate: candidate), \
+                        mock.patch.object(M.os.path, "lexists", return_value=True), \
+                        mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    with mock.patch.object(self.w, "population", path):
+                        for check in (lambda: M.canonical(path), self.w.verify_population):
+                            if isinstance(outcome, FileNotFoundError):
+                                check()
+                            else:
+                                with self.assertRaises((PermissionError, M.Refusal)):
+                                    check()
 
     def test_cmake_and_ci_registration_preserve_population_and_verification_order(self):
         cmake = (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8", errors="strict")
@@ -3598,6 +3641,62 @@ class Utf8SourceReads(unittest.TestCase):
 
 
 class FixtureCleanupCustody(unittest.TestCase):
+    def test_vanished_cleanup_entries_are_absent_and_custody_stays_strict(self):
+        for boundary in ("inventory", "file", "directory", "root", "replacement", "custody", "outside",
+                         "permission", "unreadable"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve(strict=True)
+                root = base / "fixture"
+                admin = root / ".git"
+                admin.mkdir(parents=True)
+                path = admin / "object"
+                path.write_bytes(b"owned object")
+                identity = file_identity(root)
+                rmtree = shutil.rmtree
+                inventory = M.inventory
+                def enroll(candidate, *args, **kwargs):
+                    result = inventory(candidate, *args, **kwargs)
+                    if boundary == "inventory":
+                        path.unlink()
+                    return result
+                def remove(candidate, onerror=None):
+                    self.assertEqual(candidate, root)
+                    if boundary == "root":
+                        rmtree(root)
+                        vanished = root
+                    elif boundary == "directory":
+                        rmtree(admin)
+                        vanished = admin
+                    else:
+                        if boundary != "inventory":
+                            path.unlink()
+                        vanished = path
+                        if boundary == "replacement":
+                            path.write_bytes(b"foreign")
+                        elif boundary == "custody":
+                            root.rename(base / "displaced")
+                            root.mkdir()
+                        elif boundary == "outside":
+                            vanished = base / "outside"
+                    error = PermissionError("unreadable") if boundary == "permission" else FileNotFoundError("vanished")
+                    with contextlib.ExitStack() as stack:
+                        if boundary == "unreadable":
+                            stack.enter_context(mock.patch.object(os, "lstat", side_effect=PermissionError("unreadable")))
+                        onerror(os.unlink if vanished == path else os.rmdir, str(vanished), (type(error), error, None))
+                    if root.exists():
+                        rmtree(root)
+                with mock.patch.object(shutil, "rmtree", side_effect=remove), \
+                        mock.patch.object(M, "inventory", side_effect=enroll):
+                    if boundary in ("inventory", "file", "directory", "root"):
+                        remove_source_fixture(root, identity, ())
+                        self.assertFalse(root.exists())
+                    else:
+                        with self.assertRaises((FileNotFoundError, PermissionError, AssertionError)):
+                            remove_source_fixture(root, identity, ())
+                        self.assertTrue(root.exists())
+                        if boundary == "replacement":
+                            self.assertEqual(path.read_bytes(), b"foreign")
+
     def test_readonly_object_retry_requires_exact_custody_attributes_and_unlink(self):
         for name, attributes, winerror, allowed in (
                 ("objects/pack/pack-" + "a" * 40 + ".idx", 1, 5, True),
