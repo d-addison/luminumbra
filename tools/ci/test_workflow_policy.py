@@ -920,7 +920,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         # Issue-write access on the runner is limited to trusted refs; other-branch dispatches only build.
         report_if = value(report, "if", 4).removeprefix("${{ ").removesuffix(" }}")
         self.assertIn("(github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')", report_if)
-        for ref in ("refs/heads/devel", "refs/heads/main", "refs/heads/feature", "refs/pull/1/merge", "refs/tags/v1"):
+        for ref in ("refs/heads/devel", "refs/heads/main", "refs/heads/feature", "refs/remotes/origin/devel", "refs/tags/v1"):
             for event in ("schedule", "workflow_dispatch"):
                 condition = report_if.replace("github.ref", repr(ref)).replace("github.event_name", repr(event))
                 condition = condition.replace("always()", "True")
