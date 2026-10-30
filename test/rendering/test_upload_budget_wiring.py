@@ -236,6 +236,30 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("WaterfallReplacementPreservesOtherEmitterHandles", native)
         self.assertIn("particle_determinism_test", read(ROOT / "test/CMakeLists.txt"))
 
+    def test_preview_full_reset_invalidates_pass_owned_ambient_cache(self):
+        source = read(RENDERING / "passes/ParticlePass.cpp")
+        clear = body(source, "void ParticlePass::clear_emitters()")
+        self.assertIn("m_active_emitters.clear();", clear)
+        self.assertIn("m_ambient_emitter_index = kMaxEmitters;", clear)
+        update = body(source, "void ParticlePass::update_ambient_motes(")
+        create = body(update, "if (m_ambient_emitter_index == kMaxEmitters)")
+        self.assertIn('add_emitter(root_path / "data/common/particles/ambient_motes.json",', create)
+        self.assertIn("kInvalidEmitter)", create)
+        self.assertIn("m_ambient_emitter_index = m_active_emitters.size() - 1;", create)
+        self.assertIn("m_active_emitters[m_ambient_emitter_index]", update)
+        self.assertIn("emitter.world_origin = camera_position + emitter.data.origin;", update)
+        self.assertIn("particles->update_ambient_motes(root_dir, g_camera->Position);", self.main)
+        self.assertNotIn("ambientMotes", self.main)
+        preview = read(ROOT / "src/luminumbra_client/world/WorldgenPreview.cpp")
+        for signature in ("void WorldgenPreview::apply_precipitation(",
+                          "void WorldgenPreview::clear_precipitation("):
+            self.assertIn("particles->clear_emitters();", body(preview, signature))
+        cancel = body(self.pipeline, "void RenderPipeline::cancel_waterfall_adoption()")
+        self.assertIn("m_particle_pass->clear_emitters();", cancel)
+        native = read(ROOT / "test/rendering/particle_determinism_test.cpp")
+        self.assertIn("TEST_F(ParticleLiveTest, AmbientMotesTickAfterPreviewFullReset)", native)
+        self.assertIn("rendering/particle_determinism_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
     def test_both_live_backends_use_policy_and_include_preparation(self):
         self.assertIn("manage_mesh_gpu_resources<false>", self.pipeline)
         self.assertIn("manage_mesh_gpu_resources<true>", self.pipeline)
