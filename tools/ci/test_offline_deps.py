@@ -4846,10 +4846,11 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
         spec.loader.exec_module(shards)
         cmake = "\n".join(path.read_text(encoding="utf-8") for path in (
             ROOT / "tools/ci/local_check_contracts.cmake", ROOT / "tools/CMakeLists.txt"))
-        names = re.findall(r"NAME ((?:OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
+        names = re.findall(r"NAME ((?:ChangedTranslationUnits|OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
         # Routing tables, not the CMake names being checked, define the roster.
         expected = []
         for script, prefix, variable in (
+                ("test_changed_tus.py", "ChangedTranslationUnitsContract", "CHANGED_TUS_PARTITIONS"),
                 ("test_offline_deps.py", "OfflineDependenciesContract", "OFFLINE_PARTITIONS"),
                 ("test_workflow_policy.py", "WorkflowPolicyContract", "POLICY_PARTITIONS"),
                 ("test_ctest_shards.py", "CTestShardContract", "CTEST_SHARD_PARTITIONS")):

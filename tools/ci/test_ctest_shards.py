@@ -610,7 +610,12 @@ class CTestShardTests(unittest.TestCase):
         self.assertCountEqual(selected, expected)
 
     def contract_priorities(self):
-        return {"WorkflowPolicyContract": 30, "ChangedTranslationUnitsContract": 29,
+        spec = importlib.util.spec_from_file_location("changed_tus_roster", ROOT / "tools/ci/test_changed_tus.py")
+        changed = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(changed)
+        return {"WorkflowPolicyContract": 30,
+                **{"ChangedTranslationUnitsContract" + ("" if part == "0" else "Part" + part): 8
+                   for part in changed.CHANGED_TUS_PARTITIONS},
                 **{"CTestShardContractPart" + part: 25 for part in CTEST_SHARD_PARTITIONS},
                 "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
                 "WorkflowPolicyContractPart9": 19, "OfflineDependenciesContractPart2": 18,
@@ -622,7 +627,8 @@ class CTestShardTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("offline_roster", ROOT / "tools/ci/test_offline_deps.py")
         offline = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(offline)
-        local_names = {"ChangedTranslationUnitsContract"} | {
+        local_names = {name for name in self.contract_priorities()
+                       if name.startswith("ChangedTranslationUnitsContract")} | {
             "OfflineDependenciesContract" + ("" if part == "0" else "Part" + part)
             for part in offline.OFFLINE_PARTITIONS}
         borrowed_input_names = {

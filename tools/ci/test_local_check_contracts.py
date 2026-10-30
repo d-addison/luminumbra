@@ -146,16 +146,18 @@ class RegistrationTests(unittest.TestCase):
                                     check=True, capture_output=True, text=True)
             discovery = json.loads(result.stdout)
             tests = {test["name"]: test for test in discovery["tests"]}
-            self.assertEqual(set(tests), {
-                "ChangedTranslationUnitsContract", "OfflineDependenciesContract",
-                "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"})
-            self.assertEqual(len(discovery["tests"]), len(tests))
-            for name, script, arguments in (
-                ("ChangedTranslationUnitsContract", "test_changed_tus.py", []),
-                ("OfflineDependenciesContract", "test_offline_deps.py", ["--partition", "0"]),
-                ("OfflineDependenciesContractPart1", "test_offline_deps.py", ["--partition", "1"]),
-                ("OfflineDependenciesContractPart2", "test_offline_deps.py", ["--partition", "2"]),
-            ):
+            expected = []
+            for script, prefix, variable in (
+                    ("test_changed_tus.py", "ChangedTranslationUnitsContract", "CHANGED_TUS_PARTITIONS"),
+                    ("test_offline_deps.py", "OfflineDependenciesContract", "OFFLINE_PARTITIONS")):
+                spec = importlib.util.spec_from_file_location("local_contract_roster", ROOT / "tools/ci" / script)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                expected.extend((prefix + ("Part" + part if part != "0" else ""),
+                                 script, ["--partition", part]) for part in getattr(module, variable))
+            self.assertEqual(set(tests), {name for name, _, _ in expected})
+            self.assertEqual(len(discovery["tests"]), len(expected))
+            for name, script, arguments in expected:
                 with self.subTest(name=name):
                     test = tests[name]
                     command = test["command"]
