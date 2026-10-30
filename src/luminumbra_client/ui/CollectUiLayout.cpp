@@ -35,8 +35,11 @@ std::string DirectText(Rml::Element& element, Detail::UiLayoutStringBudget& stri
         if (children > static_cast<int>(kUiLayoutMaxElements))
             throw std::length_error("UI layout child budget exceeded");
         for (int index = 0; index < children; ++index) {
+            // Match AddToStackingContext: hidden immediate text is not painted,
+            // even though its visible parent still has a record.
             if (const auto* child_text =
-                    dynamic_cast<const Rml::ElementText*>(element.GetChild(index))) {
+                    dynamic_cast<const Rml::ElementText*>(element.GetChild(index));
+                child_text && child_text->IsVisible()) {
                 strings.Add(child_text->GetText());
                 result += child_text->GetText();
             }
@@ -101,8 +104,12 @@ void CollectDocument(Rml::Element& document,
         if (node.depth > kUiLayoutMaxDepth || visited == kUiLayoutMaxElements)
             throw std::length_error("UI layout tree budget exceeded");
         ++visited;
+        // RmlUi 6.1 Element::AddToStackingContext returns before visiting children
+        // on !IsVisible(). Visibility is non-inherited, but a locally visible
+        // child still cannot escape a hidden ancestor (including a hidden document).
+        // Display::None also makes IsVisible() false; opacity does not.
         if (!node.element->IsVisible())
-            continue; // Rml also prunes invisible subtrees from its stacking contexts.
+            continue;
         const int children = node.element->GetNumChildren(true);
         if (static_cast<std::size_t>(children) > kUiLayoutMaxElements - visited - pending.size())
             throw std::length_error("UI layout child budget exceeded");

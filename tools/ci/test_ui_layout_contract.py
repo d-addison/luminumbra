@@ -82,6 +82,20 @@ class UiLayoutContract(unittest.TestCase):
             self.assertNotIn(forbidden, collector)
         self.assertIn("UI layout sidecars", source("docs/visual-regression.md"))
 
+    def test_direct_text_uses_the_same_local_visibility_as_tree_collection(self):
+        collector = source("src/luminumbra_client/ui/CollectUiLayout.cpp")
+        direct_text = collector.split("std::string DirectText(", 1)[1].split(
+            "UiLayoutElement CollectElementRecord(", 1)[0]
+        self.assertRegex(direct_text, r"child_text\s*&&\s*child_text->IsVisible\(\)")
+        smoke = source("test/ui/ui_smoke_test.cpp")
+        for token in ('std::pair{"visibility", "hidden"}', 'std::pair{"display", "none"}',
+                      'for (const bool non_dom : {false, true})',
+                      'EXPECT_EQ(recorded_direct_text->text, "kept")',
+                      'ASSERT_NO_FATAL_FAILURE(AppendHiddenLayoutText(*first))',
+                      'ASSERT_NO_FATAL_FAILURE(ExpectLayoutGeometryAndText(layout, *input_element))',
+                      'ASSERT_NO_FATAL_FAILURE(ExpectLayoutVisibilityRecords(layout))'):
+            self.assertIn(token, smoke)
+
 
 if __name__ == "__main__":
     unittest.main()

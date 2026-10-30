@@ -212,10 +212,11 @@ Each Rml record has keys `id`, `tag`, `text`, `rect`, `clip`, `clip_masked`, `z`
 `depth`, `parent`, in that order:
 
 - `id` and `tag` come from `Element::GetId()` and `GetTagName()`.
-- `text` concatenates only immediate `ElementText` children in child order,
+- `text` concatenates only visible immediate `ElementText` children in child order,
   including non-DOM text nodes used by text inputs;
   text elements themselves contain their own `GetText()`. Nested element text is
-  excluded. Leading and trailing ASCII whitespace is trimmed; interior
+  excluded, as are immediate text nodes with `visibility: hidden` or `display: none`.
+  Leading and trailing ASCII whitespace is trimmed; interior
   whitespace and decoded Unicode remain intact.
 - `rect` has keys `x`, `y`, `w`, `h`: `GetAbsoluteOffset(BoxArea::Border)` and
   `GetBox().GetSize(BoxArea::Border)` for the primary layout box. Origin is the
@@ -235,10 +236,16 @@ Each Rml record has keys `id`, `tag`, `text`, `rect`, `clip`, `clip_masked`, `z`
   items in paint order. No global order is guessed from that value or DOM order.
 - `depth` starts at zero for each document; `parent` is its parent's index in
   `rml_elements`, or `null` for a document root. Hidden subtrees are omitted using
-  `Element::IsVisible()`, matching Rml stacking-context traversal. Visibility here
+  `Element::IsVisible()`, matching RmlUi 6.1 `Element::AddToStackingContext`, which
+  returns before visiting children. Both `visibility: hidden` and `display: none`
+  prune the subtree, including descendants styled `visibility: visible`.
+  RmlUi registers visibility as non-inherited: a child's local `IsVisible()` may
+  be true while `IsVisible(true)` is false because of a hidden ancestor. Hidden
+  documents use the same visibility rule; included descendants retain their
+  actual parent indices and depths without skipped ancestors. Visibility here
   describes layout/render eligibility, not occlusion, opacity or pixel coverage;
-  partially clipped or offscreen boxes retain their full coordinates. RmlUi 6.1
-  initializes a loaded document as hidden when its `<head>` is processed;
+  zero-size, opacity-zero, partially clipped and offscreen boxes retain their full
+  coordinates. RmlUi 6.1 initializes a loaded document as hidden when its `<head>` is processed;
   fixture documents must include that header before testing visibility before
   `Show()`. Unstyled elements default to inline display, so clipping fixtures
   must also establish block layout and a font family before rendering.
@@ -259,7 +266,8 @@ windows created later in the frame are outside the snapshot.
 `CollectUiLayout` returns an owned plain snapshot on the UI thread;
 `SerializeUiLayout` can run without a GL context. Collection and serialization
 refuse invalid framebuffer dimensions and excessive data instead of truncating:
-65,536 visited Rml nodes/documents, tree/ImGui ancestry depth 256, 4,096 ImGui windows, and 16 MiB of
+65,536 visited Rml nodes/documents (including hidden roots, but not their pruned
+descendants), tree/ImGui ancestry depth 256, 4,096 ImGui windows, and 16 MiB of
 aggregate source string bytes. Direct-text accounting includes text-node and
 parent copies before trimming. Serialization also refuses non-finite geometry,
 negative sizes, invalid UTF-8 and inconsistent parent/depth links. Rml clipping
@@ -277,8 +285,9 @@ No atomic pairing or screenshot-content hash is claimed by this schema.
 `UiLayoutSerializer.*` provides GL-free exact-byte, locale, escaping, empty-set
 and refusal regressions. `UiLayoutCollection.*` checks null contexts and ImGui
 enumeration without creating a GL context. `UiSmokeTest` checks authored fixture
-screens plus direct text, clips, visibility, document order and parent indices
-with its existing hidden-window setup and existing context-unavailable behavior.
+screens plus visible direct text, clips, nested visibility overrides, hidden
+documents, opacity-zero and offscreen boxes, visited-node budgets, document order
+and parent indices with its existing hidden-window setup and existing context-unavailable behavior.
 Native execution and rendered qualification remain required separately from the
 source wiring contract `UiLayoutSourceContract`.
 

@@ -818,74 +818,148 @@ TEST(UiLayoutCollection, ImGuiNavigationAndHiddenWindowsUseCurrentContextStateWi
     front->Hidden = false;
 }
 
-TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
-    HiddenGlContext context;
-    if (!context.ready()) {
-        GTEST_SKIP() << context.error();
+void AppendHiddenLayoutText(Rml::ElementDocument& document) {
+    auto* direct_text = document.GetElementById("direct_text");
+    ASSERT_NE(direct_text, nullptr);
+    for (const auto& [property, value] :
+         {std::pair{"visibility", "hidden"}, std::pair{"display", "none"}}) {
+        for (const bool non_dom : {false, true}) {
+            auto omitted_text = document.CreateTextNode("omitted");
+            ASSERT_NE(omitted_text, nullptr);
+            omitted_text->SetId(std::string(property) + (non_dom ? "_generated" : "_dom"));
+            ASSERT_TRUE(omitted_text->SetProperty(property, value));
+            direct_text->AppendChild(std::move(omitted_text), !non_dom);
+        }
     }
-    const fs::path source_root = SourceRoot();
-    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
-    ui.Init(context.window(), nullptr);
-    // Shut RmlUi down before its interfaces and the GL context, even on ASSERT failure.
-    const ScopedUiShutdown shutdown(ui);
-    ASSERT_NE(ui.GetContext(), nullptr);
-    auto* first = ui.GetContext()->LoadDocumentFromMemory(R"(
-        <rml><head><style>
-        body, div { display: block; }
-        body { width: 700px; height: 500px; font-family: Lora; font-size: 16px; }
-        #clip { position: absolute; left: 10px; top: 20px;
-                width: 100px; height: 80px; overflow: hidden; }
-        #text { width: 120px; height: 90px; }
-        input { display: inline-block; width: 180px; height: 24px; }
-        </style></head><body id="first">
-        <div id="clip"><div id="text">  before <span>nested</span> after  </div></div>
-        <div id="hidden" style="display: none"><div id="hidden_child" /></div>
-        <div id="invisible" style="visibility: hidden" />
-        <div id="unclipped" style="position: absolute; left: 200px; top: 20px;
-                                   width: 30px; height: 40px; z-index: 7" />
-        <input id="input" type="text" value="New World" />
-        <input id="empty_input" type="text" value="" />
-        </body></rml>)");
-    auto* second = ui.GetContext()->LoadDocumentFromMemory(R"(
-        <rml><head><style>
-        body, div { display: block; }
-        body { width: 600px; height: 400px; font-family: Lora; font-size: 16px; }
-        </style></head>
-        <body id="second"><div id="second_child" /></body></rml>)");
-    // RmlUi initializes document visibility in ProcessHeader, on closing <head>.
-    auto* hidden_document = ui.GetContext()->LoadDocumentFromMemory(
-        "<rml><head></head><body id=\"hidden_document\">"
-        "<div id=\"hidden_document_child\" style=\"visibility: visible\" /></body></rml>");
-    ASSERT_NE(first, nullptr);
-    ASSERT_NE(second, nullptr);
-    ASSERT_NE(hidden_document, nullptr);
-    EXPECT_FALSE(hidden_document->IsVisible());
-    auto* input_element = first->GetElementById("input");
-    ASSERT_NE(input_element, nullptr);
-    ASSERT_EQ(input_element->GetNumChildren(), 0);
-    ASSERT_EQ(input_element->GetNumChildren(true), 3);
-    // The text, selected text and selection nodes are all non-DOM children.
-    for (int index = 0; index < input_element->GetNumChildren(true); ++index) {
-        auto* child = input_element->GetChild(index);
-        ASSERT_NE(child, nullptr);
-        child->SetId("input_child_" + std::to_string(index));
+}
+
+void ExpectLocalVisibilityOverrides(Rml::ElementDocument& document,
+                                    Rml::ElementDocument& hidden_document) {
+    // IsVisible() is local. RmlUi's stacking traversal still prunes at the ancestor.
+    for (const auto* id : {"hidden_child", "visible_override", "nested_override"}) {
+        auto* overridden = document.GetElementById(id);
+        ASSERT_NE(overridden, nullptr);
+        EXPECT_TRUE(overridden->IsVisible()) << id;
+        EXPECT_FALSE(overridden->IsVisible(true)) << id;
     }
-    first->Show();
-    second->Show();
-    ui.GetContext()->Update();
-    ui.Render();
-    using namespace Luminumbra::Client::UI;
-    int width = 0, height = 0;
-    glfwGetFramebufferSize(context.window(), &width, &height);
-    const auto layout = CollectUiLayout(ui.GetContext(), nullptr, "fixture", width, height);
+    auto* hidden_document_child = hidden_document.GetElementById("hidden_document_child");
+    ASSERT_NE(hidden_document_child, nullptr);
+    EXPECT_TRUE(hidden_document_child->IsVisible());
+    EXPECT_FALSE(hidden_document_child->IsVisible(true));
+}
+
+void ExpectLayoutVisibilityRecords(const Luminumbra::Client::UI::UiLayout& layout) {
     const auto find = [&](const std::string& id) {
         return std::find_if(layout.rml_elements.begin(),
                             layout.rml_elements.end(),
                             [&](const auto& element) { return element.id == id; });
     };
-    for (const auto* id :
-         {"hidden", "hidden_child", "invisible", "hidden_document", "hidden_document_child"})
+    const auto recorded_direct_text = find("direct_text");
+    ASSERT_NE(recorded_direct_text, layout.rml_elements.end());
+    EXPECT_EQ(recorded_direct_text->text, "kept");
+    const auto transparent = find("transparent");
+    const auto opaque_override = find("opaque_override");
+    const auto zero_size = find("zero_size");
+    ASSERT_NE(transparent, layout.rml_elements.end());
+    ASSERT_NE(opaque_override, layout.rml_elements.end());
+    ASSERT_NE(zero_size, layout.rml_elements.end());
+    EXPECT_EQ(opaque_override->parent,
+              std::optional<std::size_t>(
+                  static_cast<std::size_t>(transparent - layout.rml_elements.begin())));
+    EXPECT_EQ(opaque_override->depth, transparent->depth + 1);
+    EXPECT_DOUBLE_EQ(zero_size->rect.w, 0);
+    EXPECT_DOUBLE_EQ(zero_size->rect.h, 0);
+}
+
+void ExpectOffscreenLayout(Luminumbra::Client::Rml_UIManager& ui,
+                           Rml::ElementDocument& document,
+                           int width,
+                           int height) {
+    using namespace Luminumbra::Client::UI;
+    auto* offscreen_element = document.GetElementById("unclipped");
+    ASSERT_NE(offscreen_element, nullptr);
+    ASSERT_TRUE(offscreen_element->SetProperty("left", "-50px"));
+    ASSERT_TRUE(offscreen_element->SetProperty("top", "-60px"));
+    ui.GetContext()->Update();
+    ui.Render();
+    const auto offscreen = CollectUiLayout(ui.GetContext(), nullptr, "offscreen", width, height);
+    const auto offscreen_record =
+        std::find_if(offscreen.rml_elements.begin(),
+                     offscreen.rml_elements.end(),
+                     [](const auto& element) { return element.id == "unclipped"; });
+    ASSERT_NE(offscreen_record, offscreen.rml_elements.end());
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.x, -50);
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.y, -60);
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.w, 30);
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.h, 40);
+    EXPECT_NO_THROW(SerializeUiLayout(offscreen));
+}
+
+void ExpectLayoutVisitedBudget(Luminumbra::Client::Rml_UIManager& ui,
+                               Rml::ElementDocument& document,
+                               int width,
+                               int height) {
+    using namespace Luminumbra::Client::UI;
+    // Each hidden leaf is visited, even though it produces no record. Distribute
+    // them across two branches so a per-parent child limit cannot replace the
+    // aggregate visited budget. The other (hidden) documents each cost one node.
+    document.SetInnerRML("<div id=\"budget_left\"/><div id=\"budget_right\"/>");
+    auto* budget_left = document.GetElementById("budget_left");
+    auto* budget_right = document.GetElementById("budget_right");
+    ASSERT_NE(budget_left, nullptr);
+    ASSERT_NE(budget_right, nullptr);
+    const auto document_nodes = static_cast<std::size_t>(ui.GetContext()->GetNumDocuments());
+    ASSERT_LT(document_nodes + 2, kUiLayoutMaxElements);
+    const auto hidden_leaves = kUiLayoutMaxElements - document_nodes - 2;
+    for (std::size_t index = 0; index < hidden_leaves; ++index) {
+        auto leaf = document.CreateElement("div");
+        ASSERT_NE(leaf, nullptr);
+        ASSERT_TRUE(leaf->SetProperty("visibility", "hidden"));
+        (index < hidden_leaves / 2 ? budget_left : budget_right)->AppendChild(std::move(leaf));
+    }
+    document.Show();
+    ui.Render();
+    const auto at_limit = CollectUiLayout(ui.GetContext(), nullptr, "budget", width, height);
+    ASSERT_EQ(at_limit.rml_elements.size(), 3u);
+    EXPECT_EQ(at_limit.rml_elements[0].id, "first");
+    EXPECT_EQ(at_limit.rml_elements[1].id, "budget_left");
+    EXPECT_EQ(at_limit.rml_elements[2].id, "budget_right");
+    auto extra_leaf = document.CreateElement("div");
+    ASSERT_NE(extra_leaf, nullptr);
+    ASSERT_TRUE(extra_leaf->SetProperty("visibility", "hidden"));
+    budget_right->AppendChild(std::move(extra_leaf));
+    document.UpdateDocument();
+    ui.Render();
+    EXPECT_THROW(CollectUiLayout(ui.GetContext(), nullptr, "budget", width, height),
+                 std::length_error);
+    document.Hide();
+    // A pruned document costs one visited node; its oversized subtree is not visited.
+    EXPECT_TRUE(
+        CollectUiLayout(ui.GetContext(), nullptr, "hidden", width, height).rml_elements.empty());
+}
+
+void ExpectLayoutGeometryAndText(const Luminumbra::Client::UI::UiLayout& layout,
+                                 Rml::Element& input_element) {
+    using namespace Luminumbra::Client::UI;
+    const auto find = [&](const std::string& id) {
+        return std::find_if(layout.rml_elements.begin(),
+                            layout.rml_elements.end(),
+                            [&](const auto& element) { return element.id == id; });
+    };
+    for (const auto* id : {"hidden",
+                           "hidden_child",
+                           "invisible",
+                           "visible_override",
+                           "nested_hidden",
+                           "nested_override",
+                           "hidden_document",
+                           "hidden_document_child",
+                           "visibility_dom",
+                           "visibility_generated",
+                           "display_dom",
+                           "display_generated"})
         EXPECT_EQ(find(id), layout.rml_elements.end()) << id;
+    ASSERT_NO_FATAL_FAILURE(ExpectLayoutVisibilityRecords(layout));
     const auto text = find("text");
     const auto clip = find("clip");
     const auto unclipped = find("unclipped");
@@ -901,7 +975,7 @@ TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
     EXPECT_EQ(input->text, "New World");
     EXPECT_TRUE(empty_input->text.empty());
     const auto input_index = static_cast<std::size_t>(input - layout.rml_elements.begin());
-    for (int index = 0; index < input_element->GetNumChildren(true); ++index) {
+    for (int index = 0; index < input_element.GetNumChildren(true); ++index) {
         const auto child = find("input_child_" + std::to_string(index));
         ASSERT_NE(child, layout.rml_elements.end());
         EXPECT_EQ(child->parent, std::optional<std::size_t>(input_index));
@@ -930,9 +1004,88 @@ TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
     for (const auto& element : layout.rml_elements) {
         EXPECT_GE(element.rect.x, 0);
         EXPECT_GE(element.rect.y, 0);
-        EXPECT_LE(element.rect.x + element.rect.w, width);
-        EXPECT_LE(element.rect.y + element.rect.h, height);
+        EXPECT_LE(element.rect.x + element.rect.w, layout.width);
+        EXPECT_LE(element.rect.y + element.rect.h, layout.height);
     }
+}
+
+TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    // Shut RmlUi down before its interfaces and the GL context, even on ASSERT failure.
+    const ScopedUiShutdown shutdown(ui);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    auto* first = ui.GetContext()->LoadDocumentFromMemory(R"(
+        <rml><head><style>
+        body, div { display: block; }
+        body { width: 700px; height: 500px; font-family: Lora; font-size: 16px; }
+        #clip { position: absolute; left: 10px; top: 20px;
+                width: 100px; height: 80px; overflow: hidden; }
+        #text { width: 120px; height: 90px; }
+        input { display: inline-block; width: 180px; height: 24px; }
+        </style></head><body id="first">
+        <div id="clip"><div id="text">  before <span>nested</span> after  </div></div>
+        <div id="hidden" style="display: none">
+            <div id="hidden_child" style="visibility: visible" /></div>
+        <div id="invisible" style="visibility: hidden; width: 40px; height: 30px;
+                                   overflow: hidden">
+            <div id="visible_override" style="visibility: visible; width: 80px">
+                <div id="nested_hidden" style="visibility: hidden">
+                    <div id="nested_override" style="visibility: visible">omitted</div>
+                </div>
+            </div>
+        </div>
+        <div id="direct_text">kept</div>
+        <div id="transparent" style="opacity: 0">
+            <div id="opaque_override" style="opacity: 1">opaque</div></div>
+        <div id="zero_size" style="width: 0px; height: 0px" />
+        <div id="unclipped" style="position: absolute; left: 200px; top: 20px;
+                                   width: 30px; height: 40px; z-index: 7" />
+        <input id="input" type="text" value="New World" />
+        <input id="empty_input" type="text" value="" />
+        </body></rml>)");
+    auto* second = ui.GetContext()->LoadDocumentFromMemory(R"(
+        <rml><head><style>
+        body, div { display: block; }
+        body { width: 600px; height: 400px; font-family: Lora; font-size: 16px; }
+        </style></head>
+        <body id="second"><div id="second_child" /></body></rml>)");
+    // RmlUi initializes document visibility in ProcessHeader, on closing <head>.
+    auto* hidden_document = ui.GetContext()->LoadDocumentFromMemory(
+        "<rml><head></head><body id=\"hidden_document\">"
+        "<div id=\"hidden_document_child\" style=\"visibility: visible\" /></body></rml>");
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    ASSERT_NE(hidden_document, nullptr);
+    EXPECT_FALSE(hidden_document->IsVisible());
+    ASSERT_NO_FATAL_FAILURE(AppendHiddenLayoutText(*first));
+    auto* input_element = first->GetElementById("input");
+    ASSERT_NE(input_element, nullptr);
+    ASSERT_EQ(input_element->GetNumChildren(), 0);
+    ASSERT_EQ(input_element->GetNumChildren(true), 3);
+    // The text, selected text and selection nodes are all non-DOM children.
+    for (int index = 0; index < input_element->GetNumChildren(true); ++index) {
+        auto* child = input_element->GetChild(index);
+        ASSERT_NE(child, nullptr);
+        child->SetId("input_child_" + std::to_string(index));
+    }
+    first->Show();
+    second->Show();
+    ui.GetContext()->Update();
+    ui.Render();
+    ASSERT_NO_FATAL_FAILURE(ExpectLocalVisibilityOverrides(*first, *hidden_document));
+    using namespace Luminumbra::Client::UI;
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(context.window(), &width, &height);
+    const auto layout = CollectUiLayout(ui.GetContext(), nullptr, "fixture", width, height);
+    ASSERT_EQ(layout.width, width);
+    ASSERT_EQ(layout.height, height);
+    ASSERT_NO_FATAL_FAILURE(ExpectLayoutGeometryAndText(layout, *input_element));
     const auto bytes = SerializeUiLayout(layout);
     ui.Render();
     EXPECT_EQ(
@@ -961,6 +1114,7 @@ TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
     ASSERT_NE(transformed_text, transformed.rml_elements.end());
     EXPECT_TRUE(transformed_text->clip_masked);
     EXPECT_FALSE(transformed_text->clip.has_value()) << "transformed mask has no scissor";
+    ASSERT_NO_FATAL_FAILURE(ExpectOffscreenLayout(ui, *first, width, height));
     // The context also owns debugger documents, including its visible render hook.
     // Hide every document before requiring an empty sidecar; Hide updates visibility immediately.
     // Snapshot the fixture's documents because hiding can reorder them through focus changes.
@@ -980,6 +1134,8 @@ TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
     for (const auto& element : empty.rml_elements)
         remaining_ids << " [" << element.id << "]";
     EXPECT_TRUE(empty.rml_elements.empty()) << "Remaining element ids:" << remaining_ids.str();
+
+    ASSERT_NO_FATAL_FAILURE(ExpectLayoutVisitedBudget(ui, *first, width, height));
 }
 
 static Luminumbra::Persistence::SavedWorldCatalog SavedWorldFixture() {
