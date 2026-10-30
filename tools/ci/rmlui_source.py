@@ -88,9 +88,11 @@ def canonical(raw: str | Path) -> Path:
     path = Path(os.path.abspath(text))
     require(path == path.resolve(), "workspace path alias")
     for part in [path, *path.parents]:
-        if os.path.lexists(part):
+        try:
             info = os.lstat(part)
-            require(ordinary(info, True) or (part == path and ordinary(info)), "workspace symlink or reparse path")
+        except FileNotFoundError:
+            continue
+        require(ordinary(info, True) or (part == path and ordinary(info)), "workspace symlink or reparse path")
     if os.name == "nt":
         existing = path
         while not existing.exists():
@@ -743,10 +745,13 @@ class Workspace:
         # FetchContent may inspect SOURCE_SUBDIR before returning. Only the
         # empty ordinary population directory is eligible for that operation.
         canonical(self.population)
-        if os.path.lexists(self.population):
-            require(ordinary(os.lstat(self.population), True), "nonordinary population directory")
-            with os.scandir(self.population) as entries:
-                require(next(entries, None) is None, "nonempty population directory")
+        try:
+            info = os.lstat(self.population)
+        except FileNotFoundError:
+            return
+        require(ordinary(info, True), "nonordinary population directory")
+        with os.scandir(self.population) as entries:
+            require(next(entries, None) is None, "nonempty population directory")
 
     def verify(self) -> None:
         owner = self.owner()
