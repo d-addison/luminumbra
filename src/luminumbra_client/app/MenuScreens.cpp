@@ -28,7 +28,6 @@
 #include <cstddef>
 #include <exception>
 #include <filesystem>
-#include <imgui.h>
 #include <string>
 #include <vector>
 
@@ -92,11 +91,9 @@ bool WriteUiScreenshot(const std::filesystem::path& shot,
     try {
         // Validate and serialize the snapshot before either output is opened.
         // Both single and batch CLI captures use this path; normal frames do not.
-        const auto layout = UI::CollectUiLayout(uiManager ? uiManager->GetContext() : nullptr,
-                                                ImGui::GetCurrentContext(),
-                                                screen,
-                                                width,
-                                                height);
+        // The backbuffer contains RmlUi; ImGui is composited after this readback.
+        const auto layout = UI::CollectUiLayout(
+            uiManager ? uiManager->GetContext() : nullptr, nullptr, screen, width, height);
         const auto bytes = UI::SerializeUiLayout(layout);
         auto sidecar = shot;
         sidecar.replace_extension(".layout.json");

@@ -53,7 +53,9 @@ inline constexpr std::size_t kUiLayoutMaxWindows = 4'096;
 inline constexpr std::size_t kUiLayoutMaxDepth = 256;
 inline constexpr std::size_t kUiLayoutMaxStringBytes = std::size_t{16} * 1024 * 1024;
 
-// Call on the UI thread after Rml rendering, while both contexts remain alive.
+// Call on the UI thread after Rml rendering, while supplied contexts remain alive.
+// Supply only contexts whose UI is in the paired image. Menu CLI captures precede
+// the ImGui composite and pass a null ImGui context, yielding no ImGui windows.
 // Visible Rml subtrees include non-DOM children and their immediate text nodes.
 // Null contexts produce empty arrays. No GL calls, simulation writes or event dispatch.
 // Throws on invalid dimensions or capture limits. Rml may refresh diagnostic caches.

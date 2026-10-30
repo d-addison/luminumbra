@@ -191,7 +191,9 @@ Each successful `--ui-screenshot <screen>` capture also writes
 comma-separated batch. Existing screenshot bytes and other capture formats are
 unchanged. Collection runs only at the CLI screenshot capture site, after the
 RmlUi render and before the existing ImGui composite. It inspects the current
-ImGui context; the PPM still captures the same pre-composite image as before.
+RmlUi context and passes no ImGui context, so the sidecar describes only the
+RmlUi layer present in the paired PPM. ImGui windows are excluded even when an
+ImGui context exists; the PPM still captures the same pre-composite image as before.
 
 Schema 1 is UTF-8 JSON with a final LF. Keys have the order below; arrays retain
 their collection order. Every geometry number has exactly three decimal places,
@@ -204,7 +206,7 @@ Strings use JSON escaping; absent ids and empty direct text are empty strings.
 | `screen` | Requested CLI screen name. |
 | `width`, `height` | Framebuffer size from GLFW at screenshot readback. |
 | `rml_elements` | Visible documents in `Context::GetDocument(index)` order, then depth-first child order, including Rml non-DOM children such as controls and scrollbars. |
-| `imgui_windows` | Every window retained in `ImGuiContext::Windows`, ordered for drawing as described below, including inactive windows. A missing context gives an empty array. |
+| `imgui_windows` | Empty for CLI UI screenshots, which read back before ImGui is drawn. The collector API can include windows when explicitly supplied an ImGui context, as described below. |
 
 Each Rml record has keys `id`, `tag`, `text`, `rect`, `clip`, `clip_masked`, `z`,
 `depth`, `parent`, in that order:
@@ -241,7 +243,8 @@ Each Rml record has keys `id`, `tag`, `text`, `rect`, `clip`, `clip_masked`, `z`
   `Show()`. Unstyled elements default to inline display, so clipping fixtures
   must also establish block layout and a font family before rendering.
 
-Each ImGui record has keys `title`, `rect`, `collapsed`, `visible`, in that order.
+For callers that supply an ImGui context, each ImGui record has keys `title`,
+`rect`, `collapsed`, `visible`, in that order. CLI UI screenshots do not supply one.
 `title` is `ImGuiWindow::Name`, including any ImGui identity suffix. `rect` uses
 window `Pos` minus the main viewport origin, and current `Size`, multiplied by
 `IO.DisplayFramebufferScale`. `collapsed` is `Collapsed`; `visible` is `!Hidden`,

@@ -30,6 +30,26 @@ class UiLayoutContract(unittest.TestCase):
         self.assertGreater(menu.index("if (!WriteUiScreenshot("), mode)
         self.assertEqual(menu.count("WriteUiScreenshot("), 2)
 
+    def test_menu_capture_excludes_imgui_before_its_composite(self):
+        menu = source("src/luminumbra_client/app/MenuScreens.cpp")
+        helper = menu.split("bool WriteUiScreenshot(", 1)[1].split("} // namespace", 1)[0]
+        self.assertRegex(
+            helper,
+            r"UI::CollectUiLayout\(\s*uiManager \? uiManager->GetContext\(\) : nullptr,\s*"
+            r"nullptr,\s*screen,\s*width,\s*height\)")
+        self.assertLess(menu.index("uiManager->Render();"),
+                        menu.index("if (!WriteUiScreenshot("))
+        self.assertIn("glReadBuffer(GL_BACK);", menu)
+
+        client = source("src/luminumbra_client/main_client.cpp")
+        stages = [client.index(token) for token in (
+            "ImGui::NewFrame();", "RenderMenuScreens(g_app,", "ImGui::Render();",
+            "ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());")]
+        self.assertEqual(stages, sorted(stages))
+        self.assertEqual(client.count("RenderMenuScreens(g_app,"), 1)
+        self.assertNotIn("UI::CollectUiLayout(", client)
+        self.assertNotIn("UI::SerializeUiLayout(", client)
+
     def test_sources_and_always_running_serializer_are_registered(self):
         registered = source("src/luminumbra_client/sources.cmake")
         for name in ("CollectUiLayout.cpp", "UiLayout.cpp"):
