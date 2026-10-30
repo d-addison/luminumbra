@@ -428,6 +428,12 @@ that path too. Routing does not fetch or change the existing lane classifier.
 For native work the job installs Linux configuration dependencies plus GCC,
 Clang 18, clang-tidy 18 and ccache. It configures separate
 Release GCC and Clang compile databases with tests exposed and Diligent off.
+The pilot reflection executable remains in both databases without `slangc`,
+excluded from the default build. Shader generation and reflection-parity CTest
+registration still require `slangc`; tool-present builds retain their existing
+sources, flags, dependencies and tests. Offline contracts evaluate the target
+declaration across Windows, Apple and Linux link branches and exercise its
+compile and both tidy plans. Native database generation remains CI qualification.
 Configuration generates engine/stb headers; the only build target is `glad`
 for its generated headers. It does not link engine/test targets or run CTest.
 The `ci` command shares the local dependency selector, scans ordinary and
