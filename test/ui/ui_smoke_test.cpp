@@ -961,10 +961,25 @@ TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
     ASSERT_NE(transformed_text, transformed.rml_elements.end());
     EXPECT_TRUE(transformed_text->clip_masked);
     EXPECT_FALSE(transformed_text->clip.has_value()) << "transformed mask has no scissor";
-    first->Hide();
-    second->Hide();
+    // The context also owns debugger documents, including its visible render hook.
+    // Hide every document before requiring an empty sidecar; Hide updates visibility immediately.
+    // Snapshot the fixture's documents because hiding can reorder them through focus changes.
+    std::vector<Rml::ElementDocument*> documents;
+    const int document_count = ui.GetContext()->GetNumDocuments();
+    for (int index = 0; index < document_count; ++index) {
+        auto* document = ui.GetContext()->GetDocument(index);
+        ASSERT_NE(document, nullptr);
+        documents.push_back(document);
+    }
+    for (auto* document : documents) {
+        document->Hide();
+        EXPECT_FALSE(document->IsVisible()) << document->GetId();
+    }
     const auto empty = CollectUiLayout(ui.GetContext(), nullptr, "hidden", width, height);
-    EXPECT_TRUE(empty.rml_elements.empty());
+    std::ostringstream remaining_ids;
+    for (const auto& element : empty.rml_elements)
+        remaining_ids << " [" << element.id << "]";
+    EXPECT_TRUE(empty.rml_elements.empty()) << "Remaining element ids:" << remaining_ids.str();
 }
 
 static Luminumbra::Persistence::SavedWorldCatalog SavedWorldFixture() {
