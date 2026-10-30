@@ -51,6 +51,8 @@ set(CLIENT_INTERNAL_SOURCES
     # Rendering
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureManifest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureManifestLive.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldWaterMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeRenderMesh.cpp

@@ -279,6 +279,58 @@ with its existing hidden-window setup and existing context-unavailable behavior.
 Native execution and rendered qualification remain required separately from the
 source wiring contract `UiLayoutSourceContract`.
 
+## Capture provenance manifests (schema 1)
+
+CLI frame-scan, SceneSurvey and timelapse captures write
+`<capture-stem>.manifest.json` beside the capture. Scene-config still captures use
+the same protocol. A survey or frame-scan image and its scan JSON share a stem
+and one manifest; completion covers both required outputs. Existing image, scan,
+health and survey-index formats are unchanged. Interactive photo sidecars retain
+their separate format.
+
+The manifest is published with `status: "incomplete"` before readback, then
+atomically replaced with `complete` or `failed` after required payload writers
+return and close their files. `reason` is respectively `capture_in_progress`,
+`capture_finished` or `capture_failed`. An interrupted capture retains incomplete
+evidence. If metadata cannot be published, capture success is refused; a failed
+final replacement leaves the incomplete manifest. Temporary files are created
+exclusively, closed before rename, and retained on failure. An occupied `.tmp`
+refuses the capture; use a fresh output directory after an interrupted write.
+Atomic replacement covers process interruption, without claiming power-loss
+durability or coordinating multiple processes writing the same capture stem.
+
+| Field | Encoding and source |
+|---|---|
+| `schema` | Integer `1`; independent of existing scan schemas. |
+| `build_id` | Existing `GetEngineVersionString()` identity, including its configured commit suffix when available. Empty identity becomes null with `build_id_unavailable`. |
+| `asset_hash`, `asset_hash_scope` | Session `PresetContentHash()`: existing FNV-1a-64 canonical terrain-preset and resolved-dependency content identity. This scope does not cover every texture, mesh or UI asset. Empty identity becomes null with `asset_hash_unavailable`. |
+| `shader_hash` | Currently null, with `shader_hash_unavailable`: compiled expanded/define-injected source bytes are not retained, and embedded compute/bake programs are outside the shader roster. Re-reading disk after compilation or failed hot reload would not identify the active programs. No substitute hash is emitted. |
+| `simulation_tick`, `world_seed` | Read-only `GameSession::GetSimulationTickCount()` and metadata seed string. Integer ticks preserve all 64 bits. |
+| `world_hash` | Currently null, with `world_hash_unavailable`: the client has no cached authoritative composite hash. Its existing chunk-snapshot hash requires a whole-world scan and differs from the server composite. Capture does neither a scan nor a streaming fence to manufacture this value. |
+| `camera` | Pipeline's retained prepared-frame view, unjittered projection, vertical FOV in degrees, near and selected far planes. Position and forward derive from that rigid view, even if the live camera has already moved. Matrices are flat column-major arrays: index = column × 4 + row. Projection is right-handed reversed-Z with zero-to-one depth; TAAU jitter is recorded separately in render settings. JSON numeric precision round-trips float32. |
+| `resolution` | Back-buffer `width` and `height` from GLFW at the capture site. |
+| `render_settings` | Resolved graphics preset/revision/custom state and its presentation values, with live public pipeline diagnostics for render scale, internal extent, grass, shadow resolution, volumetrics, AO/cloud quality, TAAU/history/jitter, sky LUT and exposure metering. Also records time of day, season, moon, weather/wind/cloud state, atmosphere, wireframe and UI-overlay selection. Resolved fields without a public runtime diagnostic describe configured values, rather than inferred GL state. |
+| `started_utc`, `finished_utc` | UTC strings `YYYY-MM-DDTHH:MM:SS.sssZ` from an injectable clock. Finish is null while incomplete. The live clock is system UTC; fixed test clocks make serialization byte-identical. Wall-clock adjustments can affect timestamp order. |
+| `status`, `reason` | Explicit capture lifecycle verdict and reason described above. |
+
+Absent identities always have a sibling `<field>_unavailable` reason; a known
+identity omits that reason. Object keys are lexicographically ordered, arrays have
+fixed order, and documents end with one newline. The builder refuses nonfinite
+camera/settings values, invalid dimensions/planes/FOV, missing identity reasons,
+invalid UTF-8 and oversized metadata before writing. Metadata is bounded to 128
+scalar settings, 64-byte setting names and 256-byte text fields, except the world
+seed which retains the existing 4 KiB saved-input compatibility limit. Capture
+dimensions use the shared 64-megapixel pixel-buffer bound. Frame-scan observations
+precede its next-frame camera and lighting setters, including with zero settle.
+
+The GL-free `capture_manifest_test` exercises fixed-clock determinism, matrix
+precision, null reasons, lifecycle ordering, exclusive temporary-file refusal and
+failed publication. Existing Python capture-wiring contracts check all four CLI
+paths. Manifest observations run only when those paths capture a frame, with no
+new simulation writes or normal-play provenance work. Null shader/world identities
+mean these sidecars are partial provenance, not proof of identical render inputs
+or visual approval. Compare timestamps separately when diffing independent runs.
+
 ## Determinism note
 
 This harness is **render-only tooling** — it touches no sim/worldgen code and

@@ -1221,7 +1221,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("capture_ok = health_written && capture_ok", scan)
         self.assertIn("if (rep.ok)", scan)
         self.assertIn("if (capture_ok) capture_ok = Luminumbra::Rendering::WriteFrameScanReport(", scan)
-        self.assertIn('if (!capture_ok) capture_failure(g_app.capture.frame_scan_path, "frame_capture_incomplete")', scan)
+        self.assertIn('if (!capture_finished) capture_failure(g_app.capture.frame_scan_path, "frame_capture_incomplete")', scan)
         self.assertLess(scan.index("capture_ok = image_written"), scan.index("WriteFrameScanReport("))
 
     def test_early_close_and_sibling_images_cannot_return_partial_capture_success(self):
@@ -1229,7 +1229,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("g_app.capture.frame_scan_active && !frame_scan_complete && exit_code == 0", main)
         self.assertIn("g_app.capture.survey_active && !survey_complete && exit_code == 0", main)
         self.assertIn("!scene_capture_complete && exit_code == 0", main)
-        self.assertIn("frame_scan_complete = capture_ok;", main)
+        self.assertIn("frame_scan_complete = capture_finished;", main)
         self.assertIn("survey_complete = true;", main)
         self.assertIn("if (!scene_capture_complete) capture_failure(", main)
         self.assertIn("if (!screenshot_complete) capture_failure(", main)
@@ -1238,6 +1238,67 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("!WritePixelBufferPpm(g_app.capture.timelapse_dir / nm, vw, vh, px)) return false;", timelapse)
         self.assertIn("if (!CaptureTimelapseFrame(", main)
         self.assertIn("g_app.capture.timelapse_captured < g_app.capture.timelapse_frames && exit_code == 0", main)
+
+    def test_capture_manifests_wrap_every_requested_capture_before_readback(self):
+        survey = body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey(")
+        timelapse = body(self.main, "static bool CaptureTimelapseFrame(")
+        scene = body(self.main, "if (g_app.capture.scene_active &&")
+        scan = body(self.main, "if (g_app.capture.frame_scan_active && currentState == GameState::IN_GAME &&")
+        for source in (survey, timelapse, scene, scan):
+            self.assertEqual(source.count("WithCaptureManifest("), 1)
+            self.assertEqual(source.count("ObserveCaptureManifest("), 1)
+            self.assertLess(source.index("WithCaptureManifest("), source.index("glReadPixels("))
+        self.assertLess(survey.index("WithCaptureManifest("), survey.index("ScanFrame("))
+        self.assertLess(scan.index("WithCaptureManifest("), scan.index("ScanFrame("))
+        self.assertLess(scan.index("ObserveCaptureManifest("), scan.index("set_time_of_day("))
+        self.assertLess(scan.index("ObserveCaptureManifest("), scan.index("g_camera->Position ="))
+        self.assertIn("frame_scan_manifest,", scan)
+        self.assertIn("if (!captured) return false;", compact(survey))
+        self.assertIn("if (!captured) return false;", compact(timelapse))
+        wrapper = compact(body(read(RENDERING / "CaptureManifest.h"), "bool WithCaptureManifest("))
+        self.assertIn("if (!manifest.Begin()) return false;", wrapper)
+        self.assertLess(wrapper.index("manifest.Begin()"), wrapper.index("write_capture()"))
+        self.assertLess(wrapper.index("write_capture()"), wrapper.index("manifest.Finish(captured)"))
+        self.assertIn("return captured && finished;", wrapper)
+        live = read(RENDERING / "CaptureManifestLive.cpp")
+        for forbidden in ("TickSimulation(", "wait_for_streaming_jobs(", "snapshot_streamed_chunks(",
+                          "glRead", "std::ifstream", "std::filesystem::exists"):
+            self.assertNotIn(forbidden, live)
+        for query in ("GetEngineVersionString()", "PresetContentHash()", "GetSimulationTickCount()",
+                      "GetMetadata().seed", "pipeline.capture_camera()", "SetCaptureManifestCamera(input, *camera)",
+                      "graphics_runtime_config()", "taau_jitter_ndc()"):
+            self.assertIn(query, live)
+        diagnostic = compact(body(self.header, "const FarReplayCamera* capture_camera() const"))
+        self.assertEqual(diagnostic,
+                         "return m_frame_prepared.valid ? &m_frame_prepared.replay_camera : nullptr;")
+        self.assertIn("if (!camera || !SetCaptureManifestCamera(input, *camera))", live)
+
+    def test_capture_manifest_builder_and_lifecycle_regressions_are_registered_without_gl(self):
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        target = cmake.split("add_executable(capture_manifest_test", 1)[1].split(")", 1)[0]
+        self.assertIn("rendering/capture_manifest_test.cpp", target)
+        self.assertIn("rendering/CaptureManifest.cpp", target)
+        targets = cmake.split("set(LUMINUMBRA_GTEST_TARGETS", 1)[1].split(")", 1)[0]
+        self.assertEqual(targets.split().count("capture_manifest_test"), 1)
+        native = read(ROOT / "test/rendering/capture_manifest_test.cpp")
+        for regression in ("FixedClockIsByteIdenticalAndKeysAreLexicographic",
+                           "MatricesRoundTripFloat32AndStateIsUnchanged",
+                           "PreparedCameraSurvivesLivePoseChangesAndRefusesInvalidSnapshots",
+                           "UnavailableIdentitiesRequireReasonsAndNeverInventHashes",
+                           "IncompletePrecedesPayloadAndFinalVerdictFollowsIt",
+                           "PayloadFailureAndAbandonmentCannotPublishComplete",
+                           "StaleTemporaryAndInvalidParentRefuseWithoutCallingPayload",
+                           "FinalPublicationFailureRetainsIncompleteEvidence",
+                           "RenameFailureNeverDeletesTheDestinationOrTemporaryEvidence",
+                           "InvalidNumbersExtentsAndMetadataAreRefusedBeforeWriting"):
+            self.assertIn("TEST_F(CaptureManifestTest, " + regression + ")", native)
+        for source in ("CaptureManifest.cpp", "CaptureManifestLive.cpp"):
+            self.assertIn("/rendering/" + source, read(ROOT / "src/luminumbra_client/sources.cmake"))
+        builder = read(RENDERING / "CaptureManifest.cpp")
+        self.assertIn("MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)", builder)
+        self.assertIn("std::filesystem::rename(temporary, path, error)", builder)
+        self.assertIn('std::fopen(temporary.c_str(), "wbx")', builder)
+        self.assertIn('_wfopen_s(&output, temporary.c_str(), L"wbx")', builder)
 
 
 if __name__ == "__main__":

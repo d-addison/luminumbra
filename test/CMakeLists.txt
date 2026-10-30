@@ -421,6 +421,14 @@ target_include_directories(rendering_defaults_test PRIVATE ../src)
 target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(rendering_defaults_test)
 
+# GL-free capture provenance builder and filesystem publication lifecycle.
+add_executable(capture_manifest_test
+    rendering/capture_manifest_test.cpp
+    ../src/luminumbra_client/rendering/CaptureManifest.cpp)
+target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json)
+luminumbra_configure_first_party_target(capture_manifest_test)
+
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
 add_executable(octa_impostor_test
@@ -2061,6 +2069,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     skinned_test_assets_test
     tree_lod_test
     rendering_defaults_test
+    capture_manifest_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
