@@ -3,6 +3,40 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "ci.deterministic-work-budgets",
+      "source": "docs/deterministic-work-budgets.md",
+      "statement": "Issue #396 uses pinned integer work ceilings in the existing native suites for foliage idle, dirty sampling, copies, transfers, simulation counters, activation, backlog growth and eventual drain. Terrain and water upload policy fixtures attain their pinned byte/count/backlog/drain ceilings without graphics calls or clock reads and require current queued revisions. SimBudgetGateContract pins fixture values, counter producers and registration; all capture consumers refuse malformed work-item extensions while accepting older artifacts that omit them. Native execution remains pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetGateContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DeterministicWorkBudget.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.DeterministicWorkBudgetMovementEditDrainAndIdle"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.OutdatedRevisionReadbackIsDiscardedBeforeAdoption"
+        },
+        {
+          "kind": "script",
+          "ref": "test/fixtures/deterministic-work-budgets.json"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/deterministic-work-budgets.md",
+          "planned": "Run the registered native work-budget and foliage fixtures on standard CI; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.base-edit-routing",
       "source": "issue #637",
       "statement": "CI admits pull-request edited events only when changes.base is present. Metadata-only edits skip every job before runner allocation, use unique non-cancelling concurrency groups, and publish distinct skipped check names so required check names retain their validation results. Real base edits preserve normal routing; every ready pull request retargeted to main enables Windows/UCRT64 regardless of labels, Windows-sensitive paths or C++ classification, including confirmed non-C++ changes. MSVC runs when C++ or Python classification is required or uncertain. Offline behavioural regressions cover missing and partial edit metadata, dependency failures and cancellation, concurrency isolation, check names, draft guards and retarget admission. Hosted check publication remains pending qualification.",
@@ -117,7 +151,7 @@
     {
       "id": "ci.workflow-policy-partitions",
       "source": "tools/ci/test_workflow_policy.py",
-      "statement": "Thirteen disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates reusable Windows routing and standalone Python contract placement; WorkflowPolicyContractPart12 isolates the aggregate refusal of uncertain classification. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "statement": "Disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates reusable Windows routing and standalone Python contract placement; WorkflowPolicyContractPart12 isolates the aggregate refusal of uncertain classification. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
       "status": "covered",
       "evidence": [
         {
