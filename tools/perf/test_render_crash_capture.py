@@ -649,7 +649,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn('tools/perf/test_render_crash_capture.py', cmake)
         inventory = (root / 'tools/ci/ci_paths.py').read_text(encoding='utf-8')
         self.assertIn('"tools/perf/test_render_crash_capture.py"', inventory)
-        workflow = (root / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        workflow = (root / '.github/workflows/windows-build.yml').read_text(encoding='utf-8')
         self.assertIn('-DCMAKE_CXX_FLAGS=/Z7', workflow)
         self.assertIn('-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF', workflow)
         self.assertIn('-DCMAKE_CXX_FLAGS=-g', workflow)

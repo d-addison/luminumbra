@@ -4228,7 +4228,7 @@ script.write_text('changed input', encoding='utf-8')
                     self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' && matrix.shard != 2 }}")
                 elif name != "Upload test evidence":
                     self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' }}")
-        aggregate = workflow.split("\n  linux-result:\n", 1)[1].split("\n  windows-msvc-result:\n", 1)[0]
+        aggregate = workflow.split("\n  linux-result:\n", 1)[1].split("\n  lint:\n", 1)[0]
         step = aggregate.split("      - name: Check acceptance matrix CTest execution\n", 1)[1].split("      - name: ", 1)[0]
         condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
         self.assertIsNotNone(condition)

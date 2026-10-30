@@ -22,6 +22,11 @@ policy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(policy)
 
 
+def workflow_sources():
+    return "\n".join((ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+                     for filename in ("ci.yml", "windows-build.yml"))
+
+
 class RegistrationTests(unittest.TestCase):
     def test_borrowed_source_contracts_share_an_effective_resource_lock(self):
         production = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
@@ -172,7 +177,7 @@ class RegistrationTests(unittest.TestCase):
             self.assertNotRegex(production, rf"\bNAME\s+{name}\b")
 
     def test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = workflow_sources()
         jobs = policy.jobs(workflow)
         for job, python in (("linux", "python3"), ("windows-msvc", '"$CI_PYTHON_EXECUTABLE"')):
             with self.subTest(job=job):
@@ -205,15 +210,13 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(policy.value(upload, "if", 8), "${{ always() && (" + policy.READY + ") }}")
                 for path in ("ctest-discovery.json", "ctest.junit.xml", "Testing/Temporary"):
                     self.assertIn("build/local-check-contracts/" + path, upload)
-                self.assertIn("${{ github.sha }}", upload)
+                self.assertIn("${{ needs.changes.outputs.head_sha }}" if job == "windows-msvc" else "${{ github.sha }}", upload)
                 self.assertLess(jobs[job].index(run), jobs[job].index(upload))
         self.assertNotIn("paths:", workflow.split("permissions:", 1)[0])
 
     def test_hosted_route_contract_rejects_missing_and_wrong_platform_interpreters(self):
-        workflow_path = ROOT / ".github/workflows/ci.yml"
-        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow = workflow_sources()
         jobs = policy.jobs(workflow)
-        read_text = Path.read_text
         for job, python, other_python in (("linux", "python3", "python"),
                                           ("windows-msvc", "python", "python3")):
             steps = {step.splitlines()[0].removeprefix("      - name: "): step
@@ -239,15 +242,13 @@ class RegistrationTests(unittest.TestCase):
                     self.assertEqual(workflow.count(run), 1)
                     candidate = workflow.replace(run, changed_run, 1)
 
-                    def read_workflow(path, *args, **kwargs):
-                        if path == workflow_path:
-                            return candidate
-                        return read_text(path, *args, **kwargs)
+                    def read_workflow():
+                        return candidate
 
                     # Feed the mutated shipping step through the existing exact
                     # route contract and real policy parser; never run its shell.
                     result = unittest.TestResult()
-                    with patch.object(Path, "read_text", read_workflow):
+                    with patch(__name__ + ".workflow_sources", read_workflow):
                         inner_case = RegistrationTests(
                             "test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence"
                         )
@@ -262,7 +263,7 @@ class RegistrationTests(unittest.TestCase):
                     self.assertIn("-DPython3_EXECUTABLE=", message)
 
     def test_local_check_artifacts_are_distinct_for_both_platforms_and_every_shard(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = workflow_sources()
         jobs = policy.jobs(workflow)
         names = []
         for job, platform in (("linux", "linux"), ("windows-msvc", "windows")):
@@ -271,7 +272,8 @@ class RegistrationTests(unittest.TestCase):
                          for step in policy.steps(jobs[job])}
                 upload = steps["Upload local-check deadline evidence"]
                 name = policy.value(upload, "name", 10)
-                self.assertEqual(name, platform + "-local-check-contracts-${{ github.sha }}-"
+                head = "needs.changes.outputs.head_sha" if platform == "windows" else "github.sha"
+                self.assertEqual(name, platform + "-local-check-contracts-${{ " + head + " }}-"
                                  "${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}")
                 matrix = policy.value(jobs[job], "shard", 8)
                 selections = [json.loads(value) for value in re.findall(r"fromJSON\('([^']+)'\)", matrix)]
@@ -279,7 +281,7 @@ class RegistrationTests(unittest.TestCase):
                 for selection in selections:
                     for shard in selection:
                         rendered = name
-                        for key, value in (("github.sha", "a" * 40), ("github.run_id", "7"),
+                        for key, value in ((head, "a" * 40), ("github.run_id", "7"),
                                            ("github.run_attempt", "1"), ("matrix.shard", str(shard))):
                             rendered = rendered.replace("${{ " + key + " }}", value)
                         self.assertNotIn("${{", rendered)
@@ -288,7 +290,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(len(set(names)), len(names))
 
     def test_local_check_junit_producer_checker_and_upload_share_an_absolute_path(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = workflow_sources()
         jobs = policy.jobs(workflow)
         expected = "${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml"
         for job, python in (("linux", "python3"), ("windows-msvc", "$CI_PYTHON_EXECUTABLE")):
@@ -320,7 +322,7 @@ class RegistrationTests(unittest.TestCase):
                         self.assertEqual(path_type(path).name, "ctest.junit.xml")
 
     def test_windows_local_checks_reject_bare_unbound_or_mismatched_python(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = workflow_sources()
         run, = [step for step in policy.steps(policy.jobs(workflow)["windows-msvc"])
                 if policy.value(step, "id", 8) == "local-contracts"]
         check = RegistrationTests(
@@ -337,13 +339,13 @@ class RegistrationTests(unittest.TestCase):
             with self.subTest(mutation=old, replacement=new):
                 self.assertEqual(run.count(old), 1)
                 mutated = workflow.replace(run, run.replace(old, new, 1), 1)
-                with patch.object(Path, "read_text", return_value=mutated) as read:
+                with patch(__name__ + ".workflow_sources", return_value=mutated) as read:
                     with self.assertRaises(AssertionError):
                         check.test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence()
-                    read.assert_called_once_with(encoding="utf-8")
+                    read.assert_called_once_with()
 
     def test_windows_bash_normalizes_selected_python_after_native_cmake(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = workflow_sources()
         blocks = policy.steps(policy.jobs(workflow)["windows-msvc"])
         selector, = [step for step in blocks if "uses: actions/setup-python@" in step]
         self.assertEqual(policy.value(selector, "id", 8), "python")
@@ -375,7 +377,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(sum("cygpath" in command for command in commands), 1)
 
     def test_windows_bash_rejects_missing_reversed_or_unquoted_normalization(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = workflow_sources()
         run, = [step for step in policy.steps(policy.jobs(workflow)["windows-msvc"])
                 if policy.value(step, "id", 8) == "local-contracts"]
         check = RegistrationTests("test_windows_bash_normalizes_selected_python_after_native_cmake")
@@ -399,10 +401,10 @@ class RegistrationTests(unittest.TestCase):
             with self.subTest(mutation=mutated_run):
                 self.assertNotEqual(run, mutated_run)
                 mutated = workflow.replace(run, mutated_run, 1)
-                with patch.object(Path, "read_text", return_value=mutated) as read:
+                with patch(__name__ + ".workflow_sources", return_value=mutated) as read:
                     with self.assertRaises(AssertionError):
                         check.test_windows_bash_normalizes_selected_python_after_native_cmake()
-                    read.assert_called_once_with(encoding="utf-8")
+                    read.assert_called_once_with()
 
     def test_registration_regression_is_in_both_test_plans_and_requires_ci_coverage(self):
         path = "tools/ci/test_local_check_contracts.py"
