@@ -58,7 +58,7 @@ std::size_t FillDugPond(SHIELD_WorldSystem& world, Chunk& chunk, int resolution)
     // Authored material must survive the same scratch snapshot as the edited SDF.
     chunk.material_data.assign(chunk.sdf_data.size(), static_cast<u8>(MaterialType::Stone));
     chunk.mark_voxel_data_dirty();
-    const auto cells = static_cast<std::size_t>(resolution) * resolution;
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
     chunk.current_water_resolution.store(resolution);
     chunk.has_water_sim.store(true);
     chunk.water_level_data.assign(cells, 6.0f);
@@ -69,7 +69,8 @@ std::size_t FillDugPond(SHIELD_WorldSystem& world, Chunk& chunk, int resolution)
     std::size_t wet_cells = 0;
     for (int z = resolution / 4; z < 3 * resolution / 4; ++z) {
         for (int x = resolution / 4; x < 3 * resolution / 4; ++x) {
-            const auto index = static_cast<std::size_t>(z) * resolution + x;
+            const auto index = static_cast<std::size_t>(z) * static_cast<std::size_t>(resolution) +
+                               static_cast<std::size_t>(x);
             // Exercise the strict 50 mm culling boundary as well as dry cells.
             const std::int32_t depth = (x + z) % 3 == 0 ? 50 : 2000;
             chunk.water_depth_mm[index] = depth;
