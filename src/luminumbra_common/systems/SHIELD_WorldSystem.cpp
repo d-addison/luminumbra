@@ -4368,6 +4368,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             chunk->applied_transition_faces.store(0, std::memory_order_release);
             chunk->water_mesh_vertices.clear();
             chunk->water_mesh_indices.clear();
+            chunk->water_mesh_generated.store(false, std::memory_order_release);
             chunk->current_lod.store(build_chunk.lod);
             chunk->mesh_version++;
             chunk->has_collision.store(false);

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -396,8 +397,10 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
         static_cast<std::size_t>(old_authority - old_outcome.tile.sdf_bricks.begin());
     const std::size_t samples = FarLodSdfBrickSampleCount(FarLodTier::F1);
     const std::vector<i16> old_density(
-        old_outcome.tile.sdf_density_q.begin() + old_authority_index * samples,
-        old_outcome.tile.sdf_density_q.begin() + (old_authority_index + 1u) * samples);
+        old_outcome.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>(old_authority_index * samples),
+        old_outcome.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>((old_authority_index + 1u) * samples));
 
     TerrainGenParams new_params = old_params;
     new_params.height_offset = 24.0f;
@@ -426,8 +429,10 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
     const std::size_t new_authority_index =
         static_cast<std::size_t>(new_authority - rebased.tile.sdf_bricks.begin());
     const std::vector<i16> new_density(
-        rebased.tile.sdf_density_q.begin() + new_authority_index * samples,
-        rebased.tile.sdf_density_q.begin() + (new_authority_index + 1u) * samples);
+        rebased.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>(new_authority_index * samples),
+        rebased.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>((new_authority_index + 1u) * samples));
     EXPECT_EQ(new_density, old_density);
 }
 
@@ -1189,7 +1194,7 @@ void main() {
     const std::array<float, 8> albedo{0.2f, 0.4f, 0.05f, 1.0f, 0, 0, 0, 0};
     const std::array<float, 8> normal_surface{0.5f, 0.5f, 0.8f, 0.4f, 0, 0, 0, 0};
     for (int i = 0; i < 2; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(i));
         glBindTexture(GL_TEXTURE_2D, gl.textures[static_cast<std::size_t>(5 + i)]);
         glTexImage2D(GL_TEXTURE_2D,
                      0,
@@ -1231,7 +1236,7 @@ void main() {
             EXPECT_EQ(color, clear) << "low-coverage gaps must remain empty";
             continue;
         }
-        for (int i = 0; i < 3; ++i)
+        for (std::size_t i = 0; i < 3u; ++i)
             EXPECT_NEAR(color[i], albedo[i], 0.002f);
         EXPECT_NEAR(color[3], 0.8f, 0.002f);
         glReadBuffer(GL_COLOR_ATTACHMENT1);
@@ -1320,7 +1325,8 @@ void main() { color = vec4(1); }
     // resident regions cannot fill a missing centre tile from this camera.
     for (int y : {16, 32, 48})
         for (int x : {16, 32, 48})
-            EXPECT_EQ(pixels[(y * 64 + x) * 4], 255) << "missing ground at " << x << "," << y;
+            EXPECT_EQ(pixels[static_cast<std::size_t>((y * 64 + x) * 4)], 255)
+                << "missing ground at " << x << "," << y;
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     far.shutdown();
     jobs.shutdown();
@@ -1396,7 +1402,7 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glGenTextures(1, &gl.array);
     for (int unit = 1; unit <= 6; ++unit) {
-        glActiveTexture(GL_TEXTURE0 + unit);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
         glBindTexture(GL_TEXTURE_2D_ARRAY, gl.array);
     }
     const std::array<unsigned char, 4> texel{128, 128, 255, 255};

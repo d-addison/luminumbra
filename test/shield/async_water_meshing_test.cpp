@@ -728,6 +728,66 @@ TEST(AsyncWaterMeshing, SynchronousEditPreparationRejectsCompletedTerrainSnapsho
     }
 }
 
+TEST(AsyncWaterMeshing, SynchronousEditPreparationInvalidatesPublishedWaterOnlySnapshot) {
+    for (const bool fill : {false, true}) {
+        SCOPED_TRACE(fill);
+        JobSystem jobs;
+        jobs.startup(static_cast<std::size_t>(1));
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        world.debug_set_streaming_radius_cap(1);
+        WaterSystem water(&jobs, &world);
+        water.SetBootPaused(true);
+        world.SetWaterSystem(&water);
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        FillDugPond(world, *chunk, 8);
+        const auto dispatched = ReferenceMesh(world, water, *chunk);
+        ASSERT_FALSE(dispatched->water_mesh_indices.empty());
+        chunk->mesh_vertices = dispatched->mesh_vertices;
+        chunk->mesh_indices = dispatched->mesh_indices;
+        chunk->current_lod.store(0);
+        chunk->set_state(ChunkState::Ready);
+        const auto saved_bed = chunk->water_bed_mm;
+        const auto saved_depth = chunk->water_depth_mm;
+        const auto saved_levels = chunk->water_level_data;
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        PendingMeshGate gate(jobs, world);
+        entt::registry registry;
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        gate.release();
+        world.quiesce_streaming_jobs_for_save();
+        ASSERT_TRUE(chunk->pending_mesh_ready.load());
+        ASSERT_TRUE(chunk->pending_mesh_vertices.empty());
+        ASSERT_FALSE(chunk->pending_water_mesh_indices.empty());
+        ASSERT_EQ(chunk->water_mesh_version.load(), 0u);
+        const auto old_revision = chunk->voxel_revision();
+        PhysicsSystem physics;
+        physics.startup();
+        // The drain accepts the water-only result before rebuilding terrain.
+        // At resolution 8, this 1 m brush misses every water-cell centre, so
+        // the bed edit cannot invalidate the flag after the rebuild clears the geometry.
+        ASSERT_EQ(world.EditTerrainVoxel(Vec3(8.0f, 4.0f, 8.0f), 1.0f, fill, &physics), 1);
+        EXPECT_EQ(chunk->voxel_revision(), old_revision + 1u);
+        EXPECT_EQ(chunk->current_lod.load(), 0);
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+        EXPECT_EQ(chunk->mesh_version.load(), 1u);
+        EXPECT_EQ(chunk->water_mesh_version.load(), 1u);
+        EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk->water_mesh_indices.empty());
+        EXPECT_FALSE(chunk->water_mesh_generated.load());
+        EXPECT_EQ(chunk->water_bed_mm, saved_bed);
+        EXPECT_EQ(chunk->water_depth_mm, saved_depth);
+        EXPECT_EQ(chunk->water_level_data, saved_levels);
+        const auto expected = ReferenceMesh(world, water, *chunk);
+        ExpectVerticesEqual(chunk->mesh_vertices, expected->mesh_vertices);
+        EXPECT_EQ(chunk->mesh_indices, expected->mesh_indices);
+    }
+}
+
 TEST(AsyncWaterMeshing, RejectedDispatchRetainsVoxelInvalidationWithoutPublishingWater) {
     for (const bool water_only : {false, true}) {
         SCOPED_TRACE(water_only);
