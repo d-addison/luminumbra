@@ -52,6 +52,8 @@ A red scheduled or manual run creates or updates the open **Daily Windows run**
 issue carrying the `windows-daily` label (an issue with that title but no label is
 ignored), with a failure comment naming the run URL, head SHA and failed
 jobs. A later passing run comments and closes it. The report uses only the
-workflow token through `gh`. PR proof runs do not update the issue. Red Windows
+workflow token through `gh`, and only for runs of `devel` or `main`: a manual
+dispatch from any other branch builds and reports in its own run but never writes
+the issue. PR proof runs do not update the issue. Red Windows
 proof gates the **v0.3.1 tag**, not landings, and never freezes `devel`. This change
 uses the user's runner and adds no paid or larger GitHub runner.

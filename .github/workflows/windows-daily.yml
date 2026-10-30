@@ -37,7 +37,9 @@ jobs:
       expected_sha: ${{ inputs.expected_sha || '' }}
 
   report:
-    if: ${{ always() && github.event_name != 'pull_request' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) }}
+    # Manual dispatches from other branches still build and show results in the run;
+    # only the trusted refs may hold issue-write access on the runner.
+    if: ${{ always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main') && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) }}
     needs: build
     runs-on: [self-hosted, windows, x64, lum-windows]
     timeout-minutes: 5

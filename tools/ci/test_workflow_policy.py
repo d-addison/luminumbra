@@ -917,6 +917,20 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIn("head_sha: ${{ steps.source.outputs.head_sha }}", source)
         self.assertIn("value: ${{ jobs.changes.outputs.head_sha }}", reusable)
         self.assertEqual(value(report, "WINDOWS_HEAD_SHA", 10), "${{ needs.build.outputs.head_sha || github.sha }}")
+        # Issue-write access on the runner is limited to trusted refs; other-branch dispatches only build.
+        report_if = value(report, "if", 4).removeprefix("${{ ").removesuffix(" }}")
+        self.assertIn("(github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')", report_if)
+        for ref in ("refs/heads/devel", "refs/heads/main", "refs/heads/feature", "refs/pull/1/merge", "refs/tags/v1"):
+            for event in ("schedule", "workflow_dispatch"):
+                condition = report_if.replace("github.ref", repr(ref)).replace("github.event_name", repr(event))
+                condition = condition.replace("always()", "True")
+                condition = condition.replace("&&", " and ").replace("||", " or ")
+                condition = re.sub(r"github\.event\.pull_request\.head\.repo\.full_name", "''", condition)
+                condition = condition.replace("github.repository", "'x'").replace(
+                    "contains(github.event.pull_request.labels.*.name, 'windows-proof')", "False")
+                with self.subTest(ref=ref, event=event):
+                    self.assertEqual(bool(eval(condition, {"__builtins__": {}}, {})),
+                                     ref in ("refs/heads/devel", "refs/heads/main"))
         self.assertEqual(value(daily, "group", 2),
                          "windows-daily-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}")
         self.assertEqual(value(daily, "cancel-in-progress", 2), "${{ github.event_name == 'pull_request' }}")
