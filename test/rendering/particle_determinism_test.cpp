@@ -345,6 +345,62 @@ TEST_F(ParticleLiveTest, WaterfallRemovalPreservesAndRemapsEveryUnrelatedParticl
     EXPECT_GT(pass.live_particle_count(), 0u);
 }
 
+TEST_F(ParticleLiveTest, AmbientMotesTickAfterPreviewFullReset) {
+    for (const bool reuse_id : {false, true}) {
+        SCOPED_TRACE(reuse_id);
+        pass.clear_emitters();
+        pass.update_ambient_motes(SourceRoot(), glm::vec3(0.0f));
+        pass.rebuild_emitter_descriptors(777u, 10u);
+        ASSERT_EQ(pass.emitter_descriptors().size(), 1u);
+        const auto old_id = pass.emitter_descriptors().front().id;
+        pass.update(0.125f);
+        ASSERT_GT(pass.live_particle_count(), 0u);
+
+        // Preview weather changes and cancellation both fully clear the shared pass.
+        pass.clear_emitters();
+        pass.clear_emitters(); // Empty cancellation must also invalidate the cache.
+        ExpectParticleStates(pass, {});
+        if (reuse_id) {
+            ASSERT_EQ(pass.add_waterfall_spray(spray_file, glm::vec3(10.0f), 8.0f, 4.0f), old_id);
+        }
+        pass.update_ambient_motes(SourceRoot(), glm::vec3(100.0f, 0.0f, 0.0f));
+        pass.update_ambient_motes(SourceRoot(), glm::vec3(200.0f, 0.0f, 0.0f));
+        pass.rebuild_emitter_descriptors(777u, 10u);
+        ASSERT_EQ(pass.emitter_descriptors().size(), reuse_id ? 2u : 1u);
+        const auto ambient_index = reuse_id ? 1u : 0u;
+        const auto& ambient = pass.emitter_descriptors().back();
+        EXPECT_EQ(ambient.origin_region[0], 200000);
+        EXPECT_EQ(ambient.origin_region[1], 5000);
+        if (reuse_id) {
+            EXPECT_NE(ambient.id, old_id);
+            EXPECT_EQ(pass.emitter_descriptors().front().id, old_id);
+            EXPECT_EQ(pass.emitter_descriptors().front().origin_region[0], 10000);
+        }
+
+        pass.update(0.125f);
+        const auto first_tick = pass.live_particle_states();
+        ASSERT_EQ(std::count_if(
+                      first_tick.begin(),
+                      first_tick.end(),
+                      [ambient_index](const auto& p) { return p.emitter_index == ambient_index; }),
+                  4); // 38 motes per second, with the fractional spawn credit retained.
+        pass.update(0.125f);
+        const auto second_tick = pass.live_particle_states();
+        EXPECT_EQ(pass.frame_instance_count(), second_tick.size());
+        EXPECT_EQ(std::count_if(
+                      second_tick.begin(),
+                      second_tick.end(),
+                      [ambient_index](const auto& p) { return p.emitter_index == ambient_index; }),
+                  9);
+        EXPECT_EQ(std::count_if(second_tick.begin(),
+                                second_tick.end(),
+                                [ambient_index](const auto& p) {
+                                    return p.emitter_index == ambient_index && p.age == 0.25f;
+                                }),
+                  4); // Existing motes keep ticking while new ones spawn.
+    }
+}
+
 TEST_F(ParticleLiveTest, WaterfallOnlyLiveSetBecomesEmpty) {
     for (int site = 0; site < 2; ++site)
         ASSERT_NE(pass.add_waterfall_spray(spray_file, glm::vec3(20.0f), 8.0f, 4.0f),
