@@ -5904,6 +5904,7 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
             snapshot.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
                                          std::memory_order_release);
         }
+        const u32 voxel_revision = chunk->voxel_revision();
         if (terrain_mesh_required) {
             // Classification above guarantees an empty or exact full lattice.
             // Each terrain channel is bounded by one chunk's padded lattice.
@@ -5921,7 +5922,7 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
                                      scratch_owner,
                                      chunk->mesh_version.load(std::memory_order_acquire),
                                      chunk->water_mesh_version.load(std::memory_order_acquire),
-                                     chunk->voxel_revision()});
+                                     voxel_revision});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this,
@@ -6062,7 +6063,10 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->mesh_version.load(std::memory_order_acquire) == job_chunk.mesh_version &&
             chunk->water_mesh_version.load(std::memory_order_acquire) ==
                 job_chunk.water_mesh_version &&
-            chunk->voxel_revision() == job_chunk.voxel_revision;
+            // Only terrain jobs consume voxel data. Water-only results remain
+            // independent of edits and must not restore the invalidated terrain LOD.
+            (!job_chunk.terrain_mesh_required ||
+             chunk->voxel_revision() == job_chunk.voxel_revision);
         if (mesh_ready && !mesh_failed && current_result) {
             if (job_chunk.terrain_mesh_required) {
                 //  ( step 1): the LOD0-promotion backfill
