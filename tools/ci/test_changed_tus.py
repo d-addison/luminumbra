@@ -832,6 +832,105 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                             self.assertEqual([flag for flag in replayed[0] if flag in flags],
                                              flags if changed == self.a else [])
 
+    def test_pilot_reflection_compile_database_without_optional_slangc(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        declaration = cmake[cmake.index("find_program(LUMINUMBRA_SLANGC "):
+                            cmake.index("# the LUMIN_RHI backend-selector parse gate.")]
+        registration = re.search(
+            r"if\(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE\).*?endif\(\)", cmake, re.S)
+        self.assertIsNotNone(registration)
+        expected_sources = ["rendering/pilot_shader_reflection_test.cpp",
+                            "../src/luminumbra_client/rendering/ShaderReflection.cpp",
+                            "../src/luminumbra_client/rendering/ShaderReflectionSpirv.cpp",
+                            "../src/luminumbra_client/rendering/PassShaderLayouts.cpp"]
+        commands = ("target_compile_definitions", "target_include_directories",
+                    "target_link_libraries", "add_dependencies", "add_custom_command",
+                    "add_custom_target")
+        # Evaluate the shipping control flow, not a second implementation of its
+        # optional-tool guard. Script-mode recorders replace target/generator APIs;
+        # no configure, compiler, shader tool, network or native test is run.
+        script = ["cmake_minimum_required(VERSION 3.20)",
+                  'set(WIN32 "${FIXTURE_WINDOWS}")',
+                  'set(APPLE "${FIXTURE_APPLE}")',
+                  'set(OPENGL_LIBRARIES fixture-apple-opengl)',
+                  'function(find_program name)',
+                  '  set(${name} "${OPTIONAL_SLANGC}" PARENT_SCOPE)',
+                  'endfunction()',
+                  'function(find_package)', 'endfunction()',
+                  'function(add_executable target)',
+                  '  set(sources ${ARGN})',
+                  '  list(FIND sources EXCLUDE_FROM_ALL excluded)',
+                  '  if(excluded EQUAL -1)', '    set(excluded FALSE)',
+                  '  else()', '    set(excluded TRUE)', '  endif()',
+                  '  list(REMOVE_ITEM sources EXCLUDE_FROM_ALL)',
+                  '  file(WRITE "${CMAKE_BINARY_DIR}/sources.txt" "${sources}")',
+                  '  file(WRITE "${CMAKE_BINARY_DIR}/excluded.txt" "${excluded}")',
+                  'endfunction()',
+                  'function(set_target_properties target keyword property value)',
+                  '  if(NOT property STREQUAL "EXCLUDE_FROM_ALL")',
+                  '    message(FATAL_ERROR "unexpected target property: ${property}")',
+                  '  endif()',
+                  '  file(WRITE "${CMAKE_BINARY_DIR}/excluded.txt" "${value}")',
+                  'endfunction()']
+        for command in commands:
+            script += [f'file(WRITE "${{CMAKE_BINARY_DIR}}/{command}.txt" "")',
+                       f'function({command})',
+                       f'  file(APPEND "${{CMAKE_BINARY_DIR}}/{command}.txt" "${{ARGV}}\n")',
+                       'endfunction()']
+        script += [declaration, registration[0],
+                   'file(WRITE "${CMAKE_BINARY_DIR}/registered.txt" "${LUMINUMBRA_GTEST_TARGETS}")']
+        test_dir = self.root / "test"
+        test_dir.mkdir()
+        pilot = test_dir / expected_sources[0]
+        for platform, library in (("Windows", "opengl32"), ("Apple", "fixture-apple-opengl"),
+                                  ("Linux", "OpenGL::GL")):
+            for tool in ("", "LUMINUMBRA_SLANGC-NOTFOUND", "unavailable-slangc"):
+                available = tool == "unavailable-slangc"
+                with self.subTest(platform=platform, slangc=tool):
+                    work = self.build / (platform + (tool or "empty"))
+                    work.mkdir()
+                    fixture = work / "contract.cmake"
+                    fixture.write_text("\n".join(script) + "\n", encoding="utf-8")
+                    result = subprocess.run(
+                        ["cmake", f"-DFIXTURE_WINDOWS={'ON' if platform == 'Windows' else 'OFF'}",
+                         f"-DFIXTURE_APPLE={'ON' if platform == 'Apple' else 'OFF'}",
+                         f"-DOPTIONAL_SLANGC={tool}", "-P", str(fixture)],
+                        cwd=work, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    sources_file = work / "sources.txt"
+                    self.assertTrue(sources_file.is_file(), "optional tool removed the compile target")
+                    self.assertEqual(sources_file.read_text(encoding="utf-8").split(";"), expected_sources)
+                    self.assertEqual((work / "excluded.txt").read_text(encoding="utf-8"), "FALSE" if available else "TRUE")
+                    self.assertEqual((work / "registered.txt").read_text(encoding="utf-8"),
+                                     "pilot_shader_reflection_test" if available else "")
+                    for command, count in (("add_custom_command", 2), ("add_custom_target", 1),
+                                           ("add_dependencies", 1)):
+                        self.assertEqual(len((work / f"{command}.txt").read_text(encoding="utf-8").splitlines()),
+                                         count if available else 0)
+                    definitions = (work / "target_compile_definitions.txt").read_text(encoding="utf-8").strip().split(";")[2:]
+                    self.assertEqual(definitions, [f'LUMINUMBRA_SOURCE_ROOT="{work.as_posix()}"',
+                                                  f'PILOT_SHADER_REFLECT_DIR="{work.as_posix()}/pilot_shaders"'])
+                    self.assertEqual((work / "target_include_directories.txt").read_text(encoding="utf-8").strip(),
+                                     'pilot_shader_reflection_test;PRIVATE;../src;../src/luminumbra_client')
+                    links = (work / "target_link_libraries.txt").read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(links, ["pilot_shader_reflection_test;PRIVATE;gtest_main;glfw;glad;"
+                                             "nlohmann_json::nlohmann_json",
+                                             f"pilot_shader_reflection_test;PRIVATE;{library}"])
+                    # Model database emission from the recorded target sources.
+                    # Real generator output remains a native CI qualification.
+                    self.raw = []
+                    for source in sources_file.read_text(encoding="utf-8").split(";"):
+                        path = (test_dir / source).resolve()
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("// fixture\n", encoding="utf-8")
+                        self.raw.append(self.raw_entry(path, ["-D" + value for value in definitions]))
+                    self.save_db()
+                    self.commands.clear()
+                    self.assertEqual(self.run_ci(changed={pilot}, tracked=[pilot]), 0)
+                    self.assertEqual(sum(command[0] == "ccache" for command, _ in self.commands), 1)
+                    self.assertEqual(sum("-p" in command for command, _ in self.commands), 1)
+                    self.assertEqual(sum("--files0-from" in command for command, _ in self.commands), 1)
+
     def test_clang_pch_replays_textual_header_without_binary_cache(self):
         header = self.build / "cmake_pch.hxx"
         header.write_text('#include "ordinary.hpp"\n')

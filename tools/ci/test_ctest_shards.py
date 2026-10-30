@@ -615,7 +615,7 @@ class CTestShardTests(unittest.TestCase):
                 "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
                 "WorkflowPolicyContractPart9": 19, "OfflineDependenciesContractPart2": 18,
                 "WorkflowPolicyContractPart10": 17, "WorkflowPolicyContractPart11": 16,
-                "WorkflowPolicyContractPart12": 15, "WorkflowPolicyContractPart13": 14,
+                "WorkflowPolicyContractPart12": 15,
                 "OfflineDependenciesContract": 10, "OfflineDependenciesContractPart1": 10}
 
     def test_windows_contract_reservations_cover_both_projects_and_preserve_shards(self):
@@ -1534,9 +1534,13 @@ class CTestShardTests(unittest.TestCase):
 
     def test_all_full_and_light_unions_preserve_floors_and_required_cases(self):
         for profile, filename in (("asan", "asan.yml"), ("gcc", "ci.yml"),
-                                  ("msvc", "ci.yml"), ("ucrt64", "ci.yml")):
+                                  ("msvc", "windows-build.yml"), ("ucrt64", "windows-build.yml")):
             workflow = (Path(__file__).resolve().parents[2] / ".github/workflows" / filename).read_text(encoding="utf-8")
-            command = next(line for line in workflow.splitlines()
+            aggregate = {"asan": "asan", "gcc": "linux-result", "msvc": "windows-msvc-result",
+                         "ucrt64": "windows-ucrt64-result"}[profile]
+            section = workflow.split("\n  " + aggregate + ":\n", 1)[1]
+            section = re.split(r"\n  [\w-]+:\n", section, maxsplit=1)[0]
+            command = next(line for line in section.splitlines()
                            if line.strip().startswith("python3 tools/ci/check_ctest_junit.py "))
             arguments = shlex.split(command)[3:]
             required = [arguments[index + 1] for index, argument in enumerate(arguments)

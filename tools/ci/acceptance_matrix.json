@@ -47,7 +47,7 @@
     {
       "id": "ci.fast-replay-budget",
       "source": "docs/ci/local-checks.md#fast-hosted-validation",
-      "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Changed first-party sources are admitted by each compiler's configured dependency closure, including included sources without their own database entries; standalone sources without database entries and sources consumed only by absent targets refuse before replay even above budget. Local compile/tidy share this admission. Included-source reports name proven consumers' inputs, and unconfigured-source reports exclude those inputs. Refusals, missing consumers or cross-selected TU entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes.",
+      "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Changed first-party sources are admitted by each compiler's configured dependency closure, including included sources without their own database entries; standalone sources without database entries and sources consumed only by absent targets refuse before replay even above budget. Local compile/tidy share this admission. Included-source reports name proven consumers' inputs, and unconfigured-source reports exclude those inputs. Refusals, missing consumers or cross-selected TU entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes. The pilot reflection executable remains in both databases without slangc and is excluded from the default build in that case. Shader generation and reflection-parity CTest registration remain gated on slangc, with tool-present behaviour unchanged. Offline contracts evaluate Windows, Apple and Linux link branches and exercise compile and both tidy plans; native database generation remains CI qualification.",
       "status": "covered",
       "evidence": [
         {
@@ -117,7 +117,7 @@
     {
       "id": "ci.workflow-policy-partitions",
       "source": "tools/ci/test_workflow_policy.py",
-      "statement": "Disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates UCRT64 route checks, Windows docs skips and standalone Python contract placement; WorkflowPolicyContractPart12 isolates the aggregate refusal of uncertain classification; WorkflowPolicyContractPart13 isolates the bash subprocess classifier fixtures. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "statement": "Disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates reusable Windows routing and standalone Python contract placement; WorkflowPolicyContractPart12 isolates the aggregate refusal of uncertain classification. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
       "status": "covered",
       "evidence": [
         {
@@ -171,17 +171,13 @@
         {
           "kind": "ctest",
           "ref": "WorkflowPolicyContractPart12"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorkflowPolicyContractPart13"
         }
       ]
     },
     {
       "id": "ci.compiler-cache-budget",
       "source": "docs/development.md#continuous-integration",
-      "statement": "MSVC and UCRT64 compiler caches use 1200M each. The seven compiler lanes total 4.15 GB per branch; main/devel's newest generations total 8.3 GB, within the 9.5 GB repository cleanup budget, allowing obsolete generations outside the grace window to be retired. 1.7 GB of the 10 GB repository limit remains for other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the 9.5 GB budget cause cleanup to warn and skip deletion. Frequent devel pushes and rare main pushes can still require free least-recently-used eviction at the repository limit; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
+      "statement": "MSVC and UCRT64 compiler caches use 1200M each on the daily runner's disk. The five hosted compiler lanes total 1.75 GB per branch; main/devel's newest generations total 3.5 GB, within the unchanged 9.5 GB repository cleanup budget. The remaining 6.5 GB of the 10 GB repository limit accommodates other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the cleanup budget cause cleanup to warn and skip deletion; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
       "status": "covered",
       "evidence": [
         {
@@ -198,7 +194,7 @@
     {
       "id": "ci.ucrt64-routing",
       "source": "docs/development.md#continuous-integration",
-      "statement": "Every ready main-bound PR requires successful UCRT64 native producers, including confirmed non-C++ changes and base retargets. Main/devel pushes, manual dispatches, and ready devel-bound PRs admitted by the windows-proof label or Windows-sensitive paths require C++ classification; unknown outputs keep those native routes, while confirmed non-C++ changes skip them. The aggregate refuses skipped expected producers, drafts, missing draft metadata and unsuccessful classification. MSVC retains its native route for Python-only changes.",
+      "statement": "Full MSVC and UCRT64 validation runs on the self-hosted daily runner for schedules, manual dispatches and same-repository pull requests labelled windows-proof. Every admitted proof selects full native validation; aggregates reject drafts, missing draft metadata, unsuccessful classification and skipped expected producers. Normal CI retains its non-Windows jobs and base-retarget handling. Windows proof gates the v0.3.1 tag rather than landings.",
       "status": "covered",
       "evidence": [
         {
@@ -216,10 +212,6 @@
         {
           "kind": "doc",
           "ref": "docs/development.md"
-        },
-        {
-          "kind": "ctest",
-          "ref": "WorkflowPolicyContractPart13"
         }
       ],
       "requirements": []
