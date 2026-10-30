@@ -203,7 +203,7 @@ bool HasCompleteIntegerWaterGrid(const Chunk& chunk, int resolution) {
     if (resolution <= 1 || resolution > 32 || 32 % resolution != 0 ||
         !chunk.has_water_sim.load(std::memory_order_relaxed))
         return false;
-    const auto cells = static_cast<std::size_t>(resolution) * resolution;
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
     return chunk.water_bed_mm.size() == cells && chunk.water_depth_mm.size() == cells;
 }
 
@@ -215,7 +215,8 @@ std::uint64_t WaterActivityScore(const Chunk& chunk) {
     std::uint64_t activity = 0;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_relaxed);
     if (!HasCompleteIntegerWaterGrid(chunk, resolution) ||
-        chunk.water_edge_flux.size() != 2 * static_cast<std::size_t>(resolution) * resolution) {
+        chunk.water_edge_flux.size() !=
+            2u * static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)) {
         return activity;
     }
 
@@ -711,7 +712,8 @@ struct BootWaterSeedTask {
         released->store(true, std::memory_order_release);
     }
     void compute() const {
-        const auto cells = static_cast<std::size_t>(resolution) * resolution;
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
         const auto terrain = reuse_terrain ? std::span<const float>(inputs->terrain.data(), cells)
                                            : std::span<const float>{};
         ComputeWaterSeedInputs(*inputs, coords, resolution, *sampler, terrain);
