@@ -678,7 +678,8 @@ class CTestShardTests(unittest.TestCase):
                 if not standalone:
                     self.assertTrue(borrowed_input_names <= set(selected))
                     self.assertTrue({"ContainmentLinkClosureContract",
-                                     "FirstPartyExceptionsContract"} <= set(selected))
+                                     "FirstPartyExceptionsContract",
+                                     "UiLayoutSourceContract"} <= set(selected))
                 names = [row["name"] for row in rows]
                 unthrottled = copy.deepcopy(rows)
                 for row in unthrottled:

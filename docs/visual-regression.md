@@ -184,6 +184,113 @@ itself is healthy before trusting its verdicts:
 python tools/flip_diff.py --selftest
 ```
 
+## UI layout sidecars
+
+Each successful `--ui-screenshot <screen>` capture also writes
+`ui-<screen>.layout.json` beside `ui-<screen>.ppm`, including each screen in a
+comma-separated batch. Existing screenshot bytes and other capture formats are
+unchanged. Collection runs only at the CLI screenshot capture site, after the
+RmlUi render and before the existing ImGui composite. It inspects the current
+RmlUi context and passes no ImGui context, so the sidecar describes only the
+RmlUi layer present in the paired PPM. ImGui windows are excluded even when an
+ImGui context exists; the PPM still captures the same pre-composite image as before.
+
+Schema 1 is UTF-8 JSON with a final LF. Keys have the order below; arrays retain
+their collection order. Every geometry number has exactly three decimal places,
+using the classic locale. Integer fields and booleans retain their JSON types.
+Strings use JSON escaping; absent ids and empty direct text are empty strings.
+
+| Key | Source and meaning |
+| --- | --- |
+| `schema` | Integer `1`. |
+| `screen` | Requested CLI screen name. |
+| `width`, `height` | Framebuffer size from GLFW at screenshot readback. |
+| `rml_elements` | Visible documents in `Context::GetDocument(index)` order, then depth-first child order, including Rml non-DOM children such as controls and scrollbars. |
+| `imgui_windows` | Empty for CLI UI screenshots, which read back before ImGui is drawn. The collector API can include windows when explicitly supplied an ImGui context, as described below. |
+
+Each Rml record has keys `id`, `tag`, `text`, `rect`, `clip`, `clip_masked`, `z`,
+`depth`, `parent`, in that order:
+
+- `id` and `tag` come from `Element::GetId()` and `GetTagName()`.
+- `text` concatenates only visible immediate `ElementText` children in child order,
+  including non-DOM text nodes used by text inputs;
+  text elements themselves contain their own `GetText()`. Nested element text is
+  excluded, as are immediate text nodes with `visibility: hidden` or `display: none`.
+  Leading and trailing ASCII whitespace is trimmed; interior
+  whitespace and decoded Unicode remain intact.
+- `rect` has keys `x`, `y`, `w`, `h`: `GetAbsoluteOffset(BoxArea::Border)` and
+  `GetBox().GetSize(BoxArea::Border)` for the primary layout box. Origin is the
+  framebuffer's top left. The GL3 UI renderer projects directly in framebuffer
+  pixels, so Rml offsets receive no additional DPI scale. CSS transforms,
+  auxiliary inline boxes, shadows and filter extents are outside this layout box.
+- `clip` is the effective rectangular scissor region returned by
+  `ElementUtilities::GetClippingRegion`, with the same `x`, `y`, `w`, `h` keys,
+  or `null` when no rectangular scissor is active. Collection requests the clip
+  mask list just as Rml's render path does. `clip_masked` reports a nonempty list:
+  rounded or transformed masks cannot be represented fully by a rectangle. In a
+  mask-only case `clip` is `null` and `clip_masked` is `true`; that means the
+  rectangular field is unavailable, rather than wholly unclipped.
+- `z` is always `null` in the pinned RmlUi 6.1. Its effective paint stack and
+  stacking-context flags are private. Public `GetZIndex()` supplies a local CSS
+  value, which cannot rank nested contexts, floats, positioned elements and flex
+  items in paint order. No global order is guessed from that value or DOM order.
+- `depth` starts at zero for each document; `parent` is its parent's index in
+  `rml_elements`, or `null` for a document root. Hidden subtrees are omitted using
+  `Element::IsVisible()`, matching RmlUi 6.1 `Element::AddToStackingContext`, which
+  returns before visiting children. Both `visibility: hidden` and `display: none`
+  prune the subtree, including descendants styled `visibility: visible`.
+  RmlUi registers visibility as non-inherited: a child's local `IsVisible()` may
+  be true while `IsVisible(true)` is false because of a hidden ancestor. Hidden
+  documents use the same visibility rule; included descendants retain their
+  actual parent indices and depths without skipped ancestors. Visibility here
+  describes layout/render eligibility, not occlusion, opacity or pixel coverage;
+  zero-size, opacity-zero, partially clipped and offscreen boxes retain their full
+  coordinates. RmlUi 6.1 initializes a loaded document as hidden when its `<head>` is processed;
+  fixture documents must include that header before testing visibility before
+  `Show()`. Unstyled elements default to inline display, so clipping fixtures
+  must also establish block layout and a font family before rendering.
+
+For callers that supply an ImGui context, each ImGui record has keys `title`,
+`rect`, `collapsed`, `visible`, in that order. CLI UI screenshots do not supply one.
+`title` is `ImGuiWindow::Name`, including any ImGui identity suffix. `rect` uses
+window `Pos` minus the main viewport origin, and current `Size`, multiplied by
+`IO.DisplayFramebufferScale`. `collapsed` is `Collapsed`; `visible` is `!Hidden`,
+independent of `Active`. Ordering mirrors pinned ImGui 1.92.1 `EndFrame` and
+`Render`: root display order, parents before children, children ordered by popup
+flag, tooltip flag and `BeginOrderWithinParent`, navigation target/list roots last
+in their layer, and tooltip roots in the final layer. Inactive windows retain
+their corresponding place in that ordering even though they submit no draw
+commands. The collector reads current state without ending the ImGui frame;
+windows created later in the frame are outside the snapshot.
+
+`CollectUiLayout` returns an owned plain snapshot on the UI thread;
+`SerializeUiLayout` can run without a GL context. Collection and serialization
+refuse invalid framebuffer dimensions and excessive data instead of truncating:
+65,536 visited Rml nodes/documents (including hidden roots, but not their pruned
+descendants), tree/ImGui ancestry depth 256, 4,096 ImGui windows, and 16 MiB of
+aggregate source string bytes. Direct-text accounting includes text-node and
+parent copies before trimming. Serialization also refuses non-finite geometry,
+negative sizes, invalid UTF-8 and inconsistent parent/depth links. Rml clipping
+queries walk ancestors, so Rml capture work is bounded by node count times depth.
+ImGui ordering is bounded by window count times log(window count) times depth;
+normal frames perform no layout collection or serialization.
+
+The snapshot is serialized before opening either capture output. The screenshot
+payload is written first and the sidecar last, using the shared checked capture
+writer. Any serialization or write failure fails the capture without advancing
+the batch. A successful PPM can remain after a sidecar I/O failure, and an I/O
+failure can leave a partial sidecar; use only captures whose producer succeeded.
+No atomic pairing or screenshot-content hash is claimed by this schema.
+
+`UiLayoutSerializer.*` provides GL-free exact-byte, locale, escaping, empty-set
+and refusal regressions. `UiLayoutCollection.*` checks null contexts and ImGui
+enumeration without creating a GL context. `UiSmokeTest` checks authored fixture
+screens plus visible direct text, clips, nested visibility overrides, hidden
+documents, opacity-zero and offscreen boxes, visited-node budgets, document order
+and parent indices with its existing hidden-window setup and existing context-unavailable behavior.
+Native execution and rendered qualification remain required separately from the
+source wiring contract `UiLayoutSourceContract`.
+
 ## Capture provenance manifests (schema 1)
 
 CLI frame-scan, SceneSurvey and timelapse captures write

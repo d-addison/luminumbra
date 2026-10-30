@@ -2103,6 +2103,11 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
     set_tests_properties(SlowestTestsScriptContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME UiLayoutSourceContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ui_layout_contract.py")
+    set_tests_properties(UiLayoutSourceContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     include("${CMAKE_CURRENT_SOURCE_DIR}/ci/local_check_contracts.cmake")
     add_test(
         NAME LocalCheckRegistrationContract

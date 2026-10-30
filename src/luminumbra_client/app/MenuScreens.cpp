@@ -6,20 +6,23 @@
 #include "app/FrameAttribution.h"
 #include "app/MenuSceneSchedule.h"
 #include "app/MenuScreens.h"
+#include "app/UiInputRouter.h"
 
 #include "core/Log.h"
-#include "core/RuntimeScenarioConfig.h"
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/SavedJsonAdmission.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "nlohmann/json.hpp"
+#include "nlohmann/json_fwd.hpp"
 #include "rendering/Camera.h"
 #include "rendering/PixelIo.h"
 #include "rendering/RenderPipeline.h"
 #include "ui/Rml_UIManager.h"
+#include "ui/UiLayout.h"
 #include "world/WorldgenOverride.h"
 #include "world/WorldgenPreview.h"
 
+#include <RmlUi/Core/Element.h>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -79,13 +82,35 @@ bool WritePixelBufferPpm(const std::filesystem::path& shot, int width, int heigh
     }
 }
 
-bool WritePixelBufferPpm(const std::filesystem::path& shot, GLFWwindow* window) {
+bool WriteUiScreenshot(const std::filesystem::path& shot,
+                       GLFWwindow* window,
+                       Luminumbra::Client::Rml_UIManager* uiManager,
+                       const std::string& screen) {
     int width = 0, height = 0;
     glfwGetFramebufferSize(window, &width, &height);
-    if (!WritePixelBufferPpm(shot, width, height))
+    try {
+        // Validate and serialize the snapshot before either output is opened.
+        // Both single and batch CLI captures use this path; normal frames do not.
+        // The backbuffer contains RmlUi; ImGui is composited after this readback.
+        const auto layout = UI::CollectUiLayout(
+            uiManager ? uiManager->GetContext() : nullptr, nullptr, screen, width, height);
+        const auto bytes = UI::SerializeUiLayout(layout);
+        auto sidecar = shot;
+        sidecar.replace_extension(".layout.json");
+        if (!WritePixelBufferPpm(shot, width, height))
+            return false;
+        LUMINUMBRA_CORE_INFO("UI screenshot written -> {} ({}x{})", shot.string(), width, height);
+        // Metadata is last. A failed sidecar refuses the capture without advancing
+        // the batch; the successfully written screenshot remains available.
+        if (!Luminumbra::Rendering::WriteCaptureText(sidecar, bytes)) {
+            LUMINUMBRA_CORE_ERROR("UI layout output failed: {}", sidecar.string());
+            return false;
+        }
+        return true;
+    } catch (const std::exception& error) {
+        LUMINUMBRA_CORE_ERROR("UI layout capture failed: {}", error.what());
         return false;
-    LUMINUMBRA_CORE_INFO("UI screenshot written -> {} ({}x{})", shot.string(), width, height);
-    return true;
+    }
 }
 } // namespace
 
@@ -421,7 +446,7 @@ void RenderMenuScreens(ClientAppContext& app,
                     sig += '=';
                     sig += p.value;
                 }
-                int seedVal = 4242;
+                const int seedVal = 4242;
                 if (sig != previewState.lastSig) {
                     previewState.candidate_source_failed = true;
                     previewState.lastSig = sig;
@@ -446,7 +471,7 @@ void RenderMenuScreens(ClientAppContext& app,
                                     hasKnobs = true;
                                     break;
                                 }
-                            nlohmann::json resolved =
+                            const nlohmann::json resolved =
                                 hasKnobs
                                     ? Luminumbra::Client::BuildKnobResolvedPreset(base, pv.params)
                                           .json
@@ -726,7 +751,10 @@ void RenderMenuScreens(ClientAppContext& app,
                 const std::filesystem::path shot =
                     app.capture.ui_screenshot_dir /
                     ("ui-" + app.capture.ui_screens[app.capture.ui_screen_index] + ".ppm");
-                if (!WritePixelBufferPpm(shot, window)) {
+                if (!WriteUiScreenshot(shot,
+                                       window,
+                                       uiManager,
+                                       app.capture.ui_screens[app.capture.ui_screen_index])) {
                     fail_capture("screenshot output failed");
                     return;
                 }

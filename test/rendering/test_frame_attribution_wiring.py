@@ -956,7 +956,7 @@ class FrameAttributionWiring(unittest.TestCase):
         capture = block(menu[menu.index("} else if (app.capture.ui_screenshot_settle < 30)"):],
                         "if (ready_to_capture)")
         self.assertIn("s_preview_wait_armed = false;", capture)
-        self.assertLess(capture.index("WritePixelBufferPpm("), capture.index("++app.capture.ui_screen_index;"))
+        self.assertLess(capture.index("WriteUiScreenshot("), capture.index("++app.capture.ui_screen_index;"))
         for fragment in ("app.capture.ui_screenshot_settle = 0;",
                          "app.capture.ui_preview_settle_after_ready = 0;",
                          "previewState.capture_key.reset();", "RequestLoadDocument(",
@@ -1190,12 +1190,13 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("capture_gate.decide( std::chrono::steady_clock::now(), "
                       "ready_to_capture, drawable, content_ready)", compact(capture))
         self.assertLess(capture.index("MenuCaptureGate::Result::TimedOut"), capture.index("if (ready_to_capture)"))
-        for body, advance in ((capture, "++app.capture.ui_screen_index;"),
-                              (block(menu, "if (app.capture.ui_thumbs > 0"), "++app.capture.ui_thumbs_index;")):
-            refusal = block(body, "if (!WritePixelBufferPpm(")
+        for body, writer, advance in ((capture, "if (!WriteUiScreenshot(", "++app.capture.ui_screen_index;"),
+                                      (block(menu, "if (app.capture.ui_thumbs > 0"),
+                                       "if (!WritePixelBufferPpm(", "++app.capture.ui_thumbs_index;")):
+            refusal = block(body, writer)
             self.assertIn("fail_capture(", refusal)
             self.assertIn("return;", refusal)
-            self.assertLess(body.index("if (!WritePixelBufferPpm("), body.index(advance))
+            self.assertLess(body.index(writer), body.index(advance))
         output = block(read(CLIENT / "app/MenuScreens.cpp"), "bool WritePixelBufferPpm(")
         self.assertLess(output.index("if (!rgba_bytes)"), output.index("std::vector<unsigned char>"))
         self.assertIn("(*rgba_bytes / 4) * 3", output)
@@ -1250,7 +1251,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("return;", zero)
         self.assertIn("app.capture.ui_thumbs_index >= app.capture.ui_thumbs && "
                       "app.capture.ui_screen_index >= app.capture.ui_screens.size()", compact(thumbs))
-        readback = block(source, "bool WritePixelBufferPpm(const std::filesystem::path& shot, GLFWwindow* window)")
+        readback = block(source, "bool WriteUiScreenshot(")
         self.assertRegex(compact(readback), r"if \(!WritePixelBufferPpm\(shot, width, height\)\) return false;")
         self.assertLess(readback.index("return false;"), readback.index("UI screenshot written"))
 
