@@ -519,7 +519,8 @@ tidy policy files. The `--evidence-file` JSON records the same result, including
 deferrals, and is uploaded under the native-route condition even after failure.
 Evidence is published atomically from a temporary file closed before replacement;
 failed serialization, writes or replacement preserve prior evidence. Summary or
-evidence publication failure fails the lane.
+evidence publication failure fails the lane, overriding any pending replay
+exception or cancellation after restoring the caller's cache namespace.
 
 Hosted validation is still needed for dependency provisioning, generated headers,
 real GCC/Clang warning baselines, both tidy configurations, duration on small
@@ -543,9 +544,20 @@ nice -n 10 python3 -I -B tools/ci/test_workflow_policy.py
 rmdir scratch/helper-check-tmp
 ```
 
-The selector and dependency suites are registered in `tools/CMakeLists.txt` and in the standalone
-Python plan in `tools/ci/ci_paths.py`. Their CI infrastructure paths retain
-native qualification routing.
+The selector and dependency suites share registrations in
+`tools/ci/local_check_contracts.cmake`, included by `tools/CMakeLists.txt` and the
+compiler-free CTest project, and remain in the standalone Python plan in
+`tools/ci/ci_paths.py`. Their CI infrastructure paths retain native qualification
+routing. The selector has six disjoint whole-case partitions:
+`ChangedTranslationUnitsContract` and `ChangedTranslationUnitsContractPart1`
+through `ChangedTranslationUnitsContractPart5`. They retain every assertion,
+`ci;tools` labels and 30-second deadlines. CI replay, CMake fixtures, process-tree
+checks, base-ref subprocesses and locale subprocesses run separately from the
+selection cases. Windows retains the four-slot reservation for every partition;
+hosted Windows deadline qualification remains pending. Direct invocation and
+unittest discovery run the complete suite. Run one partition with
+`python3 -I -B tools/ci/test_changed_tus.py --partition 0` (indices 0 through 5),
+or append `--list-tests` to inspect its cases.
 
 The selector regressions also run in the fast lane; shell-selection and
 workflow-policy regressions run in the public-tree job. Shell tests isolate PATH and record every analyzer

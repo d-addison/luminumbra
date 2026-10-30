@@ -1546,7 +1546,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(fast, "timeout-minutes", 4), "5")
         self.assertIsNone(value(fast, "continue-on-error", 4))
         registered = (ROOT / "tools/ci/local_check_contracts.cmake").read_text(encoding="utf-8")
-        # The offline-dependency suite is registered once per partition; the fast lane runs the whole script once.
+        # Both local suites are registered once per partition; the fast lane runs each complete script once.
         scripts = list(dict.fromkeys(re.findall(
             r'COMMAND "\$\{Python3_EXECUTABLE\}" -I -B "\$\{_local_check_source_dir\}/([^"\n]+)"', registered)))
         self.assertEqual(scripts, ["test_changed_tus.py", "test_offline_deps.py"])

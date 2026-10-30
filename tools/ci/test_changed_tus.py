@@ -2,6 +2,7 @@
 """Isolated stdlib contracts for dependency-expanded compile and tidy checks."""
 
 import argparse
+import ast
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import importlib.util
 import io
@@ -3097,6 +3098,51 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.assertEqual(destination.read_text(), "previous evidence")
                 self.assertEqual(list(self.root.glob("fast-evidence-*")), [])
 
+    def test_ci_publication_failure_overrides_results_and_pending_exceptions(self):
+        # Exercise cleanup after the namespace was changed, through the public
+        # entry point. A failed summary must still prevent evidence publication.
+        # The database and dependency closure are immutable in this matrix.
+        # Load/select them once; the replay, scratch cleanup and publication
+        # control flow still run through ci_checks for every outcome.
+        entries = self.entries()
+        with patch.object(tus, "read_database", return_value=entries), \
+                patch.object(tus, "select", return_value=(entries, {})), \
+                patch.object(tus, "ci_cache_key", return_value="publication-test-namespace"):
+            operations = (None, tus.SelectionError("replay refused"), RuntimeError("unexpected replay"),
+                          KeyboardInterrupt(), SystemExit(73))
+            failures = (None, ValueError("invalid report"), OSError("partial publication"),
+                        TypeError("unknown report metadata"), RuntimeError("unexpected publisher"))
+            for namespace in (None, "previous namespace"):
+                for operation in operations:
+                    for publisher in ("publish_ci_summary", "publish_ci_evidence"):
+                        for failure in failures:
+                            with self.subTest(namespace=namespace, operation=type(operation).__name__,
+                                              publisher=publisher, failure=type(failure).__name__), \
+                                    patch.dict(os.environ), \
+                                    patch.object(tus, "ci_tidy", side_effect=operation), \
+                                    patch.object(tus, "publish_ci_summary") as summary, \
+                                    patch.object(tus, "publish_ci_evidence") as evidence:
+                                os.environ.pop("CCACHE_NAMESPACE", None)
+                                if namespace is not None:
+                                    os.environ["CCACHE_NAMESPACE"] = namespace
+                                publishers = {"publish_ci_summary": summary, "publish_ci_evidence": evidence}
+                                publishers[publisher].side_effect = failure
+                                propagated = (failure if isinstance(failure, RuntimeError) else
+                                              operation if failure is None and isinstance(
+                                                  operation, (RuntimeError, KeyboardInterrupt, SystemExit)) else None)
+                                if propagated is not None:
+                                    with self.assertRaises(type(propagated)) as caught:
+                                        self.run_ci()
+                                    self.assertIs(caught.exception, propagated)
+                                else:
+                                    self.assertEqual(self.run_ci(), int(failure is not None or operation is not None))
+                                self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+                                summary.assert_called_once()
+                                self.assertEqual(evidence.call_count, int(publisher != "publish_ci_summary" or failure is None))
+                                report = summary.call_args.args[1]
+                                self.assertEqual(report["status"], "passed" if operation is None else "failed")
+                                self.assertIn("tidy_seconds", report)
+
     def test_ci_over_budget_publication_failure_is_not_success(self):
         clang = self.budget_databases()
         destination = self.root / "evidence.json"
@@ -3108,6 +3154,57 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             self.assertEqual(destination.read_text(), "previous evidence")
         self.assertEqual(self.run_ci(full_selection=True, clang_build_dir=clang,
                                      evidence_file=self.root / "missing" / "evidence.json"), 1)
+
+    def test_ci_publication_failure_overrides_pending_exceptions_after_restoration(self):
+        for original in (None, "caller namespace"):
+            for pending in (OSError("selection failed"), RuntimeError("unexpected failure"),
+                            KeyboardInterrupt(), SystemExit(7)):
+                for failed_publisher in (None, "summary", "evidence"):
+                    for failure_type in (ValueError, OSError, TypeError):
+                        calls = []
+
+                        def select(*args):
+                            os.environ["CCACHE_NAMESPACE"] = "temporary namespace"
+                            raise pending
+
+                        def publish(name):
+                            def action(destination, report):
+                                self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), original)
+                                self.assertGreaterEqual(report["scan_seconds"], 0)
+                                calls.append(name)
+                                if name == failed_publisher:
+                                    raise failure_type("publication failed")
+                            return action
+
+                        with self.subTest(original=original, pending=type(pending).__name__,
+                                          publisher=failed_publisher, failure=failure_type.__name__), \
+                                patch.dict(os.environ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                            os.environ.pop("CCACHE_NAMESPACE", None)
+                            if original is not None:
+                                os.environ["CCACHE_NAMESPACE"] = original
+                            with patch.object(tus, "changed_paths", side_effect=select), \
+                                    patch.object(tus, "publish_ci_summary", side_effect=publish("summary")), \
+                                    patch.object(tus, "publish_ci_evidence", side_effect=publish("evidence")):
+                                if failed_publisher or isinstance(pending, OSError):
+                                    self.assertEqual(tus.ci_checks(self.ci_args(), self.root), 1)
+                                else:
+                                    with self.assertRaises(type(pending)) as caught:
+                                        tus.ci_checks(self.ci_args(), self.root)
+                                    self.assertIs(caught.exception, pending)
+                            self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), original)
+                            self.assertEqual(calls, ["summary"] if failed_publisher == "summary"
+                                             else ["summary", "evidence"])
+
+    def test_ci_failed_cleanup_clock_propagates_without_publication(self):
+        failure = OSError("timer unavailable")
+        with patch.object(tus.time, "monotonic", side_effect=[1.0, failure]), \
+                patch.object(tus, "publish_ci_summary") as summary, \
+                patch.object(tus, "publish_ci_evidence") as evidence, redirect_stderr(io.StringIO()):
+            with self.assertRaises(OSError) as caught:
+                tus.ci_checks(self.ci_args(jobs=0), self.root)
+        self.assertIs(caught.exception, failure)
+        summary.assert_not_called()
+        evidence.assert_not_called()
 
     def test_ci_budget_disabled_negative_control_exposes_compile_failure(self):
         clang = self.budget_databases()
@@ -3768,9 +3865,281 @@ class PchEntryIdentityTests(unittest.TestCase):
                 self.assertEqual(tus._PCH_SEARCH_CACHE, {})
 
 
+diagnostic_spec = importlib.util.spec_from_file_location(
+    "contract_case_diagnostics", ROOT / "tools/ci/contract_case_diagnostics.py")
+diagnostics = importlib.util.module_from_spec(diagnostic_spec)
+diagnostic_spec.loader.exec_module(diagnostics)
+
+
+# Measured launch-heavy and replay groups have separate 30s deadlines. New
+# methods in known classes retain complete coverage through the class default.
+CHANGED_TUS_CLASS_PARTITIONS = {
+    "DependencyIncludesTests": "2",
+    "ChangedTranslationUnitsTests": "0",
+    "BaseRefProcessTests": "4",
+    "ProcessTimeoutTests": "3",
+    "WindowsSearchPathTests": "0",
+    "PchEntryIdentityTests": "0",
+    "ChangedTusPartitionSelectionTests": "0",
+}
+CHANGED_TUS_CASE_PARTITIONS = {
+    "ChangedTranslationUnitsTests.test_ci_publication_failure_overrides_results_and_pending_exceptions": "1",
+    "ChangedTranslationUnitsTests.test_ci_tidy_retains_local_replay_and_configuration_admission": "1",
+    "ChangedTranslationUnitsTests.test_ci_rejects_reparse_roots_and_builds_before_resolution": "1",
+    "ChangedTranslationUnitsTests.test_ci_route_only_proven_docs_python_skip_and_uncertainty_validates": "1",
+    "ChangedTranslationUnitsTests.test_ci_non_policy_commands_replay_normal_flags_for_both_drivers": "1",
+    "ChangedTranslationUnitsTests.test_ci_policy_marker_uses_definitions_and_refuses_unknown_metadata": "1",
+    "ChangedTranslationUnitsTests.test_ci_mixed_policy_variants_of_same_source_are_both_replayed": "1",
+    "ChangedTranslationUnitsTests.test_ci_unknown_policy_refuses_before_compilation": "1",
+    "ChangedTranslationUnitsTests.test_ci_fatal_profile_adds_categories_without_changing_local_policy": "1",
+    "ChangedTranslationUnitsTests.test_ci_enforces_every_category_with_preconfigured_warning_families": "1",
+    "ChangedTranslationUnitsTests.test_ci_refuses_group_and_subgroup_demotions_without_changing_local_policy": "1",
+    "ChangedTranslationUnitsTests.test_ci_warning_enforcement_refusal_reports_failure_before_compiling": "1",
+    "ChangedTranslationUnitsTests.test_ci_real_cmake_warning_policy_compiles_and_runs_both_tidy_configs": "1",
+    "ChangedTranslationUnitsTests.test_ci_replays_duplicate_variants_and_both_tidy_configs_and_cleans": "1",
+    "ChangedTranslationUnitsTests.test_ci_union_includes_each_compiler_context_and_all_target_variants": "1",
+    "ChangedTranslationUnitsTests.test_ci_included_source_selects_consumers_before_replay_or_deferral": "1",
+    "ChangedTranslationUnitsTests.test_ci_unconsumed_sources_refuse_even_with_over_budget_selection": "1",
+    "ChangedTranslationUnitsTests.test_ci_included_source_requires_complete_scans_in_each_compiler": "1",
+    "ChangedTranslationUnitsTests.test_ci_over_budget_defers_after_scans_and_reports_success_evidence": "1",
+    "ChangedTranslationUnitsTests.test_ci_at_budget_replays_every_variant_and_both_tidy_configurations": "1",
+    "ChangedTranslationUnitsTests.test_ci_over_budget_refusals_and_incomplete_inputs_still_fail": "1",
+    "ChangedTranslationUnitsTests.test_ci_over_budget_missing_database_entry_fails_before_deferral": "1",
+    "ChangedTranslationUnitsTests.test_ci_deferred_summary_names_counts_budget_and_combined_fingerprint": "1",
+    "ChangedTranslationUnitsTests.test_ci_atomic_evidence_closes_before_replace_and_preserves_previous_on_failure": "1",
+    "ChangedTranslationUnitsTests.test_ci_over_budget_publication_failure_is_not_success": "1",
+    "ChangedTranslationUnitsTests.test_ci_budget_disabled_negative_control_exposes_compile_failure": "1",
+    "ChangedTranslationUnitsTests.test_ci_missing_cross_compiler_tu_and_malformed_db_fail_before_compile": "1",
+    "ChangedTranslationUnitsTests.test_ci_failed_scan_compile_and_tidy_fail_and_cleanup": "1",
+    "ChangedTranslationUnitsTests.test_ci_cache_key_covers_profile_identity_config_and_resolved_build_content": "1",
+    "ChangedTranslationUnitsTests.test_ci_bounds_full_selection_namespace_restoration_and_missing_tu": "1",
+    "ChangedTranslationUnitsTests.test_ci_cli_dispatch_and_calibration_refusal": "1",
+    "ChangedTranslationUnitsTests.test_ci_missing_tools_empty_database_and_symlink_scratch_fail_visibly": "1",
+    "ChangedTranslationUnitsTests.test_ci_reports_unconfigured_sources_and_failure_does_not_validate_them": "1",
+    "ChangedTranslationUnitsTests.test_ci_summary_escapes_unusual_filenames": "1",
+    "ChangedTranslationUnitsTests.test_cmake_startup_database_reaches_compile_and_tidy_plans": "2",
+    "ChangedTranslationUnitsTests.test_pilot_reflection_compile_database_without_optional_slangc": "2",
+    "ChangedTranslationUnitsTests.test_forced_system_and_relative_project_headers_use_compiler_search": "5",
+    "ChangedTranslationUnitsTests.test_hostile_locale_reaches_english_baseline_capture_and_replay_in_real_child": "5",
+    "ChangedTranslationUnitsTests.test_sibling_tool_invocations_share_real_child_locale_and_preserve_environment": "5",
+}
+
+
+CHANGED_TUS_PARTITIONS = tuple(sorted(set(CHANGED_TUS_CLASS_PARTITIONS.values()) |
+                                     set(CHANGED_TUS_CASE_PARTITIONS.values()), key=int))
+
+
+def changed_tus_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from changed_tus_cases(item)
+        else:
+            yield item
+
+
+def changed_tus_partition_suite(loader, module, partition):
+    if partition not in CHANGED_TUS_PARTITIONS:
+        raise ValueError("unknown changed-TU partition")
+    if any(value not in CHANGED_TUS_PARTITIONS for value in (
+            *CHANGED_TUS_CLASS_PARTITIONS.values(), *CHANGED_TUS_CASE_PARTITIONS.values())):
+        raise ValueError("invalid changed-TU partition mapping")
+    # Scan the finite unittest roster once; selection starts no subprocesses.
+    cases = list(changed_tus_cases(loader.loadTestsFromModule(module)))
+    seen = set()
+    selected = []
+    for case in cases:
+        key = f"{type(case).__name__}.{case._testMethodName}"
+        if key in seen:
+            raise ValueError("duplicate changed-TU case: " + key)
+        seen.add(key)
+        class_partition = CHANGED_TUS_CLASS_PARTITIONS.get(type(case).__name__)
+        if class_partition is None:
+            raise ValueError("unregistered changed-TU class: " + type(case).__name__)
+        if CHANGED_TUS_CASE_PARTITIONS.get(key, class_partition) == partition:
+            selected.append(case)
+    if not CHANGED_TUS_CASE_PARTITIONS.keys() <= seen:
+        raise ValueError("missing dedicated changed-TU case")
+    if not selected:
+        raise ValueError("empty changed-TU partition")
+    return unittest.TestSuite(selected)
+
+
+def changed_tus_main(argv=None):
+    # Without a partition, retain unittest's complete CLI and discovery semantics.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--partition", choices=CHANGED_TUS_PARTITIONS, action="append")
+    parser.add_argument("--list-tests", action="store_true")
+    args, remaining = parser.parse_known_args(argv)
+    if args.partition is None:
+        if args.list_tests:
+            parser.error("--list-tests requires --partition")
+        unittest.main(argv=[sys.argv[0], *remaining], testLoader=unittest.TestLoader(),
+                      testRunner=diagnostics.CaseDiagnosticRunner)
+        return 0
+    if len(args.partition) != 1 or remaining:
+        parser.error("one partition is required, without unittest selectors")
+    try:
+        suite = changed_tus_partition_suite(unittest.TestLoader(), sys.modules[__name__], args.partition[0])
+    except ValueError as error:
+        parser.error(str(error))
+    if args.list_tests:
+        for case in changed_tus_cases(suite):
+            print(case.id())
+        return 0
+    result = diagnostics.CaseDiagnosticRunner(verbosity=2).run(suite)
+    return int(not result.wasSuccessful())
+
+
+class ChangedTusPartitionSelectionTests(unittest.TestCase):
+    def test_first_party_cleanup_has_no_return_in_finally(self):
+        tree = ast.parse((ROOT / "tools/ci/changed_tus.py").read_text(encoding="utf-8"))
+        returns = [node.lineno for block in ast.walk(tree) if isinstance(block, ast.Try)
+                   for statement in block.finalbody for node in ast.walk(statement)
+                   if isinstance(node, ast.Return)]
+        self.assertEqual(returns, [], "a return in finally masks pending exceptions and warns on Python 3.14")
+
+    def test_finally_blocks_do_not_override_control_flow(self):
+        tree = ast.parse((ROOT / "tools/ci/changed_tus.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try):
+                for statement in node.finalbody:
+                    self.assertFalse(any(isinstance(child, (ast.Return, ast.Break, ast.Continue))
+                                         for child in ast.walk(statement)), "control flow in finally")
+
+    def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        complete = [case.id() for case in changed_tus_cases(loader.loadTestsFromModule(module))]
+        selected = []
+        for partition in CHANGED_TUS_PARTITIONS:
+            cases = list(changed_tus_cases(changed_tus_partition_suite(loader, module, partition)))
+            self.assertTrue(cases)
+            selected.extend(case.id() for case in cases)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertCountEqual(selected, complete)
+        self.assertTrue(any("ChangedTusPartitionSelectionTests." in name for name in selected))
+        self.assertEqual(set(CHANGED_TUS_CLASS_PARTITIONS),
+                         {type(case).__name__ for case in changed_tus_cases(loader.loadTestsFromModule(module))})
+        # New methods in known classes enter selection without maintaining lists.
+        class Extended(ChangedTranslationUnitsTests):
+            def test_added_case(self):
+                pass
+        Extended.__name__ = "ChangedTranslationUnitsTests"
+        extra = Extended("test_added_case")
+        augmented = unittest.TestSuite([loader.loadTestsFromModule(module), extra])
+        with patch.object(loader, "loadTestsFromModule", return_value=augmented):
+            cases = list(changed_tus_cases(changed_tus_partition_suite(loader, module, "0")))
+        self.assertIn(extra, cases)
+
+    def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        for invalid in ("", "-1", str(max(map(int, CHANGED_TUS_PARTITIONS)) + 1), "01", "1/8", None, 1):
+            with self.subTest(partition=invalid), self.assertRaises(ValueError):
+                changed_tus_partition_suite(loader, module, invalid)
+        complete = list(changed_tus_cases(loader.loadTestsFromModule(module)))
+        for mapping in (CHANGED_TUS_CLASS_PARTITIONS, CHANGED_TUS_CASE_PARTITIONS):
+            with patch.dict(mapping, {next(iter(mapping)): "unknown"}):
+                with self.assertRaisesRegex(ValueError, "invalid changed-TU partition mapping"):
+                    changed_tus_partition_suite(loader, module, "0")
+        dedicated = next(case for case in complete if type(case).__name__ + "." + case._testMethodName in CHANGED_TUS_CASE_PARTITIONS)
+        class Unknown(unittest.TestCase):
+            def test_unknown(self):
+                pass
+        for cases, partition, message in (
+            ([], "0", "missing dedicated"),
+            ([*complete, complete[0]], "0", "duplicate"),
+            ([case for case in complete if case is not dedicated], "0", "missing dedicated"),
+            ([*complete, Unknown("test_unknown")], "0", "unregistered"),
+            ([case for case in complete if type(case).__name__ + "." + case._testMethodName
+              in CHANGED_TUS_CASE_PARTITIONS], "0", "empty"),
+        ):
+            with self.subTest(message=message), patch.object(loader, "loadTestsFromModule", return_value=unittest.TestSuite(cases)):
+                with self.assertRaisesRegex(ValueError, message):
+                    changed_tus_partition_suite(loader, module, partition)
+
+    def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
+        cmake = (ROOT / "tools/ci/local_check_contracts.cmake").read_text(encoding="utf-8")
+        registrations = re.findall(r"add_test\(\s*NAME ([\w]+)\s+COMMAND ([^)]*)\)", cmake)
+        actual = [(name, " ".join(command.split())) for name, command in registrations
+                  if "test_changed_tus.py" in command]
+        expected = []
+        for partition in CHANGED_TUS_PARTITIONS:
+            name = "ChangedTranslationUnitsContract" + ("" if partition == "0" else "Part" + partition)
+            expected.append((name, '"${Python3_EXECUTABLE}" -I -B '
+                             '"${_local_check_source_dir}/test_changed_tus.py" --partition ' + partition))
+            properties = re.findall(r"set_tests_properties\(" + name + r"\s+PROPERTIES ([^)]*)\)", cmake)
+            self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'])
+        self.assertCountEqual(actual, expected)
+        self.assertEqual(len(actual), len(set(actual)))
+
+    def test_cli_listing_and_refusals_use_actual_selection(self):
+        for partition in CHANGED_TUS_PARTITIONS:
+            with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output, \
+                    patch.object(unittest.defaultTestLoader, "testNamePatterns", ["*hidden_case*"]):
+                self.assertEqual(changed_tus_main(["--partition", partition, "--list-tests"]), 0)
+                expected = changed_tus_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
+                self.assertEqual(output.getvalue().splitlines(), [case.id() for case in changed_tus_cases(expected)])
+        for argv in (["--partition"], ["--partition", str(max(map(int, CHANGED_TUS_PARTITIONS)) + 1)], ["--partition", "01"],
+                     ["--partition", "0", "--partition", "1"], ["--list-tests"],
+                     ["--partition", "0", "ChangedTranslationUnitsTests"], ["--partition", "0", "--unknown"]):
+            with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                changed_tus_main(argv)
+            self.assertEqual(error.exception.code, 2)
+        with patch.object(sys.modules[__name__], "changed_tus_partition_suite", side_effect=ValueError("bad roster")), \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as output, self.assertRaises(SystemExit) as error:
+            changed_tus_main(["--partition", "0"])
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("bad roster", output.getvalue())
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(changed_tus_main([]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0]], testLoader=run.call_args.kwargs["testLoader"],
+                                        testRunner=diagnostics.CaseDiagnosticRunner)
+            self.assertIsInstance(run.call_args.kwargs["testLoader"], unittest.TestLoader)
+            self.assertIsNot(run.call_args.kwargs["testLoader"], unittest.defaultTestLoader)
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(changed_tus_main(["ChangedTranslationUnitsTests", "-v"]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0], "ChangedTranslationUnitsTests", "-v"],
+                                        testLoader=run.call_args.kwargs["testLoader"], testRunner=diagnostics.CaseDiagnosticRunner)
+
+    def test_partition_runner_propagates_case_failure_and_reports_duration(self):
+        class Fails(unittest.TestCase):
+            def test_failure(self):
+                self.fail("partition failure")
+        class Passes(unittest.TestCase):
+            def test_success(self):
+                pass
+        for cases, status in (([Fails("test_failure")], 1), ([Passes("test_success")], 0), ([], 0)):
+            suite = unittest.TestSuite(cases)
+            with self.subTest(status=status), patch.object(sys, "stderr", new_callable=io.StringIO) as output, patch.object(
+                    sys.modules[__name__], "changed_tus_partition_suite", return_value=suite):
+                self.assertEqual(changed_tus_main(["--partition", "0"]), status)
+            self.assertEqual(output.getvalue().count("[contract-case] START "), len(cases))
+            self.assertEqual(output.getvalue().count("[contract-case] STOP "), len(cases))
+            self.assertIn("Ran " + str(len(cases)) + " test", output.getvalue())
+            if status:
+                self.assertIn("partition failure", output.getvalue())
+
+    def test_qualified_import_keeps_complete_partition_roster_and_listing(self):
+        name = "changed_tus_selection.qualified"
+        spec = importlib.util.spec_from_file_location(name, Path(__file__))
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {name: module}):
+            spec.loader.exec_module(module)
+            complete = list(module.changed_tus_cases(unittest.TestLoader().loadTestsFromModule(module)))
+            selected = []
+            for partition in module.CHANGED_TUS_PARTITIONS:
+                selected.extend(module.changed_tus_cases(module.changed_tus_partition_suite(unittest.TestLoader(), module, partition)))
+            self.assertEqual(len(selected), len({case.id() for case in selected}))
+            self.assertCountEqual([case.id() for case in selected], [case.id() for case in complete])
+            expected = changed_tus_cases(unittest.TestLoader().loadTestsFromModule(sys.modules[__name__]))
+            self.assertCountEqual([(type(case).__name__, case._testMethodName) for case in complete],
+                                  [(type(case).__name__, case._testMethodName) for case in expected])
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(module.changed_tus_main(["--partition", "0", "--list-tests"]), 0)
+            part_zero = module.changed_tus_partition_suite(unittest.TestLoader(), module, "0")
+            self.assertEqual(output.getvalue().splitlines(), [case.id() for case in module.changed_tus_cases(part_zero)])
+
+
 if __name__ == "__main__":
-    diagnostic_spec = importlib.util.spec_from_file_location(
-        "contract_case_diagnostics", ROOT / "tools/ci/contract_case_diagnostics.py")
-    diagnostics = importlib.util.module_from_spec(diagnostic_spec)
-    diagnostic_spec.loader.exec_module(diagnostics)
-    unittest.main(testRunner=diagnostics.CaseDiagnosticRunner)
+    raise SystemExit(changed_tus_main())
