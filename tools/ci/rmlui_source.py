@@ -119,6 +119,12 @@ def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str
     """Allow transient link counts below .git and entries that vanish mid-scan in an owned command.
 
     All admission, verification and post-exit inventories keep sole-link checks.
+
+    Git replaces working-tree files itself (checkout creates them, apply unlinks and
+    recreates the patched ones), so during a live scan any entry below the root can
+    vanish between scandir and lstat. Skipping a vanished entry only drops a path that no
+    longer exists; every surviving entry is still checked, and the strict post-exit
+    inventory validates the final tree.
     """
     result = {}
     pending = [root]

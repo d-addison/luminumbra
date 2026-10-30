@@ -1384,6 +1384,28 @@ class DeliveryRefusals(unittest.TestCase):
                             M.inventory(root, live_git=live)
                 self.assertEqual(hits, 1)
 
+    def test_live_scan_skips_vanished_worktree_entries_but_refuses_surviving_ones_and_final_scan_is_strict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            vanished = root / "src" / "patched.cpp"
+            vanished.write_bytes(b"replaced by git apply")
+            (root / "kept.txt").write_bytes(b"source")
+            lstat = os.lstat
+            def inspect(candidate, *args, **kwargs):
+                if Path(candidate) == vanished:
+                    raise FileNotFoundError("controlled missing entry")
+                return lstat(candidate, *args, **kwargs)
+            with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                self.assertEqual(set(M.inventory(root, live_git=True)), {"kept.txt"})
+            os.link(root / "kept.txt", root / "src" / "second-link.txt")
+            with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                    M.inventory(root, live_git=True)
+            vanished.write_bytes(b"recreated")
+            with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                M.inventory(root)
+
     def test_inventory_missing_queued_directories_are_transient_only_during_live_scans(self):
         cases = itertools.product((".git/objects/xx", "source", "nested/.git", ".git-objects", ".git", "."),
                                   (False, True), ("lstat", "scandir"), (FileNotFoundError, PermissionError))
