@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FramePacing.h"
+
 #include <array>
 #include <cstdint>
 #include <map>
@@ -10,7 +12,7 @@
 namespace luminumbra::core {
 
 // Revisions are immutable: retain old tables when introducing a new revision.
-inline constexpr std::uint32_t kGraphicsPresetRevision = 1;
+inline constexpr std::uint32_t kGraphicsPresetRevision = 2;
 enum class GraphicsPreset : std::uint8_t {
     Low,
     Medium,
@@ -100,6 +102,9 @@ void ResetGraphicsOverrides(GraphicsSettings& settings);
 
 struct ResolvedGraphics {
     GraphicsValues values;
+    // Independent user.video choices: selecting/resetting a preset preserves these.
+    // Measurement overrides are resolved separately at presentation time.
+    FramePacing frame_pacing{.vsync = true, .frame_cap = 0};
     GraphicsPreset base_preset = GraphicsPreset::Ultra;
     std::uint32_t preset_revision = kGraphicsPresetRevision;
     bool custom = false;
@@ -111,9 +116,12 @@ struct ResolvedGraphics {
 // CLI/environment overrides (already ordered by the caller's environment precedence).
 // On error, result is unchanged. No environment reads, I/O or renderer calls.
 // Resolve when settings change and cache values; this is not a per-frame operation.
+// frame_pacing projects independent user.video choices without affecting Custom.
+// An unsupported cap is refused before publishing any resolved state.
 [[nodiscard]] bool ResolveGraphics(const GraphicsSettings& settings,
                                    const GraphicsOverrides& session_overrides,
                                    ResolvedGraphics& result,
-                                   std::string& error);
+                                   std::string& error,
+                                   FramePacing frame_pacing = {.vsync = true, .frame_cap = 0});
 
 } // namespace luminumbra::core
