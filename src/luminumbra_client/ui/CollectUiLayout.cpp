@@ -31,7 +31,7 @@ std::string DirectText(Rml::Element& element, Detail::UiLayoutStringBudget& stri
         strings.Add(text->GetText());
         result = text->GetText();
     } else {
-        const int children = element.GetNumChildren();
+        const int children = element.GetNumChildren(true);
         if (children > static_cast<int>(kUiLayoutMaxElements))
             throw std::length_error("UI layout child budget exceeded");
         for (int index = 0; index < children; ++index) {
@@ -110,6 +110,8 @@ void CollectDocument(Rml::Element& document,
         layout.rml_elements.push_back(
             CollectElementRecord(*node.element, node.parent, node.depth, strings));
         for (int index = children; index > 0; --index) {
+            // RmlUi 6.1 GetChild(int) indexes all children, including non-DOM
+            // children. Only GetNumChildren has an include_non_dom_elements flag.
             if (auto* child = node.element->GetChild(index - 1))
                 pending.push_back({.element = child, .parent = own_index, .depth = node.depth + 1});
         }

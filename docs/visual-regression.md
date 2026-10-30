@@ -210,7 +210,8 @@ Each Rml record has keys `id`, `tag`, `text`, `rect`, `clip`, `clip_masked`, `z`
 `depth`, `parent`, in that order:
 
 - `id` and `tag` come from `Element::GetId()` and `GetTagName()`.
-- `text` concatenates only immediate `ElementText` children in child order;
+- `text` concatenates only immediate `ElementText` children in child order,
+  including non-DOM text nodes used by text inputs;
   text elements themselves contain their own `GetText()`. Nested element text is
   excluded. Leading and trailing ASCII whitespace is trimmed; interior
   whitespace and decoded Unicode remain intact.
@@ -234,7 +235,11 @@ Each Rml record has keys `id`, `tag`, `text`, `rect`, `clip`, `clip_masked`, `z`
   `rml_elements`, or `null` for a document root. Hidden subtrees are omitted using
   `Element::IsVisible()`, matching Rml stacking-context traversal. Visibility here
   describes layout/render eligibility, not occlusion, opacity or pixel coverage;
-  partially clipped or offscreen boxes retain their full coordinates.
+  partially clipped or offscreen boxes retain their full coordinates. RmlUi 6.1
+  initializes a loaded document as hidden when its `<head>` is processed;
+  fixture documents must include that header before testing visibility before
+  `Show()`. Unstyled elements default to inline display, so clipping fixtures
+  must also establish block layout and a font family before rendering.
 
 Each ImGui record has keys `title`, `rect`, `collapsed`, `visible`, in that order.
 `title` is `ImGuiWindow::Name`, including any ImGui identity suffix. `rect` uses
