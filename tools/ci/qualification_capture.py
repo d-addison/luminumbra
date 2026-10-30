@@ -25,8 +25,8 @@ SCHEMA = "luminumbra.ci_qualification_capture.v1"
 LANES = {
     "linux-gcc": ("ci.yml", "Linux / GCC", ("identity", "configure", "build", "tests")),
     "asan": ("asan.yml", "Linux / GCC ASan", ("identity", "configure", "build", "tests")),
-    "windows-msvc": ("ci.yml", "Windows / MSVC", ("identity", "native")),
-    "windows-ucrt64": ("ci.yml", "Windows / MSYS2 UCRT64", ("identity", "configure", "build", "tests")),
+    "windows-msvc": ("windows-daily.yml", "build / Windows / MSVC", ("identity", "native")),
+    "windows-ucrt64": ("windows-daily.yml", "build / Windows / MSYS2 UCRT64", ("identity", "configure", "build", "tests")),
     "server-capture": ("performance.yml", "Simulation budget qualification / candidate", ("identity", "configure", "build", "capture", "proposal", "check")),
 }
 PRESETS = ("default", "mountains", "archipelago")
