@@ -7,7 +7,7 @@ This is deliberately scoped to their current YAML layout, not a YAML parser.
 The 72-case baseline launched 772 subprocesses on POSIX; aggregate cancellation,
 ASan admission and Bash syntax cases accounted for 340, 210 and 79 launches.
 Windows qualification exhausted the suite's 30-second CTest deadline without
-per-case timings. Fourteen disjoint registrations isolate those workloads and keep
+per-case timings. Disjoint registrations isolate those workloads and keep
 each 30-second deadline. Each selected case reports elapsed time so a slow case
 remains visible. Native per-case qualification is still required; local timings
 do not establish that every Windows case fits its deadline. Direct invocation
@@ -1765,9 +1765,12 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         registrations = re.findall(
             r'add_test\(\s*NAME (AcceptanceMatrixContract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
-        self.assertEqual(len(registrations), 225)
+        spec = importlib.util.spec_from_file_location("acceptance_roster", ROOT / "tools/ci/test_check_acceptance_matrix.py")
+        acceptance = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(acceptance)
+        self.assertEqual(len(registrations), acceptance._CONTRACT_PARTITIONS)
         self.assertEqual({int(re.search(r'--contract-partition ([0-9]+)', command)[1])
-                          for _, command in registrations}, set(range(225)))
+                          for _, command in registrations}, set(range(acceptance._CONTRACT_PARTITIONS)))
         self.assertNotIn("NAME AcceptanceRecoveryContract", cmake)
         for name, command in registrations:
             self.assertIn('ci/test_check_acceptance_matrix.py', command)
@@ -3421,7 +3424,6 @@ def policy_route_results(cases, workers):
 
 # Keep launch-heavy cases separate without changing any case or subtest.
 # Selection scans the finite unittest roster once; no subprocess is started here.
-POLICY_PARTITIONS = tuple(str(index) for index in range(14))
 POLICY_ROUTE_CASE = "WorkflowDraftPolicyTests.test_native_aggregates_preserve_route_checks"
 POLICY_CASE_PARTITIONS = {
     "WorkflowDraftPolicyTests.test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies": "1",
@@ -3448,6 +3450,10 @@ POLICY_CLASS_PARTITIONS = {
     "WorkflowShellTests": "4",
     "WorkflowShellDiagnosticTests": "5",
 }
+
+
+POLICY_PARTITIONS = tuple(sorted(set(POLICY_CLASS_PARTITIONS.values()) |
+                                 set(POLICY_CASE_PARTITIONS.values()), key=int))
 
 
 def policy_cases(suite):
@@ -3887,6 +3893,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
         for name, methods in expected.items():
             with self.subTest(test_class=name):
                 self.assertLessEqual(set(methods), set(unittest.defaultTestLoader.getTestCaseNames(getattr(module, name))))
+        # Historical baseline: future cases are covered by discovery below.
         self.assertEqual(sum(map(len, expected.values())), 76)
 
     def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
@@ -3917,7 +3924,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "-1", "14", "01", "0/14", None, 0):
+        for invalid in ("", "-1", str(max(map(int, POLICY_PARTITIONS)) + 1), "01", "0/14", None, 0):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 policy_partition_suite(loader, module, invalid)
         complete = list(policy_cases(loader.loadTestsFromModule(module)))
@@ -3939,7 +3946,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_unassigned_classes_and_invalid_mapping_targets(self):
         module = sys.modules[__name__]
         for mapping in (POLICY_CLASS_PARTITIONS, POLICY_CASE_PARTITIONS):
-            for invalid in ("", "14", "unknown", None, 0):
+            for invalid in ("", str(max(map(int, POLICY_PARTITIONS)) + 1), "unknown", None, 0):
                 with self.subTest(mapping=list(mapping), invalid=invalid), patch.dict(
                         mapping, {next(iter(mapping)): invalid}):
                     with self.assertRaisesRegex(ValueError, "invalid policy partition mapping"):
@@ -3978,7 +3985,12 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             with self.subTest(partition=partition):
                 cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
                 self.assertEqual({type(case).__name__ for case in cases}, {name})
-                self.assertEqual({case._testMethodName for case in cases}, methods)
+                self.assertLessEqual(methods, {case._testMethodName for case in cases})
+                discovered = unittest.TestLoader().getTestCaseNames(getattr(module, name))
+                expected = {method for method in discovered
+                            if POLICY_CASE_PARTITIONS.get(name + "." + method,
+                                                          POLICY_CLASS_PARTITIONS[name]) == partition}
+                self.assertEqual({case._testMethodName for case in cases}, expected)
 
     def test_launch_heavy_cases_keep_individual_partitions(self):
         module = sys.modules[__name__]
@@ -3997,7 +4009,9 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 self.assertEqual([case._testMethodName for case in cases], [method])
 
     def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
-        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assert_policy_registrations((ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8"))
+
+    def assert_policy_registrations(self, cmake):
         registrations = re.findall(r"add_test\(\s*NAME ([\w]+)\s+COMMAND ([^)]*)\)", cmake)
         actual = [(name, " ".join(command.split())) for name, command in registrations
                   if "ci/test_workflow_policy.py" in command]
@@ -4012,6 +4026,41 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                              + (' PROCESSORS 2' if partition == POLICY_CASE_PARTITIONS[POLICY_ROUTE_CASE] else '')])
         self.assertCountEqual(actual, expected)
         self.assertEqual(len(actual), len(set(actual)))
+
+    def test_registration_growth_and_removed_duplicate_or_misrouted_parts(self):
+        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        part = str(max(map(int, POLICY_PARTITIONS)) + 1)
+        name = "WorkflowPolicyContractPart" + part
+        extra = ('add_test(NAME ' + name + ' COMMAND "${Python3_EXECUTABLE}" -I -B '
+                 '"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition ' + part + ')\n'
+                 'set_tests_properties(' + name + ' PROPERTIES LABELS "ci;tools" TIMEOUT 30)\n')
+        # Evaluate the real routing declarations with one more dedicated case.
+        # This fails if the partition universe is replaced by a fixed range.
+        source = Path(__file__).read_text(encoding="utf-8")
+        routing = source.split("POLICY_ROUTE_CASE =", 1)[1].split("def policy_cases", 1)[0]
+        method = "test_added_partition_case"
+        key = "WorkflowShellTests." + method
+        routing = ("POLICY_ROUTE_CASE =" + routing).replace(
+            "POLICY_CASE_PARTITIONS = {", "POLICY_CASE_PARTITIONS = {" + repr(key) + ": " + repr(part) + ",")
+        namespace = {}
+        exec(compile(routing, "policy routing", "exec"), namespace)
+        self.assertEqual(set(namespace["POLICY_PARTITIONS"]), {*POLICY_PARTITIONS, part})
+        with patch.object(WorkflowShellTests, method, lambda self: None, create=True), \
+                patch.object(sys.modules[__name__], "POLICY_PARTITIONS", namespace["POLICY_PARTITIONS"]), \
+                patch.dict(POLICY_CASE_PARTITIONS, {key: part}):
+            cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], part)))
+            self.assertEqual([case._testMethodName for case in cases], [method])
+            self.assert_policy_registrations(cmake + extra)
+            for changed in (cmake, cmake + extra + extra,
+                            cmake + extra.replace("--partition " + part, "--partition 0")):
+                with self.subTest(changed=changed[-len(extra):]), self.assertRaises(AssertionError):
+                    self.assert_policy_registrations(changed)
+        with patch.object(WorkflowRequiredAggregatePolicyTests, "test_added_case", lambda self: None, create=True):
+            self.test_remaining_behavioural_groups_have_separate_complete_partitions()
+        # Existing partitions may not disappear even if the total is unchanged.
+        block = re.search(r'add_test\(\s*NAME WorkflowPolicyContractPart1\s+COMMAND [^)]*\)', cmake)[0]
+        with self.assertRaises(AssertionError):
+            self.assert_policy_registrations(cmake.replace(block, ""))
 
     def test_direct_workflow_discovery_and_path_routes_keep_complete_suite(self):
         import ci_paths
@@ -4043,7 +4092,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 self.assertEqual(policy_main(["--partition", partition, "--list-tests"]), 0)
                 expected = policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in policy_cases(expected)])
-        for argv in (["--partition"], ["--partition", "14"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", str(max(map(int, POLICY_PARTITIONS)) + 1)], ["--partition", "01"],
                      ["--partition", "0", "--partition", "1"], ["--list-tests"],
                      ["--partition", "0", "WorkflowShellTests"], ["--partition", "0", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:

@@ -114,6 +114,7 @@ if(BUILD_TESTING)
     target_link_libraries(luminumbra_save_fixture PRIVATE luminumbra_save_fixture_support)
     luminumbra_configure_first_party_target(luminumbra_save_fixture)
 
+    get_property(_tools_existing_tests DIRECTORY PROPERTY TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
         NAME ContainmentLinkClosureContract
@@ -2021,9 +2022,6 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
     # Every borrowed-input consumer shares custody; recovery cases have separate
     # entries so real Git publication stays inside the existing deadlines.
-    set(_rmlui_source_contracts
-        RmlUiSourceScriptContract RmlUiSourceCommandContract
-        LocalRmlUiRecipeContract LocalRmlUiRecoveryFailureContract)
     add_test(
         NAME RmlUiSourceScriptContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
@@ -2045,7 +2043,6 @@ if(BUILD_TESTING)
                     SourceFiles.test_${fixture})
         set_tests_properties(RmlUiSourceFixture_${fixture}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
-        list(APPEND _rmlui_source_contracts RmlUiSourceFixture_${fixture})
     endforeach()
     foreach(boundary IN ITEMS check apply postverify rename receipt admission)
         add_test(
@@ -2054,7 +2051,6 @@ if(BUILD_TESTING)
                     SourceFiles.test_interruption_at_${boundary}_never_marks_incomplete_ready)
         set_tests_properties(RmlUiSourceInterruption_${boundary}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
-        list(APPEND _rmlui_source_contracts RmlUiSourceInterruption_${boundary})
     endforeach()
     add_test(
         NAME RmlUiSourceCommandContract
@@ -2075,7 +2071,6 @@ if(BUILD_TESTING)
                     BorrowedFixtureRecovery.test_${recovery})
         set_tests_properties(RmlUiSourceRecovery_${recovery}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
-        list(APPEND _rmlui_source_contracts RmlUiSourceRecovery_${recovery})
     endforeach()
     add_test(
         NAME LocalRmlUiRecipeContract
@@ -2093,7 +2088,6 @@ if(BUILD_TESTING)
                     LocalSourceRecipe.test_${recipe})
         set_tests_properties(LocalRmlUiRecipe_${recipe}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
-        list(APPEND _rmlui_source_contracts LocalRmlUiRecipe_${recipe})
     endforeach()
     foreach(boundary IN ITEMS beforepatch afterpatch beforerename afterrename receipt configure)
         add_test(
@@ -2102,7 +2096,6 @@ if(BUILD_TESTING)
                     LocalRecipeRecovery.test_publication_${boundary}_returns_borrowed_input)
         set_tests_properties(LocalRmlUiRecovery_${boundary}
             PROPERTIES LABELS "ci;tools" TIMEOUT 60 RESOURCE_LOCK rmlui_offline_input)
-        list(APPEND _rmlui_source_contracts LocalRmlUiRecovery_${boundary})
     endforeach()
     add_test(
         NAME LocalRmlUiRecoveryFailureContract
@@ -2128,30 +2121,21 @@ if(BUILD_TESTING)
         # CTest can always run a reservation alone, even with a smaller -j.
         # Linux retains its existing parallelism. Local-check registrations
         # share this policy through local_check_contracts.cmake.
-        set_tests_properties(
-            WorldgenProbeSmokeValidatorContract AsanShardContract
-            ContainmentLinkClosureContract FirstPartyExceptionsContract
-            CTestShardContractPart1 CTestShardContractPart2
-            CTestShardContractPart3 CTestShardContractPart4
-            CTestShardContractPart5 CTestShardContractPart6
-            CTestShardContractPart7 CTestShardContractPart8
-            WorkflowPolicyContract WorkflowPolicyContractPart1
-            WorkflowPolicyContractPart2 WorkflowPolicyContractPart3
-            WorkflowPolicyContractPart4 WorkflowPolicyContractPart5
-            WorkflowPolicyContractPart6 WorkflowPolicyContractPart7
-            WorkflowPolicyContractPart8 WorkflowPolicyContractPart9
-            WorkflowPolicyContractPart10 WorkflowPolicyContractPart11
-            WorkflowPolicyContractPart12 WorkflowPolicyContractPart13
-            QualificationCaptureContract SlowestTestsScriptContract
-            LocalCheckRegistrationContract
-            ${_rmlui_source_contracts}
-            PROPERTIES PROCESSORS 4)
+        get_property(_registered_contracts DIRECTORY PROPERTY TESTS)
+        foreach(_contract IN LISTS _registered_contracts)
+            get_test_property(${_contract} LABELS _contract_labels)
+            if(NOT _contract IN_LIST _tools_existing_tests
+                    AND "ci" IN_LIST _contract_labels AND "tools" IN_LIST _contract_labels)
+                set_tests_properties(${_contract} PROPERTIES PROCESSORS 4)
+            endif()
+        endforeach()
         # Explicit costs seed longest-first scheduling on fresh runners.
         set_property(TEST WorkflowPolicyContract PROPERTY COST 30)
-        set_property(TEST CTestShardContractPart1 CTestShardContractPart2
-            CTestShardContractPart3 CTestShardContractPart4
-            CTestShardContractPart5 CTestShardContractPart6
-            CTestShardContractPart7 CTestShardContractPart8 PROPERTY COST 25)
+        foreach(_contract IN LISTS _registered_contracts)
+            if(_contract MATCHES "^CTestShardContractPart[0-9]+$")
+                set_property(TEST ${_contract} PROPERTY COST 25)
+            endif()
+        endforeach()
         set_property(TEST WorkflowPolicyContractPart1 PROPERTY COST 21)
         set_property(TEST WorkflowPolicyContractPart8 PROPERTY COST 20)
         set_property(TEST WorkflowPolicyContractPart9 PROPERTY COST 19)

@@ -97,7 +97,10 @@ class RegistrationTests(unittest.TestCase):
         blocks = re.findall(
             r'add_test\(\s*NAME AcceptanceMatrixContract\d*\s+COMMAND.*?\)\s*'
             r'set_tests_properties\(AcceptanceMatrixContract\d*\s+PROPERTIES.*?\)', source, re.S)
-        self.assertEqual(len(blocks), 225)
+        spec = importlib.util.spec_from_file_location("acceptance_roster", ROOT / "tools/ci/test_check_acceptance_matrix.py")
+        acceptance = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(acceptance)
+        self.assertEqual(len(blocks), acceptance._CONTRACT_PARTITIONS)
         with tempfile.TemporaryDirectory(prefix="acceptance registration ") as temporary:
             fixture = Path(temporary)
             cmake = ('cmake_minimum_required(VERSION 3.20)\nproject(AcceptanceRegistration LANGUAGES NONE)\n'
@@ -112,7 +115,7 @@ class RegistrationTests(unittest.TestCase):
             discovery = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
                                        check=True, capture_output=True, text=True)
             tests = json.loads(discovery.stdout)["tests"]
-            expected = {"AcceptanceMatrixContract" + (str(i + 1) if i else ""): i for i in range(225)}
+            expected = {"AcceptanceMatrixContract" + (str(i + 1) if i else ""): i for i in range(acceptance._CONTRACT_PARTITIONS)}
             self.assertEqual({test["name"] for test in tests}, set(expected))
             self.assertEqual(len(tests), len(expected))
             for test in tests:

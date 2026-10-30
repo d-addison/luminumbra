@@ -541,39 +541,90 @@ class CTestShardTests(unittest.TestCase):
                 shards.partition(tests, [name for name in names if name != removed["name"]])
         self.assertTrue(related[-1]["properties"][-1]["value"])
 
-    def contract_registration_inventory(self, windows, standalone=False):
+    def contract_registration_inventory(self, windows, standalone=False, extra=""):
         source = self.root / ("windows" if windows else "posix") / ("local" if standalone else "engine")
         source.mkdir(parents=True)
         # Execute the shipping Python registration tail in a compiler-free
         # project. The outer conditional replaces BUILD_TESTING; no targets,
         # compiler checks, dependency downloads or native tests are involved.
         if standalone:
-            registrations = 'include("' + (ROOT / "tools/ci/local_check_contracts.cmake").as_posix() + '")\n'
+            local = ROOT / "tools/ci/local_check_contracts.cmake"
+            if extra:
+                local_source = local.read_text(encoding="utf-8").replace(
+                    '${CMAKE_CURRENT_LIST_DIR}', local.parent.as_posix())
+                self.assertEqual(local_source.count("if(WIN32)\n"), 1)
+                local = source / "local_check_contracts.cmake"
+                local.write_text(local_source.replace("if(WIN32)\n", extra + "if(WIN32)\n"),
+                                 encoding="utf-8")
+            registrations = 'include("' + local.as_posix() + '")\n'
         else:
             cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
-            marker = "    find_package(Python3 COMPONENTS Interpreter REQUIRED)\n"
+            marker = "    get_property(_tools_existing_tests DIRECTORY PROPERTY TESTS)\n"
             self.assertEqual(cmake.count(marker), 1)
             registrations = "if(TRUE)\n" + marker + cmake.split(marker, 1)[1]
+            if extra:
+                marker = "    if(WIN32)\n        # Both Windows shard profiles"
+                self.assertIn(marker, registrations)
+                registrations = registrations.replace(marker, extra + marker)
         (source / "CMakeLists.txt").write_text(
             'cmake_minimum_required(VERSION 3.20)\nproject(ContractScheduling LANGUAGES NONE)\n'
             'enable_testing()\nfind_package(Python3 COMPONENTS Interpreter REQUIRED)\n'
             f'set(WIN32 {"TRUE" if windows else "FALSE"})\n'
             f'set(UNIX {"FALSE" if windows else "TRUE"})\n'
-            f'set(CMAKE_CURRENT_SOURCE_DIR "{(ROOT / "tools").as_posix()}")\n' + registrations,
+            f'set(CMAKE_CURRENT_SOURCE_DIR "{(ROOT / "tools").as_posix()}")\n'
+            'add_test(NAME ExistingCMakeContract COMMAND "${CMAKE_COMMAND}" -E true)\n'
+            'set_tests_properties(ExistingCMakeContract PROPERTIES LABELS "ci;tools;net" TIMEOUT 30)\n'
+            + registrations,
             encoding="utf-8")
         build = source / "build"
-        subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
+        configured = subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
+                        "--trace-expand", "--trace-format=json-v1",
                         f"-DPython3_EXECUTABLE={sys.executable}"],
-                       check=True, capture_output=True, text=True, timeout=10)
+                       check=True, capture_output=True, text=True, encoding="utf-8", timeout=10)
         cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
         self.assertNotRegex(cache, r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
         result = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
-                                check=True, capture_output=True, text=True, timeout=10)
-        return shards.inventory(json.loads(result.stdout))
+                                check=True, capture_output=True, text=True, encoding="utf-8", timeout=10)
+        rows = shards.inventory(json.loads(result.stdout))
+        declarations = [json.loads(line) for line in configured.stderr.splitlines() if line.startswith("{")]
+        self.assert_registration_inventory(rows, declarations)
+        return rows
+
+    def assert_registration_inventory(self, rows, declarations):
+        # Expanded CMake calls are independent of CTest's discovered properties.
+        # Compare multisets so a missing or repeated registration cannot cancel out.
+        registered = [call["args"][1] for call in declarations
+                      if call.get("cmd") == "add_test" and call["args"][0] == "NAME"]
+        self.assertCountEqual([row["name"] for row in rows], registered)
+        expected = set()
+        for call in declarations:
+            if call.get("cmd") != "set_tests_properties":
+                continue
+            args = call["args"]
+            boundary = args.index("PROPERTIES")
+            properties = dict(zip(args[boundary + 1::2], args[boundary + 2::2]))
+            if {"ci", "tools"} <= set(properties.get("LABELS", "").split(";")):
+                expected.update(args[:boundary])
+        selected = [row["name"] for row in rows if {"ci", "tools"} <= set(
+            next((prop["value"] for prop in row["properties"] if prop["name"] == "LABELS"), []))]
+        self.assertCountEqual(selected, expected)
+
+    def contract_priorities(self):
+        return {"WorkflowPolicyContract": 30, "ChangedTranslationUnitsContract": 29,
+                **{"CTestShardContractPart" + part: 25 for part in CTEST_SHARD_PARTITIONS},
+                "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
+                "WorkflowPolicyContractPart9": 19, "OfflineDependenciesContractPart2": 18,
+                "WorkflowPolicyContractPart10": 17, "WorkflowPolicyContractPart11": 16,
+                "WorkflowPolicyContractPart12": 15, "WorkflowPolicyContractPart13": 14,
+                "OfflineDependenciesContract": 10, "OfflineDependenciesContractPart1": 10}
 
     def test_windows_contract_reservations_cover_both_projects_and_preserve_shards(self):
-        local_names = {"ChangedTranslationUnitsContract", "OfflineDependenciesContract",
-                       "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"}
+        spec = importlib.util.spec_from_file_location("offline_roster", ROOT / "tools/ci/test_offline_deps.py")
+        offline = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(offline)
+        local_names = {"ChangedTranslationUnitsContract"} | {
+            "OfflineDependenciesContract" + ("" if part == "0" else "Part" + part)
+            for part in offline.OFFLINE_PARTITIONS}
         borrowed_input_names = {
             "RmlUiSourceScriptContract", "RmlUiSourceCommandContract",
             "LocalRmlUiRecipeContract", "LocalRmlUiRecoveryFailureContract",
@@ -596,13 +647,7 @@ class CTestShardTests(unittest.TestCase):
             *{"LocalRmlUiRecovery_" + name for name in (
                 "beforepatch", "afterpatch", "beforerename", "afterrename", "receipt", "configure")},
         }
-        priorities = {"WorkflowPolicyContract": 30, "ChangedTranslationUnitsContract": 29,
-                      **{f"CTestShardContractPart{index}": 25 for index in range(1, 9)},
-                      "WorkflowPolicyContractPart1": 21, "WorkflowPolicyContractPart8": 20,
-                      "WorkflowPolicyContractPart9": 19, "OfflineDependenciesContractPart2": 18,
-                      "WorkflowPolicyContractPart10": 17, "WorkflowPolicyContractPart11": 16,
-                      "WorkflowPolicyContractPart12": 15, "WorkflowPolicyContractPart13": 14,
-                      "OfflineDependenciesContract": 10, "OfflineDependenciesContractPart1": 10}
+        priorities = self.contract_priorities()
         for standalone in (False, True):
             inventories = {}
             for windows in (False, True):
@@ -630,7 +675,6 @@ class CTestShardTests(unittest.TestCase):
                             self.assertNotIn("PROCESSORS", props)
                             self.assertNotIn("COST", props)
                 self.assertTrue(local_names <= set(selected))
-                self.assertEqual(len(selected), 4 if standalone else 62 if windows else 64)
                 if not standalone:
                     self.assertTrue(borrowed_input_names <= set(selected))
                     self.assertTrue({"ContainmentLinkClosureContract",
@@ -645,8 +689,6 @@ class CTestShardTests(unittest.TestCase):
                     # shard membership, index order or relationship closure.
                     for operation in (shards.partition, shards._partition_validated, shards._partition_projected):
                         self.assertEqual(operation(rows, names, profile), operation(unthrottled, names, profile))
-                if standalone:
-                    self.assertEqual(set(selected), local_names)
             posix = {row["name"]: row for row in inventories[False]}
             for row in inventories[True]:
                 if row["name"] not in selected:
@@ -659,11 +701,13 @@ class CTestShardTests(unittest.TestCase):
 
     def test_ctest_windows_reservations_run_alone_longest_first_with_smaller_parallelism(self):
         rows = self.contract_registration_inventory(True)
-        names = ["WorkflowPolicyContract", "ChangedTranslationUnitsContract", "CTestShardContractPart1",
-                 "WorkflowPolicyContractPart1", "WorkflowPolicyContractPart8", "WorkflowPolicyContractPart9",
-                 "OfflineDependenciesContractPart2", "WorkflowPolicyContractPart10",
-                 "WorkflowPolicyContractPart11", "WorkflowPolicyContractPart12", "WorkflowPolicyContractPart13",
-                 "OfflineDependenciesContract"]
+        # One representative per distinct scheduling cost exercises every tier.
+        # COST values are deliberate policy pins checked against the source above.
+        by_cost = {}
+        for name, cost in self.contract_priorities().items():
+            by_cost.setdefault(cost, name)
+        self.assertTrue(by_cost)
+        names = [by_cost[cost] for cost in sorted(by_cost, reverse=True)]
         probe = self.root / "probe.py"
         probe.write_text(
             "import pathlib, sys, time\n"
@@ -697,6 +741,28 @@ class CTestShardTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((build / "order").read_text(encoding="utf-8").splitlines(), names)
             self.assertFalse((build / "active").exists())
+
+    def test_added_registration_is_reserved_and_inventory_drift_is_detected(self):
+        self.root = self.root / "contract café"
+        extra = ('    add_test(NAME AddedContract COMMAND "${Python3_EXECUTABLE}" -I -B '
+                 '"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ci_paths.py")\n'
+                 '    set_tests_properties(AddedContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)\n')
+        for standalone in (False, True):
+            for windows in (False, True):
+                rows = self.contract_registration_inventory(windows, standalone, extra=extra)
+                added = next(row for row in rows if row["name"] == "AddedContract")
+                props = {prop["name"]: prop["value"] for prop in added["properties"]}
+                self.assertEqual(props.get("PROCESSORS", 1), 4 if windows else 1)
+                existing = next(row for row in rows if row["name"] == "ExistingCMakeContract")
+                self.assertNotIn("PROCESSORS", {prop["name"] for prop in existing["properties"]})
+        declarations = [{"cmd": "add_test", "args": ["NAME", "AddedContract"]},
+                        {"cmd": "set_tests_properties", "args": [
+                            "AddedContract", "PROPERTIES", "LABELS", "ci;tools"]}]
+        row = test("AddedContract", LABELS=["ci", "tools"])
+        self.assert_registration_inventory([row], declarations)
+        for rows in ([], [row, row], [test("AddedContract")]):
+            with self.subTest(rows=rows), self.assertRaises(AssertionError):
+                self.assert_registration_inventory(rows, declarations)
 
     def shared_gl_inventory(self):
         locked = [test("RenderTraversalIntegrated", RESOURCE_LOCK=["luminumbra_gl_context"]),
@@ -2998,9 +3064,8 @@ class GateArgumentTests(unittest.TestCase):
                     self.assertIn(diagnostic, stderr)
 
 
-# Whole-case overrides balance eight groups for the unchanged 30s Windows
+# Whole-case overrides balance the groups for the unchanged 30s Windows
 # deadline. New methods in known classes enter part 1 automatically.
-CTEST_SHARD_PARTITIONS = ("1", "2", "3", "4", "5", "6", "7", "8")
 CTEST_SHARD_CLASS_PARTITIONS = {
     "CTestShardTests": "1",
     "ExecutionNormalizationTests": "1",
@@ -3032,6 +3097,10 @@ CTEST_SHARD_CASE_PARTITIONS = {
     "CTestShardTests.test_light_coverage_refuses_missing_extra_skipped_or_mismatched_selection_without_mutation": "8",
     "CTestShardTests.test_every_lane_rechecks_same_context_and_preserves_limits_and_exit_status": "8",
 }
+
+
+CTEST_SHARD_PARTITIONS = tuple(sorted(set(CTEST_SHARD_CLASS_PARTITIONS.values()) |
+                                     set(CTEST_SHARD_CASE_PARTITIONS.values()), key=int))
 
 
 def ctest_shard_cases(suite):
@@ -3124,7 +3193,7 @@ class CTestShardPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "0", "-1", "9", "01", "1/8", None, 1):
+        for invalid in ("", "0", "-1", str(max(map(int, CTEST_SHARD_PARTITIONS)) + 1), "01", "1/8", None, 1):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 ctest_shard_partition_suite(loader, module, invalid)
         complete = list(ctest_shard_cases(loader.loadTestsFromModule(module)))
@@ -3233,7 +3302,7 @@ class CTestShardPartitionSelectionTests(unittest.TestCase):
                 self.assertEqual(ctest_shard_main(["--partition", partition, "--list-tests"]), 0)
                 expected = ctest_shard_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in ctest_shard_cases(expected)])
-        for argv in (["--partition"], ["--partition", "9"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", str(max(map(int, CTEST_SHARD_PARTITIONS)) + 1)], ["--partition", "01"],
                      ["--partition", "1", "--partition", "2"], ["--list-tests"],
                      ["--partition", "1", "CTestShardTests"], ["--partition", "1", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
