@@ -188,7 +188,8 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         const bool current_container =
             json.is_object() && json.contains("container_version") &&
             json.at("container_version").is_number_integer() &&
-            json.at("container_version") == WorldSaveService::kContainerVersion;
+            (json.at("container_version") == WorldSaveService::kContainerVersion ||
+             json.at("container_version") == WorldSaveService::kIndexedMetadataVersion);
         if (!current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;

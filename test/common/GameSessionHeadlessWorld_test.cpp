@@ -1,3 +1,4 @@
+#include "../support/IndexedSaveFixture.h"
 // asset-manifest split. The engine-side GameSession validates
 // SIMULATION requirements only (preset and worldgen dependencies); renderer/UI
 // asset requirements are caller-supplied by the client. Worldgen dependencies
@@ -2581,14 +2582,19 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
         SCOPED_TRACE(with_chunks);
         fs::remove_all(snapshot);
         ASSERT_TRUE(fs::create_directories(snapshot));
-        fs::copy_file(source_save / "world_info.json", snapshot / "world_info.json");
         fs::copy_file(source_save / "preset.json", snapshot / "preset.json");
+        Luminumbra::WorldStreamingState state;
         if (with_chunks) {
-            Luminumbra::WorldStreamingState state;
             auto chunk = state.get_or_create_chunk(Luminumbra::IVec3(0, 0, 0));
             chunk->set_state(Luminumbra::ChunkState::Idle);
-            ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
         }
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(snapshot, [&] {
+            return P::WorldSaveService::write_member_bytes(snapshot, "world_info.json", ReadClockTestFile(source_save / "world_info.json")) &&
+                P::WorldSaveService::remove_member(snapshot, "chunks/region/active-regions.arl") &&
+                (!with_chunks || P::WorldSaveService{}.save_world(state, snapshot));
+        }));
+        ASSERT_FALSE(fs::exists(P::WorldSaveService::active_regions_path(snapshot)));
+        ASSERT_TRUE(fs::exists(P::WorldSaveService::world_manifest_path(snapshot)));
         reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
         auto before = SavedPresetTestDiskBytes(snapshot);
         ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
@@ -2597,14 +2603,16 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
 
         auto metadata = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
         ASSERT_EQ(metadata.erase("waterSimCursor"), 1u);
-        ASSERT_NO_FATAL_FAILURE(WriteSavedPresetTestJson(snapshot / "world_info.json", metadata));
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), snapshot));
         reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
         before = SavedPresetTestDiskBytes(snapshot);
         ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
         EXPECT_EQ(SavedPresetTestDiskBytes(snapshot), before);
 
-        ASSERT_TRUE(fs::remove(snapshot / "world_info.json"));
+        ASSERT_TRUE(P::WorldSaveService::remove_member(snapshot, "world_info.json"));
+        ASSERT_FALSE(fs::exists(snapshot / "world_info.json"));
+        ASSERT_TRUE(fs::exists(P::WorldSaveService::world_manifest_path(snapshot)));
         reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
         ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
@@ -5599,6 +5607,66 @@ TEST(GameSessionHeadlessWorldTest, SnapshotMissingIndexWithMarkerIsRefused) {
     EXPECT_NE(reopened.GetWorldOpenError().find("inconsistent snapshot"), std::string::npos);
 }
 
+TEST(GameSessionHeadlessWorldTest, IndexedEnvelopeWitnessesSurviveMissingIndexAndMetadata) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Envelope witness", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto source = owner.GetWorldSaveDir();
+    const auto manifest_path = P::WorldSaveService::world_manifest_path(source);
+    ASSERT_TRUE(fs::exists(manifest_path)); // Required even with no chunks.
+    const auto info = nlohmann::json::parse(ReadClockTestFile(source / "world_info.json"));
+    const auto manifest = nlohmann::json::parse(ReadClockTestFile(manifest_path));
+    EXPECT_EQ(info.at("container_version"), 3);
+    EXPECT_EQ(manifest.at("schema"), "luminumbra.persistence.world_manifest.v2");
+    for (int witness = 0; witness < 8; ++witness) {
+        SCOPED_TRACE(witness);
+        const auto save = root.path() / ("witness-" + std::to_string(witness));
+        fs::copy(source, save, fs::copy_options::recursive);
+        if (witness == 2) {
+            ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(save, [&] {
+                return P::WorldSaveService::remove_member(save, "world_info.json") &&
+                       P::WorldSaveService::remove_member(save, "chunks/region/active-regions.arl");
+            }));
+            EXPECT_FALSE(fs::exists(save / "world_info.json"));
+            EXPECT_TRUE(fs::exists(P::WorldSaveService::world_manifest_path(save)));
+        }
+        ASSERT_TRUE(fs::remove(P::snapshot_index_path(save)));
+        if (witness == 0) {
+            auto value = info;
+            value.erase("snapshotFormat");
+            std::ofstream(save / "world_info.json") << value.dump();
+            ASSERT_TRUE(fs::remove(P::WorldSaveService::world_manifest_path(save)));
+        } else if (witness == 1) {
+            ASSERT_TRUE(fs::remove(save / "world_info.json"));
+        } else if (witness == 3 || witness == 4) {
+            const auto path = witness == 3 ? save / "world_info.json"
+                                           : P::WorldSaveService::world_manifest_path(save);
+            std::ofstream(path) << "{";
+        } else if (witness == 5) {
+            auto value = info;
+            value["container_version"] = 4;
+            std::ofstream(save / "world_info.json") << value.dump();
+        } else if (witness == 6) {
+            auto value = manifest;
+            value["schema"] = "luminumbra.persistence.world_manifest.v3";
+            std::ofstream(P::WorldSaveService::world_manifest_path(save)) << value.dump();
+        } else if (witness == 7) {
+            ASSERT_TRUE(fs::remove(P::WorldSaveService::world_manifest_path(save)));
+            fs::create_directory(P::WorldSaveService::world_manifest_path(save));
+        }
+        const auto before_metadata = ReadClockTestFile(save / "world_info.json");
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::WorldSaveService::validate_save(save, &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before_metadata);
+        EXPECT_FALSE(P::journal_pending(save));
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, SnapshotTamperedMemberIsRefused) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -5668,22 +5736,20 @@ TEST(GameSessionHeadlessWorldTest, SnapshotPendingJournalIsRolledBackAtOpen) {
     const auto save = owner.GetWorldSaveDir();
     const auto worldId = owner.GetMetadata().worldId;
     const auto info_bytes = ReadClockTestFile(save / "world_info.json");
-    // Stage a PUBLISHED transaction: protect the metadata (journal + undo copy), keep a copy of
-    // the journal, roll the transaction back, then modify the metadata and restore the journal.
-    // The directory now looks like a crash between "member replaced" and "index published".
-    const auto side = root.path() / "journal-copy";
+    // Retain the actual interrupted journal objects: copied files have different ownership.
+    const auto side = root.path() / "interrupted-journal";
     {
         P::SaveTransaction txn(save, 0, {}, &P::WorldSaveService::member_digest);
         ASSERT_TRUE(txn.begin(nullptr));
         ASSERT_TRUE(txn.protect({"world_info.json"}, nullptr));
-        fs::copy(P::journal_directory(save), side, fs::copy_options::recursive);
-        txn.abort(nullptr);
+        auto info = nlohmann::json::parse(info_bytes);
+        info["name"] = "half written";
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(info.dump(2), save));
+        fs::rename(P::journal_directory(save), side);
+        txn.abort(nullptr); // Refuses the displaced journal and retains recovery evidence.
     }
     ASSERT_FALSE(P::journal_pending(save));
-    auto info = nlohmann::json::parse(info_bytes);
-    info["name"] = "half written";
-    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << info.dump(2);
-    fs::copy(side, P::journal_directory(save), fs::copy_options::recursive);
+    fs::rename(side, P::journal_directory(save));
     const auto entry = Luminumbra::Persistence::InspectSavedWorld(root.path(), worldId);
     EXPECT_TRUE(entry.pending_recovery);
     EXPECT_TRUE(entry.error.empty());

@@ -46,6 +46,29 @@ struct RegionDigestInputs {
     bool require_index = true;
 };
 
+// One owner-thread digest operation admits the index once, then verifies actual region bytes
+// on every read. Owner-thread publication invalidates the admitted index.
+class RegionDigestOperation {
+public:
+    RegionDigestOperation(const std::filesystem::path& save_dir, bool require_index);
+    std::uint64_t digest(world::RegionKey key, const RegionDigestInputs& inputs);
+    [[nodiscard]] std::size_t index_reads() const {
+        return m_index_reads;
+    }
+    [[nodiscard]] std::size_t input_items() const {
+        return m_input_items;
+    }
+
+private:
+    std::unique_lock<std::recursive_mutex> m_ownership;
+    std::filesystem::path m_save_dir;
+    SnapshotIndex m_index;
+    std::uint64_t m_publication_revision = 0;
+    bool m_require_index = false;
+    std::size_t m_index_reads = 0;
+    std::size_t m_input_items = 0;
+};
+
 // Persists WorldStreamingState snapshots beneath a world save directory.
 //
 // Current layout: chunks/region/r.<rx>.<rz>.lmr and world-manifest.json.
@@ -67,8 +90,24 @@ public:
         std::unique_lock<std::recursive_mutex> m_lock;
     };
 
-    // Also recorded in world_info.json, including before the first chunk save.
+    // LMR payload wire version; metadata envelopes have their own version boundary.
     static constexpr std::uint16_t kContainerVersion = 2;
+    static constexpr std::uint16_t kIndexedMetadataVersion = 3;
+    struct SaveFormat {
+        bool indexed = false;
+        bool requires_index = false;
+    };
+    // Present invalid control files refuse; only v2 metadata/v1 manifests permit index absence.
+    static bool read_save_format(const std::filesystem::path& save_dir,
+                                 SaveFormat& format,
+                                 std::vector<std::string>* errors = nullptr,
+                                 const std::stop_token& stop = {},
+                                 SnapshotIndex* admitted_index = nullptr);
+    // Persistence integration calls this after payload writers and before the final index.
+    // A deliberately absent metadata member stays absent; the manifest is always published.
+    static bool finalize_indexed_envelope(const std::filesystem::path& save_dir,
+                                          std::vector<std::string>* errors = nullptr,
+                                          CreatedWorldArtifacts* artifacts = nullptr);
     static constexpr const char* kObsoleteWorldMessage =
         "This world predates the v0.3.0 format and cannot be opened. Create a new world; migration "
         "is not supported.";
@@ -132,7 +171,8 @@ public:
     // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
                                                   world::RegionKey key,
-                                                  const RegionDigestInputs& inputs);
+                                                  const RegionDigestInputs& inputs,
+                                                  const SnapshotIndex* admitted_index = nullptr);
     // Compatibility call shape: live chunks with no parked inputs, using the same v2 projection.
     static std::uint64_t
     region_simulation_digest(const std::filesystem::path& save_dir,
@@ -221,7 +261,8 @@ public:
                                                  int min_chunk_z,
                                                  int max_chunk_z,
                                                  std::vector<std::shared_ptr<Chunk>>& out_chunks,
-                                                 std::vector<std::string>* errors = nullptr);
+                                                 std::vector<std::string>* errors = nullptr,
+                                                 const SnapshotIndex* admitted_index = nullptr);
     enum class ChunkReadStatus {
         Found,
         Absent,
@@ -340,7 +381,34 @@ public:
     static bool durable_write_file(const std::filesystem::path& destination,
                                    const std::string& bytes,
                                    std::vector<std::string>* errors = nullptr,
-                                   const std::filesystem::path& staging = {});
+                                   const std::filesystem::path& staging = {},
+                                   std::array<std::uint64_t, 3>* published_identity = nullptr);
+    using ArtifactIdentity = std::array<std::uint64_t, 3>;
+    // Versioned journal records append through one verified handle; total control bytes stay
+    // within kMaxSnapshotIndexBytes. Empty expected identity requests exclusive creation.
+    static bool append_journal_record(const std::filesystem::path& path,
+                                      const std::string& record,
+                                      ArtifactIdentity& identity,
+                                      std::vector<std::string>* errors);
+    // Recovery operations require the recorded object, including at the destructive operation.
+    static bool artifact_identity(const std::filesystem::path& path,
+                                  ArtifactIdentity& identity,
+                                  bool& missing,
+                                  bool directory = false);
+    static bool remove_owned_entry(const std::filesystem::path& path,
+                                   const ArtifactIdentity& identity,
+                                   std::vector<std::string>* errors,
+                                   bool directory = false);
+    static bool prepare_restoration(const std::filesystem::path& staging,
+                                    const std::string& bytes,
+                                    std::filesystem::path& temp,
+                                    ArtifactIdentity& identity,
+                                    std::vector<std::string>* errors);
+    static bool publish_restoration(const std::filesystem::path& temp,
+                                    const std::filesystem::path& destination,
+                                    const ArtifactIdentity& expected,
+                                    const ArtifactIdentity& incoming,
+                                    std::vector<std::string>* errors);
     // Unlinks `path` when it exists (a missing file is success) and flushes the parent directory.
     // Fires "before-delete"/"after-delete".
     static bool durable_remove(const std::filesystem::path& path,

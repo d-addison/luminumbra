@@ -1,3 +1,4 @@
+#include "../support/IndexedSaveFixture.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -204,32 +205,33 @@ protected:
                           const std::string& id,
                           const nlohmann::json& metadata) {
         SCOPED_TRACE(static_cast<int>(failure));
-        ASSERT_TRUE(
-            WorldSaveService::write_file_durably(save / "world_info.json", metadata.dump()));
         WorldStreamingState state;
         auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
         chunk->set_state(ChunkState::Idle);
-        chunk->sdf_data =
-            failure == LoadFailure::Sdf ? std::vector<float>{1.0f} : std::vector<float>{};
-        ASSERT_TRUE(WorldSaveService{}.save_world(state, save));
-        if (failure == LoadFailure::PartialLedger || failure == LoadFailure::EmptyLedger ||
-            failure == LoadFailure::Scheduler || failure == LoadFailure::ActiveRegionsRequired) {
-            auto clock_metadata = metadata;
-            clock_metadata.erase("renderCalendar");
-            world::WorldClock(0, world::WorldCalendar::Legacy()).write_metadata(clock_metadata);
-            ASSERT_TRUE(WorldSaveService::write_file_durably(save / "world_info.json",
-                                                             clock_metadata.dump()));
+        chunk->sdf_data = failure == LoadFailure::Sdf ? std::vector<float>{1.0f} : std::vector<float>{};
+        const bool clock_case = failure == LoadFailure::PartialLedger || failure == LoadFailure::EmptyLedger ||
+            failure == LoadFailure::Scheduler || failure == LoadFailure::ActiveRegionsRequired;
+        auto incoming = metadata;
+        world::WorldClock clock(0, world::WorldCalendar::Legacy());
+        if (clock_case) {
+            incoming.erase("renderCalendar");
+            clock.write_metadata(incoming);
         }
+        world::ActiveRegionLedger persisted(failure == LoadFailure::Scheduler ? world::RegionSchedulerConfig{10, 3, 2}
+                                                                           : world::RegionSchedulerConfig{});
+        persisted.set_local_anchor(Vec3(8, 18, 8));
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(save, [&] {
+            return WorldSaveService::remove_member(save, "chunks/region/active-regions.arl") &&
+                WorldSaveService::write_member_bytes(save, "world_info.json", incoming.dump()) &&
+                WorldSaveService{}.save_world(state, save) &&
+                (!clock_case || WorldSaveService::save_active_regions(persisted, clock, save));
+        }));
+        ASSERT_EQ(Metadata(save).at("waterSimCursor"), 65);
         const auto ledger_path = WorldSaveService::active_regions_path(save);
-        fs::remove(ledger_path);
+        ASSERT_EQ(fs::exists(ledger_path), clock_case);
         if (failure == LoadFailure::PartialLedger || failure == LoadFailure::EmptyLedger) {
             ASSERT_TRUE(WorldSaveService::write_file_durably(
                 ledger_path, failure == LoadFailure::PartialLedger ? "partial ledger" : ""));
-        }
-        if (failure == LoadFailure::Scheduler) {
-            world::ActiveRegionLedger persisted(world::RegionSchedulerConfig{10, 3, 2});
-            persisted.set_local_anchor(Vec3(8, 18, 8));
-            ASSERT_TRUE(WorldSaveService::write_file_durably(ledger_path, persisted.encode()));
         }
         if (failure == LoadFailure::Chunk) {
             const auto region = WorldSaveService::region_file_path(save, 0, 0);
@@ -241,7 +243,7 @@ protected:
             ASSERT_TRUE(fs::remove(save / "world_info.json"));
             ASSERT_TRUE(fs::create_directory(save / "world_info.json"));
         } else if (failure == LoadFailure::Cursor) {
-            auto invalid = metadata;
+            auto invalid = Metadata(save);
             invalid["waterSimCursor"] = -1;
             ASSERT_TRUE(
                 WorldSaveService::write_file_durably(save / "world_info.json", invalid.dump()));
@@ -258,11 +260,7 @@ protected:
         for (const int load_path : {0, 1, 2}) {
             ASSERT_NO_FATAL_FAILURE(CheckRetainedWorld(failure, save, id, load_path));
         }
-        // Restore the malformed container before preparing the next failure.
-        fs::remove_all(WorldSaveService::region_directory(save));
-        fs::remove(WorldSaveService::world_manifest_path(save));
-        fs::remove(ledger_path);
-        fs::remove_all(save / "world_info.json");
+
     }
 };
 
@@ -395,8 +393,9 @@ TEST_P(WorldStateCommit, RefusedLoadsClearResidentChunksWithoutPublishingStagedM
     metadata["renderCalendar"] =
         world::WorldClock(0, world::WorldCalendar::Legacy()).calendar_metadata();
     metadata["waterSimCursor"] = 65;
-    // Directly author a presentation-only save, usable with either feature setting.
-    fs::remove(WorldSaveService::active_regions_path(save));
+    // Every corruption case starts from its own copy of a valid committed baseline.
+    const auto baseline = root / "refusal-baseline";
+    fs::copy(save, baseline, fs::copy_options::recursive);
     std::vector<LoadFailure> failures{LoadFailure::Sdf,
                                       LoadFailure::Chunk,
                                       LoadFailure::PartialMetadata,
@@ -410,6 +409,9 @@ TEST_P(WorldStateCommit, RefusedLoadsClearResidentChunksWithoutPublishingStagedM
         failures.push_back(LoadFailure::ActiveRegionsRequired);
     }
     for (const auto failure : failures) {
+        fs::remove_all(save);
+        fs::copy(baseline, save, fs::copy_options::recursive);
+        ASSERT_TRUE(WorldSaveService::validate_save(save));
         ASSERT_NO_FATAL_FAILURE(CheckRefusedLoad(failure, save, id, metadata));
     }
 }

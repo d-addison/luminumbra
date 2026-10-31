@@ -32,6 +32,10 @@
 #include <utility>
 #include <vector>
 
+namespace Luminumbra::Persistence {
+struct RegionDigestInputs;
+}
+
 namespace Luminumbra::Systems {
 
 class PhysicsSystem;
@@ -1039,6 +1043,15 @@ public:
                                   std::function<void(std::string)> fault);
     void remember_durable_chunks(const std::vector<IVec3>& coords);
     std::vector<IVec3> durable_chunk_inventory() const;
+    // Owner-thread membership is maintained at adoption/parking/eviction, never rebuilt per probe.
+    Persistence::RegionDigestInputs region_digest_inputs(i32 rx, i32 rz) const;
+    bool has_region_members(i32 rx, i32 rz) const;
+    std::vector<std::pair<i32, i32>> authority_region_keys() const;
+    // Const deterministic work diagnostic: number of regional input entries copied.
+    u64 region_digest_input_items() const {
+        return m_region_digest_input_items;
+    }
+
     bool restore_authoritative_chunk(const IVec3& coords);
     void release_clean_parked_chunks();
     void note_persistence_outcome(bool ok) {
@@ -1171,6 +1184,16 @@ private:
         std::int64_t tick = -1;
     };
     std::unordered_map<ChunkID, ParkedChunk> m_parked;
+    struct DigestMembership {
+        std::unordered_map<ChunkID, std::shared_ptr<Chunk>> live;
+        std::unordered_map<ChunkID, std::shared_ptr<Chunk>> parked;
+        std::unordered_map<ChunkID, IVec3> durable;
+    };
+    std::unordered_map<u64, DigestMembership> m_digest_members;
+    mutable u64 m_region_digest_input_items = 0;
+    u64 m_digest_membership_revision = 0;
+    static u64 digest_region_id(i32 rx, i32 rz);
+    void note_digest_chunk(const std::shared_ptr<Chunk>& chunk, bool parked, bool present);
     std::map<ChunkID, IVec3> m_durable_chunks;
     std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
     std::function<void(std::string)> m_durable_chunk_fault;

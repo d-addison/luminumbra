@@ -288,7 +288,7 @@ JournalCaptureState& JournalCapture() {
 
 void CaptureJournalHook(const char* step, const fs::path& /*path*/) {
     if (std::string_view(step) == "commit-point" && fs::exists(JournalCapture().source)) {
-        CopyTree(JournalCapture().source, JournalCapture().target);
+        fs::rename(JournalCapture().source, JournalCapture().target);
     }
 }
 
@@ -531,6 +531,58 @@ TEST(SaveTransaction, AbortRestoresPreviousBytesAndRemovesCreatedMembers) {
     EXPECT_FALSE(journal_pending(save.path()));
 }
 
+TEST(SaveTransaction, AbortRefusesForeignCreatedAndReplacedOccupants) {
+    for (const bool replacing : {false, true}) {
+        SCOPED_TRACE(replacing);
+        TempSave save, displaced;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        const std::string relative = replacing ? "world_info.json" : "aether_state.efs";
+        const auto member = save.path() / relative;
+        {
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({relative}, nullptr));
+            ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), relative, "ours"));
+            fs::rename(member, displaced.path() / "owned");
+            Put(member, "foreign occupant");
+            std::vector<std::string> errors;
+            transaction.abort(&errors);
+            EXPECT_FALSE(errors.empty());
+            EXPECT_EQ(Get(member), "foreign occupant");
+            EXPECT_TRUE(journal_pending(save.path()));
+        }
+        fs::rename(member, displaced.path() / "foreign");
+        fs::rename(displaced.path() / "owned", member);
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_EQ(Get(displaced.path() / "foreign"), "foreign occupant");
+    }
+}
+
+TEST(SaveTransaction, AbortRefusesSubstitutedJournalAndRecoveryRefusesUnknownDebris) {
+    TempSave save, displaced;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    {
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "ours"));
+        fs::rename(journal_directory(save.path()), displaced.path() / "owned-journal");
+        Put(journal_directory(save.path()) / "foreign", "retain");
+        transaction.abort(nullptr);
+        EXPECT_EQ(Get(journal_directory(save.path()) / "foreign"), "retain");
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "ours");
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Get(journal_directory(save.path()) / "foreign"), "retain");
+    }
+    fs::rename(journal_directory(save.path()), displaced.path() / "foreign-journal");
+    fs::rename(displaced.path() / "owned-journal", journal_directory(save.path()));
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), baseline);
+    EXPECT_EQ(Get(displaced.path() / "foreign-journal/foreign"), "retain");
+}
+
 TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
@@ -707,7 +759,7 @@ TEST(SaveTransaction, RecoveryDiscardsStaleJournalWhenIndexAlreadyCommitted) {
     ASSERT_FALSE(journal_pending(save.path()));
     const TreeMap post_commit = Tree(save.path());
 
-    CopyTree(JournalCapture().target, journal_directory(save.path()));
+    fs::rename(JournalCapture().target, journal_directory(save.path()));
     ASSERT_TRUE(journal_pending(save.path()));
 
     std::vector<std::string> errors;
@@ -887,7 +939,10 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
     int recovery_kills = 0;
     for (int m = 1; m <= 20 && !saw_finish; ++m) {
         TempSave rec;
-        CopyTree(dead.path(), rec.path());
+        CopyTree(base.path(), rec.path());
+        EXPECT_EXIT(ChildKillScenario(rec.path(), kill_at), KilledOrFinished, "");
+        ASSERT_EQ(DeathState().last_exit_code, 7);
+        ASSERT_TRUE(journal_pending(rec.path()));
         EXPECT_EXIT(ChildKilledRecovery(rec.path(), m), KilledOrFinished, "");
         ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7)
             << "M=" << m << " child exit=" << DeathState().last_exit_code;
@@ -1014,7 +1069,7 @@ TEST(SaveTransaction, DISABLED_WindowsInterruptionChild) {
 }
 
 TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) {
-    TempSave base, final, work, interrupted;
+    TempSave base, final, work;
     ASSERT_TRUE(CommitOnce(base.path(),
                            1,
                            {{"world_info.json", "w0"},
@@ -1026,6 +1081,7 @@ TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) 
     const auto finished_tree = Tree(final.path());
     bool complete = false;
     bool have_interrupted = false;
+    int interrupted_cut = 0;
     for (int cut = 1; cut <= 200 && !complete; ++cut) {
         SCOPED_TRACE(cut);
         CopyTree(base.path(), work.path());
@@ -1037,7 +1093,7 @@ TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) 
         ASSERT_TRUE(code == 0 || code == 7) << code;
         if (!have_interrupted && journal_pending(work.path()) &&
             Get(work.path() / "aether_state.efs") != "e0") {
-            CopyTree(work.path(), interrupted.path());
+            interrupted_cut = cut;
             have_interrupted = true;
         }
         std::vector<std::string> errors;
@@ -1052,7 +1108,11 @@ TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) 
     complete = false;
     for (int cut = 1; cut <= 200 && !complete; ++cut) {
         SCOPED_TRACE(cut);
-        CopyTree(interrupted.path(), work.path());
+        CopyTree(base.path(), work.path());
+        const auto interrupted_exit = WindowsTxnChild(work.path(), interrupted_cut, false);
+        ASSERT_TRUE(interrupted_exit.has_value());
+        ASSERT_EQ(interrupted_exit.value_or(9), 7u);
+        ASSERT_TRUE(journal_pending(work.path()));
         const auto exit_code = WindowsTxnChild(work.path(), cut, true);
         ASSERT_TRUE(exit_code.has_value());
         if (!exit_code.has_value())

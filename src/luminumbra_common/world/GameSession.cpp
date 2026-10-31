@@ -1827,25 +1827,22 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                 : std::nullopt;
         // Built lazily on the first probe call of this tick.
         std::optional<std::set<RegionKey>> owned_regions;
+        std::optional<Persistence::RegionDigestOperation> digest_operation;
         try {
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
                 anchors,
                 m_regionWork,
-                [this](RegionKey key) {
+                [this, &digest_operation](RegionKey key) {
                     const auto directory = m_regionDurableDirectory.empty()
                                                ? GetWorldSaveDir()
                                                : m_regionDurableDirectory;
-                    return Persistence::WorldSaveService::region_simulation_digest(
-                        directory,
-                        key,
-                        m_worldSystem
-                            ? Persistence::
-                                  RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                     m_worldSystem->snapshot_parked_chunks(),
-                                                     m_worldSystem->durable_chunk_inventory(),
-                                                     m_regionRequiresIndex}
-                            : Persistence::RegionDigestInputs{});
+                    if (!digest_operation)
+                        digest_operation.emplace(directory, m_regionRequiresIndex);
+                    auto inputs = m_worldSystem ? m_worldSystem->region_digest_inputs(key.x, key.z)
+                                                : Persistence::RegionDigestInputs{};
+                    inputs.require_index = m_regionRequiresIndex;
+                    return digest_operation->digest(key, inputs);
                 },
                 // Later slices extend this probe with ground objects,
                 // pages, creatures, plants and water debt.
@@ -1854,23 +1851,9 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
-                        if (!m_worldSystem)
-                            return owned_regions->contains(key);
-                        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
-                            int rx = 0, rz = 0;
-                            Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
-                            owned_regions->insert(RegionKey{rx, rz});
-                        }
-                        for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
-                            if (!chunk)
-                                continue;
-                            int rx = 0, rz = 0;
-                            Persistence::WorldSaveService::region_coords_for_chunk(
-                                chunk->get_coords(), rx, rz);
-                            owned_regions->insert(RegionKey{rx, rz});
-                        }
                     }
-                    return owned_regions->contains(key);
+                    return owned_regions->contains(key) ||
+                           (m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));
                 });
             m_regionWork.clear();
         } catch (const std::exception& error) {
@@ -2047,46 +2030,30 @@ std::string GameSession::ComputeChunkStateHash() {
         m_worldSystem->sync_water_authority();
     if (!m_worldSystem)
         return {};
-    const auto live = m_worldSystem->snapshot_streamed_chunks();
     if (!m_activeRegionsEnabled) {
+        const auto live = m_worldSystem->snapshot_streamed_chunks();
         WorldStreamingState state;
         for (const auto& chunk : live)
             state.insert_chunk(chunk);
         return Persistence::ComputeWorldStreamingStateHash(
             state, m_worldSystem->GetWaterSimWindowCursor());
     }
-    const auto parked = m_worldSystem->snapshot_parked_chunks();
-    const auto durable = m_worldSystem->durable_chunk_inventory();
-    std::set<RegionKey> keys;
-    const auto add_key = [&keys](const IVec3& coords) {
-        int rx = 0, rz = 0;
-        Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
-        keys.insert({rx, rz});
-    };
-    for (const auto& chunk : live)
-        if (chunk && chunk->needs_authority() && chunk->get_state() != ChunkState::Loading)
-            add_key(chunk->get_coords());
-    for (const auto& chunk : parked)
-        if (chunk && chunk->needs_authority())
-            add_key(chunk->get_coords());
-    for (const auto& coords : durable)
-        add_key(coords);
+    const auto keys = m_worldSystem->authority_region_keys();
     const auto directory =
         m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
     std::string projection =
         "authoritative_chunks:v2:" + std::to_string(m_worldSystem->GetWaterSimWindowCursor()) + ":";
     try {
-        if (m_regionRequiresIndex && !durable.empty() &&
-            !Persistence::snapshot_index_exists(directory))
-            throw std::runtime_error("inconsistent snapshot: index missing");
-        for (const auto key : keys) {
+        Persistence::RegionDigestOperation operation(directory, m_regionRequiresIndex);
+        for (const auto& [rx, rz] : keys) {
+            const RegionKey key{rx, rz};
+            auto inputs = m_worldSystem->region_digest_inputs(rx, rz);
+            inputs.require_index = m_regionRequiresIndex;
             const auto record = m_activeRegionLedger.records().find(key);
-            const auto digest =
-                record != m_activeRegionLedger.records().end() &&
-                        record->second.state == RegionState::Frozen
-                    ? record->second.frozen_digest
-                    : Persistence::WorldSaveService::region_simulation_digest(
-                          directory, key, {live, parked, durable, m_regionRequiresIndex});
+            const auto digest = record != m_activeRegionLedger.records().end() &&
+                                        record->second.state == RegionState::Frozen
+                                    ? record->second.frozen_digest
+                                    : operation.digest(key, inputs);
             projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
                           std::to_string(digest) + ";";
         }
@@ -2148,7 +2115,8 @@ public:
 
     bool Commit() {
         std::vector<std::string> errors;
-        if (!m_transaction.commit(&errors)) {
+        if (!Persistence::WorldSaveService::finalize_indexed_envelope(m_save_dir, &errors) ||
+            !m_transaction.commit(&errors)) {
             Log(errors);
             return false;
         }
@@ -2361,6 +2329,7 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         // Marks a directory that must carry a snapshot index (downgrade guard, S4). Written only
         // inside a snapshot transaction, so the marker and the index always appear together.
         metadata_json["snapshotFormat"] = 1;
+        metadata_json["container_version"] = Persistence::WorldSaveService::kIndexedMetadataVersion;
     }
     if (!Persistence::AdmitMetadata(metadata_json) ||
         !Persistence::BoundedJsonDump(
@@ -2557,7 +2526,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         }
     }
     std::unique_ptr<OuterSaveTransaction> outer;
-    if (m_activeRegionsEnabled && !Persistence::SaveTransaction::active_for(save_dir)) {
+    if ((m_activeRegionsEnabled || Persistence::snapshot_index_exists(save_dir)) &&
+        !Persistence::SaveTransaction::active_for(save_dir)) {
         outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
         if (!outer)
             return false;
@@ -2848,15 +2818,8 @@ bool GameSession::ReadPreparedWorldState(
         state.input_refused = error.find("Saved-input admission refused:") == 0;
         return false;
     }
-    // Enabled session saves have a snapshot commit point. The standalone persistence
-    // helpers also support legacy clock/ledger pairs, but session admission must not
-    // silently regenerate authority after an indexed save loses its index and marker.
     if (cancelled())
         return false;
-    if (requires_active_regions && !state.requires_index) {
-        error = "inconsistent snapshot: enabled records without index";
-        return false;
-    }
     if (options.active_regions) {
         // Presentation-only saves recorded the calendar but no simulation tick.
         if (state.render_calendar)

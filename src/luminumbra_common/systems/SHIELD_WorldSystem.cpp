@@ -4212,6 +4212,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                         if (physics_system)
                             physics_system->remove_chunk_collision(id);
                         m_activation_index.erase(*chunk);
+                        note_digest_chunk(it->second, false, false);
                         it = m_streaming_state.chunks.erase(it);
                         shadow_note_evicted(id);
                         continue;
@@ -4242,8 +4243,10 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                     }
                     chunk->normalize_for_park();
                     m_parked[id] = ParkedChunk{chunk, bytes, m_persistence_tick};
+                    note_digest_chunk(chunk, true, true);
                     m_parked_bytes += bytes;
                     m_activation_index.erase(*chunk);
+                    note_digest_chunk(it->second, false, false);
                     it = m_streaming_state.chunks.erase(it);
                     shadow_note_evicted(id);
                     continue;
@@ -4252,6 +4255,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             if (physics_system)
                 physics_system->remove_chunk_collision(id);
             m_activation_index.erase(*it->second);
+            note_digest_chunk(it->second, false, false);
             it = m_streaming_state.chunks.erase(it);
             shadow_note_evicted(id);
         }
@@ -4395,6 +4399,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                     auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
                     it = m_streaming_state.chunks.emplace(id, std::move(chunk)).first;
                     m_activation_index.insert(it->second);
+                    note_digest_chunk(it->second, false, true);
                 }
 
                 auto& chunk = it->second;
@@ -6349,6 +6354,8 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_streaming_state.chunks.clear();
     m_parked.clear();
     m_durable_chunks.clear();
+    m_digest_members.clear();
+    ++m_digest_membership_revision;
     m_durable_read_failed = false;
     m_evictions_suspended = false;
     m_parked_bytes = 0;
@@ -6698,9 +6705,98 @@ void SHIELD_WorldSystem::set_durable_chunk_loader(
     m_durable_chunk_fault = std::move(fault);
 }
 
+u64 SHIELD_WorldSystem::digest_region_id(i32 rx, i32 rz) {
+    return (static_cast<u64>(static_cast<u32>(rx)) << 32u) | static_cast<u32>(rz);
+}
+
+void SHIELD_WorldSystem::note_digest_chunk(const std::shared_ptr<Chunk>& chunk,
+                                           bool parked,
+                                           bool present) {
+    if (!chunk)
+        return;
+    int rx = 0, rz = 0;
+    Persistence::WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
+    const auto key = digest_region_id(rx, rz);
+    auto region = m_digest_members.find(key);
+    if (present) {
+        auto& members = m_digest_members[key];
+        auto& chunks = parked ? members.parked : members.live;
+        chunks.insert_or_assign(chunk->get_id(), chunk);
+    } else if (region != m_digest_members.end()) {
+        auto& chunks = parked ? region->second.parked : region->second.live;
+        chunks.erase(chunk->get_id());
+        if (region->second.live.empty() && region->second.parked.empty() &&
+            region->second.durable.empty())
+            m_digest_members.erase(region);
+    }
+    ++m_digest_membership_revision;
+}
+
+Persistence::RegionDigestInputs SHIELD_WorldSystem::region_digest_inputs(i32 rx, i32 rz) const {
+    Persistence::RegionDigestInputs result;
+    const auto region = m_digest_members.find(digest_region_id(rx, rz));
+    if (region == m_digest_members.end())
+        return result;
+    for (const auto& [id, chunk] : region->second.live) {
+        (void)id;
+        result.live.push_back(chunk);
+    }
+    for (const auto& [id, chunk] : region->second.parked) {
+        (void)id;
+        result.parked.push_back(chunk);
+    }
+    for (const auto& [id, coords] : region->second.durable) {
+        (void)id;
+        result.durable.push_back(coords);
+    }
+    m_region_digest_input_items +=
+        result.live.size() + result.parked.size() + result.durable.size();
+    return result;
+}
+
+bool SHIELD_WorldSystem::has_region_members(i32 rx, i32 rz) const {
+    return m_digest_members.contains(digest_region_id(rx, rz));
+}
+
+std::vector<std::pair<i32, i32>> SHIELD_WorldSystem::authority_region_keys() const {
+    std::set<std::pair<i32, i32>> keys;
+    for (const auto& [id, region] : m_digest_members) {
+        (void)id;
+        for (const auto& [chunk_id, chunk] : region.live) {
+            (void)chunk_id;
+            if (chunk && chunk->needs_authority() && chunk->get_state() != ChunkState::Loading) {
+                int rx = 0, rz = 0;
+                Persistence::WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
+                keys.emplace(rx, rz);
+            }
+        }
+        for (const auto& [chunk_id, chunk] : region.parked) {
+            (void)chunk_id;
+            if (chunk && chunk->needs_authority()) {
+                int rx = 0, rz = 0;
+                Persistence::WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
+                keys.emplace(rx, rz);
+            }
+        }
+        for (const auto& [chunk_id, coords] : region.durable) {
+            (void)chunk_id;
+            int rx = 0, rz = 0;
+            Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+            keys.emplace(rx, rz);
+        }
+    }
+    return {keys.begin(), keys.end()};
+}
+
 void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coords) {
-    for (const auto& coord : coords)
-        m_durable_chunks.insert_or_assign(Chunk::calculate_id(coord), coord);
+    for (const auto& coord : coords) {
+        const auto id = Chunk::calculate_id(coord);
+        m_durable_chunks.insert_or_assign(id, coord);
+        int rx = 0, rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(coord, rx, rz);
+        m_digest_members[digest_region_id(rx, rz)].durable.insert_or_assign(id, coord);
+        ++m_digest_membership_revision;
+    }
 }
 
 std::vector<IVec3> SHIELD_WorldSystem::durable_chunk_inventory() const {
@@ -6756,6 +6852,7 @@ void SHIELD_WorldSystem::release_clean_parked_chunks() {
         if (chunk && m_durable_chunks.contains(it->first) && !chunk->is_voxel_data_dirty() &&
             !chunk->is_water_state_dirty()) {
             m_parked_bytes -= it->second.bytes;
+            note_digest_chunk(it->second.chunk, true, false);
             it = m_parked.erase(it);
         } else {
             ++it;
@@ -6771,6 +6868,7 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
     }
     std::shared_ptr<Luminumbra::Chunk> chunk = std::move(it->second.chunk);
     m_parked_bytes = m_parked_bytes >= it->second.bytes ? m_parked_bytes - it->second.bytes : 0u;
+    note_digest_chunk(chunk, true, false);
     m_parked.erase(it);
     if (m_streaming_state.chunks.find(id) != m_streaming_state.chunks.end()) {
         LUMINUMBRA_CORE_ERROR("unpark_chunk: id {} is both parked and resident; keeping resident",
@@ -6781,6 +6879,7 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
         chunk->current_lod.store(-1, std::memory_order_release);
         chunk->set_state(Luminumbra::ChunkState::Idle);
         m_activation_index.insert(chunk);
+        note_digest_chunk(chunk, false, true);
         m_streaming_state.chunks.emplace(id, std::move(chunk));
         ++m_dirty_generation;
     }
@@ -6831,6 +6930,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
             // The loaded record replaces any parked session state for the same id.
             m_parked_bytes =
                 m_parked_bytes >= parked->second.bytes ? m_parked_bytes - parked->second.bytes : 0u;
+            note_digest_chunk(parked->second.chunk, true, false);
             m_parked.erase(parked);
         }
     }
@@ -6846,6 +6946,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         bump_far_lod_authority_revision(chunk->get_coords());
     }
     if (adopted) {
+        note_digest_chunk(chunk, false, true);
         // Derived payloads belong to the producing world, never to a saved or
         // externally adopted chunk (world-local generation numbers can coincide).
         chunk->stage_water_seed_inputs({});

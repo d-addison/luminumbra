@@ -3,6 +3,7 @@
 #include "RegionFileWriteGuard.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +65,29 @@ public:
 
     [[nodiscard]] bool missing() const {
         return m_missing;
+    }
+
+    // Native object identity from the admitted handle, used by the recovery journal.
+    [[nodiscard]] bool identity(std::array<std::uint64_t, 3>& result) const {
+        if (!m_location_admitted)
+            return false;
+#if defined(_WIN32)
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (m_handle == INVALID_HANDLE_VALUE || !::GetFileInformationByHandle(m_handle, &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) !=
+                0 ||
+            (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0))
+            return false;
+        result = {info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow};
+#else
+        struct stat info {};
+        if (m_descriptor < 0 || ::fstat(m_descriptor, &info) != 0 || !S_ISREG(info.st_mode) ||
+            info.st_ino == 0)
+            return false;
+        result = {
+            static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino), 0};
+#endif
+        return true;
     }
 
     [[nodiscard]] bool length(std::uint64_t& size) const {

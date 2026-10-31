@@ -11,13 +11,19 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <stdexcept>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "../support/WorldgenTestData.h"
+#include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -316,6 +322,113 @@ TEST(WorldDurableResidency, ByteLimitKeepsDirtyChunkResidentAndRequestsSave) {
 
     fx.world->clear_persistence_save_request();
     EXPECT_FALSE(fx.world->persistence_save_requested());
+}
+
+TEST(WorldDurableResidency, ClientRefusalGatesDueAndPressureSaves) {
+    for (const bool pressure : {false, true}) {
+        SCOPED_TRACE(pressure);
+        DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+        ASSERT_TRUE(fx.created) << fx.error;
+        fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+        ASSERT_TRUE(fx.session->SaveWorld());
+        if (!pressure) {
+            std::ifstream input(fx.session->GetWorldSaveDir() / "world_info.json");
+            auto metadata = nlohmann::json::parse(input);
+            input.close();
+            Luminumbra::world::WorldClock(9000).write_metadata(metadata);
+            auto ledger = fx.session->GetActiveRegionLedger();
+            ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata_and_active_regions(
+                metadata.dump(), ledger, fx.session->GetWorldSaveDir()));
+            ASSERT_TRUE(fx.session->LoadWorldState());
+            fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+        }
+        const auto edited = fx.EditAtSpawnAndFindEdited();
+        ASSERT_TRUE(edited);
+        if (pressure) {
+            fx.session->SetParkedBytesLimit(1);
+            fx.Settle(fx.FarAnchor(), kSettleIterations);
+            ASSERT_TRUE(fx.session->PersistenceSaveRequested());
+        } else {
+            ASSERT_TRUE(fx.session->PersistenceAutosaveDue());
+        }
+        const auto directory = fx.session->GetWorldSaveDir();
+        const auto tree = [&] {
+            std::map<fs::path, std::string> files;
+            for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+                if (!entry.is_regular_file())
+                    continue;
+                std::ifstream input(entry.path(), std::ios::binary);
+                std::ostringstream bytes;
+                bytes << input.rdbuf();
+                files.emplace(entry.path().lexically_relative(directory), bytes.str());
+            }
+            return files;
+        };
+        const auto committed = tree();
+        const auto revision = edited->voxel_revision();
+        // Entry refusal, digest refusal, and resolved-content refusal use this exact client gate.
+        for (int refusal = 0; refusal < 3; ++refusal) {
+            SCOPED_TRACE(refusal);
+            const bool allowed = Luminumbra::Client::SessionPersistenceAllowed(
+                true, refusal == 0 ? 2 : 0, refusal == 1, refusal == 2);
+            ASSERT_FALSE(allowed);
+            EXPECT_FALSE(Luminumbra::Client::SaveSessionWhenDue(fx.session.get(), allowed));
+            EXPECT_EQ(tree(), committed);
+            EXPECT_TRUE(edited->is_voxel_data_dirty());
+            EXPECT_EQ(edited->voxel_revision(), revision);
+            if (pressure)
+                EXPECT_TRUE(fx.session->PersistenceSaveRequested());
+            else
+                EXPECT_TRUE(fx.session->PersistenceAutosaveDue());
+        }
+        EXPECT_TRUE(Luminumbra::Client::SaveSessionWhenDue(fx.session.get(), true));
+        EXPECT_NE(tree(), committed);
+        EXPECT_FALSE(edited->is_voxel_data_dirty());
+        EXPECT_FALSE(fx.session->PersistenceSaveRequested());
+        EXPECT_FALSE(fx.session->PersistenceAutosaveDue());
+    }
+}
+
+TEST(WorldDurableResidency, RegionDigestWorkIsLinearAndPublicationInvalidatesAdmission) {
+    namespace P = Luminumbra::Persistence;
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    constexpr int regions = 64;
+    for (int region = 0; region < regions; ++region) {
+        auto chunk = std::make_shared<Chunk>(IVec3(region * 32, 0, 0));
+        chunk->set_state(ChunkState::Idle);
+        chunk->heightmap_data = {static_cast<float>(region)};
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(fx.world->adopt_streamed_chunk(chunk));
+    }
+    ASSERT_EQ(fx.world->authority_region_keys().size(), regions);
+    const P::RegionDigestInputs complete{fx.world->snapshot_streamed_chunks(),
+                                         fx.world->snapshot_parked_chunks(),
+                                         fx.world->durable_chunk_inventory()};
+    const auto before = fx.world->region_digest_input_items();
+    P::RegionDigestOperation operation(fx.session->GetWorldSaveDir(), true);
+    for (int region = 0; region < regions; ++region) {
+        const Luminumbra::world::RegionKey key{region, 0};
+        const auto grouped = fx.world->region_digest_inputs(region, 0);
+        ASSERT_EQ(grouped.live.size(), 1u);
+        EXPECT_EQ(operation.digest(key, grouped), P::WorldSaveService::region_simulation_digest(
+                                                     fx.session->GetWorldSaveDir(), key, complete));
+    }
+    EXPECT_EQ(fx.world->region_digest_input_items() - before, regions);
+    EXPECT_EQ(operation.input_items(), regions);
+    EXPECT_EQ(operation.index_reads(), 1u);
+    const auto grouped = fx.world->region_digest_inputs(0, 0);
+    const auto expected = operation.digest({0, 0}, grouped);
+    ASSERT_TRUE(fx.session->SaveWorldState());
+    EXPECT_EQ(operation.digest({0, 0}, grouped), expected);
+    EXPECT_EQ(operation.index_reads(), 2u);
+    {
+        std::ofstream payload(P::WorldSaveService::region_file_path(fx.session->GetWorldSaveDir(), 0, 0),
+                              std::ios::binary | std::ios::trunc);
+        payload << "damaged actual member";
+        ASSERT_TRUE(payload.good());
+    }
+    EXPECT_THROW((void)operation.digest({0, 0}, grouped), std::runtime_error);
 }
 
 TEST(WorldDurableResidency, EditOfParkedChunkUnparksIt) {

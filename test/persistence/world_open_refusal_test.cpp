@@ -1,3 +1,4 @@
+#include "../support/IndexedSaveFixture.h"
 #include "../support/CalendarMetadataCases.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/WorldgenTestData.h"
@@ -1397,7 +1398,9 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
     EXPECT_NE(runner.Session()->SystemConfigIdentity(), GameSession{}.SystemConfigIdentity());
     const auto ledger_path =
         WorldSaveService::active_regions_path(runner.Session()->GetWorldSaveDir());
-    ASSERT_TRUE(fs::remove(ledger_path));
+    ASSERT_TRUE(WorldSaveService::remove_member(runner.Session()->GetWorldSaveDir(),
+                                                "chunks/region/active-regions.arl"));
+    ASSERT_FALSE(fs::exists(ledger_path));
     ASSERT_TRUE(runner.Session()->LoadWorldState()) << runner.Session()->GetWorldOpenError();
     EXPECT_EQ(runner.Session()->GetActiveRegionLedger().config(), scheduler);
     EXPECT_EQ(runner.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
@@ -2153,20 +2156,66 @@ TEST_F(WorldOpenRefusal, ClientExitCompleteSavePublishesCapturedSpawnInBothRegio
     }
 }
 
+class RollbackProgressObservation {
+public:
+    RollbackProgressObservation(const fs::path& directory, const std::string& chunks,
+                                const std::string& plants, bool energy_failure,
+                                const std::shared_ptr<Chunk>& chunk)
+        : directory_(directory), chunks_(chunks), plants_(plants),
+          energy_failure_(energy_failure), chunk_(chunk) {
+        current() = this;
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(&Observe);
+    }
+    ~RollbackProgressObservation() {
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+        current() = nullptr;
+    }
+    bool observed = false;
+    Luminumbra::u32 voxel_revision = 0;
+    Luminumbra::u32 water_revision = 0;
+private:
+    static RollbackProgressObservation*& current() {
+        static RollbackProgressObservation* observation = nullptr;
+        return observation;
+    }
+    static void Observe(const char* step, const fs::path& directory) {
+        auto* observation = current();
+        if (!observation || std::string_view(step) != "before-rollback" ||
+            directory != observation->directory_)
+            return;
+        // This event runs after writer scopes and publication stripes have unwound.
+        observation->observed = true;
+        EXPECT_NE(Read(WorldSaveService::region_file_path(directory, 0, 0)), observation->chunks_);
+        if (observation->energy_failure_)
+            EXPECT_NE(Read(WorldSaveService::plant_entities_path(directory)), observation->plants_);
+        else
+            EXPECT_EQ(Read(WorldSaveService::plant_entities_path(directory)), observation->plants_);
+        observation->voxel_revision = observation->chunk_->voxel_revision();
+        observation->water_revision = observation->chunk_->water_revision();
+    }
+    fs::path directory_;
+    std::string chunks_;
+    std::string plants_;
+    bool energy_failure_;
+    std::shared_ptr<Chunk> chunk_;
+};
+
 TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPending) {
     const auto [regions, failure_and_path] = GetParam();
     const bool energy_failure = failure_and_path % 2 != 0;
     const int save_path = failure_and_path / 2;
-    auto config = SnapshotRunnerConfig(RootString(), regions != 0);
+    auto config = SnapshotRunnerConfig(RootString(), regions == 1);
     if (save_path == 5)
         config.autosave_interval_ticks = 1;
     Server::ServerWorldRunner runner(config);
-    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions != 0));
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions == 1));
     auto* session = runner.Session();
     std::shared_ptr<Chunk> chunk;
     ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
     ASSERT_TRUE(session->SaveWorldState());
     const auto canonical = session->GetWorldSaveDir();
+    if (regions == 2)
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(canonical, [] { return true; }));
     const auto destination = save_path == 3
                                  ? root / "alternate/worlds/saves" / session->GetMetadata().worldId
                                  : canonical;
@@ -2174,6 +2223,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
         fs::create_directories(destination.parent_path());
         fs::copy(canonical, destination, fs::copy_options::recursive);
     }
+    const auto committed_tree = DiskBytes(destination);
     const auto old_metadata = Read(destination / "world_info.json");
     const auto old_ledger = Read(WorldSaveService::active_regions_path(destination));
     const auto old_plants = Read(WorldSaveService::plant_entities_path(destination));
@@ -2192,6 +2242,11 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     // before its destructor attempts a shutdown save.
     SiblingWriteFailure failure;
     ASSERT_NO_FATAL_FAILURE(failure.Arm(destination, energy_failure));
+    std::unique_ptr<RollbackProgressObservation> observation;
+    if (regions != 0)
+        observation = std::make_unique<RollbackProgressObservation>(destination, old_chunks,
+                                                                    old_plants, energy_failure,
+                                                                    chunk);
     world::WorldStateSaveReport report;
     if (save_path == 0)
         EXPECT_FALSE(session->SaveWorldState(&report));
@@ -2227,13 +2282,24 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_EQ(Read(destination / "world_info.json"), old_metadata);
     EXPECT_EQ(Read(WorldSaveService::active_regions_path(destination)), old_ledger);
-    // Prove the injection reached the sibling writer after durable chunk progress.
-    EXPECT_NE(Read(WorldSaveService::region_file_path(destination, 0, 0)), old_chunks);
-    EXPECT_EQ(Read(destination / "aether_state.efs"), old_energy);
-    if (energy_failure)
-        EXPECT_NE(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
-    else
+    if (regions != 0) {
+        ASSERT_NE(observation, nullptr);
+        EXPECT_TRUE(observation->observed);
+        EXPECT_EQ(chunk->voxel_revision(), observation->voxel_revision);
+        EXPECT_EQ(chunk->water_revision(), observation->water_revision);
+        EXPECT_EQ(DiskBytes(destination), committed_tree);
+        EXPECT_EQ(Read(WorldSaveService::region_file_path(destination, 0, 0)), old_chunks);
         EXPECT_EQ(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+    } else {
+        // Ordinary unindexed saves retain durable partial progress after sibling failure.
+        EXPECT_NE(Read(WorldSaveService::region_file_path(destination, 0, 0)), old_chunks);
+        if (energy_failure)
+            EXPECT_NE(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+        else
+            EXPECT_EQ(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+    }
+    EXPECT_EQ(Read(destination / "aether_state.efs"), old_energy);
+    observation.reset();
     EXPECT_TRUE(WorldSaveService::validate_save(destination));
     if (save_path != 6) {
         if (save_path == 3)
@@ -2258,7 +2324,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
 // Each CTest entry exercises one writer, host entry point and region mode.
 INSTANTIATE_TEST_SUITE_P(RegionModesWritersAndSavePaths,
                          CompleteSaveFailure,
-                         testing::Combine(testing::Values(0, 1), testing::Range(0, 14)));
+                         testing::Combine(testing::Values(0, 1, 2), testing::Range(0, 14)));
 
 TEST_F(WorldOpenRefusal, CanonicalSaveWithTrailingSeparatorAcknowledgesPendingEdits) {
     for (const bool regions : {false, true}) {

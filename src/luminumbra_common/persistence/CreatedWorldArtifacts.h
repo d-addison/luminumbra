@@ -447,6 +447,47 @@ public:
         return duplicate_file(file).release();
     }
 
+    // Delete only the object already bound by the caller. POSIX quarantines and checks the
+    // moved object before unlink; Windows disposition acts on the verified native handle.
+    static void
+    remove_bound_entry(const std::filesystem::path& path, NativeFile file, bool directory) {
+        CreatedWorldArtifacts bound;
+        bound.bind_existing_root(path.parent_path());
+        Artifact artifact{.path = path,
+                          .directory = directory,
+                          .identity = identity_from(file),
+                          .retained = duplicate_file(file)};
+        bound.remove_owned(artifact);
+    }
+
+    // Publish the caller's bound source only into a vacant destination. Parents and source
+    // identity are checked by the same platform implementation as initial creation.
+    static void publish_bound_file(const std::filesystem::path& source,
+                                   const std::filesystem::path& destination,
+                                   NativeFile file) {
+        CreatedWorldArtifacts bound;
+        bound.bind_existing_root(source.parent_path());
+        if (destination.parent_path() != source.parent_path()) {
+            CreatedWorldArtifacts parent;
+            parent.bind_existing_root(destination.parent_path());
+            bound.m_artifacts[bound.m_count++] = std::move(parent.m_artifacts[0]);
+            parent.m_count = 0;
+        }
+        Artifact from{.path = source,
+                      .directory = false,
+                      .identity = identity_from(file),
+                      .retained = duplicate_file(file)};
+        Artifact to{.path = destination, .directory = false, .identity = {}, .retained = {}};
+        if (!validate(from) ||
+            std::filesystem::exists(std::filesystem::symlink_status(destination)))
+            throw std::runtime_error("Publication source or vacant destination changed.");
+#if defined(_WIN32)
+        bound.publish_windows(from, to);
+#else
+        bound.publish_posix(from, to);
+#endif
+    }
+
     // Called immediately after exclusive creation, while the writer still owns
     // the native handle. Retain the object until release or completed removal
     // so an unlinked object's identity cannot be recycled. Windows writers
@@ -1213,12 +1254,13 @@ private:
     // Bound initial creation by its full artifact set. Renamed temporary files
     // retain their journal entries until release or rollback. At most one
     // retained native handle per entry, including both publication names.
-    static constexpr std::size_t kCreationDirectories = 3;   // Save root, chunks, region.
-    static constexpr std::size_t kCreationDurableFiles = 4;  // Preset, metadata, ledger, index.
+    static constexpr std::size_t kCreationDirectories = 3; // Save root, chunks, region.
+    static constexpr std::size_t kCreationDurableFiles =
+        5; // Preset, metadata, ledger, manifest, index.
     static constexpr std::size_t kEntriesPerDurableFile = 2; // Destination and temporary.
     static constexpr std::size_t kCreationArtifactCapacity =
         kCreationDirectories + kCreationDurableFiles * kEntriesPerDurableFile;
-    static_assert(kCreationArtifactCapacity == 11);
+    static_assert(kCreationArtifactCapacity == 13);
     std::array<Artifact, kCreationArtifactCapacity> m_artifacts{};
     bool m_borrowed_root = false;
     std::size_t m_count = 0;

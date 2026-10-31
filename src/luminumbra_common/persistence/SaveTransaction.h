@@ -1,6 +1,6 @@
 #pragma once
 
-// Snapshot commit index, journal and recovery (ds slice S4).
+// Snapshot commit index, ownership journal and recovery.
 //
 // An "indexed" save directory contains chunks/region/snapshot.json. An indexed directory is only
 // ever changed through a SaveTransaction: members are journaled (undo copies) before they are
@@ -19,6 +19,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -49,7 +50,7 @@ struct SnapshotIndex {
 };
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
-inline constexpr const char* kJournalSchema = "luminumbra.journal.v1";
+inline constexpr const char* kJournalSchema = "luminumbra.journal.v2";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
@@ -140,6 +141,17 @@ public:
     // replaces them. Already protected paths are skipped. The index file is protected on the first
     // call.
     bool protect(const std::vector<std::string>& relative_paths, std::vector<std::string>* errors);
+    // Internal writer coordination: journal incoming identities before publication, then
+    // verify the protected occupant under the publication lock. Journal/control writes bypass
+    // member coordination; the persistence integration owns their identities separately.
+    static bool prepare_publication(const std::filesystem::path& destination,
+                                    const std::filesystem::path& incoming,
+                                    std::vector<std::string>* errors);
+    static bool publication_identity(const std::filesystem::path& destination,
+                                     std::array<std::uint64_t, 3>& expected,
+                                     std::array<std::uint64_t, 3>& incoming);
+    static bool check_publication_target(const std::filesystem::path& destination,
+                                         std::vector<std::string>* errors);
     // Commits: validates and re-hashes every protected member via digest_fn, publishes the new
     // index (durable commit point), then deletes the journal. Failure before the commit point rolls
     // back.
@@ -169,6 +181,7 @@ private:
         Open,
         Committing,
         Committed,
+        RollingBack,
         RolledBack
     };
     struct Entry {
@@ -177,6 +190,14 @@ private:
         std::uint64_t prev_bytes = 0;
         std::uint64_t prev_fnv64 = 0;
         std::string undo; // relative to the journal directory, empty for create
+        std::array<std::uint64_t, 3> previous_identity{};
+        std::array<std::uint64_t, 3> installed_identity{};
+        std::array<std::uint64_t, 3> incoming_identity{};
+        std::array<std::uint64_t, 3> restored_identity{};
+        std::array<std::uint64_t, 3> undo_identity{};
+        std::string undo_temporary;
+        std::string incoming_temporary;
+        std::string restored_temporary;
     };
     bool write_journal(std::vector<std::string>* errors);
 
@@ -191,9 +212,14 @@ private:
     std::uint64_t m_new_generation = 0;
     std::vector<Entry> m_entries;
     std::unordered_set<std::string> m_protected;
+    std::unordered_map<std::string, std::size_t> m_entry_indices;
+    std::vector<std::size_t> m_changed_entries;
     std::vector<std::function<void()>> m_committed_actions;
     std::uint64_t m_next_undo = 0;
     bool m_registered = false;
+    std::array<std::uint64_t, 3> m_journal_identity{};
+    std::array<std::uint64_t, 3> m_undo_directory_identity{};
+    std::array<std::uint64_t, 3> m_control_identity{};
 };
 
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",
