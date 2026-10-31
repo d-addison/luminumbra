@@ -92,7 +92,6 @@ FetchContent_Declare(glad          GIT_REPOSITORY https://github.com/Dav1dde/gla
 FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git      GIT_TAG v3.12.0       GIT_SHALLOW TRUE)
 FetchContent_Declare(JoltPhysics   GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git GIT_TAG v5.3.0        GIT_SHALLOW TRUE SOURCE_SUBDIR Build)
 FetchContent_Declare(freetype      GIT_REPOSITORY https://github.com/freetype/freetype.git  GIT_TAG 0a0221a1347e2f1e07c395263540026e9a0aa7c7)
-FetchContent_Declare(RmlUi         GIT_REPOSITORY https://github.com/mikke89/RmlUi.git      GIT_TAG 6.1           GIT_SHALLOW TRUE)
 FetchContent_Declare(soil2         GIT_REPOSITORY https://github.com/SpartanJ/SOIL2.git     GIT_TAG 1.3.0         GIT_SHALLOW TRUE)
 FetchContent_Declare(miniaudio     GIT_REPOSITORY https://github.com/mackron/miniaudio.git  GIT_TAG 0.11.22       GIT_SHALLOW TRUE)
 FetchContent_Declare(meshoptimizer GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git GIT_TAG v0.22         GIT_SHALLOW TRUE)
@@ -111,7 +110,11 @@ if(TARGET freetype AND NOT TARGET Freetype::Freetype)
   add_library(Freetype::Freetype ALIAS freetype)
 endif()
 
-FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics RmlUi soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
+FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics)
+
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/rmlui_source.cmake")
+
+FetchContent_MakeAvailable(soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
 
 # RmlUi 6.1's bundled robin_hood header uses SIZE_MAX and fixed-width integer
 # types without including <cstdint>. Other standard-library implementations
@@ -191,6 +194,8 @@ endif()
 
 # Jolt: ensure <Jolt/...> resolves from the fetched source root.
 if (TARGET Jolt)
+  include("${CMAKE_CURRENT_LIST_DIR}/../cmake/jolt_startup.cmake")
+  luminumbra_prepare_jolt_startup("${joltphysics_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/jolt-startup")
   target_include_directories(Jolt PUBLIC $<BUILD_INTERFACE:${joltphysics_SOURCE_DIR}>)
   if(MSVC)
     # Visual Studio 18 emits C4865 from Windows SDK display enums included by
@@ -235,3 +240,17 @@ if(TARGET FastNoise)
     target_compile_options(FastNoise PRIVATE $<$<CONFIG:Debug>:-O3>)
   endif()
 endif()
+
+# Dependencies export third-party headers as system includes to
+# every consumer, including tools and their separately compiled test entries.
+# Keep the include expressions intact so build/install paths and generated
+# overlays follow the dependency targets rather than a copied directory list.
+foreach(_common_dependency IN ITEMS
+    EnTT Jolt nlohmann_json sol2 lua spdlog lz4_static glm FastNoise
+    meshoptimizer rmlui_core rmlui_debugger glfw miniaudio soil2 glad)
+  if(TARGET ${_common_dependency})
+    set_property(TARGET ${_common_dependency} APPEND PROPERTY
+      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+      "$<TARGET_PROPERTY:${_common_dependency},INTERFACE_INCLUDE_DIRECTORIES>")
+  endif()
+endforeach()

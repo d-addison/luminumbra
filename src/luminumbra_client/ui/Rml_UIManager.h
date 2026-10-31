@@ -1,13 +1,18 @@
 #pragma once
 
+#include "BackdropBlurQuality.h"
+#include "GraphicsSettingsState.h"
+
 #include "Rml_Interfaces.h"         // The one true source for interface definitions
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
 #include "persistence/AsyncSavedWorldCatalog.h"
 #include "world/WorldgenOverride.h" // WorldGenParam transport (engine-owned, not UI)
 #include <RmlUi/Core.h>
+#include <cstdint>
 #include <filesystem> // gallery fixture capture-source override
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility> // For std::move
 #include <vector>
@@ -29,16 +34,18 @@ using WorldCreationCallback = std::function<void(const std::string& name,
 using WorldParamGetter =
     std::function<std::string(const std::string& worldType, const std::string& path)>;
 // Save the current customize-form config (base preset + overrides) as a reusable, named user
-// preset; returns the new world-type id (e.g. "user_my_canyon") on success, "" on failure.
+// preset. overwrite_confirmed applies only to the exact confirmed display name.
+// Returns the new world-type id (e.g. "user_my_canyon") on success, "" on failure.
 using WorldPresetSaver = std::function<std::string(const std::string& displayName,
                                                    const std::string& baseType,
-                                                   const std::vector<WorldGenParam>& params)>;
+                                                   const std::vector<WorldGenParam>& params,
+                                                   bool overwrite_confirmed)>;
 // List saved user presets as (display name, world-type id) so create-world can offer them as
 // selectable starting points alongside the curated presets.
 using WorldPresetList = std::function<std::vector<std::pair<std::string, std::string>>()>;
 // Returns true if saving under `displayName` would collide with an existing user preset
-// (same derived slug). The UI uses this to gate the silently-overwriting saver behind an
-// explicit "overwrite?" confirm. Optional — if unwired, saves proceed without a confirm.
+// (same derived slug). The UI requests explicit overwrite consent; the saver enforces
+// no replacement when consent is absent. Optional — if unwired, only new names save.
 using WorldPresetExists = std::function<bool(const std::string& displayName)>;
 // Delete a saved user preset by its world-type id (e.g. "user_my_canyon"); true on success.
 using WorldPresetDeleter = std::function<bool(const std::string& worldType)>;
@@ -59,6 +66,10 @@ using PauseActionCallback = std::function<void(const std::string&)>;
 // pushes live changes via the setters, and persists via Save. Every field is optional —
 // any null callback is simply skipped, so the screen degrades gracefully if unwired.
 struct SettingsBridge {
+    // Graphics requests are queued by the host and applied together on the render thread.
+    std::function<GraphicsSettingsDisplay()> GetGraphics;
+    std::function<void(const GraphicsEdit&)> EditGraphics;
+    std::function<void()> SaveGraphics;
     // Video
     std::function<std::string()> GetResolution; // "" = native/default, else "WxH"
     std::function<void(const std::string&)> SetResolution;
@@ -66,6 +77,8 @@ struct SettingsBridge {
     std::function<void(const std::string&)> SetWindowMode;
     std::function<bool()> GetVSync;
     std::function<void(bool)> SetVSync;
+    std::function<int()> GetFrameCap; // 0 = unlimited; choices in core::kFrameCaps.
+    std::function<void(int)> SetFrameCap;
     std::function<float()> GetFov;
     std::function<void(float)> SetFov;
     std::function<float()> GetMouseSensitivity;
@@ -83,12 +96,27 @@ struct SettingsBridge {
     // request to capture the next key press as that action's new binding. Optional/skippable.
     std::function<std::string(const std::string&)> GetKeybind;
     std::function<void(const std::string&)> BeginRebind;
+    // Developer preferences share the console registry authority.
+    std::function<bool()> GetPerfHud;
+    std::function<void(bool)> SetPerfHud;
+    std::function<void()> OpenDeveloperConsole;
+    std::function<std::string()> GetDeveloperHelp;
     // Persist the user overlay (returns true on success).
     std::function<bool()> Save;
 };
 
 class Rml_UIManager {
 public:
+    // Changes on document replacement, including hot reload and failed loads
+    // which have closed the old document. Menu images must not cross that boundary.
+    std::uint64_t document_generation() const {
+        return m_documentGeneration;
+    }
+    void SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quality);
+    void RefreshGraphicsSettings();
+    const BackdropBlurQuality& GetBackdropBlurQuality() const {
+        return m_backdropBlur;
+    }
     Rml_UIManager(const std::string& asset_root_path);
     ~Rml_UIManager();
 
@@ -109,6 +137,12 @@ public:
     }
 
     void RequestLoadDocument(std::string path);
+
+    // Runs synchronously when navigation is requested, before a queued entry
+    // can advance in the host's next frame. Also covers the menu quit action.
+    void SetNavigationAwayCallback(std::function<void()> callback) {
+        m_navigationAwayCallback = std::move(callback);
+    }
 
     // Hot reload : clear RmlUi's stylesheet/template caches and reload the active document
     // so.rml/.rcss edits show without a restart. Called from the UIHotReload watcher callback.
@@ -195,6 +229,13 @@ public:
         m_galleryImgPrefix = std::move(img_prefix);
     }
 
+    void SetDeveloperDebuggerVisible(bool visible);
+    bool DeveloperDebuggerVisible() const;
+    void DrawDeveloperDebuggerContents();
+    void RefreshDeveloperSettings();
+    bool HasInputInteraction() const;
+    bool HasTextInputFocus() const;
+
     // Static GLFW callbacks that forward to the active manager instance
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
     static void CharCallback(GLFWwindow* window, unsigned int codepoint);
@@ -205,6 +246,7 @@ public:
 private:
     // This is now a public function on the manager, called by Update.
     void ProcessDocumentLoadRequest();
+    void AddClickSoundListener(Rml::Element* element, std::function<void(Rml::Event&)> callback);
     void BindEventListeners(Rml::ElementDocument* document);
     void LoadDocument(const std::string& rml_path);
     void StartWorldScan(Rml::ElementDocument* document);
@@ -216,9 +258,12 @@ private:
     // settings.rml support: populate widgets from the bridge on load, and push a single
     // changed widget's value back through the bridge live.
     // gallery.rml: populate the grid with the player's real captures (newest first),
-    // each thumbnail loaded from data/ui/captures/cap_<N>.tga written at shutter time.
+    // Live photos require completed image, thumbnail and verdict outputs; authored
+    // fixture sources continue to enumerate flat cap_<N>.tga thumbnails.
     void PopulateGallery(Rml::ElementDocument* document);
     void PopulateSettingsForm(Rml::ElementDocument* document);
+    void PopulateGraphicsForm(Rml::ElementDocument* document);
+    void ApplyBackdropClass(Rml::ElementDocument* document);
     void ApplySettingFromElement(Rml::Element* element);
     void BindSettingsListeners(Rml::ElementDocument* document);
 
@@ -233,7 +278,9 @@ private:
     // world_creation.rml: commit the current customize config as a named user preset via the
     // saver, then refresh the chip row + notification. Factored so the direct save path and the
     // overwrite-confirm path share one implementation.
-    void CommitSavePreset(Rml::ElementDocument* document, const std::string& name);
+    void CommitSavePreset(Rml::ElementDocument* document,
+                          const std::string& name,
+                          bool overwrite_confirmed = false);
 
     // Interfaces are now members, their lifetime is tied to the manager.
     RmlSystem m_systemInterface;
@@ -244,6 +291,7 @@ private:
     // must already be initialised when the manager is constructed (main_client: glad at the
     // GLFW context, manager constructed right after).
     RenderInterface_GL3 m_renderInterface;
+    BackdropBlurQuality m_backdropBlur;
 
     Rml::Context* m_context = nullptr;
     GLFWwindow* m_window = nullptr;
@@ -255,16 +303,22 @@ private:
     bool m_worldScanPending = false;
     WorldParamGetter m_worldParamGetter;
     WorldPresetSaver m_worldPresetSaver;
+    std::optional<std::string> m_pendingPresetOverwrite;
     WorldPresetList m_worldPresetList;
     WorldPresetExists m_worldPresetExists;
     WorldPresetDeleter m_worldPresetDeleter;
     WorldPresetRenamer m_worldPresetRenamer;
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
+    bool m_populatingGraphics = false;
+    bool m_settingsSaveFailed = false;
+    bool m_developerDebuggerVisible = false;
     PauseActionCallback m_pauseActionCallback;
+    std::function<void()> m_navigationAwayCallback;
 
     std::string m_documentToLoad;
     std::string m_activeDocument;
+    std::uint64_t m_documentGeneration = 0;
     std::string m_selectedWorldId;
 
     // The asset root the file interface resolves against (kept here too so the

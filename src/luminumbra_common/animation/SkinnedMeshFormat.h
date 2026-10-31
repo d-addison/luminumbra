@@ -12,6 +12,7 @@
 //   - at most 256 joints per skeleton (joint indices fit in a u8),
 //   -.lanim tracks are keyed by the FNV-1a 32-bit hash of the joint name.
 
+#include "../core/CaptureContentPaths.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -176,7 +177,7 @@ inline bool ValidateAnimTrack(const AnimTrack& track, float duration) {
 }
 
 inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    Luminumbra::Filesystem::ContentInput in(path, std::ios::binary | std::ios::ate);
     if (!in)
         return false;
     const auto size = in.tellg();
@@ -261,7 +262,7 @@ inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out)
 }
 
 inline bool LoadAnimClipAsset(const std::string& path, AnimClipAsset& out) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    Luminumbra::Filesystem::ContentInput in(path, std::ios::binary | std::ios::ate);
     if (!in)
         return false;
     const auto size = in.tellg();

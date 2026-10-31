@@ -3,6 +3,7 @@
 #include "RenderResourceHandles.h"
 #include "rhi/RhiResource.h"
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -92,6 +93,16 @@ struct FboDesc {
 
 class RenderResourceRegistry {
 public:
+    struct TargetExtent {
+        std::string_view name;
+        u32 width;
+        u32 height;
+    };
+    // Render-thread transaction, bounded to 32 attachments. All referencing FBOs
+    // must be wholly contained in this group. Failure retains every old object;
+    // success publishes complete replacements before retiring the old storage.
+    // Callers refresh cached handles immediately, before issuing any draw.
+    bool replace_targets(std::span<const TargetExtent> extents);
     // --- Owned path ----------------------------------------------------------
     // Allocate a registry-OWNED texture / FBO from a full-fidelity descriptor.
     // Returns an invalid handle on GL failure or name collision with an
@@ -120,6 +131,19 @@ public:
         auto it = m_owned_textures.find(std::string(name));
         return it == m_owned_textures.end() ? nullptr : &it->second.desc;
     }
+    // Replay restores adoption metadata without duplicating or owning GL resources.
+    struct AdoptedState {
+        std::unordered_map<std::string, FboHandle> fbos;
+        std::unordered_map<std::string, TextureHandle> textures;
+    };
+    AdoptedState adopted_state() const {
+        return {m_fbos, m_textures};
+    }
+    void restore_adopted_state(AdoptedState& state) noexcept {
+        m_fbos.swap(state.fbos);
+        m_textures.swap(state.textures);
+    }
+
     // Adopt (wrap) an externally-owned GL framebuffer under `name`. Re-adopting
     // the same name updates the wrapped id (the pilot re-adopts per frame).
     FboHandle adopt_fbo(std::string_view name, u32 gl_id) {
@@ -150,6 +174,11 @@ public:
         }
         auto it = m_textures.find(std::string(name));
         return it == m_textures.end() ? TextureHandle{} : it->second;
+    }
+    RenderbufferHandle renderbuffer(std::string_view name) const {
+        const auto owned = m_owned_renderbuffers.find(std::string(name));
+        return owned == m_owned_renderbuffers.end() ? RenderbufferHandle{}
+                                                    : RenderbufferHandle{owned->second.gl_id};
     }
 
     bool has_fbo(std::string_view name) const {

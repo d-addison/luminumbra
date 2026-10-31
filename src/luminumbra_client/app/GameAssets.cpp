@@ -1,4 +1,5 @@
 #include "GameAssets.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 
 #include <nlohmann/json.hpp>
 
@@ -87,7 +88,7 @@ std::filesystem::path CheckedPath(const std::filesystem::path& root, const std::
 } // namespace
 
 std::string AssetFileSha256(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    Luminumbra::Filesystem::ContentInput input(path, std::ios::binary);
     if (!input)
         throw std::runtime_error("Could not read required asset: " + path.string());
     std::array<std::uint32_t, 8> state = {0x6a09e667,
@@ -101,7 +102,8 @@ std::string AssetFileSha256(const std::filesystem::path& path) {
     std::uint64_t bytes = 0;
     std::array<unsigned char, 64> block{};
     for (;;) {
-        input.read(reinterpret_cast<char*>(block.data()), block.size());
+        input.read(reinterpret_cast<char*>(block.data()),
+                   static_cast<std::streamsize>(block.size()));
         const auto count = static_cast<size_t>(input.gcount());
         bytes += count;
         if (bytes > 512u * 1024u * 1024u || input.bad())
@@ -135,7 +137,7 @@ std::string VerifyGameAssets(const std::filesystem::path& root) {
         const auto manifestPath = root / "config/game-asset-packs.json";
         if (std::filesystem::file_size(manifestPath) > 1024u * 1024u)
             throw std::runtime_error("Game asset manifest exceeds 1 MiB");
-        std::ifstream stream(manifestPath);
+        Luminumbra::Filesystem::ContentInput stream(manifestPath);
         const auto manifest = nlohmann::json::parse(stream);
         const auto& pack = manifest.at("packs").at("tree-small-02-runtime");
         if (manifest.at("schema") != "luminumbra.game.asset-packs.v1" ||

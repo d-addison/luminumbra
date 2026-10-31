@@ -8,7 +8,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "rendering/Camera.h"
-#include "rendering/FarLodSystem.h" // farlod()->stats() in build_state_json
+#include "rendering/FarLodSystem.h" // retained Legacy compatibility telemetry
 #include "rendering/RenderPipeline.h"
 
 #include <algorithm>
@@ -114,10 +114,10 @@ bool MemoryWatermarkExceeded(const RuntimeScenarioConfig& config,
     return measured_bytes > config.memory_watermark_mb * 1024ull * 1024ull;
 }
 
-RuntimeStateRecorder::RuntimeStateRecorder(RuntimeScenarioConfig config,
-                                           std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
+RuntimeStateRecorder::RuntimeStateRecorder(
+    RuntimeScenarioConfig config, std::unique_ptr<Luminumbra::Rendering::Camera>& camera_ref)
     : m_config(std::move(config))
-    , g_camera(g_camera)
+    , g_camera(camera_ref)
     , m_started_at(std::chrono::steady_clock::now()) {
     std::error_code ec;
     std::filesystem::create_directories(m_config.artifact_dir, ec);
@@ -451,8 +451,11 @@ RuntimeStateRecorder::build_state_json(const std::string& phase,
         state["resize_generation"] = render_pipeline->resize_generation();
         state["upload_queue"] = UploadStatsToJson(render_pipeline->get_last_mesh_upload_stats());
         state["render_pass"] = RenderPassStatsToJson(render_pipeline->get_last_render_pass_stats());
-        // Far-LOD scheduler telemetry (, FarLodHorizon gate inputs).
-        if (const auto* farlod = render_pipeline->farlod()) {
+        // D value schema includes immutable water readiness and submitted subtotals.
+        state["far_world"] =
+            Luminumbra::Rendering::FarWorldDiagnosticJson(render_pipeline->far_world_diagnostic());
+        // Historical counters are Legacy evidence, never Ladder qualification.
+        if (const auto* farlod = render_pipeline->legacy_far_compatibility()) {
             const auto& farlod_stats = farlod->stats();
             state["farlod"] = {
                 {"enabled", farlod_stats.enabled},
@@ -471,7 +474,12 @@ RuntimeStateRecorder::build_state_json(const std::string& phase,
                 {"farlod_builds_integrated_failed", farlod_stats.builds_integrated_failed},
                 {"farlod_builds_failed_total", farlod_stats.builds_failed_total},
                 {"farlod_evictions_this_frame", farlod_stats.evictions_this_frame},
-                {"farlod_pending_depth", farlod_stats.pending_depth}};
+                {"farlod_pending_depth", farlod_stats.pending_depth},
+                {"tiles_saved_async", farlod_stats.tiles_saved_async},
+                {"pending_saves", farlod_stats.pending_saves},
+                {"tile_save_failures", farlod_stats.tile_save_failures},
+                {"snapshot_bytes_copied", farlod_stats.snapshot_bytes_copied},
+                {"integration_uploads_deferred", farlod_stats.integration_uploads_deferred}};
         }
     }
 
@@ -489,11 +497,11 @@ RuntimeScenarioFrameRecorder::RuntimeScenarioFrameRecorder(
     bool enabled,
     int coverage_radius,
     std::filesystem::path output_dir,
-    std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
+    std::unique_ptr<Luminumbra::Rendering::Camera>& camera_ref)
     : m_enabled(enabled)
     , m_coverage_radius(std::max(0, coverage_radius))
     , m_output_dir(std::move(output_dir))
-    , g_camera(g_camera)
+    , g_camera(camera_ref)
     , m_started_at(std::chrono::steady_clock::now()) {}
 
 bool RuntimeScenarioFrameRecorder::enabled() const {
@@ -546,6 +554,13 @@ void RuntimeScenarioFrameRecorder::record_frame(
     sample.water_stale_upload_candidates = upload.water_stale_upload_candidates;
     sample.water_stale_uploads_deferred = upload.water_stale_uploads_deferred;
     sample.water_deferred_nearer_than_selected = upload.water_deferred_nearer_than_selected;
+    if (const auto* farlod = render_pipeline.legacy_far_compatibility()) {
+        const auto& far_stats = farlod->stats();
+        sample.far_tiles_saved_async = far_stats.tiles_saved_async;
+        sample.far_pending_saves = far_stats.pending_saves;
+        sample.far_snapshot_bytes_copied = far_stats.snapshot_bytes_copied;
+        sample.far_integration_uploads_deferred = far_stats.integration_uploads_deferred;
+    }
     sample.gl_debug_errors = gl_debug.errors;
     m_samples.push_back(sample);
 }
@@ -600,6 +615,11 @@ bool RuntimeScenarioFrameRecorder::write_json(const std::filesystem::path& path)
                {"water_stale_uploads_deferred", sample.water_stale_uploads_deferred},
                {"water_deferred_nearer_than_selected",
                 sample.water_deferred_nearer_than_selected}}},
+             {"farlod",
+              {{"tiles_saved_async", sample.far_tiles_saved_async},
+               {"pending_saves", sample.far_pending_saves},
+               {"snapshot_bytes_copied", sample.far_snapshot_bytes_copied},
+               {"integration_uploads_deferred", sample.far_integration_uploads_deferred}}},
              {"gl_debug_errors", sample.gl_debug_errors}});
     }
 
@@ -632,7 +652,8 @@ bool RuntimeScenarioFrameRecorder::write_csv(const std::filesystem::path& path) 
               "candidates,terrain_stale_uploads_deferred,terrain_deferred_nearer_than_selected,"
               "water_upload_candidates,water_uploads,water_uploads_deferred,water_stale_upload_"
               "candidates,water_stale_uploads_deferred,water_deferred_nearer_than_selected,gl_"
-              "debug_errors\n";
+              "debug_errors,far_tiles_saved_async,far_pending_saves,far_snapshot_bytes_copied,"
+              "far_integration_uploads_deferred\n";
     for (const RuntimeScenarioFrameSample& sample : m_samples) {
         output << sample.frame << ',' << sample.elapsed_seconds << ',' << sample.delta_ms << ','
                << sample.camera_position.x << ',' << sample.camera_position.y << ','
@@ -648,7 +669,9 @@ bool RuntimeScenarioFrameRecorder::write_csv(const std::filesystem::path& path) 
                << sample.water_upload_candidates << ',' << sample.water_uploads << ','
                << sample.water_uploads_deferred << ',' << sample.water_stale_upload_candidates
                << ',' << sample.water_stale_uploads_deferred << ','
-               << sample.water_deferred_nearer_than_selected << ',' << sample.gl_debug_errors
+               << sample.water_deferred_nearer_than_selected << ',' << sample.gl_debug_errors << ','
+               << sample.far_tiles_saved_async << ',' << sample.far_pending_saves << ','
+               << sample.far_snapshot_bytes_copied << ',' << sample.far_integration_uploads_deferred
                << '\n';
     }
     return true;

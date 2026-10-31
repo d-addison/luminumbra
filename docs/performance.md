@@ -5,6 +5,23 @@ whole-frame profiling. Measurements compare a candidate revision with its base
 using the same scenario, preset, compiler, operating system, CPU/GPU class, driver,
 and runtime settings.
 
+## Interactive performance HUD
+
+The developer registry's `perf.hud` is available in Release and QA clients and
+shown by default. Ordinary Settings and the F1 hub edit the same persisted switch;
+`widget hide perf.hud` disables it too. Observed FPS and frame milliseconds use
+the unclamped wall interval between frames, so slow frames are not concealed by
+the gameplay delta clamp. UI submission is explicitly labeled CPU time, and
+renderer counters appear only when their service is available.
+
+The GPU profiler widget (F3 by default) reports selected timed passes, not a
+whole-frame GPU measurement. Hiding either widget removes its draw/formatting
+callbacks; existing GPU timer queries still run. An explicitly enabled shader
+watcher also continues while its panel is hidden. The console snapshots bounded
+logs only while displaying them. Capture overrides suppress developer widgets
+without changing saved preferences. See [Developer console](developer-console.md)
+for bindings, commands, registration and focus behavior.
+
 ## Local commands
 
 Use the `perf` preset for comparable measurements and `profile` when collecting a
@@ -12,18 +29,22 @@ Tracy trace. Both retain debug symbols and frame pointers; only `profile` enable
 instrumentation.
 
 ```sh
-cmake --preset perf
+if [ ! -e build/perf ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/perf || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/perf || exit
+cmake --preset perf "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset perf --target luminumbra_server_app --parallel
 python tools/perf/perf.py run \
   --workload server-smoke --layer end-to-end --preset perf \
   --build-manifest build/perf/performance-build.json --mode gating \
-  --parameter ticks=30 --parameter surface_radius=1 \
+  --parameter ticks=30 --parameter autosave_ticks=30 --parameter surface_radius=1 \
   --parameter collision_radius=1 --parameter seed=1337 \
   --parameter world_preset=default --fixture-hash "$(git rev-parse HEAD:data)" \
   --evidence-contract server-smoke --evidence build/perf/server-smoke-evidence.json \
   --warmup 1 --samples 20 --output build/perf/server-smoke.json -- \
   build/perf/bin/luminumbra_server_app --smoke --preset default --seed 1337 \
-    --ticks 30 --radius 1 --collision-radius 1 \
+    --ticks 30 --autosave-ticks 30 --radius 1 --collision-radius 1 \
     --artifact build/perf/server-smoke-evidence.json
 ```
 
@@ -88,6 +109,47 @@ CPU model, GPU and driver when applicable, renderer, metric schema, and sample
 policy. Base and candidate results with different keys are reported as
 unevaluated rather than compared. The key is recomputed during validation rather
 than trusted from the file.
+
+Fixture references are relative to the selected data root. The shared perf
+resolver follows the native preset loader's lexical rule: normalize `.` and
+`..`, reject an empty normalized path, and reject any path that escapes the
+root. The native loader (`TerrainPresetLoader.cpp`) uses host filesystem rules.
+Perf deliberately adds stricter portable parsing for authored references:
+POSIX absolute paths and Windows drive, UNC, and rooted backslash paths
+are refused on every host, including drive-relative forms such as `C:table.json`.
+Traversal escapes using either slash spelling are also refused on every host.
+These portable checks only reject references; accepted references are normalized
+using the native loader's host rules without respelling them. On POSIX,
+`extra\biomes.json` names a literal backslash filename, distinct from
+`extra/biomes.json`; on Windows, both spellings use a directory separator.
+Each normalized native path component is also checked for symlink targets
+outside the root; in-root links remain valid.
+
+`tools/perf/fixture_hash.py` checks tree entries physically before reading them,
+preserving their native names (including literal backslashes on POSIX), and validates
+authored `generation_params.biomes.table` references. Empty table strings still
+disable biomes. When hashing a preset directory separately, pass
+`--reference-root data` to select the root used by the engine. Simulation capture
+and `prepare_server_comparison.py` select this root automatically and validate
+before launching or copying fixtures. Enumerated names never pass through the
+portable reference parser. AOV inspection checks its manifest and every
+attachment against the capture directory before opening, stat'ing or hashing.
+Referenced inputs must be regular files; directories, FIFOs, sockets and devices
+are refused. Before hashing any file, reads check both the path's type and the
+opened descriptor's type, using nonblocking open where supported so a FIFO
+substituted before open cannot stall capture or comparison preparation.
+
+The tree receipt remains path-component ordered, case sensitive, with each
+entry framed as UTF-8 name, NUL, ASCII canonical SHA-256, and newline. Referenced
+dependencies already included in that tree add no bytes, preserving its hash.
+Other dependencies (including transitive references) are deduplicated by their
+normalized data-root-relative name and appended after the tree receipt as
+`NUL fixture-dependencies:v1 NUL`, followed by a compact ASCII JSON array of
+`[name, canonical_sha256]` pairs, sorted case sensitively by name. JSON escaping
+frames unusual filenames unambiguously. Missing in-root dependencies use JSON
+`null` instead of a digest, retaining fallback behavior while making their
+appearance visible. Preset-only hashes now include their referenced biome
+tables; full data and common-tree hashes without extra dependencies stay unchanged.
 
 ### Re-baselining after a deliberate fixture change
 
@@ -259,3 +321,17 @@ See [Terrain coverage diagnostics](terrain-coverage-diagnostics.md) for a record
 same-camera guard/bypass pair, original images, provenance joins and reproduction
 commands. Its coverage findings do not qualify a production ownership policy or
 ordinary-play performance.
+
+The paired server lane prepares an explicit common historical workload in isolated
+`base/perf-common` and `head/perf-common` roots. Both checkouts compile the same
+guarded fixture adapter, selected only by `.perf-controlled`, to pin legacy
+simulation gates, tuning and finite hydrology. Autosave is explicitly zero. The
+receipt records source hashes and the canonical input identity, including presets
+and systems.json. Generated saves do not enter that input hash. This measures a
+common workload with the existing 5% limit; a fixture transition alone is not a pass.
+
+Native candidate simulation-budget capture runs separately without that marker and
+requires effective active regions, High water, finite hydrology, weather rain/events
+and allocated stateful aether. Its repeated stage traces supply the existing budget
+proposal process. Null baseline identity/work ceilings require CI evidence before
+pinning; they must not be invented or treated as passing performance qualification.

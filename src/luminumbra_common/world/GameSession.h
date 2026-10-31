@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../ai/CreatureBrainSystem.h"        // ai::EcologyTuning (data-driven brain tuning, )
@@ -8,22 +8,29 @@
 #include "../ai/ThirstSystem.h"               // ai::ThirstTuning
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
+#include "../core/SystemConfig.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "TerrainPresetLoader.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
-#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <vector>
+
+namespace Luminumbra::Persistence {
+class CreatedWorldArtifacts;
+}
 
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
@@ -92,7 +99,8 @@ public:
     GameSession();
     ~GameSession();
 
-    // Initialize a new world with the given parameters.
+    // Initialize a new world with the given parameters. Refusal before adoption
+    // preserves the current world and its save eligibility, including fatal state.
     // customPresetJson (optional): a fully-resolved preset JSON (base preset + create-world
     // customize overrides). When provided it is written into THIS world's own save dir
     // (worlds/saves/<id>/preset.json) and used for generation, so the world is self-contained and
@@ -102,6 +110,20 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Staged entry retains the journal until activation or drained rollback.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     Persistence::CreatedWorldArtifacts& artifacts);
+    // Replay must preserve omitted historical selectors and their identity bytes.
+    // A required content identity is checked before directory creation or live-world replacement.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     TerrainPresetUse presetUse,
+                     const std::string& requiredPresetContentHash = {});
     // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
     // translation units compiled against the prior header still resolve a real symbol.
     bool
@@ -114,26 +136,85 @@ public:
                               const std::string& seed,
                               const std::string& worldType);
 
-    // Load an existing world from disk
+    // Load an existing world from disk. Catalog/preset preflight refusals preserve
+    // the current world and save eligibility. Snapshot reader refusals clear
+    // resident chunks and disable saving without publishing staged members.
     bool LoadWorld(const std::string& worldId);
+    // Read a caller-owned immutable save snapshot. Keep it alive until the next successful
+    // canonical save or world replacement: region freezes also read its durable directory.
+    // Runtime content and subsequent persistence retain this session's configured roots.
+    bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
 
-    // Save the current world state
+    // Copy on the owner thread, then prepare without reading any live session.
+    // The opaque result owns all admitted input; cancellation never adopts it.
+    struct WorldPreparationOptions {
+        std::string root_path;
+        // Reading a private snapshot must not retarget subsequent persistence.
+        std::filesystem::path save_root;
+        std::filesystem::path configured_save_root;
+        std::vector<std::filesystem::path> required_assets;
+        RegionSchedulerConfig ledger_config;
+        std::optional<RegionSchedulerConfig> scheduler_override;
+        std::uint64_t simulation_tick = 0;
+        std::uint64_t world_revision = 0;
+        bool active_regions = true;
+        bool aether_state = false;
+        bool job_system_available = false;
+        bool transient_creation = false;
+    };
+    struct WorldPreparation;
+    WorldPreparationOptions CaptureWorldPreparationOptions() const;
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldLoad(const WorldPreparationOptions& options,
+                     const std::string& world_id,
+                     const std::stop_token& stop = {});
+    // Initial snapshot restoration into a newly created, paused world, with its
+    // default energy state. Adoption refuses if that world's revision changed.
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldState(const WorldPreparationOptions& options,
+                      const std::filesystem::path& save_directory,
+                      const std::stop_token& stop = {});
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldCreation(const WorldPreparationOptions& options,
+                         const std::string& name,
+                         const std::string& seed,
+                         const std::string& world_type,
+                         const std::string* custom_preset,
+                         TerrainPresetUse preset_use = TerrainPresetUse::NewWorld,
+                         const std::string& required_identity = {},
+                         const std::stop_token& stop = {});
+    static std::string WorldPreparationError(const WorldPreparation& prepared);
+    bool AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
+                            Persistence::CreatedWorldArtifacts* artifacts = nullptr);
+
+    // Changes when create/load invalidates or releases the previous world, including a
+    // replacement that subsequently fails. Preflight refusal preserves it.
+    std::uint64_t WorldRevision() const {
+        return m_worldRevision;
+    }
+
+    // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
-    // Flag on: runs `body` (which may call SaveWorldState/SaveWorld and indexed-member writers)
-    // inside ONE snapshot transaction published with a single index. Otherwise just runs `body`.
-    // Owner thread only; returns the body's verdict, and false when the commit fails.
-    bool RunInSnapshotTransaction(const std::function<bool()>& body);
+    // Read-only destination preset/identity check, before any save writes or acknowledgements.
+    [[nodiscard]] bool SavedPresetCompatible(const std::filesystem::path& save_dir) const;
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
-    // (worlds/saves/<world_id>). Incremental contract: nothing is written when
-    // no chunk carries unsaved voxel edits, so a never-edited world stays
-    // byte-for-byte on the fresh-world path. The first write of an edited
-    // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
+    // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
+    // plants and energy persist even when no chunks are dirty. Active-region saves
+    // also persist metadata; regions-disabled incremental saves reconcile the
+    // presentation calendar, otherwise preserving unmarked legacy metadata bytes.
+    // A save without a prior container emits a full snapshot; later writes flush through
+    // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
+    // chunks, plants, energy and metadata succeed. Per-file atomic writes can persist
+    // partial progress on failure; metadata is saved after the required state.
+    // Full snapshots and persistent active-region save-as exports include every streamed chunk
+    // and commit metadata last. Pass full_snapshot=true for a complete regions-disabled export.
+    // Save-as exports retain canonical dirty flags and active-region save stamps.
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          bool full_snapshot = false);
 
     // Durable residency (sim.active_regions only). All zero/false when the flag is off.
     [[nodiscard]] PersistenceStatus GetPersistenceStatus() const;
@@ -154,8 +235,12 @@ public:
     // called AFTER the world systems initialize but BEFORE chunk streaming
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
-    // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns true). A refusal returns false and disables saving.
+    // edits are never clobbered by regeneration. Restores the saved water window
+    // cursor; absent metadata or an absent cursor resets it to zero. Malformed
+    // cursors refuse before changing the live cursor. A missing snapshot is a
+    // clean miss (returns true). Corrupt/incompatible snapshot refusal disables
+    // saving; a tick-boundary refusal leaves the session unchanged.
+    // Latest create/open diagnostic, independent of current-world save eligibility.
     const std::string& GetWorldOpenError() const {
         return m_worldOpenError;
     }
@@ -174,7 +259,8 @@ public:
     static WorldConfigValidationResult
     ValidateWorldConfig(const std::string& root_path,
                         const std::string& worldType,
-                        const std::vector<std::filesystem::path>& required_assets = {});
+                        const std::vector<std::filesystem::path>& required_assets = {},
+                        const std::stop_token& stop = {});
 
     // Registers the caller's required runtime assets (relative to the root
     // path) checked by CreateWorld/LoadWorld validation. The client populates
@@ -277,6 +363,18 @@ public:
     // Data-driven creature-brain tuning (energy/sleep/hunger/stamina/herd/
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
+    void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
+    // Computed on demand from effective simulation gates, tuning and resolved calendar.
+    [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Pre-world admission can supply the calendar selected for the intended world.
+    [[nodiscard]] std::string SystemConfigIdentity(const WorldCalendar& calendar) const;
+    // Resolved preset, biome/structure dependencies and captured species bytes.
+    // Shared by TCP Hello, lockstep and replay; never re-reads content.
+    [[nodiscard]] const std::string& PresetContentHash() const {
+        return m_presetContentHash;
+    }
+    [[nodiscard]] std::map<std::string, bool> EffectiveSimulationGates() const;
+
     void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) {
         m_ecologyTuning = t;
     }
@@ -306,25 +404,38 @@ public:
     void SetPlantMutationRate(float rate) {
         m_plantMutationRate = rate < 0.0f ? 0.0f : rate;
     }
-    // Opt-in weather-driven rain (sim.hydrology_weather).
+    // Weather-driven rain is enabled by default (sim.hydrology_weather).
     // Stored pre-world; wired into the water solver at CreateWorld/LoadWorld once the
-    // weather + water systems exist. Default-OFF = null wiring = byte-identical.
+    // weather + water systems exist. Explicit OFF = null wiring = byte-identical.
     // scale_mm: full precipitation (1.0) adds this many mm/tick to a cell.
     void SetWeatherRainEnabled(bool enabled, std::int32_t scale_mm = 25) {
         m_weatherRainEnabled = enabled;
         m_weatherRainScaleMm = scale_mm;
     }
-    // Supported opt-in High-resolution water (sim.water_high_res).
+    // Stored pre-world; ordinary Create/Load conserves finite water.
+    void SetFiniteHydrologyEnabled(bool enabled) {
+        m_finiteHydrologyEnabled = enabled;
+    }
+    [[nodiscard]] bool FiniteHydrologyEnabled() const {
+        return m_finiteHydrologyEnabled;
+    }
+    [[nodiscard]] bool WeatherRainEnabled() const {
+        return m_weatherRainEnabled;
+    }
+    [[nodiscard]] bool WeatherEventsEnabled() const {
+        return m_weatherEventsEnabled;
+    }
+    // High-resolution water is enabled by default (sim.water_high_res).
     // Stored pre-world; applied once at CreateWorld/LoadWorld before the first update.
     // The chosen resolution affects water/world hashes and must match on every peer.
-    // Default-OFF = Medium (8x8, 2 m cells); ON = High (16x16, 1 m cells), whose
+    // Explicit OFF = Medium (8x8, 2 m cells); ON = High (16x16, 1 m cells), whose
     // 4096-cell budget derives a 16-chunk sim window. Loading a current-format save
     // resizes its water grids in one boot-time pass if needed (LoadWorldStateFrom).
     void SetWaterHighResEnabled(bool enabled) {
         m_waterHighResEnabled = enabled;
     }
     // Exposes the deterministic weather-event schedule (Markov epoch windows) on the
-    // session behind sim.weather_events (default OFF -> always Clear/0: byte-identical).
+    // session behind sim.weather_events (explicit OFF -> always Clear/0: byte-identical).
     // Pure read: same (tick, world seed + 25) -> same state; a consumer must ALSO be a
     // participant (the scent/plant opt-in discipline) before its behavior may change.
     void SetWeatherEventsEnabled(bool enabled) {
@@ -333,7 +444,7 @@ public:
     [[nodiscard]] luminumbra::sim::WeatherEventState CurrentWeatherEvent() const;
 
     // Enables the stateful energy-field layer (sim.aether_state,
-    // default OFF). Stored pre-world; the layer is constructed at CreateWorld/
+    // explicit OFF). Stored pre-world; the layer is constructed at CreateWorld/
     // LoadWorld ONLY when enabled — OFF means no allocation, no tick work, zero
     // sub-hash bytes, saves unchanged (byte-identical by construction). The
     // layer is world-anchored sparse-page truth (the re-derivable
@@ -387,6 +498,10 @@ public:
     [[nodiscard]] const WorldClock& GetWorldClock() const {
         return m_worldClock;
     }
+    [[nodiscard]] WorldCalendar GetRenderCalendar() const {
+        return m_activeRegionsEnabled ? m_worldClock.calendar()
+                                      : m_renderCalendar.value_or(WorldCalendar::Legacy());
+    }
     [[nodiscard]] const ActiveRegionLedger& GetActiveRegionLedger() const {
         return m_activeRegionLedger;
     }
@@ -410,7 +525,9 @@ public:
     [[nodiscard]] const RegionInputRejections& GetRegionInputRejections() const {
         return m_regionInputRejections;
     }
-    // Set before world creation. Loaded worlds restore their persisted configuration.
+    // Set before world creation. An absent ledger preserves these settings; a persisted
+    // ledger must match an explicit override or loading refuses. Without an override,
+    // loaded settings become the effective configuration, also retained by world resets.
     void SetRegionSchedulerConfig(RegionSchedulerConfig config);
     void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
     void SetReplicatedSimulationAnchors(std::vector<Vec3> anchors);
@@ -463,6 +580,12 @@ public:
     void SetRootPath(const std::string& root_path) {
         m_rootPath = root_path;
     }
+    // Set before opening a world. Empty preserves storage beneath the runtime root.
+    // World saves and catalog APIs share the <root>/worlds/saves layout.
+    void SetSaveRootPath(const std::filesystem::path& save_root) {
+        m_saveRootPath = save_root;
+    }
+    std::filesystem::path GetSaveRootPath() const;
 
 private:
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
@@ -477,12 +600,40 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
+                             Persistence::CreatedWorldArtifacts* artifacts = nullptr) const;
+    bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
+                              WorldStateSaveReport* report,
+                              bool full_snapshot,
+                              bool write_metadata);
+    bool PrepareWorldMetadataTo(const std::filesystem::path& save_dir,
+                                bool full_metadata,
+                                std::string& bytes) const;
+    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
+    struct LoadedWorldState;
+    bool ReadWorldStateFrom(const std::filesystem::path& save_dir,
+                            LoadedWorldState& state,
+                            bool resetting_clock = false);
+    static bool
+    ReadPreparedWorldState(const std::filesystem::path& save_dir,
+                           const WorldPreparationOptions& options,
+                           LoadedWorldState& state,
+                           std::string& error,
+                           bool resetting_clock,
+                           const std::stop_token& stop,
+                           const luminumbra::fields::EnergyFieldState* current_energy = nullptr);
+    bool AdoptCreatedWorld(WorldPreparation& prepared,
+                           Persistence::CreatedWorldArtifacts* artifacts);
+    bool AdoptLoadedWorld(WorldPreparation& prepared);
+    void AdoptWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
+    // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
+    std::optional<WorldCalendar> m_renderCalendar;
     void AttachRegionEditObserver();
     void RecordPersistenceSaveOutcome(bool ok, double elapsed_ms);
     std::size_t m_parkedBytesLimit = static_cast<std::size_t>(256) * 1024u * 1024u;
@@ -491,24 +642,34 @@ private:
     std::uint32_t m_saveFailures = 0;
     std::int64_t m_lastSaveFailureTick = -1;
     RegionSchedulerConfig m_regionSchedulerConfig;
+    std::optional<RegionSchedulerConfig> m_regionSchedulerOverride;
     ActiveRegionLedger m_activeRegionLedger;
+    void ReplaceActiveRegionLedger(ActiveRegionLedger ledger);
     RegionSchedule m_regionSchedule;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
     std::vector<RegionWork> m_regionWork;
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
-    void LatchRegionFault(std::uint64_t tick, std::string message);
+    void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
-    bool m_activeRegionsEnabled = false;
+    std::string m_presetContentHash;
+    // Exact canonical preset source, independent of dependency-content identity.
+    std::string m_savedPresetJson;
+    luminumbra::core::SystemConfig m_appliedSystemConfig =
+        luminumbra::core::SystemConfig::Defaults();
+    bool m_activeRegionsEnabled = true;
     bool m_simulationBatchInProgress = false;
     bool CreateWorldInternal(const std::string& name,
                              const std::string& seed,
                              const std::string& worldType,
                              const std::string* customPresetJson,
-                             bool transient);
+                             bool transient,
+                             Persistence::CreatedWorldArtifacts* artifacts,
+                             TerrainPresetUse presetUse,
+                             const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which
@@ -524,16 +685,16 @@ private:
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
     // The stateful energy layer. Null unless
-    // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (default OFF —
+    // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (explicit OFF —
     // null — byte-identical). unique_ptr so this header only needs the
     // forward declaration.
     std::unique_ptr<luminumbra::fields::EnergyFieldState> m_energyFieldState;
     std::unique_ptr<Luminumbra::scripting::LuaState> m_scriptState;
-    bool m_aetherStateEnabled = false;
+    bool m_aetherStateEnabled = true;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
-    // Species definitions (see GetSpeciesTable). unique_ptr so this header only
-    // needs the forward declaration (the registry is header-only nlohmann-parsing code).
-    std::unique_ptr<luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
+    // Immutable species definitions shared with the captured dependency snapshot.
+    // Only the forward declaration is needed for the header-only parsing registry.
+    std::shared_ptr<const luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
     // Living-world substrate fields (lazily created when a participant first opts in, so a world
     // with none stays byte-identical). Anchored at the spawn point with a fixed grid extent.
     std::unique_ptr<luminumbra::foliage::SoilGrid> m_soilGrid;
@@ -541,9 +702,12 @@ private:
     JobSystem* m_jobSystem = nullptr;
 
     // Generate a unique world ID
-    std::string GenerateWorldId();
+    static std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
+    // False for fresh, incomplete, or fatally refused snapshot adoption. Operation
+    // diagnostics alone never change this; only coherent adoption enables it.
+    bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
@@ -556,17 +720,17 @@ private:
     void InitializeEnergyFieldState();
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
-    bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
-    void LoadSpeciesDefinitions();          // fills m_speciesTable (world create + load)
-    void ApplyWeatherRainWiring();          // Wires weather to rain when opted in.
-    void ApplyWaterResolutionWiring();      // Raises the water solver to High when opted in.
-    bool m_waterHighResEnabled = false;     // See SetWaterHighResEnabled.
-    bool m_weatherRainEnabled = false;      // See SetWeatherRainEnabled.
+    void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
+    void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
+    bool m_finiteHydrologyEnabled = true;
+    bool m_waterHighResEnabled = true;      // See SetWaterHighResEnabled.
+    bool m_weatherRainEnabled = true;       // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
-    bool m_weatherEventsEnabled = false;    // See SetWeatherEventsEnabled.
+    bool m_weatherEventsEnabled = true;     // See SetWeatherEventsEnabled.
     bool HasScentParticipants() const;
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
+    std::filesystem::path m_saveRootPath;
 };
 
 } // namespace Luminumbra::world

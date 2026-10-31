@@ -3,11 +3,12 @@
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -146,7 +147,9 @@ std::string Patched(std::string bytes,
 }
 
 std::string ReadBytes(const std::filesystem::path& path) {
-    const std::ifstream input(path, std::ios::binary);
+    // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+    std::ifstream input;
+    input.open(path, std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
@@ -165,10 +168,7 @@ void WriteValidTree(const std::filesystem::path& dir) {
 class TempDir {
 public:
     TempDir() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path_ = std::filesystem::temp_directory_path() /
-                ("luminumbra_far_overlay_test_" + std::to_string(stamp));
-        std::filesystem::create_directories(path_);
+        path_ = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_far_overlay_test_");
     }
     ~TempDir() {
         std::error_code ec;
@@ -625,4 +625,24 @@ TEST(FarDensity, ClassifyFarBrick) {
     EXPECT_EQ(ClassifyFarBrick(mixed), FarBrickState::Present);
 
     EXPECT_EQ(ClassifyFarBrick(Uniform(0)), FarBrickState::Present);
+}
+
+TEST(FarOverlayFiles, InvalidInputsAreRefusalsRatherThanMissingOverlays) {
+    const TempDir temp;
+    const auto key = Key(2, -1, 3);
+    const auto path = FarOverlayPath(temp.path(), key);
+    std::filesystem::create_directories(path);
+    EXPECT_EQ(ReadFarOverlay(temp.path(), key).error, FarOverlayError::IoError);
+    std::filesystem::remove(path);
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(path, "partial"));
+    EXPECT_NE(ReadFarOverlay(temp.path(), key).error, FarOverlayError::None);
+    std::filesystem::resize_file(path, kFsv1MaxFileBytes + 1);
+    EXPECT_EQ(ReadFarOverlay(temp.path(), key).error, FarOverlayError::LimitExceeded);
+    std::filesystem::remove(path);
+    EXPECT_EQ(ReadFarOverlay(temp.path(), key).error, FarOverlayError::NotFound);
+#if !defined(_WIN32)
+    // No symlink privilege is needed on this platform; include a dangling leaf.
+    std::filesystem::create_symlink(temp.path() / "absent", path);
+    EXPECT_EQ(ReadFarOverlay(temp.path(), key).error, FarOverlayError::IoError);
+#endif
 }

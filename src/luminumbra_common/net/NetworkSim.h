@@ -59,7 +59,7 @@ private:
     bool Send(bool isA, const std::vector<std::uint8_t>& f, FrameDelivery d) {
         const bool selfOpen = isA ? m_aOpen : m_bOpen;
         const bool peerOpen = isA ? m_bOpen : m_aOpen;
-        if (!selfOpen || !peerOpen)
+        if (f.size() > kMaxFramePayloadBytes || !selfOpen || !peerOpen)
             return false;
         const std::uint64_t seq = m_seq++;
         // Loss: UNRELIABLE only, deterministic from the seq.
@@ -91,22 +91,28 @@ private:
         std::deque<PendingFrame>& q = isA ? m_ba : m_ab; // A receives from the B->A queue
         int best = -1;
         for (int i = 0; i < static_cast<int>(q.size()); ++i) {
-            if (q[i].deliver_tick > m_tick)
+            if (q[static_cast<std::size_t>(i)].deliver_tick > m_tick)
                 continue;
-            if (best < 0 || q[i].deliver_tick < q[best].deliver_tick ||
-                (q[i].deliver_tick == q[best].deliver_tick && q[i].seq < q[best].seq)) {
+            if (best < 0 ||
+                q[static_cast<std::size_t>(i)].deliver_tick <
+                    q[static_cast<std::size_t>(best)].deliver_tick ||
+                (q[static_cast<std::size_t>(i)].deliver_tick ==
+                     q[static_cast<std::size_t>(best)].deliver_tick &&
+                 q[static_cast<std::size_t>(i)].seq < q[static_cast<std::size_t>(best)].seq)) {
                 best = i;
             }
         }
         if (best < 0)
             return false;
-        out = std::move(q[best].data);
+        out = std::move(q[static_cast<std::size_t>(best)].data);
         q.erase(q.begin() + best);
         return true;
     }
 
     [[nodiscard]] bool PeerOpen(bool isA) const {
-        return isA ? m_bOpen : m_aOpen;
+        // Observe a clean close only after all inbound frames have drained,
+        // including frames whose simulated delivery tick has not arrived yet.
+        return isA ? (m_bOpen || !m_ba.empty()) : (m_aOpen || !m_ab.empty());
     }
     void CloseEnd(bool isA) {
         (isA ? m_aOpen : m_bOpen) = false;
@@ -139,6 +145,8 @@ private:
     NetworkConditions m_cond;
     std::uint64_t m_tick = 0;
     std::uint64_t m_seq = 0;
+    // Both ends are in-process, so no untrusted peer can enqueue frames here.
+    // Remote receive bounds do not apply to these queues, including delayed frames.
     std::deque<PendingFrame> m_ab; // A -> B in flight
     std::deque<PendingFrame> m_ba; // B -> A in flight
     bool m_aOpen = true;

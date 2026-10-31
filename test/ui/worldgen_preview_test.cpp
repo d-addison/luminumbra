@@ -7,8 +7,8 @@
 // changes the FBO pixels, (c) orbit changes the view, (d) the per-frame render
 // holds a budget at the preview FBO size, and (e) rapid param changes collapse
 // into ONE debounced, latest-wins rebuild. They use a FIXED TerrainGenParams
-// literal (NOT default.json — that file is owned/enriched by the concurrent
-// worldgen agent), so they never go RED on a preset change.
+// literal rather than default.json, keeping these assertions independent of
+// changes to the authored world-generation presets.
 //
 // GL-required: the cases GTEST_SKIP without a GL context, and the UI gate
 // promotes any "SKIPPED" line on this target to a CTest failure,
@@ -31,7 +31,11 @@
 #include <thread>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "rendering/RenderPipeline.h"
 #include "world/WorldgenPreview.h"
 
@@ -106,6 +110,16 @@ Luminumbra::Systems::TerrainGenParams FixedCandidate() {
     p.lacunarity = 2.0f;
     p.height_offset = 8.0f;
     p.caves_enabled = false;
+    p.surface_breaks_enabled = false;
+    p.island_mask_enabled = false;
+    p.biomes_enabled = false;
+    p.biome_relief_enabled = false;
+    p.cliffs_enabled = false;
+    p.rivers_enabled = false;
+    p.lakes_enabled = false;
+    p.structures_enabled = false;
+    p.hydro_enabled = false;
+
     p.peaks_amplitude = 48.0f;
     p.peaks_frequency = 0.0025f;
     p.domain_warp_amplitude = 18.0f;
@@ -172,13 +186,14 @@ struct PreviewFixture {
     Luminumbra::Client::WorldgenPreview preview;
     bool ok = false;
 
-    PreviewFixture() {
+    explicit PreviewFixture(
+        const Luminumbra::Systems::TerrainGenParams& params = FixedCandidate()) {
         ok = pipeline.startup(kPreviewW, kPreviewH, SourceRoot());
         if (!ok)
             return;
         preview.set_active(true);
         preview.ensure_target(kPreviewW, kPreviewH);
-        preview.set_params(FixedCandidate(), /*seed*/ 4242);
+        preview.set_params(params, /*seed*/ 4242);
         // Signal the background build (past the debounce), then pump render until
         // the worker finishes and the GL-thread swap lands, so the first render has
         // a world (: the build is asynchronous).
@@ -188,6 +203,125 @@ struct PreviewFixture {
 };
 
 } // namespace
+
+TEST(WorldgenPreviewTest, CandidateAdmissionReportsRefusalSeparatelyFromBuildStatus) {
+    Luminumbra::Client::WorldgenPreview preview;
+    const fs::path data_root = SourceRoot() / "data";
+    EXPECT_FALSE(preview.set_candidate(nlohmann::json::array(), data_root, 4242));
+    EXPECT_TRUE(preview.last_build_failed());
+    EXPECT_FALSE(preview.last_error().empty());
+    EXPECT_FALSE(preview.world_ready());
+    EXPECT_FALSE(preview.candidate_ready());
+
+    std::ifstream source(SourceRoot() / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(source);
+    nlohmann::json candidate;
+    ASSERT_NO_THROW(source >> candidate);
+    // An admitted replacement is distinct from the previous failure status;
+    // no build or rendering is needed to observe admission itself.
+    EXPECT_TRUE(preview.set_candidate(candidate, data_root, 4242));
+    EXPECT_TRUE(preview.last_build_failed());
+    EXPECT_EQ(preview.rebuild_generation(), 0u);
+    EXPECT_FALSE(preview.world_ready());
+    EXPECT_FALSE(preview.candidate_ready());
+    EXPECT_FALSE(preview.set_candidate(nlohmann::json{}, data_root, 4242));
+    EXPECT_TRUE(preview.last_build_failed());
+}
+
+namespace {
+
+Luminumbra::Systems::TerrainGenParams OverBudgetCandidate() {
+    auto params = FixedCandidate();
+    params.base_amplitude = 10000000.0f;
+    params.base_frequency = 0.1f;
+    params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+    return params;
+}
+
+bool PumpRefusal(Luminumbra::Client::WorldgenPreview& preview,
+                 Luminumbra::Rendering::RenderPipeline& pipeline) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        preview.render(pipeline, 1.0f / 60.0f);
+        if (preview.last_build_failed())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return preview.last_build_failed();
+}
+
+} // namespace
+
+TEST(WorldgenPreviewTest, RetainedWorldIsNotAReadyReplacementCandidate) {
+    const HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    PreviewFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    ASSERT_TRUE(fixture.preview.world_ready());
+    ASSERT_TRUE(fixture.preview.candidate_ready());
+    const auto generation = fixture.preview.rebuild_generation();
+    fixture.preview.set_params(OverBudgetCandidate(), 4242);
+    EXPECT_TRUE(fixture.preview.world_ready());
+    EXPECT_FALSE(fixture.preview.candidate_ready()); // still debouncing
+    ASSERT_TRUE(fixture.preview.tick(1.0f));
+    EXPECT_FALSE(fixture.preview.candidate_ready()); // not adopted
+    ASSERT_TRUE(PumpRefusal(fixture.preview, fixture.pipeline));
+    EXPECT_TRUE(fixture.preview.world_ready());
+    EXPECT_FALSE(fixture.preview.candidate_ready());
+    EXPECT_EQ(fixture.preview.rebuild_generation(), generation);
+    fixture.preview.set_params(FixedCandidate(), 4242);
+    EXPECT_FALSE(fixture.preview.candidate_ready());
+    ASSERT_TRUE(fixture.preview.tick(1.0f));
+    EXPECT_FALSE(fixture.preview.candidate_ready());
+    ASSERT_TRUE(PumpRebuild(fixture.preview, fixture.pipeline, generation + 1u));
+    EXPECT_TRUE(fixture.preview.candidate_ready());
+}
+
+TEST(WorldgenPreviewTest, RefusedFirstSurfaceKeepsWorldEmptyAndAcceptsNextCandidate) {
+    const HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::Rendering::RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(kPreviewW, kPreviewH, SourceRoot()));
+    Luminumbra::Client::WorldgenPreview preview;
+    preview.set_active(true);
+    preview.ensure_target(kPreviewW, kPreviewH);
+    preview.set_params(OverBudgetCandidate(), 4242);
+    ASSERT_TRUE(preview.tick(1.0f));
+    ASSERT_TRUE(PumpRefusal(preview, pipeline));
+    EXPECT_FALSE(preview.world_ready());
+    EXPECT_EQ(preview.rebuild_generation(), 0u);
+    EXPECT_FALSE(preview.last_error().empty());
+    EXPECT_FALSE(preview.render(pipeline, 1.0f / 60.0f));
+    EXPECT_FALSE(preview.tick(1.0f));
+    preview.set_params(FixedCandidate(), 4242);
+    ASSERT_TRUE(preview.tick(1.0f));
+    ASSERT_TRUE(PumpRebuild(preview, pipeline, 1u));
+    EXPECT_EQ(preview.rebuild_generation(), 1u);
+    EXPECT_FALSE(preview.last_build_failed());
+    EXPECT_TRUE(preview.last_error().empty());
+}
+
+TEST(WorldgenPreviewTest, RefusedSurfaceRetainsLiveWorldAndAllowsRecovery) {
+    const HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    PreviewFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    ASSERT_TRUE(fixture.preview.world_ready());
+    const auto generation = fixture.preview.rebuild_generation();
+    fixture.preview.set_params(OverBudgetCandidate(), 4242);
+    ASSERT_TRUE(fixture.preview.tick(1.0f));
+    ASSERT_TRUE(PumpRefusal(fixture.preview, fixture.pipeline));
+    EXPECT_TRUE(fixture.preview.world_ready());
+    EXPECT_EQ(fixture.preview.rebuild_generation(), generation);
+    EXPECT_FALSE(fixture.preview.last_error().empty());
+    EXPECT_TRUE(fixture.preview.render(fixture.pipeline, 1.0f / 60.0f));
+    fixture.preview.set_params(FixedCandidate(), 4242);
+    ASSERT_TRUE(fixture.preview.tick(1.0f));
+    ASSERT_TRUE(PumpRebuild(fixture.preview, fixture.pipeline, generation + 1u));
+    EXPECT_EQ(fixture.preview.rebuild_generation(), generation + 1u);
+    EXPECT_FALSE(fixture.preview.last_build_failed());
+    EXPECT_TRUE(fixture.preview.last_error().empty());
+}
 
 TEST(WorldgenPreviewTest, RendersCandidateDioramaToTargetWithoutCrashing) {
     HiddenGlContext ctx;
@@ -384,4 +518,39 @@ TEST(WorldgenPreviewTest, PerFrameRenderProducesComparableObservation) {
            << "}\n";
     report.close();
     ASSERT_FALSE(report.fail()) << "could not finalize performance evidence: " << artifact;
+}
+
+TEST(WorldgenPreviewTest, ResolvedShippingHillsRendersWithDefaultTemporalPresentation) {
+    HiddenGlContext ctx;
+    ASSERT_TRUE(ctx.ready()) << ctx.error();
+    const auto preset =
+        Luminumbra::world::LoadTerrainPreset(SourceRoot() / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(preset.ok);
+    EXPECT_TRUE(preset.params.island_mask_enabled);
+    EXPECT_TRUE(preset.params.biomes_enabled);
+    EXPECT_TRUE(preset.params.biome_relief_enabled);
+    EXPECT_TRUE(preset.params.hydro_enabled);
+    EXPECT_TRUE(preset.params.structures_enabled);
+    EXPECT_TRUE(preset.params.surface_breaks_enabled);
+    EXPECT_TRUE(preset.params.rivers_enabled);
+    EXPECT_TRUE(preset.params.lakes_enabled);
+    EXPECT_TRUE(preset.params.cliffs_enabled);
+    PreviewFixture fx(preset.params);
+    ASSERT_TRUE(fx.ok);
+    ASSERT_TRUE(fx.preview.world_ready());
+    EXPECT_TRUE(fx.pipeline.taau_enabled());
+    EXPECT_EQ(fx.pipeline.volumetric_quality(), 1);
+    ASSERT_TRUE(fx.preview.render(fx.pipeline, 1.0f / 60.0f));
+    const auto pixels = ReadTarget(fx.preview);
+    EXPECT_GT(Foreground(pixels), static_cast<std::size_t>(kPreviewW * kPreviewH / 20));
+    const auto artifact = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "performance/shipping_hills.ppm";
+    fs::create_directories(artifact.parent_path());
+    std::ofstream capture(artifact, std::ios::binary);
+    ASSERT_TRUE(capture);
+    capture << "P6\n" << kPreviewW << ' ' << kPreviewH << "\n255\n";
+    for (std::size_t i = 0; i < pixels.size(); i += 4)
+        capture.write(reinterpret_cast<const char*>(pixels.data() + i), 3);
+    capture.close();
+    ASSERT_TRUE(capture);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

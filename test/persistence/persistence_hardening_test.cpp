@@ -13,13 +13,14 @@
 // divergence through the normal test failure path.
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "core/ResidencyContract.h"
 #include "nlohmann/json.hpp"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
 
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -48,11 +49,9 @@ using Luminumbra::Persistence::WorldSaveService;
 using Luminumbra::Persistence::WorldStreamingStateSubHashes;
 
 std::filesystem::path MakeTempSaveDir(const std::string& tag) {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() /
-        ("luminumbra_persistence_hardening_" + tag + "_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir);
+    const std::filesystem::path dir = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+        "luminumbra_persistence_hardening_" + tag + "_");
+
     return dir;
 }
 
@@ -921,7 +920,8 @@ TEST(PersistenceHardening, SimHashMatchesCanonicalSnapshotProjection) {
     // then apply the declared projection and checksum its canonical bytes.
     const std::string bytes = projected.dump(4) + "\n";
     std::uint64_t hash = 14695981039346656037ull;
-    for (unsigned char byte : bytes) {
+    for (const char ch : bytes) {
+        const auto byte = static_cast<unsigned char>(ch);
         hash ^= byte;
         hash *= 1099511628211ull;
     }

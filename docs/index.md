@@ -5,14 +5,19 @@ simulation, a GPU client, and a headless authoritative server. This site starts
 with the engine model and development contracts; the generated namespace,
 class, and file indexes are the lower-level API reference.
 
+v0.3.0 was published on 2026-10-16 as a signed source-only tag; v0.3.1 is in
+preparation. The [release notes](release-notes-v0.3.0.md) separate included source
+from planned work and pending Windows acceptance, and the
+[roadmap](roadmap.md) records the current milestone assignments.
+
 ## v0.3.0 world format break
 
 > This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
 
 Create a new world using a current preset. The format is LMR1 container v2,
 `luminumbra.persistence.world_manifest.v1` with `container_version: 2`, and FSD2
-far-LOD payload v3. Explicit preset revisions must be `schema_rev: 6`; omission
-remains accepted for in-memory callers. Shaping is unconditional and enabled
+far-LOD payload v3. New presets use `schema_rev: 8` with sampling revision 2; revision 6 and omitted revisions
+retain historical missing-field choices. Shaping is unconditional and enabled
 caves use the noise router, while content, hydrology, and biome controls remain.
 Future-format and corruption failures are separate from obsolete-world refusal.
 See [world format compatibility](engine-guide.md).
@@ -60,7 +65,11 @@ publication order remains a deterministic function of simulation inputs.
 ## Build a runnable engine
 
 ```sh
-cmake --preset debug
+if [ ! -e build/debug ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
+cmake --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset debug --parallel
 ctest --preset debug -LE manual --no-tests=error --output-on-failure
 ```
@@ -80,9 +89,9 @@ without a window through the deterministic server smoke path:
 
 ```sh
 build/debug/bin/luminumbra_client_app --no-audio
-build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90
+build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90 --autosave-ticks 30
 ```
 
-Luminumbra 0.3.0 is an early source release. The repository builds an engine and
+Luminumbra 0.3.0 is preparing an early source release. The repository builds an engine and
 its applications together; it does not yet promise a stable installed SDK or
 ABI for third-party applications.

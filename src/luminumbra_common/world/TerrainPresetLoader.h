@@ -13,18 +13,23 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <stop_token>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json_fwd.hpp>
 
 #include "../systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
+#include "WorldgenFileReader.h"
 
 namespace Luminumbra::world {
 
 // Explicit preset revisions must match the current algorithm contract.
-inline constexpr std::int64_t kTerrainPresetSchemaRevision = 6;
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 8;
 inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 6;
+// Keep historical canonical identity bytes at revision 7. Revision 8 gates the
+// complete activation/material sampling contract against older readers.
+inline constexpr std::int64_t kHistoricalTerrainPresetIdentityRevision = 7;
 
 // generation_params.terrain.shaping — reserved keys pinned by
 // (spline points
@@ -46,16 +51,16 @@ struct TerrainShapingPreset {
 // table: "biomes": {"table": "common/biomes.json"}. The table path is relative
 // to the data/ root and resolved to an absolute path against the preset's
 // location at load time (presets live at <root>/worlds/atlas/presets/, data at
-// <root>/data/). With no "table" key biomes stay disabled and the consumed
-// params drift byte-zero from the pre-biome implementation.
+// <root>/data/). Revision 7 supplies the shipped table when omitted; revision 6
+// keeps historical omission semantics. An explicit empty table always disables biomes.
 struct TerrainBiomesPreset {
     bool present = false;
-    bool enabled = false;            // a non-empty "table" was supplied
-    std::string table;               // verbatim relative path from the preset
-    std::string resolved_table_path; // absolute path handed to TerrainGenParams
+    bool enabled = true;                      // a non-empty "table" was supplied
+    std::string table = "common/biomes.json"; // verbatim relative path from the preset
+    std::string resolved_table_path;          // absolute UTF-8 path handed to TerrainGenParams
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
-    bool relief_enabled = false; //  temperature-driven ridge scaling
+    bool relief_enabled = true; //  temperature-driven ridge scaling
     float relief_strength = 0.45f;
 };
 
@@ -63,8 +68,8 @@ struct TerrainBiomesPreset {
 // TerrainGenParams.
 struct TerrainFeaturesPreset {
     bool present = false;
-    bool rivers_enabled = false;
-    bool structures_enabled = false;
+    bool rivers_enabled = true;
+    bool structures_enabled = true;
 };
 
 // generation_params.terrain.hydro: hydraulic/thermal relief. A preset
@@ -72,7 +77,7 @@ struct TerrainFeaturesPreset {
 // TerrainGenParams' hydro_* defaults so a bare {"enabled": true} works.
 struct TerrainHydroPreset {
     bool present = false;
-    bool enabled = false;
+    bool enabled = true;
     int iterations = 24;
     float cell_size_m = 8.0f;
     float talus_height = 1.2f;
@@ -94,33 +99,78 @@ struct TerrainPresetExtras {
 
 struct TerrainPresetLoadResult {
     bool ok = false;
+    // FNV-1a-64 of canonical resolved preset JSON and a sorted manifest of
+    // logical data_root-relative paths, exact-byte file hashes and loader outcomes.
+    std::string preset_content_hash;
+    // params.worldgen_dependencies retains the loaded objects and manifest that
+    // this identity describes, including absent/rejected-input fallback decisions.
     Systems::TerrainGenParams params;
     TerrainPresetExtras extras;
     std::vector<std::string> errors;
     std::vector<std::string> warnings; // unknown-key reports (also logged)
 };
 
+// Fill omitted feature choices using the declared revision (unversioned presets use
+// historical revision 6). Explicit false and an empty biome table remain authoritative.
+nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset);
+
+enum class TerrainPresetUse {
+    Historical,
+    NewWorld
+};
+// Resolve before hashing, saving or adopting parameters. Explicit selectors are
+// authoritative. Historical omission means revision 1 and stays absent to retain
+// existing identity bytes; new-world omission selects revision 2. Revision 2
+// carries schema 8, which older preset readers refuse; revision 1 uses schema 7
+// after materializing the original defaults. Safe to apply repeatedly.
+nlohmann::json ResolveEffectivePreset(const nlohmann::json& preset,
+                                      TerrainPresetUse use = TerrainPresetUse::Historical);
+
+// Identity bytes: effective preset, schema 7 for historical sampling or schema 8
+// for revision 2, sorted object keys, compact JSON, ASCII escapes and
+// locale-independent binary64 numbers.
+// No filesystem paths derived from data_root or provenance enter this form.
+std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset);
+// Identity with an empty dependency manifest (for dependency-free presets/fixtures).
+// Runtime callers must use the loader's preset_content_hash to bind resolved files.
+std::string TerrainPresetContentHash(const nlohmann::json& preset);
+
 // Loads and validates a world preset JSON file. Validation contract matches
 // the historical GameSession parser: generation_params, terrain and features
 // must be objects, the six terrain noise fields must be numeric and
 // caves_enabled/cave_frequency must be present and typed. On any error the
 // result carries ok=false and human-readable messages; params/extras are only
-// meaningful when ok=true.
+// meaningful when ok=true. Absent biome tables use legacy classification; present
+// tables must be readable and valid. Enabled structure pools must exist.
+// Runtime callers supply data_root independently of the preset's storage location.
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const std::filesystem::path& data_root,
+                                          const std::stop_token& stop = {});
+// Convenience for presets in the standard worlds/atlas/presets layout.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
-//   (ADDITIVE in-memory seam — no struct/behavior change). Parses
-// an ALREADY-PARSED preset JSON with an EXPLICIT data root, so a host that holds
-// candidate preset JSON in memory (the create-world live preview) gets identical
-// TerrainGenParams WITHOUT round-tripping through a temp file (the temp-file
-// route resolves the biome/structure table paths against the wrong data root —
-// they are resolved relative to <data_root> here). `data_root` is the absolute
-// path to the `data/` directory (the same root the on-disk loader derives as
-// four parents up from the preset file + "data"). `provenance` only labels the
-// unknown-key warnings. LoadTerrainPreset(path) reads+parses the file and
-// DELEGATES here with the file-derived data root, so on-disk loads are
-// byte-identical to before.
-TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
-                                                  const std::filesystem::path& data_root,
-                                                  const std::string& provenance = "<memory>");
+// Explicit CLI preset override, validated against the runtime data root. Failure leaves
+// json_text unchanged; successful text is passed to GameSession::CreateWorld.
+bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
+                               const std::filesystem::path& data_root,
+                               std::string& json_text,
+                               std::string& error);
+
+// Parses an already-parsed preset with the runtime data directory supplied
+// explicitly. The disk loader delegates here. Present biome tables and enabled
+// structure pools must be readable and valid; absent tables use legacy classification.
+// Disabled features require no files. `provenance` only
+// labels diagnostics. Identity binds the selected
+// biome table and enabled structure placement/piece files through portable paths.
+// The status reader queries links themselves and permits deterministic I/O failure coverage.
+// A supplied dependency reader must provide every consumed biome, structure and
+// species file; bounded hosts can serve validated snapshots without reopening bytes.
+TerrainPresetLoadResult LoadTerrainPresetFromJson(
+    const nlohmann::json& data,
+    const std::filesystem::path& data_root,
+    const std::string& provenance = "<memory>",
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus,
+    const World::WorldgenFileReader& dependency_reader = World::ReadWorldgenFile,
+    const std::stop_token& stop = {});
 
 } // namespace Luminumbra::world

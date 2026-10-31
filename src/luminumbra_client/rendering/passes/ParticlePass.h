@@ -171,6 +171,16 @@ public:
     std::size_t live_particle_count() const {
         return m_live_count;
     }
+    // Render-only diagnostic copy in pool order, bounded by kMaxInstances.
+    // Reports ownership and motion without exposing mutable particle storage.
+    struct LiveParticleState {
+        glm::vec3 pos{0.0f};
+        glm::vec3 vel{0.0f};
+        float age = 0.0f;
+        float lifetime = 1.0f;
+        uint32_t emitter_index = 0;
+    };
+    std::vector<LiveParticleState> live_particle_states() const;
     // the instance count update prepared for this
     // frame, exposed so RenderPipeline::capture_particle_parity can assert
     // execute's return value (the relocated stat source) without friending the
@@ -185,6 +195,14 @@ public:
     static constexpr uint32_t kInvalidEmitter = 0xFFFFFFFFu;
     uint32_t add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin);
     void clear_emitters();
+    // Remove the previous world's waterfall spray and its live particles,
+    // preserving other emitters and their particle/template indices.
+    void clear_waterfall_spray();
+
+    // The pass owns this cache: full clears invalidate it, spray removal remaps it.
+    // Repeated updates recenter it in constant time; failed loads can be retried.
+    void update_ambient_motes(const std::filesystem::path& root_path,
+                              const glm::vec3& camera_position);
 
     //  RE-CENTER an existing emitter's spawn region on a
     // new base origin (render-only). `base_origin` is the same un-offset world
@@ -275,6 +293,7 @@ private:
         double spawn_accumulator = 0.0; // fractional particles carried frame to frame
         uint64_t rng_state = 0;         // xorshift state, render-only
         float spawn_scale = 1.0f;       // live presentation intensity, not authored data
+        bool waterfall_spray = false;
     };
 
     // Render-only particle (motion state lives here, NEVER snapshotted).
@@ -310,6 +329,7 @@ private:
     // Per-frame instance count actually written to the mapping.
     std::size_t m_frame_instance_count = 0;
     uint32_t m_next_emitter_id = 0;
+    std::size_t m_ambient_emitter_index = kMaxEmitters;
     std::array<uint32_t, 2> m_precip_emitters{kInvalidEmitter, kInvalidEmitter};
     std::array<bool, 2> m_precip_load_attempted{};
 

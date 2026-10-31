@@ -1,16 +1,23 @@
 #include "SaveTransaction.h"
+#include "core/FilesystemPath.h"
 
+#include "SavedInputFile.h"
+#include "SavedInputLimits.h"
+#include "SavedJsonAdmission.h"
 #include "WorldSaveService.h"
+#include "fields/EnergyFieldState.h"
 
 #include "nlohmann/json.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -27,7 +34,7 @@ namespace {
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
-constexpr std::size_t kHashBlockBytes = 1024u * 1024u;
+constexpr std::size_t kHashBlockBytes = 64u * 1024u;
 
 SaveTransaction*& ActiveTransaction() {
     static thread_local SaveTransaction* active = nullptr;
@@ -121,16 +128,20 @@ const nlohmann::json* Field(const nlohmann::json& object, const char* key) {
     return it == object.end() ? nullptr : &(*it);
 }
 
+// Undo payloads obey the largest shipping member bound. JSON control records
+// use the stricter index budget. All lengths are admitted before allocation.
+constexpr std::uint64_t kMaxUndoBytes = SavedInputLimits::kRegionCompressedAggregateBytes + 8ull +
+                                        SavedInputLimits::kRegionRecords * 18ull;
+
 bool ReadAllBytes(const fs::path& file, std::string& out, std::vector<std::string>* errors) {
-    out.clear();
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        AddError(errors, "cannot open for reading: " + file.string());
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    if (in.bad()) {
-        AddError(errors, "cannot read: " + file.string());
+    const SavedInputFile input(file);
+    const auto maximum = file.filename() == "txn.json" || file.filename() == "snapshot.json"
+                             ? kMaxSnapshotIndexBytes
+                             : kMaxUndoBytes;
+    if (!input.read(out, maximum)) {
+        AddError(errors,
+                 "unreadable or oversized snapshot input: " +
+                     Filesystem::GenericUtf8PathString(file));
         return false;
     }
     return true;
@@ -140,54 +151,41 @@ bool SamePath(const fs::path& lhs, const fs::path& rhs) {
     std::error_code ec;
     fs::path lhs_canonical = fs::weakly_canonical(lhs, ec);
     if (ec) {
-        lhs_canonical = lhs.lexically_normal();
+        return false;
     }
     fs::path rhs_canonical = fs::weakly_canonical(rhs, ec);
     if (ec) {
-        rhs_canonical = rhs.lexically_normal();
+        return false;
     }
     return lhs_canonical == rhs_canonical;
 }
 
-// Removes stale staging files (names containing ".tmp.") directly in save_dir and chunks/region.
-// Returns false when a listed temporary could not be removed. Affected directories are flushed.
-bool SweepTemporaries(const fs::path& save_dir) {
-    bool ok = true;
-    const std::array<fs::path, 2> directories = {save_dir, save_dir / "chunks" / "region"};
+// Devel stages outside strict save inventories. Legacy-looking temporary names
+// inside a save have no ownership proof, so refuse them without deleting data.
+bool ValidateTemporaryInventory(const fs::path& save_dir) {
+    // The save root is devel's neutral staging area and is not a strict inventory.
+    const std::array<fs::path, 1> directories = {save_dir / "chunks" / "region"};
     for (const fs::path& directory : directories) {
         std::error_code ec;
         fs::directory_iterator it(directory, ec);
         if (ec) {
-            continue;
-        }
-        bool removed_any = false;
-        const fs::directory_iterator end;
-        for (; it != end; it.increment(ec)) {
-            if (ec) {
-                ok = false;
-                break;
-            }
-            std::error_code status_ec;
-            const fs::directory_entry& entry = *it;
-            if (!entry.is_regular_file(status_ec) || status_ec) {
+            if (ec == std::errc::no_such_file_or_directory)
                 continue;
-            }
-            if (entry.path().filename().string().find(".tmp.") == std::string::npos) {
-                continue;
-            }
-            std::error_code remove_ec;
-            fs::remove(entry.path(), remove_ec);
-            if (remove_ec) {
-                ok = false;
-            } else {
-                removed_any = true;
-            }
+            return false;
         }
-        if (removed_any) {
-            WorldSaveService::durable_flush_directory(directory, nullptr);
+        std::size_t count = 0;
+        // The snapshot member ceiling also caps recovery inventory work.
+        for (const fs::directory_iterator end; it != end; it.increment(ec)) {
+            if (ec || count++ == kMaxSnapshotMembers)
+                return false;
+            if (Filesystem::GenericUtf8PathString(it->path().filename()).find(".tmp.") !=
+                std::string::npos)
+                return false;
         }
+        if (ec)
+            return false;
     }
-    return ok;
+    return true;
 }
 
 // Nearest ancestor of `directory` (inclusive) that exists, for flushing entries under directories
@@ -221,6 +219,10 @@ struct JournalDocument {
 
 bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& error) {
     out = JournalDocument{};
+    if (bytes.size() > kMaxSnapshotIndexBytes || !SavedInputLimits::JsonDepthAllowed(bytes)) {
+        error = "snapshot control JSON compatibility limit";
+        return false;
+    }
     const std::string text(bytes);
     const nlohmann::json root = nlohmann::json::parse(text, nullptr, false);
     if (root.is_discarded() || !root.is_object()) {
@@ -237,7 +239,8 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
     const nlohmann::json* next = Field(root, "new_generation");
     const nlohmann::json* entries = Field(root, "entries");
     if (!txn_id || !txn_id->is_number_unsigned() || !base || !base->is_number_unsigned() || !next ||
-        !next->is_number_unsigned() || !entries || !entries->is_array()) {
+        !next->is_number_unsigned() || !entries || !entries->is_array() ||
+        entries->size() > kMaxSnapshotMembers) {
         error = "journal header fields invalid";
         return false;
     }
@@ -245,6 +248,12 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
     parsed.txn_id = txn_id->get<std::uint64_t>();
     parsed.base_generation = base->get<std::uint64_t>();
     parsed.new_generation = next->get<std::uint64_t>();
+    if (parsed.txn_id == 0 || parsed.base_generation == std::numeric_limits<std::uint64_t>::max() ||
+        parsed.new_generation != parsed.base_generation + 1) {
+        error = "journal generation identity invalid";
+        return false;
+    }
+    std::unordered_set<std::string> paths;
     for (const nlohmann::json& item : *entries) {
         const nlohmann::json* path = Field(item, "path");
         const nlohmann::json* action = Field(item, "action");
@@ -272,6 +281,13 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
         }
         if (!ParseHex64(prev_fnv->get<std::string>(), entry.prev_fnv64)) {
             error = "journal entry digest invalid";
+            return false;
+        }
+        if (!paths.insert(entry.path).second || (entry.action == "replace" && entry.undo.empty()) ||
+            (entry.action == "create" &&
+             (!entry.undo.empty() || entry.prev_bytes != 0 || entry.prev_fnv64 != 0)) ||
+            entry.prev_bytes > kMaxUndoBytes) {
+            error = "journal entry identity invalid";
             return false;
         }
         if (!IsUndoName(entry.undo)) {
@@ -304,7 +320,10 @@ std::string EncodeJournal(std::uint64_t txn_id,
         list.push_back(std::move(item));
     }
     root["entries"] = std::move(list);
-    return root.dump() + "\n";
+    std::string bytes;
+    if (!BoundedJsonDump(root, kMaxSnapshotIndexBytes - 1, bytes))
+        throw std::length_error("snapshot control JSON compatibility limit");
+    return bytes + "\n";
 }
 
 // Restores entries in reverse order. Shared by in-process abort and crash recovery.
@@ -339,19 +358,11 @@ bool RollbackEntries(const fs::path& save_dir,
             const bool matches = exists && bytes == entry.prev_bytes && fnv64 == entry.prev_fnv64;
             if (!matches) {
                 const fs::path undo_path = journal_directory(save_dir) / entry.undo;
-                std::uint64_t undo_bytes = 0;
-                std::uint64_t undo_fnv64 = 0;
-                bool undo_exists = false;
-                if (!hash_file(undo_path, undo_bytes, undo_fnv64, undo_exists, errors)) {
-                    return false;
-                }
-                if (!undo_exists || undo_bytes != entry.prev_bytes ||
-                    undo_fnv64 != entry.prev_fnv64) {
-                    AddError(errors, "journal undo copy missing or corrupt: " + entry.path);
-                    return false;
-                }
                 std::string restored;
-                if (!ReadAllBytes(undo_path, restored, errors)) {
+                if (!ReadAllBytes(undo_path, restored, errors) ||
+                    restored.size() != entry.prev_bytes ||
+                    fnv1a64_bytes(restored.data(), restored.size()) != entry.prev_fnv64) {
+                    AddError(errors, "journal undo copy missing or corrupt: " + entry.path);
                     return false;
                 }
                 if (!WorldSaveService::durable_write_file(destination, restored, errors)) {
@@ -378,17 +389,12 @@ bool RollbackEntries(const fs::path& save_dir,
     }
     // Flush every affected directory (including entries a replay found already restored) before
     // the caller retires the journal.
-    std::vector<fs::path> flushed;
+    std::unordered_set<fs::path> flushed;
     for (const JournalEntry& entry : entries) {
         const fs::path directory = NearestExistingDirectory((save_dir / entry.path).parent_path());
-        bool seen = false;
-        for (const fs::path& done : flushed) {
-            seen = seen || done == directory;
-        }
-        if (seen) {
+        if (!flushed.insert(directory).second) {
             continue;
         }
-        flushed.push_back(directory);
         if (!WorldSaveService::durable_flush_directory(directory, errors)) {
             return false;
         }
@@ -396,14 +402,13 @@ bool RollbackEntries(const fs::path& save_dir,
     return true;
 }
 
-// Deletes txn.json, the journal directory and temporaries. Errors are ignored by design.
+// Retires the transaction's journal. Errors leave recovery work for the next open.
 void FinishJournal(const fs::path& save_dir) {
     const fs::path txn_path = journal_directory(save_dir) / "txn.json";
     WorldSaveService::durable_remove(txn_path, nullptr);
     report_snapshot_step("journal-unlinked", txn_path);
     std::error_code ec;
     fs::remove_all(journal_directory(save_dir), ec);
-    SweepTemporaries(save_dir);
     WorldSaveService::durable_flush_directory(save_dir, nullptr);
 }
 
@@ -471,13 +476,20 @@ std::string encode_snapshot_index(const SnapshotIndex& index) {
         members.push_back(std::move(item));
     }
     root["members"] = std::move(members);
-    return root.dump() + "\n";
+    std::string bytes;
+    if (!BoundedJsonDump(root, kMaxSnapshotIndexBytes - 1, bytes))
+        throw std::length_error("snapshot control JSON compatibility limit");
+    return bytes + "\n";
 }
 
 bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::string& error) {
     out = SnapshotIndex{};
     if (bytes.size() > kMaxSnapshotIndexBytes) {
         error = "snapshot index exceeds size cap";
+        return false;
+    }
+    if (bytes.size() > kMaxSnapshotIndexBytes || !SavedInputLimits::JsonDepthAllowed(bytes)) {
+        error = "snapshot control JSON compatibility limit";
         return false;
     }
     const std::string text(bytes);
@@ -514,6 +526,13 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
             !anchor[1].is_number() || !anchor[2].is_number()) {
             error = "snapshot anchor invalid";
             return false;
+        }
+        for (const auto& component : anchor) {
+            const auto number = component.get<double>();
+            if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max()) {
+                error = "snapshot anchor outside float range";
+                return false;
+            }
         }
         index.anchors.push_back(
             {anchor[0].get<float>(), anchor[1].get<float>(), anchor[2].get<float>()});
@@ -583,26 +602,12 @@ bool read_snapshot_index(const fs::path& save_dir,
                          std::vector<std::string>* errors) {
     out = SnapshotIndex{};
     const fs::path path = snapshot_index_path(save_dir);
-    std::error_code ec;
-    const bool exists = fs::exists(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat snapshot index: " + path.string());
-        return false;
-    }
-    if (!exists) {
+    const SavedInputFile input(path);
+    if (input.missing())
         return true;
-    }
-    const std::uintmax_t size = fs::file_size(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat snapshot index: " + path.string());
-        return false;
-    }
-    if (size > kMaxSnapshotIndexBytes) {
-        AddError(errors, "snapshot index too large");
-        return false;
-    }
     std::string bytes;
-    if (!ReadAllBytes(path, bytes, errors)) {
+    if (!input.read(bytes, kMaxSnapshotIndexBytes)) {
+        AddError(errors, "unreadable or oversized snapshot index");
         return false;
     }
     std::string error;
@@ -615,9 +620,9 @@ bool read_snapshot_index(const fs::path& save_dir,
 }
 
 bool snapshot_index_exists(const fs::path& save_dir) {
-    std::error_code ec;
-    const bool exists = fs::exists(snapshot_index_path(save_dir), ec);
-    return !ec && exists;
+    // An invalid present input is not a clean miss; the reader must refuse it.
+    const SavedInputFile input(snapshot_index_path(save_dir));
+    return !input.missing();
 }
 
 std::uint64_t fnv1a64_bytes(const void* data, std::size_t size) {
@@ -632,42 +637,41 @@ bool hash_file(const fs::path& path,
     bytes = 0;
     fnv64 = 0;
     exists = false;
-    std::error_code ec;
-    const bool present = fs::exists(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat file: " + path.string());
+    const SavedInputFile input(path);
+    if (input.missing())
+        return true;
+    std::uint64_t length = 0;
+    if (!input.length(length) || length > kMaxUndoBytes) {
+        AddError(errors,
+                 "unreadable or oversized snapshot member: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
-    if (!present) {
-        return true;
+    // Fixed storage; work is bounded by the admitted encoded member length.
+    std::array<char, kHashBlockBytes> block{};
+    fnv64 = kFnvOffset;
+    while (bytes < length) {
+        const auto count =
+            static_cast<std::size_t>(std::min<std::uint64_t>(block.size(), length - bytes));
+        if (!input.read_exact(block.data(), count)) {
+            AddError(errors, "partial snapshot member read");
+            return false;
+        }
+        fnv64 = Fnv1aUpdate(fnv64, block.data(), count);
+        bytes += count;
     }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors, "cannot open for hashing: " + path.string());
+    if (!input.at_end()) {
+        AddError(errors, "snapshot member changed while reading");
         return false;
     }
     exists = true;
-    fnv64 = kFnvOffset;
-    std::vector<char> block(kHashBlockBytes);
-    while (in) {
-        in.read(block.data(), static_cast<std::streamsize>(block.size()));
-        const std::streamsize got = in.gcount();
-        if (got > 0) {
-            fnv64 = Fnv1aUpdate(fnv64, block.data(), static_cast<std::size_t>(got));
-            bytes += static_cast<std::uint64_t>(got);
-        }
-    }
-    if (!in.eof()) {
-        AddError(errors, "cannot read for hashing: " + path.string());
-        return false;
-    }
     return true;
 }
 
 bool journal_pending(const fs::path& save_dir) {
     std::error_code ec;
-    const bool exists = fs::exists(journal_directory(save_dir), ec);
-    return !ec && exists;
+    const auto status = fs::symlink_status(journal_directory(save_dir), ec);
+    return ec != std::errc::no_such_file_or_directory && (ec || fs::exists(status));
 }
 
 RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
@@ -675,39 +679,50 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
     try {
         const fs::path journal = journal_directory(save_dir);
         std::error_code ec;
-        const bool journal_exists = fs::exists(journal, ec);
+        const auto journal_status = fs::symlink_status(journal, ec);
+        if (ec == std::errc::no_such_file_or_directory)
+            ec.clear();
+        const bool journal_exists = fs::exists(journal_status);
+        if (journal_exists &&
+            (!fs::is_directory(journal_status) || fs::is_symlink(journal_status))) {
+            AddError(errors, "invalid snapshot journal directory");
+            return RecoveryOutcome::Failed;
+        }
         if (ec) {
-            AddError(errors, "cannot stat snapshot journal: " + journal.string());
+            AddError(errors,
+                     "cannot stat snapshot journal: " + Filesystem::GenericUtf8PathString(journal));
             return RecoveryOutcome::Failed;
         }
         if (!journal_exists) {
-            // Far-only upserts run without a transaction; a crash can leave their staging file
-            // behind, which an indexed directory would refuse at load. Legacy directories keep
-            // their historical behaviour.
-            if (snapshot_index_exists(save_dir) && !SweepTemporaries(save_dir)) {
-                AddError(errors, "cannot remove stale staging files under " + save_dir.string());
+            // Unknown files in the strict inventory require refusal, never speculative cleanup.
+            if (snapshot_index_exists(save_dir) && !ValidateTemporaryInventory(save_dir)) {
+                AddError(errors,
+                         "unknown temporary artifact under " +
+                             Filesystem::GenericUtf8PathString(save_dir));
                 return RecoveryOutcome::Failed;
             }
             return RecoveryOutcome::NothingToDo;
         }
-        const fs::path txn_path = journal / "txn.json";
-        const bool txn_exists = fs::exists(txn_path, ec);
-        if (ec) {
-            AddError(errors, "cannot stat snapshot journal: " + txn_path.string());
+        if (!ValidateTemporaryInventory(save_dir)) {
+            AddError(errors, "unknown temporary artifact in snapshot inventory");
             return RecoveryOutcome::Failed;
         }
-        if (!txn_exists) {
+        const fs::path txn_path = journal / "txn.json";
+        const SavedInputFile transaction_input(txn_path);
+        if (transaction_input.missing()) {
             // Debris from a journal that was never published.
             fs::remove_all(journal, ec);
             if (ec) {
-                AddError(errors, "cannot remove stale snapshot journal: " + journal.string());
+                AddError(errors,
+                         "cannot remove stale snapshot journal: " +
+                             Filesystem::GenericUtf8PathString(journal));
                 return RecoveryOutcome::Failed;
             }
-            SweepTemporaries(save_dir);
             return RecoveryOutcome::DiscardedStale;
         }
         std::string bytes;
-        if (!ReadAllBytes(txn_path, bytes, errors)) {
+        if (!transaction_input.read(bytes, kMaxSnapshotIndexBytes)) {
+            AddError(errors, "unreadable or oversized snapshot journal");
             return RecoveryOutcome::Failed;
         }
         JournalDocument document;
@@ -718,6 +733,16 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
         }
         SnapshotIndex committed;
         if (!read_snapshot_index(save_dir, committed, errors)) {
+            return RecoveryOutcome::Failed;
+        }
+        if (committed.generation != document.base_generation &&
+            committed.generation != document.new_generation) {
+            AddError(errors, "journal does not belong to committed snapshot generation");
+            return RecoveryOutcome::Failed;
+        }
+        if (committed.generation == document.new_generation &&
+            committed.txn_id != document.txn_id) {
+            AddError(errors, "journal does not belong to committed transaction");
             return RecoveryOutcome::Failed;
         }
         if (committed.generation != 0 && committed.generation == document.new_generation) {
@@ -791,12 +816,19 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         if (!read_snapshot_index(m_save_dir, m_previous, errors)) {
             return false;
         }
+        if (m_previous.generation == std::numeric_limits<std::uint64_t>::max() ||
+            m_previous.txn_id == std::numeric_limits<std::uint64_t>::max()) {
+            AddError(errors, "snapshot generation identity exhausted");
+            return false;
+        }
         m_new_generation = m_previous.generation + 1;
         m_txn_id = m_previous.txn_id + 1;
         std::error_code ec;
         fs::create_directories(journal_directory(m_save_dir) / "undo", ec);
         if (ec) {
-            AddError(errors, "cannot create snapshot journal: " + m_save_dir.string());
+            AddError(errors,
+                     "cannot create snapshot journal: " +
+                         Filesystem::GenericUtf8PathString(m_save_dir));
             return false;
         }
         if (!WorldSaveService::durable_flush_directory(journal_directory(m_save_dir), errors)) {
@@ -829,32 +861,24 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
         const fs::path undo_directory = journal_directory(m_save_dir) / "undo";
         bool added = false;
         for (const std::string& rel : todo) {
-            bool already = false;
-            for (const Entry& entry : m_entries) {
-                if (entry.path == rel) {
-                    already = true;
-                    break;
-                }
-            }
-            if (already) {
+            if (m_protected.contains(rel))
                 continue;
+            if (m_entries.size() == kMaxSnapshotMembers) {
+                AddError(errors, "snapshot member count limit");
+                return false;
             }
             if (rel != kSnapshotIndexRelativePath && !member_path_allowed(rel)) {
                 AddError(errors, "path not allowed in snapshot transaction: " + rel);
                 return false;
             }
             const fs::path destination = m_save_dir / rel;
-            std::uint64_t bytes = 0;
-            std::uint64_t fnv64 = 0;
-            bool exists = false;
-            if (!hash_file(destination, bytes, fnv64, exists, errors)) {
-                return false;
-            }
             Entry entry;
             entry.path = rel;
-            if (exists) {
+            const SavedInputFile input(destination);
+            if (!input.missing()) {
                 std::string previous;
-                if (!ReadAllBytes(destination, previous, errors)) {
+                if (!input.read(previous, kMaxUndoBytes)) {
+                    AddError(errors, "unreadable or oversized transaction member: " + rel);
                     return false;
                 }
                 const std::string undo_name = std::to_string(m_next_undo);
@@ -870,6 +894,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             } else {
                 entry.action = "create";
             }
+            m_protected.insert(entry.path);
             m_entries.push_back(std::move(entry));
             added = true;
         }
@@ -954,20 +979,31 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             std::error_code ec;
             fs::directory_iterator it(m_save_dir / "chunks" / "region", ec);
             const fs::directory_iterator end;
+            if (ec == std::errc::no_such_file_or_directory)
+                ec.clear();
+            std::size_t inspected = 0;
+            // Count every entry, including ignored leaves, before extending the inventory.
             if (!ec) {
                 for (; it != end; it.increment(ec)) {
                     if (ec) {
                         break;
                     }
-                    std::error_code status_ec;
-                    if (!it->is_regular_file(status_ec) || status_ec) {
-                        continue;
+                    if (inspected++ == kMaxSnapshotMembers) {
+                        AddError(errors, "snapshot inventory count limit");
+                        abort(errors);
+                        return false;
                     }
-                    const std::string rel = "chunks/region/" + it->path().filename().string();
+                    const std::string rel =
+                        "chunks/region/" + Filesystem::GenericUtf8PathString(it->path().filename());
                     if (member_path_allowed(rel)) {
                         baseline.push_back(rel);
                     }
                 }
+            }
+            if (ec) {
+                AddError(errors, "cannot enumerate complete snapshot inventory");
+                abort(errors);
+                return false;
             }
             for (const std::string& rel : baseline) {
                 MemberDigest digest;

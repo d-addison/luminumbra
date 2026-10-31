@@ -1,4 +1,10 @@
-"""Portable request ownership, replay, orphan recovery and EOF/cancel races."""
+"""Portable request ownership, replay, orphan recovery and EOF/cancel races.
+
+Job result waits observe drained completion, not machine throughput. Production
+backend deadlines and the CI job watchdog remain the fail-safes for hangs.
+"""
+from concurrent.futures import Executor, FIRST_COMPLETED, Future, wait
+from contextlib import contextmanager
 from copy import deepcopy
 import io
 import os
@@ -7,7 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import DEFAULT, patch
 import zipfile
 
 SERVICE = Path(__file__).resolve().parents[1]
@@ -18,9 +24,172 @@ from luminumbra_author.meshgen_backend import MOCK_CAPABILITY
 from luminumbra_author.meshgen_config import PROJECT_CONFIG, load_config
 from luminumbra_author.meshgen_jobs import BackendBroker, RequestLedger, process_start, read_notes
 from test_meshgen_config import project_fixture
-from mock_backend import MockServer, synthetic_glb
+from mock_backend import synthetic_glb
 from test_meshgen_backend import TOKEN, planning, png
-from meshgen_http_fixture import owned_server, client_factory, RuleAssertions
+from meshgen_http_fixture import MemoryMockServer, client_factory, RuleAssertions
+
+
+def completed_result(future, phase):
+    # Synchronous execution or an independent handshake/join must establish
+    # that this phase finished. A missing signal is then a protocol failure.
+    assert future.done(), f"Missing completion for {phase}"
+    return future.result(timeout=0)
+
+
+def phase_reached(phase, task, name):
+    # Call after synchronous durable work, or for a worker handshake with no
+    # pending durable work. This bound detects a lost signal or deadlock only.
+    wait((phase, task), timeout=2, return_when=FIRST_COMPLETED)
+    if not phase.done():
+        assert task.done(), f"Deadlock before {name}"
+        try:
+            outcome = task.result(timeout=0)
+        except BaseException as error:
+            raise AssertionError(f"Worker failed before {name}: {error}") from error
+        raise AssertionError(f"Worker completed before {name}: {outcome!r}")
+    return phase.result(timeout=0)
+
+
+def cancellation_requested(started, completion_wait, task):
+    # Entry into result() follows the durable update, even if its signal is lost.
+    phase_reached(completion_wait, task, "cancellation completion wait")
+    return completed_result(started, "cancellation request")
+
+
+def start_worker(function, *args, **kwargs):
+    future = Future()
+    work_finished = threading.Event()
+    def run():
+        try:
+            future.set_running_or_notify_cancel()
+            try:
+                future.set_result(function(*args, **kwargs))
+            except BaseException as error:
+                future.set_exception(error)
+        finally:
+            # Keep thread completion independent of its result handle; the
+            # join helper checks this signal without waiting on it.
+            work_finished.set()
+    worker = threading.Thread(target=run, daemon=True)
+    worker.future = future
+    worker.work_finished = work_finished
+    worker.start()
+    return worker
+
+
+def join_worker(worker):
+    # Call after synchronous durable work; workers only wait or read its result.
+    worker.join(timeout=2)
+    assert not worker.is_alive(), "Deadlock joining released worker"
+    assert worker.work_finished.is_set(), "Missing worker completion signal"
+    return worker.future.result(timeout=0)
+
+
+class WorkerExecutor(Executor):
+    """Queue broker work so tests can run it and its drain callback inline."""
+    def __init__(self):
+        self.pending = []
+
+    def submit(self, function, /, *args, **kwargs):
+        future = Future()
+        self.pending.append((future, function, args, kwargs))
+        return future
+
+    def run_pending(self):
+        while self.pending:
+            future, function, args, kwargs = self.pending.pop(0)
+            future.set_running_or_notify_cancel()
+            try:
+                result = function(*args, **kwargs)
+            except BaseException as error:
+                future.set_exception(error)
+            else:
+                future.set_result(result)
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        assert not self.pending, "Broker work must run before cleanup"
+
+
+def close_broker(broker):
+    broker.executor.shutdown(wait=True)
+    # Check every wait handle before close can enter cancel(). An incomplete
+    # handle must fail immediately even when its drained callback has returned.
+    for future in broker.futures.values():
+        completed_result(future, "broker drain after release")
+    broker.close()
+
+
+@contextmanager
+def managed_broker(*args, **kwargs):
+    broker = BackendBroker(*args, **kwargs)
+    try:
+        yield broker.__enter__()
+    finally:
+        close_broker(broker)
+
+
+class SynchronousExecutor(Executor):
+    """Run the task and its Future callbacks before returning to the test."""
+    def submit(self, function, /, *args, **kwargs):
+        future = Future()
+        future.set_running_or_notify_cancel()
+        try:
+            future.set_result(function(*args, **kwargs))
+        except BaseException as error:
+            future.set_exception(error)
+        return future
+
+
+def fixed_clock():
+    return 0
+
+
+def broker_server(token, *, mode="normal"):
+    # Keep the mock HTTP handler and response parser, without socket deadlines.
+    server = MemoryMockServer(("127.0.0.1", 0), token, mode=mode)
+    server.clock = fixed_clock
+    return server
+
+
+class WaitTests(unittest.TestCase):
+    def test_missing_completion_fails_without_waiting(self):
+        future = Future()
+        with patch(__name__ + ".wait", side_effect=AssertionError("Unexpected completion wait")) as waiting, \
+                patch.object(future, "result", side_effect=AssertionError("Unexpected result wait")) as result:
+            with self.assertRaisesRegex(AssertionError, "Missing completion for broker drain"):
+                completed_result(future, "broker drain")
+        waiting.assert_not_called()
+        result.assert_not_called()
+
+    def test_missing_cancellation_signal_fails_after_completion_wait_entry(self):
+        started, completion_wait, task = Future(), Future(), Future()
+        completion_wait.set_result(True)
+        original_wait = wait
+        def bounded_wait(futures, *, timeout, return_when):
+            self.assertEqual(futures, (completion_wait, task))
+            self.assertEqual(timeout, 2)
+            self.assertEqual(return_when, FIRST_COMPLETED)
+            return original_wait(futures, timeout=timeout, return_when=return_when)
+        with patch(__name__ + ".wait", side_effect=bounded_wait) as waiting:
+            with self.assertRaisesRegex(AssertionError, "Missing completion for cancellation request"):
+                cancellation_requested(started, completion_wait, task)
+        waiting.assert_called_once()
+        self.assertFalse(task.done())
+
+    def test_deadlocked_cancellation_has_bounded_detection(self):
+        started, completion_wait, task = Future(), Future(), Future()
+        with patch(__name__ + ".wait", return_value=(set(), {completion_wait, task})) as waiting:
+            with self.assertRaisesRegex(AssertionError, "Deadlock before cancellation completion wait"):
+                cancellation_requested(started, completion_wait, task)
+        waiting.assert_called_once_with((completion_wait, task), timeout=2, return_when=FIRST_COMPLETED)
+
+    def test_failed_cancellation_reports_worker_error(self):
+        started, completion_wait, task = Future(), Future(), Future()
+        error = RuntimeError("Cancellation stopped before completion wait")
+        task.set_exception(error)
+        with self.assertRaisesRegex(AssertionError, "Worker failed before cancellation completion wait") as failure:
+            cancellation_requested(started, completion_wait, task)
+        self.assertIs(failure.exception.__cause__, error)
 
 
 class LedgerTests(RuleAssertions, unittest.TestCase):
@@ -143,27 +312,33 @@ class LedgerTests(RuleAssertions, unittest.TestCase):
         record = ledger.begin("generate:race", self.plan_digest)
         identifier = record["job_id"]
         ledger.update(identifier, state="finishing")
-        entered, release, cancel_started = threading.Event(), threading.Event(), threading.Event()
+        entered, release, cancel_started = Future(), threading.Event(), Future()
+        sealing = Future()
+        cancelling = None
         results = []
         def commit():
-            entered.set()
-            self.assertTrue(release.wait(2))
+            nonlocal cancelling
+            entered.set_result(True)
+            self.assertTrue(phase_reached(entered, sealing, "candidate commit"))
+            cancelling = start_worker(cancel)
+            self.assertTrue(phase_reached(cancel_started, cancelling.future, "cancellation start"))
+            release.set()
+            self.assertTrue(release.is_set(), "Deadlock waiting for commit release")
             return {"fixture": "sealed"}
         def seal():
             results.append(ledger.commit_success(identifier, commit))
         def cancel():
-            cancel_started.set()
+            cancel_started.set_result(True)
             results.append(ledger.finish(identifier, "cancelled"))
-        sealing = threading.Thread(target=seal)
-        sealing.start()
-        self.assertTrue(entered.wait(2))
-        cancelling = threading.Thread(target=cancel)
-        cancelling.start()
-        self.assertTrue(cancel_started.wait(2))
-        release.set()
-        sealing.join(2)
-        cancelling.join(2)
-        self.assertFalse(sealing.is_alive() or cancelling.is_alive())
+        try:
+            # Publish on this thread before arming the cancellation join. The
+            # competing finish then only reads the already committed terminal.
+            sealing.set_result(seal())
+        finally:
+            release.set()
+            if cancelling is not None:
+                join_worker(cancelling)
+        self.assertFalse(not sealing.done() or cancelling.is_alive())
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[0]["state"], "succeeded")
@@ -201,17 +376,25 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
         config["backends"]["mock"]["endpoint"] = endpoint
         atomic_json(self.config_path, config)
 
+    def assert_completed(self, broker, identifier):
+        # Completion includes the broker's drained callback and durable writes.
+        # Never block here: synchronous execution must already have signalled it.
+        future = broker.futures[identifier]
+        self.assertTrue(future.done())
+        future.result(timeout=0)
+
     def test_mock_raw_ready_replay_retained_bytes_and_eof(self):
-        with owned_server(("127.0.0.1", 0), TOKEN) as server:
+        with broker_server(TOKEN) as server:
             self.configure(f"http://127.0.0.1:{server.server_port}")
-            broker = BackendBroker(self.project, client_factory=client_factory(server))
-            self.addCleanup(broker.close)
+            broker = BackendBroker(self.project, client_factory=client_factory(server),
+                                   clock=fixed_clock, executor=SynchronousExecutor())
+            self.addCleanup(close_broker, broker)
             plan = broker.plan(self.request)
             self.assertFalse(plan["eligibility"]["shippable"])
             self.assertFalse(broker.ledger.root.exists())
             record = broker.start(plan["plan_id"], plan["plan_digest"])
             identifier = record["job_id"]
-            broker.futures[identifier].result(timeout=5)
+            self.assert_completed(broker, identifier)
             self.assertEqual(broker.ledger.status(identifier)["state"], "finishing")
             broker.start(plan["plan_id"], plan["plan_digest"])
             self.assertEqual(server.submissions, 1)
@@ -230,12 +413,13 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             self.assertFalse(list(broker.ledger.root.rglob("candidate.sha256")))
 
     def test_capability_change_refuses_before_submission(self):
-        with owned_server(("127.0.0.1", 0), TOKEN, mode="card_change") as server:
+        with broker_server(TOKEN, mode="card_change") as server:
             self.configure(f"http://127.0.0.1:{server.server_port}")
-            with BackendBroker(self.project, client_factory=client_factory(server)) as broker:
+            with managed_broker(self.project, client_factory=client_factory(server),
+                               clock=fixed_clock, executor=SynchronousExecutor()) as broker:
                 plan = broker.plan(self.request)
                 record = broker.start(plan["plan_id"], plan["plan_digest"])
-                broker.futures[record["job_id"]].result(timeout=5)
+                self.assert_completed(broker, record["job_id"])
                 terminal = broker.ledger.result(record["job_id"])
                 self.assertEqual(terminal["errors"][0]["rule_id"], "backend.pin_mismatch")
                 self.assertEqual(server.submissions, 0)
@@ -243,14 +427,15 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
     def test_cancel_crash_hash_and_raw_geometry_fail_without_staging(self):
         for mode, rule in (("cancel", "backend.unavailable"), ("bad_hash", "backend.protocol"),
                            ("nonfinite", "glb.nonfinite"), ("external_uri", "glb.external"), ("oversize", "backend.limit")):
-            with self.subTest(mode=mode), owned_server(("127.0.0.1", 0), TOKEN, mode=mode) as server:
+            with self.subTest(mode=mode), broker_server(TOKEN, mode=mode) as server:
                 self.configure(f"http://127.0.0.1:{server.server_port}")
                 request = deepcopy(self.request)
                 request["request_id"] = "generate:" + mode
-                with BackendBroker(self.project, client_factory=client_factory(server)) as broker:
+                with managed_broker(self.project, client_factory=client_factory(server),
+                                   clock=fixed_clock, executor=SynchronousExecutor()) as broker:
                     plan = broker.plan(request)
                     record = broker.start(plan["plan_id"], plan["plan_digest"])
-                    broker.futures[record["job_id"]].result(timeout=5)
+                    self.assert_completed(broker, record["job_id"])
                     terminal = broker.ledger.result(record["job_id"])
                     self.assertEqual(terminal["state"], "failed")
                     self.assertEqual(terminal["errors"][0]["rule_id"], rule)
@@ -274,55 +459,180 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             def cancel(self, identifier):
                 cancelled.append(identifier)
                 return {"job_id": identifier, "state": "cancelled"}
-        with BackendBroker(self.project, clock=lambda: clock[0], client_factory=SlowClient) as broker:
+        with managed_broker(self.project, clock=lambda: clock[0], client_factory=SlowClient,
+                           executor=SynchronousExecutor()) as broker:
             plan = broker.plan(self.request)
             record = broker.start(plan["plan_id"], plan["plan_digest"])
-            broker.futures[record["job_id"]].result(timeout=10)
+            self.assert_completed(broker, record["job_id"])
             terminal = broker.ledger.result(record["job_id"])
             self.assertEqual(terminal["errors"][0]["rule_id"], "backend.deadline")
             self.assertEqual(cancelled, [digest(self.request["request_id"].encode())[:32]])
 
     def test_eof_during_submission_cancels_late_backend_id(self):
         self.configure("http://127.0.0.1:1234")
-        entered, release = threading.Event(), threading.Event()
+        entered, release, cancel_started = Future(), threading.Event(), Future()
+        completion_wait = Future()
         cancelled = []
+        hook_errors = []
+        cancelling = None
         class SubmittingClient:
             def __init__(self, *args, **kwargs):
                 pass
             def capabilities(self, **kwargs):
                 return deepcopy(MOCK_CAPABILITY)
             def submit(self, *args, **kwargs):
-                entered.set()
-                if not release.wait(2):
-                    raise RuntimeError("Test submission release was not signalled")
+                try:
+                    return self.submitting(*args, **kwargs)
+                except AssertionError as error:
+                    hook_errors.append(error)
+                    raise
+            def submitting(self, *args, **kwargs):
+                nonlocal cancelling
+                entered.set_result(True)
+                self_case.assertTrue(phase_reached(entered, broker.tasks[identifier], "submission"))
+                # Complete the real cancellation write inline. Replay only its
+                # return at the worker's update boundary, so the wait detector
+                # cannot time filesystem work or depend on cancel_started.
+                requested = original_update(identifier, cancel_requested=True, state="cancelling")
+                def update(*update_args, **changes):
+                    self_case.assertEqual(update_args, (identifier,))
+                    self_case.assertEqual(changes, {"cancel_requested": True, "state": "cancelling"})
+                    cancel_started.set_result(True)
+                    return requested
+                def await_completion(timeout=None):
+                    completion_wait.set_result(True)
+                    return DEFAULT
+                with patch.object(broker.ledger, "update", side_effect=update), \
+                        patch.object(completed, "result", side_effect=await_completion, wraps=original_result):
+                    cancelling = start_worker(broker.cancel, identifier)
+                    # Entry follows the cancellation update, even if its signal
+                    # is lost. All durable work preceding this wait is finished.
+                    self_case.assertTrue(cancellation_requested(cancel_started, completion_wait, cancelling.future))
+                    # Cancellation cannot release ownership while the POST is outstanding.
+                    with self_case.assertRaises(Refusal) as refusal:
+                        RequestLedger(self_case.project, document="other").begin("generate:contender", digest(b"other"))
+                    self_case.assertEqual(refusal.exception.finding["rule_id"], "busy")
+                    self_case.assertTrue((broker.ledger.root / ".meshgen.lock").exists())
+                release.set()
+                if not release.is_set():
+                    raise AssertionError("Deadlock waiting for submission release")
                 return digest(args[0]["request_id"].encode())[:32]
             def cancel(self, identifier):
                 cancelled.append(identifier)
                 return {"job_id": identifier, "state": "cancelled"}
-        broker = BackendBroker(self.project, client_factory=SubmittingClient)
-        self.addCleanup(broker.close)
+        broker = BackendBroker(self.project, clock=fixed_clock, client_factory=SubmittingClient,
+                               executor=WorkerExecutor())
+        self_case = self
+        self.addCleanup(close_broker, broker)
+        self.addCleanup(release.set)
         plan = broker.plan(self.request)
         record = broker.start(plan["plan_id"], plan["plan_digest"])
-        self.assertTrue(entered.wait(2))
-        cancelling = threading.Thread(target=lambda: broker.cancel(record["job_id"]))
-        cancelling.start()
-        # Cancellation cannot release ownership while the POST is outstanding.
-        with self.assertRaises(Refusal) as refusal:
-            RequestLedger(self.project, document="other").begin("generate:contender", digest(b"other"))
-        self.assertEqual(refusal.exception.finding["rule_id"], "busy")
-        self.assertTrue((broker.ledger.root / ".meshgen.lock").exists())
-        release.set()
-        cancelling.join(3)
+        identifier = record["job_id"]
+        completed = broker.futures[identifier]
+        original_result = completed.result
+        original_update = broker.ledger.update
+        try:
+            broker.executor.run_pending()
+            # Backend orchestration converts callback errors to refusals. Keep
+            # test assertion failures visible even when cancellation wins drain.
+            if hook_errors:
+                raise hook_errors[0]
+        finally:
+            release.set()
+            try:
+                broker.executor.shutdown(wait=True)
+                completed_result(broker.futures[record["job_id"]], "submission drain after release")
+            finally:
+                if cancelling is not None:
+                    join_worker(cancelling)
         self.assertFalse(cancelling.is_alive())
         broker.on_eof()
         self.assertEqual(set(cancelled), {digest(self.request["request_id"].encode())[:32]})
         self.assertEqual(broker.ledger.result(record["job_id"])["state"], "cancelled")
         self.assertFalse(broker.raw)
 
+    def test_early_run_refusal_fails_submission_handshake_without_timeout(self):
+        self.configure("http://127.0.0.1:1234")
+        entered, refuse = Future(), [False]
+        class RefusingClient:
+            def __init__(self, *args, **kwargs):
+                pass
+            def capabilities(self, **kwargs):
+                if refuse[0]:
+                    raise Refusal("backend.pin_mismatch", "Capability refused before submission")
+                return deepcopy(MOCK_CAPABILITY)
+            def submit(self, *args, **kwargs):
+                entered.set_result(True)
+                raise AssertionError("Refused worker must not submit")
+        with managed_broker(self.project, clock=fixed_clock, client_factory=RefusingClient,
+                           executor=SynchronousExecutor()) as broker:
+            plan = broker.plan(self.request)
+            refuse[0] = True
+            record = broker.start(plan["plan_id"], plan["plan_digest"])
+            task = broker.tasks[record["job_id"]]
+            self.assertTrue(task.done())
+            self.assertFalse(entered.done())
+            # An already completed task must wake the handshake immediately.
+            # Check the wait inputs rather than measuring elapsed wall time.
+            with patch(__name__ + ".wait", wraps=wait) as waiting:
+                with self.assertRaisesRegex(AssertionError, "Worker completed before submission:.*backend.pin_mismatch"):
+                    phase_reached(entered, task, "submission")
+            waiting.assert_called_once_with((entered, task), timeout=2, return_when=FIRST_COMPLETED)
+            terminal = broker.ledger.result(record["job_id"])
+            self.assertEqual(terminal["state"], "failed")
+            self.assertEqual(terminal["errors"][0]["rule_id"], "backend.pin_mismatch")
+
+    def test_missing_drained_completion_fails_and_cleanup_finishes(self):
+        for cleanup in ("registered", "context"):
+            with self.subTest(cleanup=cleanup), broker_server(TOKEN) as server:
+                self.configure(f"http://127.0.0.1:{server.server_port}")
+                broker = BackendBroker(self.project, client_factory=client_factory(server),
+                                       clock=fixed_clock, executor=SynchronousExecutor())
+                original_drained = broker._drained
+                def missing_completion(identifier, task, completed):
+                    # Do all drain/terminal work but lose the real wait handle's
+                    # signal, reproducing the cleanup failure without a sleeper.
+                    original_drained(identifier, task, Future())
+                def exercise(case):
+                    plan = broker.plan({**self.request, "request_id": "generate:missing-" + cleanup})
+                    record = broker.start(plan["plan_id"], plan["plan_digest"])
+                    case.assertTrue(broker.tasks[record["job_id"]].done())
+                    self.assert_completed(broker, record["job_id"])
+                def run(case):
+                    if cleanup == "registered":
+                        case.addCleanup(close_broker, broker)
+                        exercise(case)
+                    else:
+                        with patch(__name__ + ".BackendBroker", return_value=broker):
+                            with managed_broker(self.project):
+                                exercise(case)
+                case = unittest.FunctionTestCase(lambda: run(case))
+                result = unittest.TestResult()
+                # Guard cancellation as well as observing it, so a regression in
+                # the cleanup helper fails this test without hanging its runner.
+                with patch.object(broker, "_drained", side_effect=missing_completion), \
+                        patch.object(broker, "cancel", side_effect=AssertionError("Incomplete future reached cancellation")) as cancel, \
+                        patch.object(broker, "close", wraps=broker.close) as close, \
+                        patch(__name__ + ".wait", side_effect=AssertionError("Synchronous cleanup must not wait")) as waiting:
+                    case.run(result)
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(result.errors, [])
+                self.assertEqual(len(result.failures), 2 if cleanup == "registered" else 1)
+                self.assertIn("Missing completion for broker drain", result.failures[-1][1])
+                cancel.assert_not_called()
+                close.assert_not_called()
+                waiting.assert_not_called()
+                self.assertTrue(all(task.done() for task in broker.tasks.values()))
+                self.assertTrue(all(not future.done() for future in broker.futures.values()))
+                # Reconcile this deliberately abandoned owner before the next
+                # subtest. Cleanup itself must leave its incomplete handle alone.
+                broker.ledger.finish(broker.ledger.active, "cancelled")
+
     def test_scene_revision_does_not_cancel_but_session_change_prevents_staging(self):
         self.configure("http://127.0.0.1:1234")
         data = synthetic_glb(seed=7)
-        entered, release = threading.Event(), threading.Event()
+        entered, release = Future(), threading.Event()
+        hook_errors = []
         class PausedClient:
             def __init__(self, *args, **kwargs):
                 pass
@@ -334,24 +644,42 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
                 return {"state": "succeeded", "result": {"sha256": digest(data), "bytes": len(data), "logs_tail": "fixture",
                     "backend_reported": {"seed": 7, "steps_run": 0, "wall_s": 0, "peak_vram_mib": None}}}
             def result(self, *args, **kwargs):
-                entered.set()
-                if not release.wait(2):
-                    raise RuntimeError("Test result release was not signalled")
+                try:
+                    return self.receiving(*args, **kwargs)
+                except AssertionError as error:
+                    hook_errors.append(error)
+                    raise
+            def receiving(self, *args, **kwargs):
+                entered.set_result(True)
+                self_case.assertTrue(phase_reached(entered, broker.tasks[identifier], "result intake"))
+                broker.session = "new-document"
+                release.set()
+                if not release.is_set():
+                    raise AssertionError("Deadlock waiting for result release")
                 return data
             def cancel(self, identifier):
                 return {"job_id": identifier, "state": "cancelled"}
-        with BackendBroker(self.project, client_factory=PausedClient) as broker:
-            broker.scene_revision = 1
-            plan = broker.plan(self.request)
-            broker.scene_revision = 2
-            record = broker.start(plan["plan_id"], plan["plan_digest"])
-            self.assertTrue(entered.wait(2))
-            broker.session = "new-document"
+        broker = BackendBroker(self.project, clock=fixed_clock, client_factory=PausedClient,
+                               executor=WorkerExecutor())
+        self_case = self
+        self.addCleanup(close_broker, broker)
+        self.addCleanup(release.set)
+        broker.scene_revision = 1
+        plan = broker.plan(self.request)
+        broker.scene_revision = 2
+        record = broker.start(plan["plan_id"], plan["plan_digest"])
+        identifier = record["job_id"]
+        try:
+            broker.executor.run_pending()
+            if hook_errors:
+                raise hook_errors[0]
+        finally:
             release.set()
-            broker.futures[record["job_id"]].result(timeout=10)
-            terminal = broker.ledger.result(record["job_id"])
-            self.assertEqual(terminal["errors"][0]["rule_id"], "stale.plan")
-            self.assertFalse(broker.raw)
+            broker.executor.shutdown(wait=True)
+            completed_result(broker.futures[record["job_id"]], "result drain after release")
+        terminal = broker.ledger.result(record["job_id"])
+        self.assertEqual(terminal["errors"][0]["rule_id"], "stale.plan")
+        self.assertFalse(broker.raw)
 
     def test_real_backend_and_later_phase_requests_are_disabled(self):
         self.configure("http://127.0.0.1:1234")
@@ -359,7 +687,7 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
         config["backends"]["mock"]["kind"] = "model"
         config["backends"]["mock"]["pins"] = {"model_revision": "0"*40, "weights_sha256": ["1"*64]}
         atomic_json(self.config_path, config)
-        with BackendBroker(self.project) as broker:
+        with managed_broker(self.project) as broker:
             with self.assertRaises(Refusal) as error:
                 broker.plan(self.request)
             self.assertEqual(error.exception.finding["rule_id"], "backend.unavailable")
@@ -377,14 +705,31 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
         self.assertEqual(read_notes(self.project, policy), {"revenue": b"note"})
 
     def test_sequential_four_candidates_retain_each_seed_without_overflow(self):
-        with owned_server(("127.0.0.1", 0), TOKEN) as server:
+        with broker_server(TOKEN) as server:
             self.configure(f"http://127.0.0.1:{server.server_port}")
             request = deepcopy(self.request)
             request["overrides"]["candidates"] = {"count": 4}
-            with BackendBroker(self.project, client_factory=client_factory(server)) as broker:
+            factory = client_factory(server)
+            def checked_client(*args, **kwargs):
+                backend = factory(*args, **kwargs)
+                submit = backend.submit
+                def checked_submit(body, **kwargs):
+                    # Ownership must already be durable before POST.
+                    expected = digest(body["request_id"].encode())[:32]
+                    self.assertEqual(broker.ledger.status(broker.ledger.active)["backend_job_id"], expected)
+                    return submit(body, **kwargs)
+                backend.submit = checked_submit
+                return backend
+            with managed_broker(self.project, client_factory=checked_client,
+                               clock=fixed_clock, executor=SynchronousExecutor()) as broker:
                 plan = broker.plan(request)
-                record = broker.start(plan["plan_id"], plan["plan_digest"])
-                broker.futures[record["job_id"]].result(timeout=5)
+                with patch.object(broker.ledger, 'update', wraps=broker.ledger.update) as update:
+                    record = broker.start(plan["plan_id"], plan["plan_digest"])
+                    self.assert_completed(broker, record["job_id"])
+                publications = [call.kwargs["backend_job_id"] for call in update.call_args_list
+                                if "backend_job_id" in call.kwargs]
+                self.assertEqual(len(publications), 4)
+                self.assertEqual(len(set(publications)), 4)
                 self.assertEqual(server.submissions, 4)
                 self.assertEqual([item["seed"] for item in broker.raw[record["job_id"]]["candidates"]], [7, 8, 9, 10])
                 self.assertEqual(broker.ledger.status(record["job_id"])["seeds"], [7, 8, 9, 10])

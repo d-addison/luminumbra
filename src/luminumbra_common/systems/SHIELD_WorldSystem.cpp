@@ -1,27 +1,41 @@
 #include "SHIELD_WorldSystem.h"
+#include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
+#include "../core/WaterSeedInputs.h"
+#include "../persistence/WorldSaveService.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
-#include "entt/entt.hpp"
+#include "core/Profiler.h"
+#include "entt/entity/fwd.hpp"
+#include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
+#include "world/SurfaceWorkBudget.h"
 #include <algorithm> // Required for std::max and std::min
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono> // runtime telemetry ( implementation note): per-sub-phase streaming timing
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib> // std::llabs (hydro cache eviction distance)
 #include <cstring> // std::memcpy for the deterministic water-state hash
 #include <filesystem>
+#include <glm/common.hpp>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <shared_mutex>
+#include <span>
 #include <stdexcept>
 #include <thread> // opt-in job-wedge watchdog monitor thread
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 constexpr int BASE_WORK_BUDGET_EQUIVALENT = 320;
 const int MAX_CHUNKS_TO_PROCESS_PER_FRAME =
@@ -50,6 +64,15 @@ constexpr std::size_t STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN = 3;
 constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
                                         (Luminumbra::CHUNK_SIZE_Y + 1) *
                                         (Luminumbra::CHUNK_SIZE_Z + 1);
+constexpr std::size_t kHeightmapCells =
+    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+// Fixed lattice/grid bounds make every size calculation safe before allocation.
+// Reserving this maximum for stage A guarantees its entire stage-B handoff fits.
+constexpr std::size_t kMaxMeshingSnapshotBytes =
+    kFullSdfLattice * (sizeof(float) + sizeof(Luminumbra::u8)) + kHeightmapCells * sizeof(float) +
+    std::size_t{32} * 32u * (2u * sizeof(float) + sizeof(Luminumbra::Vec2) + sizeof(std::int32_t));
+static_assert(kMaxMeshingSnapshotBytes <=
+              Luminumbra::Systems::SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
 
 //  (activation queue ): the FIXED activation pipeline latency K, in sim
 // ticks. A batch dispatched at tick D becomes sim-visible at D+K — a pure
@@ -71,6 +94,41 @@ constexpr std::size_t kMaxGenerationBatchesInFlight = 3;
 constexpr std::size_t kMaxMeshingBatchesInFlight =
     static_cast<std::size_t>(kActivationPipelineLatencyTicks) + 1;
 
+namespace {
+bool HasPublishedFarLodSdf(const Luminumbra::Chunk* chunk) {
+    // Loading vectors belong to the generation worker until owner publication.
+    return chunk && chunk->get_state() != Luminumbra::ChunkState::Loading &&
+           chunk->sdf_data.size() == kFullSdfLattice &&
+           (chunk->material_data.empty() || chunk->material_data.size() == kFullSdfLattice);
+}
+
+// Persistence may supply a rejected grid; bound before multiplying or indexing.
+bool IsBoundedWaterResolution(int resolution) {
+    return resolution > 1 && resolution <= 32 && 32 % resolution == 0;
+}
+
+// All dispatches nested in one update share the same byte allowance. Explicit
+// blocking drains start a fresh bounded pass for each finite request prefix.
+class MeshingSnapshotPass {
+public:
+    MeshingSnapshotPass(std::size_t& bytes, bool& active)
+        : m_active(active)
+        , m_was_active(active) {
+        if (!active) {
+            bytes = 0;
+        }
+        active = true;
+    }
+    ~MeshingSnapshotPass() {
+        m_active = m_was_active;
+    }
+
+private:
+    bool& m_active;
+    bool m_was_active;
+};
+} // namespace
+
 // SIMD over-read guard for FastNoise2's
 // GenPositionArray2D. That entry point's tail does an UNCONDITIONAL full-width
 // SIMD load of the input position arrays (FS_Load_f32(&xPosArray[index]) in
@@ -85,13 +143,45 @@ constexpr std::size_t kMaxMeshingBatchesInFlight =
 // back into results, so heights/materials for indices [0,count) are byte-
 // identical and the world_hash is unchanged.
 constexpr std::size_t kNoiseSimdWidth = 16;
-constexpr std::size_t PadToNoiseSimd(std::size_t count) {
+std::size_t PadToNoiseSimd(std::size_t count) {
+    // FastNoise narrows to int; every allocation leaves at most 15 tail lanes.
+    if (count > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        count > std::vector<float>().max_size() - (kNoiseSimdWidth - 1)) {
+        throw std::length_error("Noise position array is too large");
+    }
     return count + (kNoiseSimdWidth - 1);
 }
 
 namespace Luminumbra::Systems {
 
 namespace {
+
+std::size_t MeshingSnapshotBytes(const Luminumbra::Chunk& chunk, bool terrain_required) {
+    std::size_t bytes = 0;
+    if (terrain_required) {
+        if (chunk.sdf_data.size() == kFullSdfLattice) {
+            bytes += kFullSdfLattice * sizeof(float);
+        }
+        if (chunk.heightmap_data.size() == kHeightmapCells) {
+            bytes += kHeightmapCells * sizeof(float);
+        }
+        if (chunk.material_data.size() == kFullSdfLattice) {
+            bytes += kFullSdfLattice * sizeof(Luminumbra::u8);
+        }
+    }
+    const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
+    if (resolution > 1 && resolution <= 32) {
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+        bytes += std::min(cells, chunk.water_level_data.size()) * sizeof(float);
+        bytes += std::min(cells, chunk.water_flow_data.size()) * sizeof(Luminumbra::Vec2);
+        bytes += std::min(cells, chunk.water_sim_terrain_height.size()) * sizeof(float);
+        if (chunk.water_depth_mm.size() == cells) {
+            bytes += cells * sizeof(std::int32_t);
+        }
+    }
+    return bytes;
+}
 
 template<typename T>
 FastNoise::SmartNode<T> NewWorldNoise() {
@@ -278,6 +368,48 @@ DecodeSurfaceBreakCell(int seed, int cx, int cz, const TerrainGenParams& params)
     return f;
 }
 
+// Fixed per-call working sets: misses replace FIFO, never grow with vertex count.
+template<class Key, class Value, std::size_t Capacity>
+class SamplingWorkingSet {
+    struct Entry {
+        Key key{};
+        Value value{};
+    };
+    std::array<Entry, Capacity> entries{};
+    std::size_t used = 0;
+    std::size_t next = 0;
+
+public:
+    Value* find(const Key& key) {
+        for (std::size_t i = 0; i < used; ++i) {
+            if (entries[i].key == key)
+                return &entries[i].value;
+        }
+        return nullptr;
+    }
+    const Value& insert(const Key& key, Value value) {
+        entries[next] = {key, std::move(value)};
+        const auto index = next;
+        next = (next + 1) % Capacity;
+        used = std::min(used + 1, Capacity);
+        return entries[index].value;
+    }
+};
+
+SurfaceBreakFeature
+CachedSurfaceBreakCell(int seed,
+                       int cx,
+                       int cz,
+                       const TerrainGenParams& params,
+                       SamplingWorkingSet<std::pair<int, int>, SurfaceBreakFeature, 16>& features,
+                       std::size_t& sampled_cells) {
+    const std::pair<int, int> key{cx, cz};
+    if (const auto* value = features.find(key))
+        return *value;
+    ++sampled_cells;
+    return features.insert(key, DecodeSurfaceBreakCell(seed, cx, cz, params));
+}
+
 // Legacy single-material classifier (biome_id == kNoBiome). Kept as the exact
 // float-op sequence the pre-biome implementation used so disabled worlds stay
 // byte-zero; SurfaceMaterialForColumn dispatches here when no biome applies.
@@ -382,6 +514,20 @@ void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& c
 
 } // namespace
 
+// Chunk jobs own these snapshots. At shipping cell pitches, four region/cell
+// entries cover a chunk crossing both seams; 3x3 feature neighborhoods fit in
+// sixteen cells. Smaller pitches and arbitrary batches may evict/recompute,
+// with the same fixed storage bound.
+struct SHIELD_WorldSystem::SamplingCache {
+    SamplingWorkingSet<std::pair<std::int64_t, std::int64_t>,
+                       std::shared_ptr<const std::vector<float>>,
+                       4>
+        hydro;
+    SamplingWorkingSet<std::pair<float, float>, std::array<float, 4>, 4> lakes;
+    SamplingWorkingSet<std::pair<int, int>, SurfaceBreakFeature, 16> features;
+    MaterialSamplingWork work{};
+};
+
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
                                        WaterSystem* water_system,
                                        const TerrainGenParams& params,
@@ -393,17 +539,40 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
     reinitialize_noise();
 }
 
+SHIELD_WorldSystem::SHIELD_WorldSystem(const SHIELD_WorldSystem& source, WaterSeedSamplerTag)
+    : m_job_system(nullptr)
+    , m_params(source.m_params)
+    , m_seed(source.m_seed)
+    , m_terrain_generator(source.m_terrain_generator)
+    , m_cave_generator(source.m_cave_generator)
+    , m_spaghetti_generator(source.m_spaghetti_generator)
+    , m_worley_generator(source.m_worley_generator)
+    , m_island_mask_generator(source.m_island_mask_generator)
+    , m_continentalness_generator(source.m_continentalness_generator)
+    , m_erosion_generator(source.m_erosion_generator)
+    , m_peaks_generator(source.m_peaks_generator)
+    , m_warp_generator(source.m_warp_generator)
+    , m_temperature_generator(source.m_temperature_generator)
+    , m_humidity_generator(source.m_humidity_generator)
+    , m_river_generator(source.m_river_generator)
+    , m_water_system(nullptr) {
+    // The epoch is held by capture. Nodes are configured before publication and
+    // replaced on reset, never mutated. Surface/rest sampling does not consult
+    // material or structure tables: no content reload or world-sized data copy.
+    // Copy at most the existing 2048 hydro handles; region bytes stay shared const.
+    const std::shared_lock<std::shared_mutex> hydro_lock(source.m_hydro_mutex);
+    m_hydro_cache = source.m_hydro_cache;
+}
+
+std::shared_ptr<const SHIELD_WorldSystem> SHIELD_WorldSystem::capture_water_seed_sampler() const {
+    const auto scope = acquire_worldgen_sample_scope();
+    return std::shared_ptr<const SHIELD_WorldSystem>(
+        new SHIELD_WorldSystem(*this, WaterSeedSamplerTag{}));
+}
+
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
-    wait_for_generation_jobs();
-    // Drain promotion workers with RAW waits — teardown must not publish or
-    // dispatch stage-B jobs, only guarantee no worker still touches chunks.
-    if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
-        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
-    }
-    if (m_job_system && m_streaming_state.promotion_job_handle.counter) {
-        m_job_system->wait(m_streaming_state.promotion_job_handle);
-    }
-    wait_for_meshing_jobs();
+    // Teardown fences every owned callback without publishing or admitting work.
+    quiesce_streaming_jobs_for_save();
 }
 
 void SHIELD_WorldSystem::wait_for_generation_jobs() {
@@ -454,6 +623,10 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
             if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
                 chunk->set_state(Luminumbra::ChunkState::Idle);
             }
+            // Publish invalidation with authority, never from the generating job.
+            const auto it = m_streaming_state.chunks.find(chunk->get_id());
+            if (it != m_streaming_state.chunks.end() && it->second == chunk)
+                publish_generated_column_span(*chunk);
         }
     }
     m_streaming_state.generation_batches.pop_front();
@@ -464,6 +637,22 @@ void SHIELD_WorldSystem::publish_completed_generation_jobs(bool force) {
     // Drain every publishable front batch, in FIFO order (publication order
     // == dispatch order — deterministic).
     while (publish_front_generation_batch(force)) {}
+}
+
+std::vector<IVec3> SHIELD_WorldSystem::generation_queue_prefix(std::size_t max_count) const {
+    // Bound diagnostic storage independently of world size and caller input.
+    const auto count = std::min(max_count, std::size_t{1024});
+    std::vector<IVec3> result;
+    result.reserve(count);
+    for (const auto& batch : m_streaming_state.generation_batches) {
+        for (const auto& chunk : batch.chunks) {
+            if (result.size() == count)
+                return result;
+            if (chunk)
+                result.push_back(chunk->get_coords());
+        }
+    }
+    return result;
 }
 
 void SHIELD_WorldSystem::wait_for_meshing_jobs() {
@@ -505,6 +694,19 @@ bool SHIELD_WorldSystem::meshing_batch_outstanding() const {
 
 bool SHIELD_WorldSystem::generation_batch_outstanding() const {
     return !m_streaming_state.generation_batches.empty();
+}
+
+std::size_t SHIELD_WorldSystem::pending_publication_chunks() const {
+    std::size_t pending = m_streaming_state.promotion_job_chunks.size() +
+                          m_streaming_state.pending_promotion_mesh.size();
+    // Streaming updates bound FIFO depths to kMaxGenerationBatchesInFlight (3)
+    // and kMaxMeshingBatchesInFlight (9); boot generation callers drain explicitly.
+    // No per-chunk scan or worker-counter read.
+    for (const auto& batch : m_streaming_state.generation_batches)
+        pending += batch.chunks.size();
+    for (const auto& batch : m_streaming_state.meshing_batches)
+        pending += batch.chunks.size();
+    return pending;
 }
 
 bool SHIELD_WorldSystem::sim_available_lod0(const ::Luminumbra::Chunk& chunk) {
@@ -589,6 +791,7 @@ SHIELD_WorldSystem::ActivationShadowReport SHIELD_WorldSystem::activation_shadow
 }
 
 void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
+    wait_for_hydro_prefetch_jobs();
     if (!m_job_system) {
         return;
     }
@@ -614,7 +817,7 @@ void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
 }
 
 void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
-    // activation queue : publish, in FIFO order, exactly the batches due at or
+    // Publish, in stable due order, exactly the batches due at or
     // before `tick`. A due-but-unfinished batch BLOCKS on its jobs (K
     // under-covering is a wall-clock cost, never a schedule change); a batch
     // with due_tick -1 (no tick source at dispatch) publishes when drained.
@@ -622,59 +825,86 @@ void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
     // ActivationQueueSemantics gtest; the per-tick barrier force-drains
     // everything regardless of due ticks.
 
-    // Generation lane.
-    while (!m_streaming_state.generation_batches.empty()) {
-        auto& front = m_streaming_state.generation_batches.front();
-        const bool due =
-            front.due_tick < 0 ? !has_active_job(front.handle) : front.due_tick <= tick;
-        if (!due) {
-            break;
-        }
-        if (m_job_system && front.handle.counter) {
-            m_job_system->wait(front.handle);
-        }
-        publish_front_generation_batch(/*force=*/true);
-    }
-
-    // Promotion lane (depth 1): publish sim truth + dispatch stage B when due.
-    if (promotion_pipeline_pending()) {
-        const std::int64_t promo_due = m_streaming_state.promotion_due_tick;
-        const bool due = promo_due < 0 ? !promotion_jobs_active() : promo_due <= tick;
-        if (due) {
-            if (m_job_system) {
-                if (m_streaming_state.promotion_job_handle_high.counter) {
-                    m_job_system->wait(m_streaming_state.promotion_job_handle_high);
-                }
-                if (m_streaming_state.promotion_job_handle.counter) {
-                    m_job_system->wait(m_streaming_state.promotion_job_handle);
-                }
+    bool dispatched_deferred = false;
+    do {
+        dispatched_deferred = false;
+        // Generation lane.
+        while (!m_streaming_state.generation_batches.empty()) {
+            auto& front = m_streaming_state.generation_batches.front();
+            const bool due =
+                front.due_tick < 0 ? !has_active_job(front.handle) : front.due_tick <= tick;
+            if (!due) {
+                break;
             }
-            process_completed_promotion_jobs(/*force=*/true);
-            if (!promotion_pipeline_pending()) {
-                m_streaming_state.promotion_due_tick = -1;
-            }
-        }
-    }
-
-    // Meshing lane.
-    while (!m_streaming_state.meshing_batches.empty()) {
-        auto& front = m_streaming_state.meshing_batches.front();
-        const bool due = front.due_tick < 0
-                             ? !(has_active_job(front.handle) || has_active_job(front.handle_high))
-                             : front.due_tick <= tick;
-        if (!due) {
-            break;
-        }
-        if (m_job_system) {
-            if (front.handle_high.counter) {
-                m_job_system->wait(front.handle_high);
-            }
-            if (front.handle.counter) {
+            if (m_job_system && front.handle.counter) {
                 m_job_system->wait(front.handle);
             }
+            publish_front_generation_batch(/*force=*/true);
         }
-        publish_front_meshing_batch(/*force=*/true);
-    }
+
+        // Promotion lane (depth 1): publish sim truth + dispatch stage B when due.
+        if (promotion_pipeline_pending()) {
+            const std::int64_t promo_due = m_streaming_state.promotion_due_tick;
+            const bool due = promo_due < 0 ? !promotion_jobs_active() : promo_due <= tick;
+            if (due) {
+                if (m_job_system) {
+                    if (m_streaming_state.promotion_job_handle_high.counter) {
+                        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
+                    }
+                    if (m_streaming_state.promotion_job_handle.counter) {
+                        m_job_system->wait(m_streaming_state.promotion_job_handle);
+                    }
+                }
+                process_completed_promotion_jobs(/*force=*/true);
+                if (!promotion_pipeline_pending()) {
+                    m_streaming_state.promotion_due_tick = -1;
+                }
+            }
+        }
+
+        // Meshing lane.
+        while (!m_streaming_state.meshing_batches.empty()) {
+            auto& front = m_streaming_state.meshing_batches.front();
+            const bool due = front.due_tick < 0 ? !(has_active_job(front.handle) ||
+                                                    has_active_job(front.handle_high))
+                                                : front.due_tick <= tick;
+            if (!due) {
+                break;
+            }
+            if (m_job_system) {
+                if (front.handle_high.counter) {
+                    m_job_system->wait(front.handle_high);
+                }
+                if (front.handle.counter) {
+                    m_job_system->wait(front.handle);
+                }
+            }
+            publish_front_meshing_batch(/*force=*/true);
+        }
+        // Stage B may have been held behind a full meshing FIFO above. Complete
+        // that handoff only after due batches actually freed its lane.
+        if (!m_streaming_state.pending_promotion_mesh.empty() &&
+            (m_streaming_state.promotion_due_tick < 0 ||
+             m_streaming_state.promotion_due_tick <= tick) &&
+            m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
+            const auto before = m_streaming_state.pending_promotion_mesh.size();
+            process_completed_promotion_jobs(/*force=*/true);
+            dispatched_deferred = m_streaming_state.pending_promotion_mesh.size() < before;
+        }
+        // Deferred descriptors belong to their original dispatch tick. Settle that
+        // finite prefix when due, without forcing future batches to publish early.
+        if (deferred_meshing_pending() &&
+            (m_deferred_meshing_due_tick < 0 || m_deferred_meshing_due_tick <= tick) &&
+            !promotion_pipeline_pending() &&
+            m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
+            const auto before = m_deferred_meshing_cursor;
+            dispatch_deferred_meshing();
+            dispatched_deferred = dispatched_deferred || m_deferred_meshing_cursor != before ||
+                                  !deferred_meshing_pending();
+        }
+        // Every continuation consumes a descriptor or completes a stage-B handoff.
+        // Tick-stamped jobs block when due; unticked jobs use completion checks.
+    } while (dispatched_deferred);
 }
 
 void SHIELD_WorldSystem::wait_for_promotion_jobs() {
@@ -710,6 +940,9 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 // process_completed_meshing_jobs by ): pure
                 // generation output, not an edit — the dirty flag stays
                 // clear (matching GenerateChunkData's contract).
+                const Persistence::WorldSaveService::SaveOwnership ownership;
+                const bool replaced_authority =
+                    chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited;
                 chunk->sdf_data = std::move(chunk->pending_sdf_data);
                 chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
                 // publish the promoted structure material channel
@@ -717,6 +950,11 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->mark_sdf_generated_current_params();
                 chunk->clear_voxel_data_dirty_after_generation();
+                if (replaced_authority)
+                    bump_far_lod_authority_revision(chunk->get_coords());
+                const auto resident = m_streaming_state.chunks.find(chunk->get_id());
+                if (resident != m_streaming_state.chunks.end() && resident->second == chunk)
+                    publish_generated_column_span(*chunk);
                 shadow_note_promotion_published(chunk->get_id()); //  shadow
                 m_streaming_state.pending_promotion_mesh.push_back(job_chunk);
             } else {
@@ -747,6 +985,14 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     //  5b: gate by FIFO depth (deterministic), not raw job activity.
     if (!m_streaming_state.pending_promotion_mesh.empty() &&
         m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
+        if (m_meshing_snapshot_pass_active &&
+            m_streaming_state.pending_promotion_mesh.size() >
+                (kMeshingSnapshotByteBudget - m_last_meshing_snapshot_bytes) /
+                    kMaxMeshingSnapshotBytes) {
+            return; // Keep every reservation until the entire handoff fits.
+        }
+        // Stage A reserved kMaxMeshingSnapshotBytes per item. This entire stage-B
+        // queue fits kMeshingSnapshotByteBudget even if water grids changed size.
         std::vector<MeshingWorkItem> stage_b;
         stage_b.reserve(m_streaming_state.pending_promotion_mesh.size());
         for (const auto& item : m_streaming_state.pending_promotion_mesh) {
@@ -760,24 +1006,32 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
             if (it == m_streaming_state.chunks.end() || it->second.get() != item.chunk.get()) {
                 continue;
             }
-            stage_b.push_back(
-                {item.chunk, item.lod_level, /*terrain_mesh_required=*/true, item.high_priority});
+            // Stage A reserved this LOD without starting a meshing job. Release
+            // that reservation at the main-thread handoff so the ordinary
+            // in-flight guard admits exactly one stage-B dispatch.
+            item.chunk->pending_lod.store(-1, std::memory_order_release);
+            stage_b.push_back({item.chunk,
+                               item.lod_level,
+                               /*terrain_mesh_required=*/true,
+                               item.high_priority,
+                               item.transition_faces});
         }
         m_streaming_state.pending_promotion_mesh.clear();
         if (!stage_b.empty()) {
-            dispatch_meshing_jobs(stage_b);
+            dispatch_meshing_jobs(stage_b, m_streaming_state.promotion_due_tick);
         }
     }
 }
 
-void SHIELD_WorldSystem::dispatch_promotion_jobs(
-    const std::vector<MeshingWorkItem>& chunks_to_promote) {
+std::size_t
+SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote,
+                                            std::int64_t due_tick) {
     process_completed_promotion_jobs(/*force=*/false);
     if (promotion_jobs_active()) {
         // One promotion batch in flight at a time (the meshing lane's
         // semantics); refused items re-candidate on a later pass, exactly as
         // a refused meshing dispatch would.
-        return;
+        return 0;
     }
 
     std::vector<Luminumbra::Job> high_priority_jobs;
@@ -801,7 +1055,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
         chunk->pending_promotion_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(work_item.lod_level, std::memory_order_release);
         m_streaming_state.promotion_job_chunks.push_back(
-            {chunk, work_item.lod_level, work_item.high_priority});
+            {chunk, work_item.lod_level, work_item.high_priority, work_item.transition_faces});
         shadow_note_promotion_dispatch(chunk->get_id()); //  shadow
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
@@ -838,8 +1092,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
     m_promotion_batches_dispatched++;
     m_promotion_chunks_dispatched += m_streaming_state.promotion_job_chunks.size();
     // tick-keyed activation stamp (inert until the swap).
-    m_streaming_state.promotion_due_tick =
-        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+    m_streaming_state.promotion_due_tick = due_tick;
 
     if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
         if (!high_priority_jobs.empty()) {
@@ -857,8 +1110,10 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        process_completed_promotion_jobs(/*force=*/true);
+        // Inline completion obeys the same activation schedule as worker completion.
+        process_completed_promotion_jobs(/*force=*/false);
     }
+    return chunks_to_promote.size();
 }
 
 void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
@@ -876,7 +1131,16 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
             pending.store(false, std::memory_order_release);
         }
     } writer_intent_reset{m_worldgen_writer_pending};
-    std::unique_lock<std::shared_mutex> worldgen_epoch(m_worldgen_epoch_mutex);
+    LUMIN_PROFILE_LOCK(std::unique_lock<std::shared_mutex>,
+                       worldgen_epoch,
+                       m_worldgen_epoch_mutex,
+                       "Worldgen epoch lock wait");
+    // All seed payloads from the previous generator set become unusable. Never
+    // wrap the key: at saturation consumers conservatively use inline sampling.
+    const auto seed_generation = m_water_seed_terrain_generation.load(std::memory_order_relaxed);
+    if (seed_generation != std::numeric_limits<std::uint64_t>::max()) {
+        m_water_seed_terrain_generation.store(seed_generation + 1, std::memory_order_release);
+    }
     // Publish parameters and seed under the same epoch as their generators.
     // Preview readers must retain the previous complete world until they release it.
     if (params) {
@@ -886,9 +1150,21 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         m_seed = *seed;
     }
 
-    // Terrain height is a pure function of seed/params; drop the cached
-    // per-column surface spans whenever either changes.
-    m_column_surface_span_cache.clear();
+    // Lock order is epoch -> hydro. Every bake holds the shared epoch, so
+    // none can publish offsets from the old generators after this invalidation.
+    // Per-job caches retain immutable shared region ownership until they finish.
+    {
+        const std::unique_lock<std::shared_mutex> hydro_lock(m_hydro_mutex);
+        m_hydro_cache.clear();
+    }
+    // Terrain height is a pure function of seed/params; drop dependent spans too.
+    m_activation_index.invalidate_spans();
+    m_activation_plan_valid = false;
+    m_activation_has_run = false;
+    {
+        const std::lock_guard<std::mutex> prefetch_lock(m_hydro_prefetch_mutex);
+        m_hydro_prefetch_inflight.clear();
+    }
 
     // FastNoise2 uses a node-based system to build complex generators.
 
@@ -978,7 +1254,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         humidity_fractal->SetOctaveCount(2);
         m_humidity_generator = humidity_fractal;
 
-        m_biome_table = World::BiomeTable::Load(m_params.biome_table_path);
+        m_biome_table =
+            m_params.worldgen_dependencies
+                ? m_params.worldgen_dependencies->biome_table
+                : World::BiomeTable::Load(Filesystem::PathFromUtf8(m_params.biome_table_path));
         if (!m_biome_table.ok() || m_biome_table.empty()) {
             for (const std::string& error : m_biome_table.errors()) {
                 LUMINUMBRA_CORE_WARN("biome table load error: {}", error);
@@ -1003,22 +1282,34 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     m_structures_enabled = false;
     m_params.structures_content_hash = 0;
     if (m_params.structures_enabled && !m_params.structures_data_dir.empty()) {
-        const std::filesystem::path structures_root(m_params.structures_data_dir);
-        std::error_code ec;
-        std::vector<std::filesystem::path> type_dirs;
-        if (std::filesystem::is_directory(structures_root, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
-                if (entry.is_directory()) {
-                    type_dirs.push_back(entry.path());
+        std::vector<World::StructureTemplatePool> pools;
+        if (m_params.worldgen_dependencies) {
+            pools = m_params.worldgen_dependencies->structure_pools;
+        } else {
+            // Direct generators without a preset retain filesystem loading.
+            const auto structures_root = Filesystem::PathFromUtf8(m_params.structures_data_dir);
+            std::error_code ec;
+            std::vector<std::filesystem::path> type_dirs;
+            if (std::filesystem::is_directory(structures_root, ec)) {
+                for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
+                    if (entry.is_directory()) {
+                        type_dirs.push_back(entry.path());
+                    }
                 }
             }
+            // Match the manifest's UTF-8 order, including non-BMP type names.
+            std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
+                return Filesystem::GenericUtf8PathString(a.filename()) <
+                       Filesystem::GenericUtf8PathString(b.filename());
+            });
+            for (const auto& type_dir : type_dirs) {
+                pools.push_back(World::LoadStructureTemplatePool(
+                    type_dir, Filesystem::GenericUtf8PathString(type_dir.filename())));
+            }
         }
-        // Sort by type name so the combined content hash is order-independent.
-        std::sort(type_dirs.begin(), type_dirs.end());
         u64 combined = 14695981039346656037ull; // fnv offset basis
-        for (const auto& type_dir : type_dirs) {
-            const std::string type = type_dir.filename().string();
-            World::StructureTemplatePool pool = World::LoadStructureTemplatePool(type_dir, type);
+        for (auto& pool : pools) {
+            const auto& type = pool.type;
             for (const std::string& warn : pool.warnings) {
                 LUMINUMBRA_CORE_WARN("structure pool '{}': {}", type, warn);
             }
@@ -1082,8 +1373,6 @@ SHIELD_WorldSystem::ComputeShapedHeightSample(float world_x, float world_z) cons
 
 SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSampleImpl(
     float world_x, float world_z, bool apply_hydro) const {
-    ShapedHeightSample sample;
-
     // Sampling scopes hold the shared epoch while reinitialization takes the
     // exclusive epoch. Shaping nodes are always built; local references pin
     // their lifetimes throughout this sample without an algorithm fallback.
@@ -1115,20 +1404,50 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     const float peaks_valleys = peaks_gen->GenSingle2D(
         sample_x * m_params.peaks_frequency, sample_z * m_params.peaks_frequency, m_seed + 5);
 
+    const float base_noise = m_terrain_generator->GenSingle2D(
+        sample_x * m_params.base_frequency, sample_z * m_params.base_frequency, m_seed);
+    const float island_noise =
+        m_params.island_mask_enabled
+            ? m_island_mask_generator->GenSingle2D(world_x * m_params.island_mask_frequency,
+                                                   world_z * m_params.island_mask_frequency,
+                                                   m_seed + 2)
+            : 0.0f;
+    auto sample = CombineShapedHeightSample(world_x,
+                                            world_z,
+                                            {.continentalness = continentalness,
+                                             .erosion = erosion,
+                                             .peaks_valleys = peaks_valleys,
+                                             .base_noise = base_noise,
+                                             .island_noise = island_noise},
+                                            /*complete_shaping=*/true);
+    if (apply_hydro && m_params.hydro_enabled) {
+        sample.final_height += SampleHydroOffsetMeters(world_x, world_z);
+    }
+    return sample;
+}
+
+SHIELD_WorldSystem::ShapedHeightSample
+SHIELD_WorldSystem::CombineShapedHeightSample(float world_x,
+                                              float world_z,
+                                              const ShapingNoiseSample& noise,
+                                              bool complete_shaping,
+                                              SamplingCache* cache) const {
+    ShapedHeightSample sample;
+
     const float base_level =
-        EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
+        EvaluateShapingSpline(m_params.continental_spline, noise.continentalness, 0.0f);
     const float amplitude_multiplier =
-        EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
+        EvaluateShapingSpline(m_params.erosion_spline, noise.erosion, 1.0f);
     // Ridge term: peaks only where erosion is low (eroded land is flat).
-    const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-    float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
+    const float erosion_01 = std::clamp((noise.erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
+    float ridge = EvaluateShapingSpline(m_params.peaks_spline, noise.peaks_valleys, 0.0f) *
                   m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
 
     //  per-biome morphology: scale the ridge by the (continuous)
     // temperature field — cold ground (alpine) gets taller/rugged peaks, warm
     // lowlands gentler. Only the ridge term; smooth so no seams. Byte-identical
     // to the batched path in ComputeShapedHeightGrid.
-    if (m_params.biome_relief_enabled && m_temperature_generator) {
+    if (complete_shaping && m_params.biome_relief_enabled && m_temperature_generator) {
         const float temp =
             m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
                                                  world_z * m_params.temperature_frequency,
@@ -1137,23 +1456,21 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
     }
 
-    sample.base_noise = m_terrain_generator->GenSingle2D(
-        sample_x * m_params.base_frequency, sample_z * m_params.base_frequency, m_seed);
+    sample.base_noise = noise.base_noise;
     float terrain_height = m_params.height_offset + base_level +
                            amplitude_multiplier * (sample.base_noise * m_params.base_amplitude) +
                            ridge;
     //  cliffs: terrace the shaped height inside cliff zones (byte-identical
     // to ComputeShapedHeightGrid). No-op when cliffs disabled / outside a zone.
-    terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
+    if (complete_shaping) {
+        terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
+    }
     sample.pre_island_height = terrain_height;
     sample.final_height = terrain_height;
 
     if (m_params.island_mask_enabled) {
         sample.island_applied = true;
-        sample.island_noise =
-            m_island_mask_generator->GenSingle2D(world_x * m_params.island_mask_frequency,
-                                                 world_z * m_params.island_mask_frequency,
-                                                 m_seed + 2);
+        sample.island_noise = noise.island_noise;
         sample.island_mask = glm::smoothstep(0.1f, 0.25f, sample.island_noise);
         sample.final_height = glm::mix(m_params.height_offset, terrain_height, sample.island_mask);
     }
@@ -1177,9 +1494,9 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // floor below SEA_LEVEL so the global water plane fills it (mirrors the river
     // carve; lake_max_carve gates it to low terrain only). Skipped (byte-zero) when
     // lakes are disabled. Kept byte-identical to ComputeShapedHeightGrid.
-    if (m_params.lakes_enabled) {
+    if (complete_shaping && m_params.lakes_enabled) {
         const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-        const float lake_surface = LakeSurfaceLevel(world_x, world_z);
+        const float lake_surface = LakeSurfaceLevel(world_x, world_z, cache);
         sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence, lake_surface);
     }
 
@@ -1187,17 +1504,12 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // doline footprint so the feature reads at distance/coarse-LOD (the SDF carve
     // alone is invisible on the SDF-ignoring far path). Folded into ALL THREE
     // height paths byte-identically. No-op (0) when surface_breaks disabled.
-    sample.final_height -= SurfaceBreakRimDepression(world_x, world_z);
-
-    // hydraulic/thermal relief (decision a). Added LAST so the baked
-    // drainage/talus sits in the final surface EVERY height consumer reads
-    // (collision/spawn/water/far-LOD/mesh). The per-region bake samples the
-    // NO-hydro height (apply_hydro=false) so this never recurses. Skipped (byte-
-    // identical legacy path) when hydro is disabled -> world_hash unchanged.
-    if (apply_hydro && m_params.hydro_enabled) {
-        sample.final_height += SampleHydroOffsetMeters(world_x, world_z);
+    if (complete_shaping) {
+        sample.final_height -= SurfaceBreakRimDepression(world_x, world_z, cache);
     }
 
+    // Callers add hydraulic relief LAST. The bake uses the frozen historical
+    // substrate without hydro, preserving the terrain in existing saved worlds.
     return sample;
 }
 
@@ -1224,7 +1536,9 @@ std::int64_t HydroFloorDiv(std::int64_t a, std::int64_t b) {
 }
 } // namespace
 
-float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) const {
+float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x,
+                                                  float world_z,
+                                                  SamplingCache* cache) const {
     const float cs = m_params.hydro_cell_size_m;
     if (cs <= 0.0f) {
         return 0.0f;
@@ -1246,10 +1560,11 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
         const int m = kHydroRegionCells + 2 * halo;
         const std::size_t cells = static_cast<std::size_t>(m) * static_cast<std::size_t>(m);
         // Build the padded grid's world coords, then sample the NO-hydro base
-        // heights in ONE SIMD batch (apply_hydro=false: no recursion, and the
+        // heights in ONE SIMD batch (ApplyHydro=false: no recursion, and the
         // GenPositionArray2D path is ~10x faster than per-cell GenSingle2D --
-        // keeps the bake off the far-LOD settle critical path). Byte-identical to
-        // the scalar path (position-array parity gate), so the offset is unchanged.
+        // keeps the bake off the far-LOD settle critical path). Freeze the
+        // historical substrate: adding the four missing shaping stages here
+        // would change generated terrain in existing worlds (issue #453).
         std::vector<float> xs(cells, 0.0f);
         std::vector<float> zs(cells, 0.0f);
         for (int pz = 0; pz < m; ++pz) {
@@ -1261,11 +1576,11 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
             }
         }
         std::vector<float> heights(cells, 0.0f);
-        ComputeShapedHeightsAtPositions(xs.data(),
-                                        zs.data(),
-                                        cells,
-                                        heights.data(),
-                                        /*apply_hydro=*/false);
+        ComputeShapedHeightsAtPositionsImpl<false>(xs.data(),
+                                                   zs.data(),
+                                                   cells,
+                                                   heights.data(),
+                                                   /*complete_shaping=*/false);
         World::HydroErosionParams p;
         p.iterations = m_params.hydro_iterations;
         p.talus_height = m_params.hydro_talus_height;
@@ -1284,8 +1599,8 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
     // Fetch one global cell's baked offset. Warm-cache reads take a SHARED lock
     // (concurrent across chunk-gen jobs); a cold region is baked OUTSIDE the lock
     // then inserted under the exclusive lock. std::map node storage keeps cached
-    // values stable; recompute-on-load (not persisted), deterministic.
-    auto offset_at = [this, &bake_region](std::int64_t gx, std::int64_t gz) -> float {
+    // values immutable; recompute-on-load (not persisted), deterministic.
+    auto offset_at = [this, &bake_region, cache](std::int64_t gx, std::int64_t gz) -> float {
         const std::int64_t rx = HydroFloorDiv(gx, kHydroRegionCells);
         const std::int64_t rz = HydroFloorDiv(gz, kHydroRegionCells);
         const int lx = static_cast<int>(gx - rx * kHydroRegionCells);
@@ -1294,21 +1609,34 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
         const std::size_t local =
             static_cast<std::size_t>(lz) * static_cast<std::size_t>(kHydroRegionCells) +
             static_cast<std::size_t>(lx);
+        if (cache) {
+            if (const auto* retained = cache->hydro.find(key))
+                return (**retained)[local];
+            ++cache->work.hydro_regions;
+        }
+        std::shared_ptr<const std::vector<float>> region;
         {
-            std::shared_lock<std::shared_mutex> rlock(m_hydro_mutex);
-            auto it = m_hydro_cache.find(key);
-            if (it != m_hydro_cache.end()) {
-                return it->second[local];
+            const std::shared_lock<std::shared_mutex> rlock(m_hydro_mutex);
+            const auto found = m_hydro_cache.find(key);
+            if (found != m_hydro_cache.end()) {
+                if (!cache)
+                    return (*found->second)[local];
+                region = found->second;
             }
         }
-        std::vector<float> baked = bake_region(rx, rz); // outside any lock
-        std::unique_lock<std::shared_mutex> wlock(m_hydro_mutex);
+        if (region) {
+            if (cache)
+                cache->hydro.insert(key, region);
+            return (*region)[local];
+        }
+        auto baked = std::make_shared<const std::vector<float>>(bake_region(rx, rz));
+        const std::unique_lock<std::shared_mutex> wlock(m_hydro_mutex);
         auto it = m_hydro_cache.try_emplace(key, std::move(baked)).first;
         // Bound the cache: past the cap, evict the region FARTHEST (Chebyshev)
         // from the one just requested — the just-requested key approximates the
         // current activity centre, so hot neighbourhoods survive and only stale
         // far-behind regions fall out. Safe under the exclusive lock: readers
-        // copy a single float under a lock and never retain references. Purely
+        // retain immutable region ownership or copy a float under the lock. Purely
         // a cost bound; a re-read of an evicted region re-bakes byte-identically.
         if (m_hydro_cache.size() > kHydroCacheMaxRegions) {
             auto victim = m_hydro_cache.end();
@@ -1325,7 +1653,10 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
                 m_hydro_cache.erase(victim);
             }
         }
-        return it->second[local];
+        region = it->second;
+        if (cache)
+            cache->hydro.insert(key, region);
+        return (*region)[local];
     };
 
     const float o00 = offset_at(gx0, gz0);
@@ -1338,11 +1669,24 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
 }
 
 void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) const {
+    LUMIN_PROFILE_ZONE_N("Hydrology prefetch batch");
     // Warm the hydraulic-erosion region cache AHEAD of chunk-gen demand on
     // background jobs, so the (expensive) per-region bake never lands on the
     // gen/main critical path when the camera flies into new terrain. Each region
     // bakes ONCE; the inflight set stops re-dispatching it before its job lands,
     // and the cache check stops re-dispatching baked regions.
+    const std::lock_guard<std::mutex> dispatch_lock(m_hydro_prefetch_dispatch_mutex);
+    if (has_active_job(m_hydro_prefetch_handle)) {
+        return;
+    }
+    {
+        // A drained counter may precede destruction of its last callable copy.
+        // Keep the single batch until every callback owner releases its key.
+        const std::lock_guard<std::mutex> prefetch_lock(m_hydro_prefetch_mutex);
+        if (!m_hydro_prefetch_inflight.empty()) {
+            return;
+        }
+    }
     const float cs = m_params.hydro_cell_size_m;
     if (!m_params.hydro_enabled || m_job_system == nullptr || cs <= 0.0f) {
         return;
@@ -1353,6 +1697,18 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
         HydroFloorDiv(static_cast<std::int64_t>(std::floor(cx / cs)), kHydroRegionCells);
     const std::int64_t crz =
         HydroFloorDiv(static_cast<std::int64_t>(std::floor(cz / cs)), kHydroRegionCells);
+    struct Completion {
+        const SHIELD_WorldSystem& world;
+        std::pair<std::int64_t, std::int64_t> key;
+        bool registered = false;
+        ~Completion() {
+            if (!registered)
+                return;
+            const std::lock_guard<std::mutex> lock(world.m_hydro_prefetch_mutex);
+            world.m_hydro_prefetch_inflight.erase(key);
+            world.m_hydro_prefetch_finished.notify_all();
+        }
+    };
     std::vector<Job> jobs;
     for (std::int64_t dz = -reach; dz <= reach; ++dz) {
         for (std::int64_t dx = -reach; dx <= reach; ++dx) {
@@ -1363,26 +1719,46 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
                     continue; // already baked
                 }
             }
+            std::shared_ptr<Completion> completion;
             {
                 std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
-                if (!m_hydro_prefetch_inflight.insert(rkey).second) {
+                if (m_hydro_prefetch_inflight.contains(rkey)) {
                     continue; // already queued
                 }
+                // Allocate before registration so an allocation failure cannot
+                // leave a key behind that reset/teardown would wait on forever.
+                completion = std::make_shared<Completion>(*this, rkey);
+                m_hydro_prefetch_inflight.insert(rkey);
+                completion->registered = true;
             }
             const float sample_x =
                 static_cast<float>(rkey.first * kHydroRegionCells) * cs + region_m * 0.5f;
             const float sample_z =
                 static_cast<float>(rkey.second * kHydroRegionCells) * cs + region_m * 0.5f;
-            jobs.emplace_back([this, rkey, sample_x, sample_z]() {
+            // The last callable copy releases the inflight key, including when
+            // dispatch is rejected or a bake throws. Teardown waits for these
+            // owners before releasing the world they reference.
+            jobs.emplace_back([this, completion, sample_x, sample_z]() {
+                static_cast<void>(completion);
+                const auto worldgen_scope = acquire_worldgen_sample_scope();
                 SampleHydroOffsetMeters(sample_x, sample_z); // triggers + caches the region bake
-                std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
-                m_hydro_prefetch_inflight.erase(rkey);
             });
         }
     }
     if (!jobs.empty()) {
-        m_job_system->dispatch_batch(jobs); // fire-and-forget background bakes
+        m_hydro_prefetch_handle = m_job_system->dispatch_batch(jobs);
     }
+}
+
+void SHIELD_WorldSystem::wait_for_hydro_prefetch_jobs() const {
+    const std::lock_guard<std::mutex> dispatch_lock(m_hydro_prefetch_dispatch_mutex);
+    if (m_job_system && m_hydro_prefetch_handle.counter) {
+        m_job_system->wait(m_hydro_prefetch_handle);
+    }
+    m_hydro_prefetch_handle = {};
+    std::unique_lock<std::mutex> prefetch_lock(m_hydro_prefetch_mutex);
+    m_hydro_prefetch_finished.wait(prefetch_lock,
+                                   [this]() { return m_hydro_prefetch_inflight.empty(); });
 }
 
 float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
@@ -1431,6 +1807,12 @@ float SHIELD_WorldSystem::ContinentalBaseHeight(float world_x, float world_z) co
 }
 
 float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
+    return LakeSurfaceLevel(world_x, world_z, nullptr);
+}
+
+float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x,
+                                           float world_z,
+                                           SamplingCache* cache) const {
     // the lake surface must be near-constant (flat) over a lake's extent AND
     // continuous across the coarse-cell boundaries. The old code snapped to the
     // NEAREST 768 m node (std::round), so a lake straddling a cell boundary saw two
@@ -1454,10 +1836,22 @@ float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
     const float z0 = fz0 * kLakeCellMeters;
     const float x1 = x0 + kLakeCellMeters;
     const float z1 = z0 + kLakeCellMeters;
-    const float h00 = ContinentalBaseHeight(x0, z0);
-    const float h10 = ContinentalBaseHeight(x1, z0);
-    const float h01 = ContinentalBaseHeight(x0, z1);
-    const float h11 = ContinentalBaseHeight(x1, z1);
+    const std::pair<float, float> key{fx0, fz0};
+    const auto* retained = cache ? cache->lakes.find(key) : nullptr;
+    std::array<float, 4> corners{};
+    if (retained) {
+        corners = *retained;
+    } else {
+        corners = {ContinentalBaseHeight(x0, z0),
+                   ContinentalBaseHeight(x1, z0),
+                   ContinentalBaseHeight(x0, z1),
+                   ContinentalBaseHeight(x1, z1)};
+        if (cache) {
+            cache->lakes.insert(key, corners);
+            ++cache->work.lake_cells;
+        }
+    }
+    const auto [h00, h10, h01, h11] = corners;
     const float a = h00 + (h10 - h00) * tx;
     const float b = h01 + (h11 - h01) * tx;
     const float surface = a + (b - a) * tz;
@@ -1488,7 +1882,7 @@ bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
         if (coords.x != column.x || coords.z != column.z)
             continue;
         const int res = chunk->current_water_resolution.load(std::memory_order_relaxed);
-        if (res <= 1)
+        if (!IsBoundedWaterResolution(res))
             continue;
         const std::size_t side = static_cast<std::size_t>(res);
         if (chunk->water_bed_mm.size() != side * side ||
@@ -1497,9 +1891,11 @@ bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
         has_live_grid = true;
         const float lx = world_pos.x - static_cast<float>(coords.x * CHUNK_SIZE_X);
         const float lz = world_pos.z - static_cast<float>(coords.z * CHUNK_SIZE_Z);
-        const int x = std::clamp(static_cast<int>(lx * res / CHUNK_SIZE_X), 0, res - 1);
-        const int z = std::clamp(static_cast<int>(lz * res / CHUNK_SIZE_Z), 0, res - 1);
-        const std::size_t cell = static_cast<std::size_t>(z) * side + x;
+        const int x =
+            std::clamp(static_cast<int>(lx * static_cast<float>(res) / CHUNK_SIZE_X), 0, res - 1);
+        const int z =
+            std::clamp(static_cast<int>(lz * static_cast<float>(res) / CHUNK_SIZE_Z), 0, res - 1);
+        const std::size_t cell = static_cast<std::size_t>(z) * side + static_cast<std::size_t>(x);
         const float bed = static_cast<float>(chunk->water_bed_mm[cell]) / 1000.0f;
         const float depth = static_cast<float>(chunk->water_depth_mm[cell]) / 1000.0f;
         if (depth > 0.05f && world_pos.y >= bed && world_pos.y < bed + depth - 0.05f)
@@ -1701,6 +2097,23 @@ float SHIELD_WorldSystem::SamplePristineFarDensity(const Vec3& wp,
     return std::max(filtered, analytic);
 }
 
+float SHIELD_WorldSystem::SurfaceBreakCellSize() const {
+    return m_params.surface_breaks_enabled ? m_params.feature_cell_size : 0.0f;
+}
+
+float SHIELD_WorldSystem::SurfaceBreakMaxRadius() const {
+    return m_params.surface_breaks_enabled ? m_params.max_feature_radius : 0.0f;
+}
+
+SHIELD_WorldSystem::SurfaceBreakInfo SHIELD_WorldSystem::SurfaceBreakInCell(int cell_x,
+                                                                            int cell_z) const {
+    if (!m_params.surface_breaks_enabled || m_params.feature_cell_size <= 0.0f) {
+        return {};
+    }
+    const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, cell_x, cell_z, m_params);
+    return {f.valid, f.center_x, f.center_z, f.radius, f.depth, f.shaft};
+}
+
 SHIELD_WorldSystem::SurfaceBreakInfo
 SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const {
     SurfaceBreakInfo best;
@@ -1735,8 +2148,8 @@ SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float sc
     return best;
 }
 
-SHIELD_WorldSystem::SurfaceBreakSample
-SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h) const {
+SHIELD_WorldSystem::SurfaceBreakSample SHIELD_WorldSystem::sample_surface_breaks(
+    const Vec3& world_pos, float surface_h, SamplingCache* cache) const {
     SurfaceBreakSample out{kCaveSurfaceCapDepth, 0.0f};
     if (!m_params.surface_breaks_enabled) {
         return out; // byte-identical disabled path
@@ -1754,7 +2167,14 @@ SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h
         for (int dx = -1; dx <= 1; ++dx) {
             const int cx = base_cx + dx;
             const int cz = base_cz + dz;
-            const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, cx, cz, m_params);
+            const SurfaceBreakFeature f =
+                cache ? CachedSurfaceBreakCell(m_seed,
+                                               cx,
+                                               cz,
+                                               m_params,
+                                               cache->features,
+                                               cache->work.surface_break_cells)
+                      : DecodeSurfaceBreakCell(m_seed, cx, cz, m_params);
             if (!f.valid) {
                 continue;
             }
@@ -1820,7 +2240,9 @@ SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h
 // bowl that DIPS the surface inside a doline footprint so the feature reads even on
 // the SDF-ignoring coarse path. Pure 2D (no cave probe) so it is cheap to fold into
 // every height consumer; returns metres to subtract from the surface height.
-float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x, float world_z) const {
+float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x,
+                                                    float world_z,
+                                                    SamplingCache* cache) const {
     if (!m_params.surface_breaks_enabled) {
         return 0.0f;
     }
@@ -1834,7 +2256,13 @@ float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x, float world_z
     for (int dz = -1; dz <= 1; ++dz) {
         for (int dx = -1; dx <= 1; ++dx) {
             const SurfaceBreakFeature f =
-                DecodeSurfaceBreakCell(m_seed, base_cx + dx, base_cz + dz, m_params);
+                cache ? CachedSurfaceBreakCell(m_seed,
+                                               base_cx + dx,
+                                               base_cz + dz,
+                                               m_params,
+                                               cache->features,
+                                               cache->work.surface_break_cells)
+                      : DecodeSurfaceBreakCell(m_seed, base_cx + dx, base_cz + dz, m_params);
             if (!f.valid) {
                 continue;
             }
@@ -1918,16 +2346,22 @@ float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) cons
 
 void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     int base_x, int base_z, int size_x, int size_z, float* out) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height grid batch");
     // SIMD-batched twin of ComputeShapedHeightSample over an integer-aligned
     // column grid. MUST stay byte-for-byte equal to calling ComputeShapedHeight
     // per column (the batch-vs-scalar parity gtest pins ==), so the per-channel
     // math below mirrors ComputeShapedHeightSample EXACTLY; only the noise reads
     // move from per-point GenSingle2D to the SIMD batch entry points (which
     // produce identical float bits on this build, proven by the parity gate).
-    const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_z);
-    if (count == 0) {
+    if (size_x <= 0 || size_z <= 0) {
         return;
     }
+    // GenUniformGrid2D multiplies its signed dimensions internally.
+    if (size_x > std::numeric_limits<int>::max() / size_z) {
+        throw std::length_error("Height grid is too large");
+    }
+    const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_z);
+    const std::size_t noise_pad = PadToNoiseSimd(count);
 
     // --- 1. Unwarped control + warp channels on the integer lattice (SIMD). ---
     std::vector<float> warp_x_grid(count);
@@ -1973,7 +2407,6 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     // is not a multiple of the SIMD width -- count = size_x*size_z is rarely a
     // multiple of 16) cannot over-read/over-write past the count-sized vectors.
     // Padding is never consumed (only [0,count) is read back) -> hash-neutral.
-    const std::size_t noise_pad = PadToNoiseSimd(count);
     std::vector<float> base_px(noise_pad);
     std::vector<float> base_py(noise_pad);
     std::vector<float> peaks_px(noise_pad);
@@ -2026,68 +2459,22 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     }
 
     // --- 4. Combine per column, mirroring ComputeShapedHeightSample exactly. ---
+    SamplingCache cache;
     for (int z = 0; z < size_z; ++z) {
         for (int x = 0; x < size_x; ++x) {
             const std::size_t i = static_cast<std::size_t>(x) +
                                   static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
-            const float continentalness = continentalness_grid[i];
-            const float erosion = erosion_grid[i];
-            const float peaks_valleys = peaks_noise[i];
-
-            const float base_level =
-                EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
-            const float amplitude_multiplier =
-                EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
-            const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-            float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
-                          m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-
-            //  per-biome morphology — byte-identical to ComputeShapedHeightSampleImpl.
-            if (m_params.biome_relief_enabled && m_temperature_generator) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float temp =
-                    m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
-                                                         world_z * m_params.temperature_frequency,
-                                                         m_seed + 8);
-                const float cold01 = std::clamp(0.5f - 0.5f * temp, 0.0f, 1.0f);
-                ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
-            }
-
-            float terrain_height =
-                m_params.height_offset + base_level +
-                amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
-
-            //  cliffs — byte-identical to ComputeShapedHeightSampleImpl.
-            terrain_height = CliffTerracedHeight(
-                static_cast<float>(base_x + x), static_cast<float>(base_z + z), terrain_height);
-
-            if (m_params.island_mask_enabled) {
-                const float mask = glm::smoothstep(0.1f, 0.25f, island_noise[i]);
-                terrain_height = glm::mix(m_params.height_offset, terrain_height, mask);
-            }
-
-            if (m_params.rivers_enabled) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float influence = RiverInfluenceFromNoise(world_x, world_z);
-                terrain_height -= RiverCarveAmount(terrain_height, influence);
-            }
-
-            // Lake carve — byte-identical to ComputeShapedHeightSampleImpl.
-            if (m_params.lakes_enabled) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-                const float lake_surface = LakeSurfaceLevel(world_x, world_z);
-                terrain_height -= LakeCarveAmount(terrain_height, lake_influence, lake_surface);
-            }
-
-            //  rim depression — byte-identical to ComputeShapedHeightSampleImpl.
-            terrain_height -= SurfaceBreakRimDepression(static_cast<float>(base_x + x),
-                                                        static_cast<float>(base_z + z));
-
-            out[i] = terrain_height;
+            out[i] = CombineShapedHeightSample(
+                         static_cast<float>(base_x + x),
+                         static_cast<float>(base_z + z),
+                         {.continentalness = continentalness_grid[i],
+                          .erosion = erosion_grid[i],
+                          .peaks_valleys = peaks_noise[i],
+                          .base_noise = base_noise[i],
+                          .island_noise = m_params.island_mask_enabled ? island_noise[i] : 0.0f},
+                         /*complete_shaping=*/true,
+                         &cache)
+                         .final_height;
         }
     }
 
@@ -2101,8 +2488,8 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 const std::size_t i =
                     static_cast<std::size_t>(x) +
                     static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
-                out[i] += SampleHydroOffsetMeters(static_cast<float>(base_x + x),
-                                                  static_cast<float>(base_z + z));
+                out[i] += SampleHydroOffsetMeters(
+                    static_cast<float>(base_x + x), static_cast<float>(base_z + z), &cache);
             }
         }
     }
@@ -2256,6 +2643,17 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     const float* xs, const float* zs, std::size_t count, float* out, bool apply_hydro) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height position batch");
+    if (apply_hydro) {
+        ComputeShapedHeightsAtPositionsImpl<true>(xs, zs, count, out, /*complete_shaping=*/true);
+    } else {
+        ComputeShapedHeightsAtPositionsImpl<false>(xs, zs, count, out, /*complete_shaping=*/true);
+    }
+}
+
+template<bool ApplyHydro>
+void SHIELD_WorldSystem::ComputeShapedHeightsAtPositionsImpl(
+    const float* xs, const float* zs, std::size_t count, float* out, bool complete_shaping) const {
     if (count == 0) {
         return;
     }
@@ -2322,45 +2720,47 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
                                           0.0f,
                                           m_seed + 5);
 
-    std::vector<float> island_noise;
+    SamplingCache cache;
     for (std::size_t i = 0; i < count; ++i) {
-        const float base_level =
-            EvaluateShapingSpline(m_params.continental_spline, continentalness[i], 0.0f);
-        const float amplitude_multiplier =
-            EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
-        const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
-                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float h = m_params.height_offset + base_level +
-                  amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
-        if (m_params.island_mask_enabled) {
-            const float in =
-                m_island_mask_generator->GenSingle2D(xs[i] * m_params.island_mask_frequency,
-                                                     zs[i] * m_params.island_mask_frequency,
-                                                     m_seed + 2);
-            const float mask = glm::smoothstep(0.1f, 0.25f, in);
-            h = glm::mix(m_params.height_offset, h, mask);
+        const float island_noise =
+            m_params.island_mask_enabled
+                ? m_island_mask_generator->GenSingle2D(xs[i] * m_params.island_mask_frequency,
+                                                       zs[i] * m_params.island_mask_frequency,
+                                                       m_seed + 2)
+                : 0.0f;
+        const float height = CombineShapedHeightSample(xs[i],
+                                                       zs[i],
+                                                       {.continentalness = continentalness[i],
+                                                        .erosion = erosion[i],
+                                                        .peaks_valleys = peaks_noise[i],
+                                                        .base_noise = base_noise[i],
+                                                        .island_noise = island_noise},
+                                                       complete_shaping,
+                                                       &cache)
+                                 .final_height;
+        if constexpr (ApplyHydro) {
+            if (m_params.hydro_enabled) {
+                out[i] = height + SampleHydroOffsetMeters(xs[i], zs[i], &cache);
+            } else {
+                out[i] = height;
+            }
+        } else {
+            out[i] = height;
         }
-        if (m_params.rivers_enabled) {
-            const float influence = RiverInfluenceFromNoise(xs[i], zs[i]);
-            h -= RiverCarveAmount(h, influence);
-        }
-        // add the baked hydro offset so this matches GetTerrainHeightAt
-        // (apply_hydro=false on the erosion bake's own base samples -> no recursion).
-        if (apply_hydro && m_params.hydro_enabled) {
-            h += SampleHydroOffsetMeters(xs[i], zs[i]);
-        }
-        out[i] = h;
     }
 }
 
 void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
                                                  std::size_t count,
-                                                 u32* out_materials) const {
+                                                 u32* out_materials,
+                                                 MaterialSamplingWork* work) const {
+    if (work)
+        *work = {};
     if (count == 0) {
         return;
     }
 
+    SamplingCache cache;
     // --- Batched shaped height + climate for every vertex (x,z). ---
     // GenPositionArray2D samples at (xPos[i] + xOffset, yPos[i] + yOffset); we
     // fold the per-channel frequency into the coordinate arrays (zero offsets),
@@ -2468,33 +2868,50 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
     }
 
     // --- Per-vertex combine + classification (mirrors the scalar path). ---
+    // A fixed 4 KiB direct-mapped column cache reuses exact horizontal samples
+    // across vertices on vertical edges. Collisions only recompute; there is no
+    // probing, allocation or scan proportional to the number of vertices.
+    struct MaterialColumnSample {
+        float x = 0.0f;
+        float z = 0.0f;
+        float height = 0.0f;
+        bool valid = false;
+    };
+    std::array<MaterialColumnSample, 256> columns{};
+    const bool complete_shaping = m_params.surface_sampling_revision >= kSurfaceSamplingRevision;
     for (std::size_t i = 0; i < count; ++i) {
         const Vec3& p = positions[i];
 
-        // Shaped final height at (x,z) - identical math to
-        // ComputeShapedHeightSample (no island mask in the shipped shaped
-        // presets; include it for completeness when enabled).
-        const float base_level =
-            EvaluateShapingSpline(m_params.continental_spline, continentalness[i], 0.0f);
-        const float amplitude_multiplier =
-            EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
-        const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
-                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float final_height = m_params.height_offset + base_level +
-                             amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) +
-                             ridge;
-        if (m_params.island_mask_enabled) {
+        const u32 coordinate_hash =
+            std::bit_cast<u32>(p.x) * 0x9e3779b9u ^ std::rotl(std::bit_cast<u32>(p.z), 16);
+        const std::size_t column_index =
+            (coordinate_hash ^ (coordinate_hash >> 16)) % columns.size();
+        auto& column = columns[column_index];
+        float final_height = 0.0f;
+        if (column.valid && column.x == p.x && column.z == p.z) {
+            final_height = column.height;
+        } else {
             const float island_noise =
-                m_island_mask_generator->GenSingle2D(p.x * m_params.island_mask_frequency,
-                                                     p.z * m_params.island_mask_frequency,
-                                                     m_seed + 2);
-            const float mask = glm::smoothstep(0.1f, 0.25f, island_noise);
-            final_height = glm::mix(m_params.height_offset, final_height, mask);
-        }
-        if (m_params.rivers_enabled) {
-            const float influence = RiverInfluenceFromNoise(p.x, p.z);
-            final_height -= RiverCarveAmount(final_height, influence);
+                m_params.island_mask_enabled
+                    ? m_island_mask_generator->GenSingle2D(p.x * m_params.island_mask_frequency,
+                                                           p.z * m_params.island_mask_frequency,
+                                                           m_seed + 2)
+                    : 0.0f;
+            final_height = CombineShapedHeightSample(p.x,
+                                                     p.z,
+                                                     {.continentalness = continentalness[i],
+                                                      .erosion = erosion[i],
+                                                      .peaks_valleys = peaks_noise[i],
+                                                      .base_noise = base_noise[i],
+                                                      .island_noise = island_noise},
+                                                     complete_shaping,
+                                                     &cache)
+                               .final_height;
+            if (complete_shaping && m_params.hydro_enabled) {
+                final_height += SampleHydroOffsetMeters(p.x, p.z, &cache);
+            }
+            column = {p.x, p.z, final_height, true};
+            ++cache.work.shaped_columns;
         }
 
         // Biome id (batched climate + the reused +3/+4/+5 shaping noises).
@@ -2515,7 +2932,7 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
         float final_density = terrain_density;
         if (m_params.caves_enabled) {
             const Vec3 wp(p.x, world_y, p.z);
-            const SurfaceBreakSample sb = sample_surface_breaks(wp, final_height);
+            const SurfaceBreakSample sb = sample_surface_breaks(wp, final_height, &cache);
             // single composition point (cheese + noise-router spaghetti tunnels).
             final_density = EvaluateCaveDensity(wp, terrain_density, sb.effective_cap, sb.carve);
         }
@@ -2532,6 +2949,8 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
         out_materials[i] = static_cast<u32>(
             SurfaceMaterialForColumn(p.y - 0.1f, final_height, biome_id, river_bank));
     }
+    if (work)
+        *work = cache.work;
 }
 
 SHIELD_WorldSystem::ColumnSurfaceSpan
@@ -2545,13 +2964,26 @@ SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const 
 
     // batch the 5 footprint height samples (center + 4
     // corners) through the SIMD position-array path instead of 5 scalar
-    // GenSingle2D sweeps. Byte-identical heights (same shaped helper), but the
+    // GenSingle2D sweeps. Revision 2 uses the complete shared shaping; revision 1
+    // preserves activation spans and scheduling for existing saved worlds. The
     // per-column span cost - the dominant cold-frame streaming cost on shaped
     // presets - drops ~5x.
     const std::array<float, 5> sample_xs{center_x, base_x, max_x, base_x, max_x};
     const std::array<float, 5> sample_zs{center_z, base_z, base_z, max_z, max_z};
     std::array<float, 5> heights{};
-    ComputeShapedHeightsAtPositions(sample_xs.data(), sample_zs.data(), 5, heights.data());
+    ComputeShapedHeightsAtPositionsImpl<true>(sample_xs.data(),
+                                              sample_zs.data(),
+                                              sample_xs.size(),
+                                              heights.data(),
+                                              m_params.surface_sampling_revision >=
+                                                  kSurfaceSamplingRevision);
+    return column_surface_span_from_heights(chunk_x, chunk_z, heights);
+}
+
+SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span_from_heights(
+    int chunk_x, int chunk_z, const std::array<float, 5>& heights) const {
+    const float center_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
+    const float center_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
     const float center_height = heights[0];
     float min_height = center_height;
     float max_height = center_height;
@@ -2570,17 +3002,41 @@ SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const 
     return span;
 }
 
+void SHIELD_WorldSystem::publish_generated_column_span(const Luminumbra::Chunk& chunk) {
+    const auto coords = chunk.get_coords();
+    m_activation_index.content_changed(coords);
+    // Legacy activation sampling omits these grid/scalar shaping features.
+    // Only that policy needs resampling; complete sampling can reuse generated
+    // heights. Saved/edited maps never replace the procedural activation span.
+    if (m_params.surface_sampling_revision < kSurfaceSamplingRevision &&
+        (m_params.biome_relief_enabled || m_params.cliffs_enabled || m_params.lakes_enabled ||
+         m_params.surface_breaks_enabled))
+        return;
+    constexpr std::size_t kWidth = CHUNK_SIZE_X + 1;
+    constexpr std::size_t kHeight = CHUNK_SIZE_Z + 1;
+    static_assert(CHUNK_SIZE_X % 2 == 0 && CHUNK_SIZE_Z % 2 == 0);
+    constexpr std::size_t kSamples = kWidth * kHeight;
+    if (chunk.heightmap_data.size() != kSamples)
+        return;
+    // For this revision, generated maps use the same shaped samples as the
+    // five-point sampler. The lattice is exactly 289 heights; check before indexing it.
+    // Reuse its center/corners at publication instead of running
+    // noise again on the next activation. Loaded/edited maps never take this path.
+    (void)m_activation_index.surface_span(coords.x, coords.z, [&](int x, int z) {
+        const auto& heights = chunk.heightmap_data;
+        const std::array<float, 5> samples{heights[(CHUNK_SIZE_Z / 2) * kWidth + CHUNK_SIZE_X / 2],
+                                           heights[0],
+                                           heights[kWidth - 1],
+                                           heights[(kHeight - 1) * kWidth],
+                                           heights[kSamples - 1]};
+        return column_surface_span_from_heights(x, z, samples);
+    });
+}
+
 SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span(int chunk_x,
                                                                               int chunk_z) {
-    const u64 key = horizontal_chunk_key(chunk_x, chunk_z);
-    const auto it = m_column_surface_span_cache.find(key);
-    if (it != m_column_surface_span_cache.end()) {
-        return it->second;
-    }
-
-    const ColumnSurfaceSpan span = compute_column_surface_span(chunk_x, chunk_z);
-    m_column_surface_span_cache.emplace(key, span);
-    return span;
+    return m_activation_index.surface_span(
+        chunk_x, chunk_z, [this](int x, int z) { return compute_column_surface_span(x, z); });
 }
 
 int SHIELD_WorldSystem::get_lod_level_for_distance(float dist) const {
@@ -2737,15 +3193,19 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const Vec3& camera_position,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
     // Single-anchor convenience overload — forwards to the multi-anchor path with one
     // anchor (byte-identical streaming/world_hash to the historical single-anchor code).
-    update(registry, std::vector<Vec3>{camera_position}, physics_system);
+    update(registry, std::vector<Vec3>{camera_position}, physics_system, advance_simulation);
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const std::vector<Vec3>& anchor_positions,
-                                PhysicsSystem* physics_system) {
+                                PhysicsSystem* physics_system,
+                                bool advance_simulation) {
+    const MeshingSnapshotPass snapshot_pass(m_last_meshing_snapshot_bytes,
+                                            m_meshing_snapshot_pass_active);
     if (m_durable_read_failed)
         return;
     // runtime telemetry ( implementation note): split the 300ms+ streaming spike by sub-phase.
@@ -2773,7 +3233,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         PrefetchHydroRegions(anchor.x, anchor.z, 768.0f);
     }
 
+    // Diagnostic backlog survives between activation passes, even after dispatched
+    // batches drain. Only the next activation pass recomputes these deferrals.
+    const auto deferred_generation = m_last_streaming_budget_stats.deferred_generation;
     m_last_streaming_budget_stats = {};
+    m_last_streaming_budget_stats.deferred_generation = deferred_generation;
     m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
     m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
@@ -2835,7 +3299,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
-    if (m_water_system) {
+    if (advance_simulation && m_water_system) {
         m_water_system->update(registry, m_streaming_state.chunks);
     }
     _dbg_split(m_dbg_stream.water); // runtime telemetry
@@ -2871,38 +3335,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                  activation_ran_this_tick || !m_last_pass_drained;
     m_last_anchor_positions = anchor_positions;
     m_last_chunk_count = m_streaming_state.chunks.size();
-    // Hoisted out of the gated block: the queue-depth telemetry below (after the gate) reads it.
-    // Recomputed FRESH inside every non-elided pass (never a stale cross-frame dispatch input).
-    std::size_t terrain_meshing_backlog = 0;
     if (streaming_dirty) {
-        // Snapshot meshed-chunk LODs per horizontal column so the candidate loop
-        // below can cheaply detect coarse chunks whose transition skirts went
-        // stale because a finer neighbor arrived AFTER this chunk was meshed.
-        // Without this, a seam crack opened by a late-arriving finer neighbor
-        // persists until the coarse chunk happens to remesh for another reason.
-        struct MeshedColumnEntry {
-            int y = 0;
-            int lod = 0;
-        };
-        std::unordered_map<u64, std::vector<MeshedColumnEntry>> meshed_columns;
-        meshed_columns.reserve(m_streaming_state.chunks.size());
-        for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-            (void)id;
-            if (!chunk_ptr || chunk_ptr->mesh_vertices.empty() || chunk_ptr->mesh_indices.empty()) {
-                continue;
-            }
-            const int lod = chunk_ptr->current_lod.load(std::memory_order_acquire);
-            if (lod < 0) {
-                continue;
-            }
-            const IVec3 coords = chunk_ptr->get_coords();
-            meshed_columns[horizontal_chunk_key(coords.x, coords.z)].push_back({coords.y, lod});
-        }
+        // Residency is indexed at insert/erase. Neighbor mesh state is read at
+        // this owner-thread observation point, matching the former snapshot.
+        const auto& meshed_columns = m_activation_index.columns();
 
-        // Returns the transition faces this chunk needs against current neighbor
-        // LODs that are NOT yet baked into its mesh. Mirrors the neighbor criteria
-        // used by dispatch_meshing_jobs so a triggered remesh always converges.
-        auto missing_transition_faces = [&](const Luminumbra::Chunk& chunk, int lod_level) -> u8 {
+        // Capture the complete transition mask against this scheduler pass's
+        // neighbor LODs. Carrying it in each descriptor avoids world rescans in
+        // blocking subpasses; later scheduler passes detect newly arrived seams.
+        auto required_transition_faces = [&](const Luminumbra::Chunk& chunk, int lod_level) -> u8 {
+            if (get_lod_step_for_level(lod_level) <= 1) {
+                return Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+            }
             const IVec3 coords = chunk.get_coords();
             u8 required = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
             auto require_face_if_neighbor_is_finer =
@@ -2912,9 +3356,16 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                     if (column_it == meshed_columns.end()) {
                         return;
                     }
-                    for (const MeshedColumnEntry& entry : column_it->second) {
-                        if (entry.lod < lod_level ||
-                            (entry.lod != lod_level && entry.y != coords.y)) {
+                    for (const auto& [neighbor_id, neighbor] : column_it->second.residents) {
+                        (void)neighbor_id;
+                        if (neighbor->mesh_vertices.empty() || neighbor->mesh_indices.empty())
+                            continue;
+                        const int neighbor_lod =
+                            neighbor->current_lod.load(std::memory_order_acquire);
+                        if (neighbor_lod < 0)
+                            continue;
+                        if (neighbor_lod < lod_level ||
+                            (neighbor_lod != lod_level && neighbor->get_coords().y != coords.y)) {
                             required |= static_cast<
                                 Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
                             return;
@@ -2929,9 +3380,19 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
             require_face_if_neighbor_is_finer(
                 0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
-            return static_cast<u8>(required & static_cast<u8>(~chunk.applied_transition_faces.load(
-                                                  std::memory_order_acquire)));
+            return required;
         };
+
+        // At most one capped scheduler prefix: map only retained descriptors,
+        // then mark membership during the existing candidate scan. Old requests
+        // can remain valid even after anchor motion removes them from candidates.
+        std::unordered_map<ChunkID, std::size_t> deferred_indices;
+        deferred_indices.reserve(m_deferred_meshing.size() - m_deferred_meshing_cursor);
+        for (std::size_t index = m_deferred_meshing_cursor; index < m_deferred_meshing.size();
+             ++index) {
+            m_deferred_meshing[index].current_candidate = false;
+            deferred_indices.emplace(m_deferred_meshing[index].chunk->get_id(), index);
+        }
 
         // Chunk state logging removed from hot path - too expensive
 
@@ -2987,7 +3448,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                     terrain_mesh_required = false;
                 } else if (get_lod_step_for_level(required_lod) > 1 &&
                            !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty() &&
-                           missing_transition_faces(*chunk_ptr, required_lod) !=
+                           (required_transition_faces(*chunk_ptr, required_lod) &
+                            static_cast<u8>(~chunk_ptr->applied_transition_faces.load(
+                                std::memory_order_acquire))) !=
                                Luminumbra::World::MarchingCubes::kNoTransitionFaces) {
                     // A finer neighbor arrived after this coarse chunk was meshed:
                     // remesh so the now-required boundary transition skirts are
@@ -3042,10 +3505,38 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                               vertical_surface_distance,
                                               distance_sq});
             }
+
+            const auto retained = deferred_indices.find(chunk_ptr->get_id());
+            if (retained != deferred_indices.end() &&
+                m_deferred_meshing[retained->second].chunk == chunk_ptr) {
+                auto& item = m_deferred_meshing[retained->second];
+                // Refresh in the existing scan, without changing prefix ownership
+                // or its due tick. Even a satisfied request still owns a remesh,
+                // but must use today's LOD and neighbors rather than undo it.
+                if (required_lod < 0) {
+                    const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
+                                              Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                    required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
+                                                              chunk_center,
+                                                              closest_anchor,
+                                                              chunk_ptr->current_lod.load());
+                }
+                item.lod_level = required_lod;
+                if (needs_meshing) {
+                    item.terrain_mesh_required = terrain_mesh_required;
+                }
+                const bool has_active_mesh = state == Luminumbra::ChunkState::Ready &&
+                                             !chunk_ptr->mesh_vertices.empty() &&
+                                             !chunk_ptr->mesh_indices.empty();
+                item.high_priority = !has_active_mesh &&
+                                     retained->second < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
+                item.transition_faces = required_transition_faces(*chunk_ptr, required_lod);
+                item.current_candidate = needs_meshing;
+            }
         }
 
         m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
-        terrain_meshing_backlog = 0;
+        std::size_t terrain_meshing_backlog = 0;
         for (const MeshingCandidate& candidate : meshing_candidates) {
             if (candidate.terrain_mesh_required) {
                 ++terrain_meshing_backlog;
@@ -3084,7 +3575,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
         m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : meshing_budget;
 
-        if (!meshing_candidates.empty() && !meshing_job_active) {
+        if (!meshing_candidates.empty() && !meshing_job_active && !deferred_meshing_pending()) {
             std::sort(meshing_candidates.begin(),
                       meshing_candidates.end(),
                       [](const MeshingCandidate& a, const MeshingCandidate& b) {
@@ -3112,10 +3603,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 // exactly the near-field holes.
                 const bool high_priority = !meshing_candidates[i].has_active_mesh &&
                                            i < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
-                chunks_to_mesh_jobs.push_back({meshing_candidates[i].chunk,
-                                               meshing_candidates[i].required_lod,
-                                               meshing_candidates[i].terrain_mesh_required,
-                                               high_priority});
+                chunks_to_mesh_jobs.push_back(
+                    {meshing_candidates[i].chunk,
+                     meshing_candidates[i].required_lod,
+                     meshing_candidates[i].terrain_mesh_required,
+                     high_priority,
+                     required_transition_faces(*meshing_candidates[i].chunk,
+                                               meshing_candidates[i].required_lod)});
             }
 
             m_last_streaming_budget_stats.scheduled_meshing = chunks_to_mesh_jobs.size();
@@ -3123,8 +3617,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 meshing_candidates.size() - chunks_to_mesh_jobs.size();
         }
 
-        if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
-            dispatch_meshing_jobs(chunks_to_mesh_jobs);
+        if (!chunks_to_mesh_jobs.empty()) {
+            m_deferred_meshing = std::move(chunks_to_mesh_jobs);
+            m_deferred_meshing_cursor = 0;
+            m_deferred_meshing_due_tick =
+                m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+        }
+        if (deferred_meshing_pending() && !meshing_job_active) {
+            const auto result = dispatch_deferred_meshing();
+            m_last_streaming_budget_stats.scheduled_meshing = result.admitted;
+            m_last_streaming_budget_stats.submitted_meshing = result.submitted_candidates;
+            m_last_streaming_budget_stats.deferred_meshing =
+                meshing_candidates.size() - result.submitted_candidates;
         }
 
         // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS
@@ -3140,7 +3644,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         // signals (main-thread events), not wall-clock job counters — the last
         // scheduler read to be de-timed ahead of the barrier removal.
         const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
-                               !promotion_pipeline_pending() && !generation_batch_outstanding();
+                               !promotion_pipeline_pending() && !generation_batch_outstanding() &&
+                               !deferred_meshing_pending();
         m_last_pass_drained = quiescent;
         if (quiescent) {
             m_last_serviced_generation = m_dirty_generation;
@@ -3185,11 +3690,15 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
+    m_streaming_telemetry_stats.pending_lod_chunks = 0;
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         (void)id;
         if (!chunk_ptr) {
             continue;
         }
+
+        if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0)
+            ++m_streaming_telemetry_stats.pending_lod_chunks;
 
         const ChunkState state = chunk_ptr->get_state();
         if (state == ChunkState::Ready) {
@@ -3206,8 +3715,25 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
     }
 
-    const std::size_t queue_depth =
-        m_last_streaming_budget_stats.loading_chunks + terrain_meshing_backlog;
+    m_streaming_telemetry_stats.generation_batches = m_streaming_state.generation_batches.size();
+    m_streaming_telemetry_stats.meshing_batches = m_streaming_state.meshing_batches.size();
+    m_streaming_telemetry_stats.promotion_pending = promotion_pipeline_pending();
+    // Pending items leave the candidate set at dispatch, even when their
+    // active mesh keeps them Ready. Count them through publication, plus
+    // candidates not submitted this frame (including a backpressured lane).
+    // Retained requests outside this scan still own future work. The suffix is
+    // bounded by the existing scheduler prefix, never by the resident world.
+    const auto retained_non_candidates = static_cast<std::size_t>(std::count_if(
+        m_deferred_meshing.begin() + static_cast<std::ptrdiff_t>(m_deferred_meshing_cursor),
+        m_deferred_meshing.end(),
+        [](const MeshingWorkItem& item) { return !item.current_candidate; }));
+    m_last_streaming_budget_stats.deferred_meshing =
+        m_last_streaming_budget_stats.meshing_candidates -
+        m_last_streaming_budget_stats.submitted_meshing + retained_non_candidates;
+    const std::size_t queue_depth = pending_publication_chunks() + retained_non_candidates +
+                                    m_deferred_generation_candidates +
+                                    (m_last_streaming_budget_stats.meshing_candidates -
+                                     m_last_streaming_budget_stats.submitted_meshing);
     ++m_streaming_telemetry_stats.frames_observed;
     m_streaming_telemetry_stats.last_queue_depth = queue_depth;
     m_streaming_telemetry_stats.peak_queue_depth =
@@ -3245,6 +3771,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     }
     m_streaming_telemetry_stats.max_deferred_age_frames = std::max(
         m_streaming_telemetry_stats.max_deferred_age_frames, m_deferred_backlog_age_frames);
+    // Cache publication-pending work after dispatch. Lane capacity and raw worker
+    // completion do not establish that the streaming pipeline has settled.
+    m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
+    m_last_streaming_budget_stats.meshing_job_active =
+        meshing_batch_outstanding() || promotion_pipeline_pending();
 }
 
 bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors,
@@ -3275,15 +3806,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_last_activation_pending == 0 && camera_chunks == m_last_activation_camera_chunks) {
         return false;
     }
-    struct GenerationCandidate {
-        IVec3 coords;
-        bool surface = false;
-        int ring_distance = 0;
-        int horizontal_distance_sq = 0;
-        int vertical_rank = 0;
-        int target_step = 1;
-        bool interior_focus = false;
-    };
+    using GenerationCandidate = World::ActivationResidencyIndex::Candidate;
 
     int target_radius = streaming_radius_for_pressure(
         m_streaming_state.chunks.size(),
@@ -3320,246 +3843,231 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             ? 0
             : generation_budget;
 
-    std::vector<GenerationCandidate> to_create;
-    to_create.reserve(static_cast<std::size_t>((target_radius * 2 + 1) * (target_radius * 2 + 1)));
-    //  map ChunkID -> its index in to_create (was a plain seen-set). A chunk
-    // reached from multiple anchors is deduped AND its priority metrics are upgraded
-    // to the CLOSEST anchor's (see add_candidate) so per-anchor near-fields are fair.
-    std::unordered_map<ChunkID, std::size_t> candidate_index;
-    candidate_index.reserve(to_create.capacity() * 2u);
+    // Priority depends on anchor chunks, while generation LOD depends on exact
+    // positions. Resolve LOD only for the dispatched prefix below, allowing
+    // sub-chunk motion and residency deltas to reuse the ordered missing set.
+    if (!m_activation_plan_valid || camera_chunks != m_activation_plan_camera_chunks ||
+        target_radius != m_activation_plan_radius) {
+        std::vector<GenerationCandidate> to_create;
+        // Radius is bounded by RENDER_DISTANCE. Check the footprint arithmetic
+        // before reserving; vertical spans and other anchors grow the vector normally.
+        const auto diameter = static_cast<std::size_t>(target_radius) * 2u + 1u;
+        if (diameter > std::numeric_limits<std::size_t>::max() / diameter)
+            throw std::length_error("Activation footprint exceeds addressable storage");
+        const auto footprint = diameter * diameter;
+        to_create.reserve(footprint);
+        //  map ChunkID -> its index in to_create (was a plain seen-set). A chunk
+        // reached from multiple anchors is deduped AND its priority metrics are upgraded
+        // to the CLOSEST anchor's (see add_candidate) so per-anchor near-fields are fair.
+        std::unordered_map<ChunkID, std::size_t> candidate_index;
+        candidate_index.reserve(footprint);
 
-    auto add_candidate = [&](const IVec3& coords,
-                             bool surface,
-                             int ring_distance,
-                             int horizontal_dist2,
-                             int vertical_rank,
-                             const Vec3& anchor_pos,
-                             bool interior_focus = false) {
-        // NOTE: the active-chunk budget is no longer applied here.
-        // Enforcing it during enumeration capped candidates in row-major scan
-        // order, so when the wanted set exceeded the budget (mountains preset
-        // with surface spans) the dropped chunks were a directional bite out
-        // of one side of the disc. The budget is applied after the sort below,
-        // so the trimmed candidates are always the lowest-priority (farthest
-        // ring, deepest vertical rank) ones - a thin rim at the horizon edge.
-        const ChunkID id = Chunk::calculate_id(coords);
-        if (m_streaming_state.chunks.find(id) != m_streaming_state.chunks.end()) {
-            return;
-        }
+        auto add_candidate = [&](const IVec3& coords,
+                                 bool surface,
+                                 int ring_distance,
+                                 int horizontal_dist2,
+                                 int vertical_rank,
+                                 bool interior_focus = false) {
+            // NOTE: the active-chunk budget is no longer applied here.
+            // Enforcing it during enumeration capped candidates in row-major scan
+            // order, so when the wanted set exceeded the budget (mountains preset
+            // with surface spans) the dropped chunks were a directional bite out
+            // of one side of the disc. The budget is applied after the sort below,
+            // so the trimmed candidates are always the lowest-priority (farthest
+            // ring, deepest vertical rank) ones - a thin rim at the horizon edge.
+            const ChunkID id = Chunk::calculate_id(coords);
 
-        // Generation intent: chunks whose required meshing step is
-        // coarse (> 1) generate surface-band data only - no interior SDF, no
-        // 3D cave grid. Promotion to LOD0 backfills the full SDF via the
-        // meshing dispatch, so a conservative step here is only a perf cost.
-        const Vec3 chunk_center =
-            (Vec3(coords) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-        const int required_lod = get_required_lod_for_chunk(coords, chunk_center, anchor_pos);
-        const int target_step = get_lod_step_for_level(required_lod);
+            // Preserve first-enumerated surface classification and the minimum
+            // priority metrics across anchors. Generation LOD is resolved only
+            // for the dispatched prefix, using all contributing anchors.
+            auto it = candidate_index.find(id);
+            if (it != candidate_index.end()) {
+                GenerationCandidate& existing = to_create[it->second];
+                existing.ring_distance = std::min(existing.ring_distance, ring_distance);
+                existing.horizontal_distance_sq =
+                    std::min(existing.horizontal_distance_sq, horizontal_dist2);
+                existing.vertical_rank = std::min(existing.vertical_rank, vertical_rank);
+                existing.interior_focus = existing.interior_focus || interior_focus;
+                return;
+            }
+            candidate_index.emplace(id, to_create.size());
+            to_create.push_back(
+                {coords, surface, ring_distance, horizontal_dist2, vertical_rank, interior_focus});
+        };
 
-        //  when a chunk is wanted by more than
-        // one anchor, keep the CLOSEST anchor's priority metrics (smallest ring /
-        // horizontal distance, finest LOD step) instead of the v1 first-anchor-wins.
-        // ring_distance/horizontal_distance_sq/target_step are all monotone in the
-        // distance to the SAME enumerating anchor, so the per-field min picks the
-        // closest anchor consistently. This makes each anchor's near-field sort to the
-        // front of to_create, so the post-sort active-chunk budget truncates only the
-        // shared far rim -- no near anchor can starve a far one under union pressure.
-        // RESIDENCY-ONLY: streaming sets which chunks are resident, never their content,
-        // so world_hash is unaffected; a single anchor never hits the merge path -> the
-        // single-anchor stream/hash stays byte-identical.
-        auto it = candidate_index.find(id);
-        if (it != candidate_index.end()) {
-            GenerationCandidate& existing = to_create[it->second];
-            existing.ring_distance = std::min(existing.ring_distance, ring_distance);
-            existing.horizontal_distance_sq =
-                std::min(existing.horizontal_distance_sq, horizontal_dist2);
-            existing.vertical_rank = std::min(existing.vertical_rank, vertical_rank);
-            existing.target_step = std::min(existing.target_step, target_step);
-            existing.interior_focus = existing.interior_focus || interior_focus;
-            return;
-        }
-        candidate_index.emplace(id, to_create.size());
-        to_create.push_back({coords,
-                             surface,
-                             ring_distance,
-                             horizontal_dist2,
-                             vertical_rank,
-                             target_step,
-                             interior_focus});
-    };
+        // UNION the wanted-set across every anchor. candidate_index (in add_candidate)
+        // dedupes a chunk reached from multiple anchors and upgrades it to the CLOSEST
+        // anchor's priority metrics; a chunk wanted by ANY anchor is enumerated.
+        // One anchor -> the historical single-disc scan, unchanged.
+        for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
+            const IVec3 camera_chunk = camera_chunks[ai];
+            // Surface streaming alone never requests deeper cave chunks. Once the
+            // anchor leaves that band, keep a bounded full-SDF neighbourhood around
+            // its actual Y. Surface travel retains its existing wanted set and order.
+            const auto anchor_surface = column_surface_span(camera_chunk.x, camera_chunk.z);
+            if (camera_chunk.y < anchor_surface.min_y - 1) {
+                // Default caves can expose a wall over 100 m away at the client's
+                // wide FOV. A two-chunk cube left those sightlines open to the sky.
+                // Bound the interior to 128 m horizontally and 64 m vertically;
+                // smaller requested radii retain their existing residency budget.
+                const int interior_radius = std::min(target_radius, 8);
+                const int interior_height = std::min(interior_radius, 4);
+                for (int dz = -interior_radius; dz <= interior_radius; ++dz) {
+                    for (int dx = -interior_radius; dx <= interior_radius; ++dx) {
+                        for (int dy = -interior_height; dy <= interior_height; ++dy) {
+                            add_candidate(camera_chunk + IVec3(dx, dy, dz),
+                                          false,
+                                          horizontal_ring_distance(dx, dz),
+                                          horizontal_distance_sq(dx, dz),
+                                          std::abs(dy),
+                                          true);
+                        }
+                    }
+                }
+            }
+            for (int dz = -target_radius; dz <= target_radius; ++dz) {
+                for (int dx = -target_radius; dx <= target_radius; ++dx) {
+                    const int horizontal_dist2 = horizontal_distance_sq(dx, dz);
+                    if (horizontal_dist2 > target_radius * target_radius) {
+                        continue;
+                    }
 
-    // UNION the wanted-set across every anchor. candidate_index (in add_candidate)
-    // dedupes a chunk reached from multiple anchors and upgrades it to the CLOSEST
-    // anchor's priority metrics; a chunk wanted by ANY anchor is enumerated.
-    // One anchor -> the historical single-disc scan, unchanged.
-    for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
-        const IVec3 camera_chunk = camera_chunks[ai];
-        const Vec3& anchor_pos = anchors[ai];
-        // Surface streaming alone never requests deeper cave chunks. Once the
-        // anchor leaves that band, keep a bounded full-SDF neighbourhood around
-        // its actual Y. Surface travel retains its existing wanted set and order.
-        const auto anchor_surface = column_surface_span(camera_chunk.x, camera_chunk.z);
-        if (camera_chunk.y < anchor_surface.min_y - 1) {
-            // Default caves can expose a wall over 100 m away at the client's
-            // wide FOV. A two-chunk cube left those sightlines open to the sky.
-            // Bound the interior to 128 m horizontally and 64 m vertically;
-            // smaller requested radii retain their existing residency budget.
-            const int interior_radius = std::min(target_radius, 8);
-            const int interior_height = std::min(interior_radius, 4);
-            for (int dz = -interior_radius; dz <= interior_radius; ++dz) {
-                for (int dx = -interior_radius; dx <= interior_radius; ++dx) {
-                    for (int dy = -interior_height; dy <= interior_height; ++dy) {
-                        add_candidate(camera_chunk + IVec3(dx, dy, dz),
+                    const int chunk_x = camera_chunk.x + dx;
+                    const int chunk_z = camera_chunk.z + dz;
+                    m_activation_index.note_column_scan();
+                    const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
+                    const int ring_distance = horizontal_ring_distance(dx, dz);
+
+                    ++m_last_streaming_budget_stats.target_surface_columns;
+                    // Activate EVERY chunk-Y the column's isosurface passes through,
+                    // at every ring. Beyond ring 12 the old code streamed exactly one
+                    // chunk per column; any coarse cell whose surface lay in another
+                    // chunk-Y had no owner (the coarse mesher's per-cell ownership
+                    // test drops it) - a permanent horizon hole. Cliff walls between
+                    // columns (>16 m steps) live in the span interior and were never
+                    // streamed at any ring. Flat terrain has span size 1, so this
+                    // costs nothing where the old behavior was already correct.
+                    // When the full wanted set exceeds the active-chunk budget (the
+                    // mountains preset at large radii), the post-sort budget
+                    // truncation below trims the farthest-ring candidates - never
+                    // the near field.
+                    for (int y = span.min_y; y <= span.max_y; ++y) {
+                        add_candidate(IVec3(chunk_x, y, chunk_z),
+                                      true,
+                                      ring_distance,
+                                      horizontal_dist2,
+                                      std::abs(y - span.center_y));
+                    }
+
+                    if (ring_distance <= STREAMING_NEAR_VERTICAL_STACK_RADIUS) {
+                        add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z),
                                       false,
-                                      horizontal_ring_distance(dx, dz),
-                                      horizontal_distance_sq(dx, dz),
-                                      std::abs(dy),
-                                      anchor_pos,
-                                      true);
+                                      ring_distance,
+                                      horizontal_dist2,
+                                      1);
+                        add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z),
+                                      false,
+                                      ring_distance,
+                                      horizontal_dist2,
+                                      1);
+                    } else if (ring_distance <= STREAMING_MID_VERTICAL_STACK_RADIUS) {
+                        add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z),
+                                      false,
+                                      ring_distance,
+                                      horizontal_dist2,
+                                      2);
+                        add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z),
+                                      false,
+                                      ring_distance,
+                                      horizontal_dist2,
+                                      2);
                     }
                 }
             }
         }
-        for (int dz = -target_radius; dz <= target_radius; ++dz) {
-            for (int dx = -target_radius; dx <= target_radius; ++dx) {
-                const int horizontal_dist2 = horizontal_distance_sq(dx, dz);
-                if (horizontal_dist2 > target_radius * target_radius) {
-                    continue;
-                }
 
-                const int chunk_x = camera_chunk.x + dx;
-                const int chunk_z = camera_chunk.z + dz;
-                // 5-point span sample; the cache persists for the
-                // lifetime of seed/params.
-                const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
-                const int ring_distance = horizontal_ring_distance(dx, dz);
-
-                ++m_last_streaming_budget_stats.target_surface_columns;
-                // Activate EVERY chunk-Y the column's isosurface passes through,
-                // at every ring. Beyond ring 12 the old code streamed exactly one
-                // chunk per column; any coarse cell whose surface lay in another
-                // chunk-Y had no owner (the coarse mesher's per-cell ownership
-                // test drops it) - a permanent horizon hole. Cliff walls between
-                // columns (>16 m steps) live in the span interior and were never
-                // streamed at any ring. Flat terrain has span size 1, so this
-                // costs nothing where the old behavior was already correct.
-                // When the full wanted set exceeds the active-chunk budget (the
-                // mountains preset at large radii), the post-sort budget
-                // truncation below trims the farthest-ring candidates - never
-                // the near field.
-                for (int y = span.min_y; y <= span.max_y; ++y) {
-                    add_candidate(IVec3(chunk_x, y, chunk_z),
-                                  true,
-                                  ring_distance,
-                                  horizontal_dist2,
-                                  std::abs(y - span.center_y),
-                                  anchor_pos);
-                }
-
-                if (ring_distance <= STREAMING_NEAR_VERTICAL_STACK_RADIUS) {
-                    add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z),
-                                  false,
-                                  ring_distance,
-                                  horizontal_dist2,
-                                  1,
-                                  anchor_pos);
-                    add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z),
-                                  false,
-                                  ring_distance,
-                                  horizontal_dist2,
-                                  1,
-                                  anchor_pos);
-                } else if (ring_distance <= STREAMING_MID_VERTICAL_STACK_RADIUS) {
-                    add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z),
-                                  false,
-                                  ring_distance,
-                                  horizontal_dist2,
-                                  2,
-                                  anchor_pos);
-                    add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z),
-                                  false,
-                                  ring_distance,
-                                  horizontal_dist2,
-                                  2,
-                                  anchor_pos);
-                }
-            }
-        }
+        m_activation_index.replace_wanted(to_create);
+        m_activation_plan_camera_chunks = camera_chunks;
+        m_activation_plan_radius = target_radius;
+        m_activation_plan_surface_columns = m_last_streaming_budget_stats.target_surface_columns;
+        m_activation_plan_valid = true;
     }
-
-    std::sort(to_create.begin(),
-              to_create.end(),
-              [](const GenerationCandidate& a, const GenerationCandidate& b) {
-                  if (a.interior_focus != b.interior_focus)
-                      return a.interior_focus; // immediate cave walls precede distant surface fill
-                  if (a.surface != b.surface) {
-                      return a.surface;
-                  }
-                  if (a.ring_distance != b.ring_distance) {
-                      return a.ring_distance < b.ring_distance;
-                  }
-                  if (a.horizontal_distance_sq != b.horizontal_distance_sq) {
-                      return a.horizontal_distance_sq < b.horizontal_distance_sq;
-                  }
-                  if (a.vertical_rank != b.vertical_rank) {
-                      return a.vertical_rank < b.vertical_rank;
-                  }
-                  if (a.coords.y != b.coords.y) {
-                      return a.coords.y < b.coords.y;
-                  }
-                  if (a.coords.x != b.coords.x) {
-                      return a.coords.x < b.coords.x;
-                  }
-                  return a.coords.z < b.coords.z;
-              });
-
-    if (m_durable_residency) {
-        // A parked chunk that re-entered range keeps its authoritative data. Restore it before
-        // any generation/headroom gate so byte-limit-resident chunks cannot starve re-entry.
-        to_create.erase(std::remove_if(to_create.begin(),
-                                       to_create.end(),
-                                       [this](const GenerationCandidate& candidate) {
-                                           return restore_authoritative_chunk(candidate.coords);
-                                       }),
-                        to_create.end());
-        if (m_durable_read_failed)
-            return false;
-    }
-
+    const auto& to_create = m_activation_index.pending();
+    m_last_streaming_budget_stats.target_surface_columns = m_activation_plan_surface_columns;
     m_last_streaming_budget_stats.generation_candidates = to_create.size();
-    for (const GenerationCandidate& candidate : to_create) {
-        if (candidate.surface) {
-            ++m_last_streaming_budget_stats.surface_generation_candidates;
-        } else {
-            ++m_last_streaming_budget_stats.vertical_generation_candidates;
+    m_last_streaming_budget_stats.surface_generation_candidates =
+        m_activation_index.surface_pending();
+    m_last_streaming_budget_stats.vertical_generation_candidates =
+        to_create.size() - m_activation_index.surface_pending();
+
+    // Membership must match enumeration, including cave cubes and overlapping
+    // anchors. A nearby anchor outside that wanted set must not change the LOD.
+    auto generation_step = [&](const IVec3& coords) {
+        const auto span = column_surface_span(coords.x, coords.z);
+        int step = m_lod_levels.back().step;
+        const Vec3 center = (Vec3(coords) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+        for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
+            const IVec3 d = coords - camera_chunks[ai];
+            const int ring = horizontal_ring_distance(d.x, d.z);
+            const bool in_surface = coords.y >= span.min_y && coords.y <= span.max_y;
+            const bool in_stack = ring <= STREAMING_MID_VERTICAL_STACK_RADIUS &&
+                                  (coords.y == span.min_y - 1 || coords.y == span.max_y + 1);
+            // Check the bounded footprint before squaring: other anchors may
+            // be separated by the full supported world coordinate range.
+            bool wanted = ring <= target_radius &&
+                          horizontal_distance_sq(d.x, d.z) <= target_radius * target_radius &&
+                          (in_surface || in_stack);
+            if (!wanted) {
+                const auto anchor_span =
+                    column_surface_span(camera_chunks[ai].x, camera_chunks[ai].z);
+                const int radius = std::min(target_radius, 8);
+                wanted = camera_chunks[ai].y < anchor_span.min_y - 1 && ring <= radius &&
+                         std::abs(d.y) <= std::min(radius, 4);
+            }
+            if (wanted)
+                step = std::min(step,
+                                get_lod_step_for_level(
+                                    get_required_lod_for_chunk(coords, center, anchors[ai])));
         }
-    }
+        return step;
+    };
 
     std::vector<ChunkGenerationRequest> generate_now;
-    generate_now.reserve(static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
-    if (m_last_streaming_budget_stats.generation_budget > 0) {
-        // Active-chunk budget, applied to the sorted candidate prefix so the
-        // highest-priority (nearest, surface-first) chunks always win the
-        // remaining slots.
-        const std::size_t budget_headroom =
+    const auto generation_limit =
+        static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget);
+    generate_now.reserve(generation_limit);
+    if (generation_limit > 0) {
+        const auto headroom =
             m_streaming_state.chunks.size() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET
                 ? STREAMING_MAX_ACTIVE_CHUNKS_BUDGET - m_streaming_state.chunks.size()
                 : 0u;
-        const std::size_t budget =
-            std::min(std::min(to_create.size(), budget_headroom),
-                     static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
-        for (std::size_t i = 0; i < budget; ++i) {
-            generate_now.push_back({to_create[i].coords, to_create[i].target_step});
-            if (to_create[i].surface) {
-                ++m_last_streaming_budget_stats.surface_generation_scheduled;
-            } else {
-                ++m_last_streaming_budget_stats.vertical_generation_scheduled;
+        // At most one scheduler prefix per activation; copy coordinates before
+        // adoption mutates the indexed pending set. No whole-world restoration scan.
+        std::vector<GenerationCandidate> prefix;
+        prefix.reserve(std::min(to_create.size(), generation_limit));
+        auto candidate = to_create.begin();
+        for (std::size_t i = 0; i < generation_limit && candidate != to_create.end();
+             ++i, ++candidate)
+            prefix.push_back(*candidate);
+        for (const auto& item : prefix) {
+            if (m_durable_residency && restore_authoritative_chunk(item.coords)) {
+                if (m_durable_read_failed)
+                    return false;
+                continue;
             }
+            if (generate_now.size() >= headroom)
+                break;
+            generate_now.push_back({item.coords, generation_step(item.coords)});
+            if (item.surface)
+                ++m_last_streaming_budget_stats.surface_generation_scheduled;
+            else
+                ++m_last_streaming_budget_stats.vertical_generation_scheduled;
         }
     }
 
     m_last_streaming_budget_stats.scheduled_generation = generate_now.size();
     m_last_streaming_budget_stats.deferred_generation = to_create.size() - generate_now.size();
+    m_deferred_generation_candidates = m_last_streaming_budget_stats.deferred_generation;
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
         for (const ChunkGenerationRequest& request : generate_now) {
@@ -3568,7 +4076,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     }
 
     // 5. Unload chunks that are now out of range.
-    std::vector<ChunkID> to_unload;
+    std::unordered_set<ChunkID> to_unload;
 
     // Add a small buffer (hysteresis) to the render distance to prevent rapid
     // loading/unloading of chunks at the very edge of the view distance.
@@ -3576,50 +4084,62 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     const int UNLOAD_DISTANCE_UP = RENDER_DISTANCE_UP + 2;
     const int UNLOAD_DISTANCE_DOWN = RENDER_DISTANCE_DOWN + 2;
 
-    for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
-        const IVec3 coords = chunk_ptr->get_coords();
-        // Multi-anchor range test: keep the chunk if it is in full range of ANY anchor
-        // (XZ within the hysteresis disc AND vertically within that anchor's band). One
-        // anchor -> identical to the historical camera-relative test.
-        bool xz_in_range_any = false;
-        bool vert_in_band_any = false;
-        for (const IVec3& cc : camera_chunks) {
-            const IVec3 d = coords - cc;
-            if (std::abs(d.x) > UNLOAD_DISTANCE_XZ || std::abs(d.z) > UNLOAD_DISTANCE_XZ) {
-                continue; // outside this anchor's XZ disc
-            }
-            xz_in_range_any = true;
-            if (d.y <= UNLOAD_DISTANCE_UP && d.y >= -UNLOAD_DISTANCE_DOWN) {
-                vert_in_band_any = true;
-                break;
-            }
-        }
-        if (vert_in_band_any) {
-            continue; // in full range of some anchor
-        }
-        if (!xz_in_range_any) {
-            to_unload.push_back(id); // XZ-far from every anchor
+    const bool eviction_policy_changed =
+        camera_chunks != m_last_activation_camera_chunks || target_radius != m_last_eviction_radius;
+    const auto& eviction_columns = eviction_policy_changed ? m_activation_index.resident_columns()
+                                                           : m_activation_index.dirty_columns();
+    for (const u64 key : eviction_columns) {
+        const auto column = m_activation_index.columns().find(key);
+        if (column == m_activation_index.columns().end() || column->second.residents.empty())
             continue;
-        }
-        // XZ in range of some anchor but vertically outside all bands -> surface-band test.
+        m_activation_index.note_column_scan();
+        for (const auto& [id, chunk_ptr] : column->second.residents) {
+            const IVec3 coords = chunk_ptr->get_coords();
+            // Multi-anchor range test: keep the chunk if it is in full range of ANY anchor
+            // (XZ within the hysteresis disc AND vertically within that anchor's band). One
+            // anchor -> identical to the historical camera-relative test.
+            bool xz_in_range_any = false;
+            bool vert_in_band_any = false;
+            for (const IVec3& cc : camera_chunks) {
+                const IVec3 d = coords - cc;
+                if (std::abs(d.x) > UNLOAD_DISTANCE_XZ || std::abs(d.z) > UNLOAD_DISTANCE_XZ) {
+                    continue; // outside this anchor's XZ disc
+                }
+                xz_in_range_any = true;
+                if (d.y <= UNLOAD_DISTANCE_UP && d.y >= -UNLOAD_DISTANCE_DOWN) {
+                    vert_in_band_any = true;
+                    break;
+                }
+            }
+            if (vert_in_band_any) {
+                continue; // in full range of some anchor
+            }
+            if (!xz_in_range_any) {
+                to_unload.insert(id); // XZ-far from every anchor
+                continue;
+            }
+            // XZ in range of some anchor but vertically outside all bands -> surface-band test.
 
-        // Vertical-unload exemption: a chunk inside its column's
-        // surface span (+-1 stack margin) holds the terrain isosurface the
-        // player can see, regardless of how far above/below the CAMERA it
-        // sits. The old camera-relative test evicted mountain summits more
-        // than 160 m above a valley camera every activation pass, then the
-        // surface scan immediately re-added them - a load/unload churn loop
-        // that left permanent holes on tall peaks. Only chunks vertically
-        // outside their column's surface band may be evicted by the Y test;
-        // the XZ test above is unchanged.
-        const ColumnSurfaceSpan span = column_surface_span(coords.x, coords.z);
-        const bool inside_surface_band = coords.y >= span.min_y - 1 && coords.y <= span.max_y + 1;
-        if (!inside_surface_band) {
-            to_unload.push_back(id);
+            // Vertical-unload exemption: a chunk inside its column's
+            // surface span (+-1 stack margin) holds the terrain isosurface the
+            // player can see, regardless of how far above/below the CAMERA it
+            // sits. The old camera-relative test evicted mountain summits more
+            // than 160 m above a valley camera every activation pass, then the
+            // surface scan immediately re-added them - a load/unload churn loop
+            // that left permanent holes on tall peaks. Only chunks vertically
+            // outside their column's surface band may be evicted by the Y test;
+            // the XZ test above is unchanged.
+            const ColumnSurfaceSpan span = column_surface_span(coords.x, coords.z);
+            const bool inside_surface_band =
+                coords.y >= span.min_y - 1 && coords.y <= span.max_y + 1;
+            if (!inside_surface_band) {
+                to_unload.insert(id);
+            }
         }
     }
+    m_activation_index.clear_dirty_columns();
+    m_last_eviction_radius = target_radius;
 
-    m_last_streaming_budget_stats.unloaded_chunks = to_unload.size();
     m_parking_deferred = 0;
     m_parking_blocked_dirty = 0;
     // Chunks owned by a generation/meshing/promotion job; built lazily, once per pass, and only
@@ -3649,72 +4169,92 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 in_flight_ids.insert(job.chunk->get_id());
         }
     };
-    if (m_durable_residency) {
-        // Byte-limit admission is order dependent: make it independent of map insertion history.
-        std::sort(to_unload.begin(), to_unload.end());
-    }
-    for (ChunkID id : to_unload) {
-        if (m_durable_residency) {
-            const auto found = m_streaming_state.chunks.find(id);
-            if (found != m_streaming_state.chunks.end() && found->second &&
-                found->second->needs_authority()) {
-                const std::shared_ptr<::Luminumbra::Chunk> chunk = found->second;
-                if (!in_flight_built) {
-                    build_in_flight();
-                }
-                const Luminumbra::ChunkState st = chunk->get_state();
-                const bool quiescent =
-                    (st == Luminumbra::ChunkState::Idle || st == Luminumbra::ChunkState::Ready) &&
-                    chunk->pending_lod.load(std::memory_order_acquire) < 0 &&
-                    !chunk->pending_generation_ready.load(std::memory_order_acquire) &&
-                    !chunk->pending_mesh_ready.load(std::memory_order_acquire) &&
-                    !chunk->pending_mesh_failed.load(std::memory_order_acquire) &&
-                    !chunk->pending_promotion_ready.load(std::memory_order_acquire) &&
-                    !chunk->pending_promotion_failed.load(std::memory_order_acquire) &&
-                    in_flight_ids.find(id) == in_flight_ids.end();
-                if (!quiescent) {
-                    ++m_parking_deferred; // retried next pass; keeps activation elision open
-                    continue;
-                }
-                const bool dirty = chunk->is_voxel_data_dirty() || chunk->is_water_state_dirty();
-                if (!dirty && m_durable_chunks.contains(id) && m_durable_chunk_loader) {
-                    if (physics_system)
+    m_last_streaming_budget_stats.unloaded_chunks = to_unload.size();
+    if (!to_unload.empty()) {
+        m_activation_index.note_column_scan(m_activation_index.resident_columns().size());
+        // Preserve the full-scan removal order: physics stores may swap the
+        // final collider into an erased slot. Only actual eviction work pays
+        // this traversal; unchanged residency never walks the chunk map here.
+        for (auto it = m_streaming_state.chunks.begin(); it != m_streaming_state.chunks.end();) {
+            const auto id = it->first;
+            if (!to_unload.contains(id)) {
+                ++it;
+                continue;
+            }
+            if (m_durable_residency) {
+                const auto found = m_streaming_state.chunks.find(id);
+                if (found != m_streaming_state.chunks.end() && found->second &&
+                    found->second->needs_authority()) {
+                    const std::shared_ptr<::Luminumbra::Chunk> chunk = found->second;
+                    if (!in_flight_built) {
+                        build_in_flight();
+                    }
+                    const Luminumbra::ChunkState st = chunk->get_state();
+                    const bool quiescent =
+                        (st == Luminumbra::ChunkState::Idle ||
+                         st == Luminumbra::ChunkState::Ready) &&
+                        chunk->pending_lod.load(std::memory_order_acquire) < 0 &&
+                        !chunk->pending_generation_ready.load(std::memory_order_acquire) &&
+                        !chunk->pending_mesh_ready.load(std::memory_order_acquire) &&
+                        !chunk->pending_mesh_failed.load(std::memory_order_acquire) &&
+                        !chunk->pending_promotion_ready.load(std::memory_order_acquire) &&
+                        !chunk->pending_promotion_failed.load(std::memory_order_acquire) &&
+                        in_flight_ids.find(id) == in_flight_ids.end();
+                    if (!quiescent) {
+                        ++m_parking_deferred;
+                        m_activation_index.content_changed(chunk->get_coords());
+                        ++it;
+                        continue;
+                    }
+                    const bool dirty =
+                        chunk->is_voxel_data_dirty() || chunk->is_water_state_dirty();
+                    if (!dirty && m_durable_chunks.contains(id) && m_durable_chunk_loader) {
+                        if (physics_system)
+                            physics_system->remove_chunk_collision(id);
+                        m_activation_index.erase(*chunk);
+                        it = m_streaming_state.chunks.erase(it);
+                        shadow_note_evicted(id);
+                        continue;
+                    }
+                    if (dirty && m_evictions_suspended) {
+                        ++m_parking_deferred;
+                        m_activation_index.content_changed(chunk->get_coords());
+                        ++it;
+                        continue;
+                    }
+                    const std::size_t bytes = chunk->estimated_sim_bytes();
+                    if (m_parked_bytes_limit > 0 &&
+                        (m_parked_bytes > m_parked_bytes_limit ||
+                         bytes > m_parked_bytes_limit - m_parked_bytes)) {
+                        if (chunk->is_voxel_data_dirty() || chunk->is_water_state_dirty()) {
+                            ++m_parking_blocked_dirty;
+                            m_persistence_save_requested = true;
+                        }
+                        // Stays resident. Counted as deferred so activation elision cannot hide a
+                        // later dirty transition (renewed pressure request) from the next pass.
+                        ++m_parking_deferred;
+                        m_activation_index.content_changed(chunk->get_coords());
+                        ++it;
+                        continue;
+                    }
+                    if (physics_system) {
                         physics_system->remove_chunk_collision(id);
-                    m_streaming_state.chunks.erase(id);
+                    }
+                    chunk->normalize_for_park();
+                    m_parked[id] = ParkedChunk{chunk, bytes, m_persistence_tick};
+                    m_parked_bytes += bytes;
+                    m_activation_index.erase(*chunk);
+                    it = m_streaming_state.chunks.erase(it);
                     shadow_note_evicted(id);
                     continue;
                 }
-                if (dirty && m_evictions_suspended) {
-                    ++m_parking_deferred;
-                    continue;
-                }
-                const std::size_t bytes = chunk->estimated_sim_bytes();
-                if (m_parked_bytes_limit > 0 && m_parked_bytes + bytes > m_parked_bytes_limit) {
-                    if (chunk->is_voxel_data_dirty() || chunk->is_water_state_dirty()) {
-                        ++m_parking_blocked_dirty;
-                        m_persistence_save_requested = true;
-                    }
-                    // Stays resident. Counted as deferred so activation elision cannot hide a
-                    // later dirty transition (renewed pressure request) from the next pass.
-                    ++m_parking_deferred;
-                    continue;
-                }
-                if (physics_system) {
-                    physics_system->remove_chunk_collision(id);
-                }
-                chunk->normalize_for_park();
-                m_parked[id] = ParkedChunk{chunk, bytes, m_persistence_tick};
-                m_parked_bytes += bytes;
-                m_streaming_state.chunks.erase(id);
-                shadow_note_evicted(id);
-                continue;
             }
+            if (physics_system)
+                physics_system->remove_chunk_collision(id);
+            m_activation_index.erase(*it->second);
+            it = m_streaming_state.chunks.erase(it);
+            shadow_note_evicted(id);
         }
-        if (physics_system) {
-            physics_system->remove_chunk_collision(id);
-        }
-        m_streaming_state.chunks.erase(id);
-        shadow_note_evicted(id);
     }
 
     //  implementation note: record the elision signals for next tick. m_last_activation_pending ==
@@ -3741,9 +4281,58 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                                                 int surface_radius,
                                                 int collision_radius,
                                                 int render_lod0_radius) {
-    if (!physics_system || m_durable_read_failed) {
+    // Preserve the direct API's historical negative-to-zero normalization.
+    const int radius = std::max(0, surface_radius);
+    const int collision_range = std::max(0, collision_radius);
+    const auto column_count = World::SurfaceColumnCount(static_cast<std::uint64_t>(radius));
+    if (m_durable_read_failed)
+        return false;
+    if (!physics_system || !column_count ||
+        !World::SurfaceRadiiSupported(radius, collision_range)) {
         return false;
     }
+
+    const IVec3 center_chunk = world_to_chunk_coords(world_pos);
+    // Preflight the exact vertical work before allocating or changing chunks.
+    // At most 625 columns and 8192 chunks, including both vertical margins.
+    std::array<ColumnSurfaceSpan, World::kMaxSurfaceColumns> surface_spans{};
+    std::size_t surface_capacity = 0;
+    std::size_t surface_index = 0;
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const auto span = column_surface_span(center_chunk.x + dx, center_chunk.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, surface_capacity))
+                return false;
+            surface_spans[surface_index++] = span;
+        }
+    }
+    //  radius, decoupled from collision (preview fidelity implementation note).
+    // render_lod0_radius < 0 (the default, every game caller) preserves the
+    // historical behaviour exactly: the full-detail LOD0 ring boundary == the
+    // collision radius, so the game's LOD selection — and world_hash — is
+    // unchanged. A caller (the create-world preview) may opt into a LARGER
+    // full-SDF render slice than its collision radius so the visible near rings
+    // render caves/overhangs instead of coarse heightmap LODs, WITHOUT building
+    // any extra gameplay collision (collision still gates on collision_range
+    // below). Clamped to [0, radius] so it never exceeds the built surface disc.
+    const int lod0_range =
+        (render_lod0_radius < 0) ? collision_range : std::clamp(render_lod0_radius, 0, radius);
+    struct SurfaceHorizonChunk {
+        std::shared_ptr<Luminumbra::Chunk> chunk;
+        IVec2 offset{0};
+        int vertical_rank = 0;
+        int lod = 0;
+        int step = 1;
+        bool requires_generation = false;
+    };
+
+    std::vector<SurfaceHorizonChunk> chunks_to_build;
+    std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
+    std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
+    if (surface_capacity > chunks_to_build.max_size())
+        return false;
+    if (surface_capacity > chunks_to_consider_for_collision.max_size())
+        return false;
 
     // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
     // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
@@ -3769,42 +4358,14 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     // settle the two-stage promotion pipeline too (publish staged
     // sim truth, dispatch + drain the stage-B render meshes) so the surface
     // band below observes fully settled chunks, exactly as before the split.
-    Luminumbra::Core::WaitWithJobWatchdog(
-        job_watchdog, "EnsureSurfaceReadyNear/promotion-drain", [this]() {
-            wait_for_promotion_jobs();
-            wait_for_meshing_jobs();
-        });
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/promotion-drain",
+                                          [this]() { wait_for_streaming_jobs(); });
 
-    const IVec3 center_chunk = world_to_chunk_coords(world_pos);
-    const int radius = std::max(0, surface_radius);
-    const int collision_range = std::max(0, collision_radius);
-    //  radius, decoupled from collision (preview fidelity implementation note).
-    // render_lod0_radius < 0 (the default, every game caller) preserves the
-    // historical behaviour exactly: the full-detail LOD0 ring boundary == the
-    // collision radius, so the game's LOD selection — and world_hash — is
-    // unchanged. A caller (the create-world preview) may opt into a LARGER
-    // full-SDF render slice than its collision radius so the visible near rings
-    // render caves/overhangs instead of coarse heightmap LODs, WITHOUT building
-    // any extra gameplay collision (collision still gates on collision_range
-    // below). Clamped to [0, radius] so it never exceeds the built surface disc.
-    const int lod0_range =
-        (render_lod0_radius < 0) ? collision_range : std::clamp(render_lod0_radius, 0, radius);
-    struct SurfaceHorizonChunk {
-        std::shared_ptr<Luminumbra::Chunk> chunk;
-        IVec2 offset{0};
-        int vertical_rank = 0;
-        int lod = 0;
-        int step = 1;
-    };
-
-    std::vector<SurfaceHorizonChunk> chunks_to_build;
-    std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
-    std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
-    const std::size_t surface_capacity =
-        static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 5);
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
+    surface_index = 0;
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
             const int chunk_x = center_chunk.x + dx;
@@ -3813,7 +4374,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             // margin the fixed {-1, 0, 1} band provided on flat terrain;
             // steep columns additionally cover every chunk-Y the isosurface
             // passes through so cliff walls are meshed before world enter.
-            const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
+            const ColumnSurfaceSpan& span = surface_spans[surface_index++];
             const int ring_distance = std::max(std::abs(dx), std::abs(dz));
             const int lod = horizon_lod_for_ring(ring_distance, radius, lod0_range);
             const int step = get_lod_step_for_level(lod);
@@ -3833,11 +4394,12 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 if (it == m_streaming_state.chunks.end()) {
                     auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
                     it = m_streaming_state.chunks.emplace(id, std::move(chunk)).first;
+                    m_activation_index.insert(it->second);
                 }
 
                 auto& chunk = it->second;
                 SurfaceHorizonChunk surface_chunk{
-                    chunk, IVec2(dx, dz), std::abs(chunk_y - span.center_y), lod, step};
+                    chunk, IVec2(dx, dz), std::abs(chunk_y - span.center_y), lod, step, false};
                 chunks_to_consider_for_collision.push_back(surface_chunk);
                 if (chunk->get_state() != ChunkState::Ready || chunk->current_lod.load() != lod ||
                     chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
@@ -3850,8 +4412,14 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
 
     std::vector<Luminumbra::Job> build_jobs;
     build_jobs.reserve(chunks_to_build.size());
-    for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
-        build_jobs.emplace_back([this, build_chunk]() {
+    for (SurfaceHorizonChunk& build_chunk : chunks_to_build) {
+        const auto& source = *build_chunk.chunk;
+        build_chunk.requires_generation =
+            (!source.sdf_data.empty() && source.sdf_data.size() != kFullSdfLattice) ||
+            (build_chunk.step <= 1 ? source.sdf_data.empty()
+                                   : source.sdf_data.empty() && source.heightmap_data.empty());
+        const auto seed_inputs = request_water_seed_inputs(*build_chunk.chunk);
+        build_jobs.emplace_back([this, build_chunk, seed_inputs]() {
             const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
@@ -3863,38 +4431,55 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             // Detect it and clear the buffer so it REGENERATES a correct lattice below
             // (generation is a pure function of seed/params). Hash-neutral for valid worlds:
             // a well-formed full SDF is always exactly kFullSdfLattice, so this never fires.
-            const bool has_malformed_sdf =
-                !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
-            if (has_malformed_sdf) {
-                const IVec3 cc = chunk->get_coords();
-                LUMINUMBRA_CORE_WARN(
-                    "EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
-                    "SDF (size {} != {}); regenerating a full lattice before meshing",
-                    cc.x,
-                    cc.y,
-                    cc.z,
-                    chunk->sdf_data.size(),
-                    kFullSdfLattice);
-                chunk->sdf_data.clear();
+            {
+                const bool has_malformed_sdf =
+                    !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
+                const bool missing_required_data =
+                    needs_full_sdf ? chunk->sdf_data.empty()
+                                   : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
+                const bool changes_authority =
+                    has_malformed_sdf ||
+                    (missing_required_data &&
+                     chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited);
+                // Fresh Loading generation is private to owner-thread publication;
+                // keep those independent jobs parallel. Replacements own persistence.
+                std::optional<Persistence::WorldSaveService::SaveOwnership> ownership;
+                if (changes_authority) {
+                    ownership.emplace();
+                    // Generation can throw after changing buffers; invalidate first.
+                    bump_far_lod_authority_revision(chunk->get_coords());
+                }
+                if (has_malformed_sdf) {
+                    const IVec3 cc = chunk->get_coords();
+                    LUMINUMBRA_CORE_WARN(
+                        "EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
+                        "SDF (size {} != {}); regenerating a full lattice before meshing",
+                        cc.x,
+                        cc.y,
+                        cc.z,
+                        chunk->sdf_data.size(),
+                        kFullSdfLattice);
+                    chunk->sdf_data.clear();
+                }
+                if (has_malformed_sdf) {
+                    // A malformed non-empty lattice must not fall back to the
+                    // coarse heightfield: rebuild exact SDF authority first.
+                    GenerateChunkData(*chunk);
+                } else if (missing_required_data) {
+                    // Chunks restored from a world save arrive with voxel data
+                    // already populated (possibly carrying player edits);
+                    // regeneration would clobber those edits. Generation is a
+                    // pure function of seed/params, so skipping it for any chunk
+                    // that already has the data its step needs is also a no-op
+                    // for fresh chunks that merely need a LOD rebuild. Coarse
+                    // (step > 1) horizon chunks generate the surface band only
+                    // the heightfield mesher and seam fallback never
+                    // read interior SDF.
+                    GenerateChunkData(*chunk, build_chunk.step);
+                }
             }
-            const bool missing_required_data =
-                needs_full_sdf ? chunk->sdf_data.empty()
-                               : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
-            if (has_malformed_sdf) {
-                // A malformed non-empty lattice must not fall back to the
-                // coarse heightfield: rebuild exact SDF authority first.
-                GenerateChunkData(*chunk);
-            } else if (missing_required_data) {
-                // Chunks restored from a world save arrive with voxel data
-                // already populated (possibly carrying player edits);
-                // regeneration would clobber those edits. Generation is a
-                // pure function of seed/params, so skipping it for any chunk
-                // that already has the data its step needs is also a no-op
-                // for fresh chunks that merely need a LOD rebuild. Coarse
-                // (step > 1) horizon chunks generate the surface band only
-                // the heightfield mesher and seam fallback never
-                // read interior SDF.
-                GenerateChunkData(*chunk, build_chunk.step);
+            if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
+                ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
             }
             chunk->set_state(ChunkState::Meshing);
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(
@@ -3902,6 +4487,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             chunk->applied_transition_faces.store(0, std::memory_order_release);
             chunk->water_mesh_vertices.clear();
             chunk->water_mesh_indices.clear();
+            chunk->water_mesh_generated.store(false, std::memory_order_release);
             chunk->current_lod.store(build_chunk.lod);
             chunk->mesh_version++;
             chunk->has_collision.store(false);
@@ -3950,6 +4536,10 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         for (auto& job : build_jobs) {
             job();
         }
+    }
+    for (const auto& built : chunks_to_build) {
+        if (built.requires_generation)
+            publish_generated_column_span(*built.chunk);
     }
     LUMINUMBRA_CORE_INFO(
         "EnsureSurfaceReadyNear: surface ready (took {:.0f}ms)",
@@ -4107,18 +4697,21 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
         if (!c || !c->has_water_sim.load(std::memory_order_acquire))
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res)
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
                 const float dx = wx - center.x, dz = wz - center.z;
                 if (dx * dx + dz * dz <= r2)
-                    sum += c->water_depth_mm[z * res + x];
+                    sum += c->water_depth_mm[static_cast<std::size_t>(z * res + x)];
             }
         }
     }
@@ -4156,19 +4749,21 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_bed_mm.size()) != res * res)
+        if (!IsBoundedWaterResolution(res) || static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z)
             for (int x = 0; x < res; ++x) {
-                const std::int32_t b = c->water_bed_mm[z * res + x];
+                const std::int32_t b = c->water_bed_mm[static_cast<std::size_t>(z * res + x)];
                 if (b > 2000 &&
                     b < lowest) { // above sea (valley floor, not coast) and the lowest so far
                     lowest = b;
-                    const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                    const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                    const float wx = static_cast<float>(cc.x * CHUNK_SIZE_X) +
+                                     (static_cast<float>(x) + 0.5f) * cw_x;
+                    const float wz = static_cast<float>(cc.z * CHUNK_SIZE_Z) +
+                                     (static_cast<float>(z) + 0.5f) * cw_z;
                     pos_out = Vec3(wx, static_cast<float>(b) / 1000.0f, wz);
                     bed_m_out = static_cast<float>(b) / 1000.0f;
                     found = true;
@@ -4199,7 +4794,8 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res ||
             static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
@@ -4207,13 +4803,17 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                if (c->water_depth_mm[z * res + x] < 2500)
+                if (c->water_depth_mm[static_cast<std::size_t>(z * res + x)] < 2500)
                     continue; // need real depth (>=2.5 m)
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                const float surf = static_cast<float>(c->water_bed_mm[z * res + x] +
-                                                      c->water_depth_mm[z * res + x]) /
-                                   1000.0f;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float surf =
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
+                                       c->water_depth_mm[static_cast<std::size_t>(z * res + x)]) /
+                    1000.0f;
                 for (int a = 0; a < 8; ++a) {
                     const float ang = static_cast<float>(a) * 0.7853981634f;
                     const float ox = std::cos(ang), oz = std::sin(ang);
@@ -4263,7 +4863,8 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
         if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+        if (!IsBoundedWaterResolution(res) ||
+            static_cast<int>(c->water_depth_mm.size()) != res * res ||
             static_cast<int>(c->water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c->get_coords();
@@ -4271,13 +4872,19 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                const std::int32_t d = c->water_depth_mm[z * res + x];
+                const std::int32_t d = c->water_depth_mm[static_cast<std::size_t>(z * res + x)];
                 if (d <= best)
                     continue;
                 best = d;
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                const float surf_y = static_cast<float>(c->water_bed_mm[z * res + x] + d) / 1000.0f;
+                const float wx =
+                    static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
+                const float wz =
+                    static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float surf_y =
+                    static_cast<float>(static_cast<std::int64_t>(
+                                           c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
+                                       d) /
+                    1000.0f;
                 best_pos = Vec3(wx, surf_y, wz);
             }
         }
@@ -4346,25 +4953,32 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return terrain;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    if (res <= 1 || static_cast<int>(c->water_level_data.size()) != res * res)
+    if (!IsBoundedWaterResolution(res) ||
+        c->water_level_data.size() < static_cast<std::size_t>(res) * static_cast<std::size_t>(res))
         return terrain;
     const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
     const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
-    const int sx = std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * res), 0, res - 1);
-    const int sz = std::clamp(static_cast<int>((lz / CHUNK_SIZE_Z) * res), 0, res - 1);
-    return c->water_level_data[sz * res + sx];
+    const int sx =
+        std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * static_cast<float>(res)), 0, res - 1);
+    const int sz =
+        std::clamp(static_cast<int>((lz / CHUNK_SIZE_Z) * static_cast<float>(res)), 0, res - 1);
+    return c->water_level_data[static_cast<std::size_t>(sz * res + sx)];
 }
 
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
-    // Mirrors the injection loop's precondition (has_water_sim + complete FLOAT
-    // grid). EMPIRICAL ground truth (the water-source staging hunt): water grids live on
-    // the 2.5D COLUMN's y=0 chunk regardless of the terrain sign — probe there.
+    // Match source injection: an integer pair plus all three float mirrors.
+    // Probe the 2.5D column's y=0 chunk regardless of terrain sign.
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
     const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
     if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
         return false;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    return res > 1 && static_cast<int>(c->water_level_data.size()) == res * res;
+    if (!IsBoundedWaterResolution(res))
+        return false;
+    const auto cells = static_cast<std::size_t>(res) * static_cast<std::size_t>(res);
+    return c->water_bed_mm.size() == cells && c->water_depth_mm.size() == cells &&
+           c->water_level_data.size() >= cells && c->water_flow_data.size() >= cells &&
+           c->water_sim_terrain_height.size() >= cells;
 }
 
 // boot-settle mode passthrough (lifts the live-play water caps during Boot only).
@@ -4420,6 +5034,65 @@ void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
         m_water_system->SetSimWindowCursor(cursor);
 }
 
+bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m) {
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > 16.0f ||
+        !std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z) ||
+        std::abs(world_pos.x) > 32000.0f || std::abs(world_pos.y) > 32000.0f ||
+        std::abs(world_pos.z) > 32000.0f)
+        return false;
+
+    if (m_durable_read_failed)
+        return false;
+    wait_for_streaming_jobs();
+    if (promotion_pipeline_pending())
+        return false;
+    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m));
+    const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m));
+    // Resolve every saved member before generating any procedural replacement.
+    // The validated footprint is at most 27 chunks.
+    if (m_durable_residency) {
+        for (int cz = lo.z; cz <= hi.z; ++cz)
+            for (int cy = lo.y; cy <= hi.y; ++cy)
+                for (int cx = lo.x; cx <= hi.x; ++cx) {
+                    restore_authoritative_chunk(IVec3(cx, cy, cz));
+                    if (m_durable_read_failed)
+                        return false;
+                }
+    }
+    const auto worldgen_scope = acquire_worldgen_sample_scope();
+    // The validated bounds above cover at most 27 chunks of 17^3 samples.
+    // Generate synchronously before editing; never replace saved/edited SDFs.
+    for (int cz = lo.z; cz <= hi.z; ++cz)
+        for (int cy = lo.y; cy <= hi.y; ++cy)
+            for (int cx = lo.x; cx <= hi.x; ++cx) {
+                const IVec3 coords(cx, cy, cz);
+                const ChunkID id = Chunk::calculate_id(coords);
+                auto iterator = m_streaming_state.chunks.find(id);
+                if (iterator == m_streaming_state.chunks.end()) {
+                    iterator = m_streaming_state.chunks
+                                   .emplace(id, std::make_shared<Luminumbra::Chunk>(coords))
+                                   .first;
+                    m_activation_index.insert(iterator->second);
+                    ++m_dirty_generation;
+                }
+                auto& chunk = iterator->second;
+                if (!chunk)
+                    return false;
+                if (chunk->sdf_data.empty()) {
+                    const Persistence::WorldSaveService::SaveOwnership ownership;
+                    bump_far_lod_authority_revision(chunk->get_coords());
+                    GenerateChunkData(*chunk, 1);
+                    publish_generated_column_span(*chunk);
+                    ++m_dirty_generation;
+                    chunk->current_lod.store(-1, std::memory_order_release);
+                    chunk->set_state(ChunkState::Idle);
+                }
+                if (chunk->sdf_data.size() != kFullSdfLattice)
+                    return false;
+            }
+    return true;
+}
+
 // PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
 // then couple the water to the new bed. Edits the signed density field (sdf_data) of
 // every streamed chunk the sphere overlaps. Positive density is air (same convention
@@ -4439,8 +5112,25 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                          float radius_m,
                                          bool fill,
                                          PhysicsSystem* physics_system) {
-    if (radius_m <= 0.0f || m_durable_read_failed)
+    // The edit must fit its subsequent synchronous remesh before touching SDF.
+    constexpr float max_edit_radius =
+        static_cast<float>((World::kMaxSurfaceRadius - 2) * CHUNK_SIZE_X);
+    if (m_durable_read_failed)
         return 0;
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > max_edit_radius)
+        return 0;
+    const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
+    const IVec3 center = world_to_chunk_coords(world_pos);
+    std::size_t remesh_chunks = 0;
+    // At most 625 columns. Check the exact remesh work before changing any SDF;
+    // the subsequent surface call reuses these cached spans.
+    for (int dz = -rings; dz <= rings; ++dz) {
+        for (int dx = -rings; dx <= rings; ++dx) {
+            const auto span = column_surface_span(center.x + dx, center.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, remesh_chunks))
+                return 0;
+        }
+    }
     constexpr int size_x = CHUNK_SIZE_X + 1;
     constexpr int size_y = CHUNK_SIZE_Y + 1;
     constexpr int size_z = CHUNK_SIZE_Z + 1;
@@ -4451,20 +5141,30 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
     // Chunk-coord AABB the sphere can touch (carve may span several chunks).
     const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m, radius_m, radius_m));
     const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m, radius_m, radius_m));
+    // Validate the bounded edit footprint before changing any SDF. A corrupt
+    // later member must not leave earlier chunks partially edited.
+    if (m_durable_residency) {
+        for (int cz = lo.z; cz <= hi.z; ++cz)
+            for (int cy = lo.y; cy <= hi.y; ++cy)
+                for (int cx = lo.x; cx <= hi.x; ++cx) {
+                    restore_authoritative_chunk(IVec3(cx, cy, cz));
+                    if (m_durable_read_failed)
+                        return 0;
+                }
+    }
     int edited = 0;
     for (int cz = lo.z; cz <= hi.z; ++cz)
         for (int cy = lo.y; cy <= hi.y; ++cy)
             for (int cx = lo.x; cx <= hi.x; ++cx) {
-                if (m_durable_residency) {
-                    restore_authoritative_chunk(IVec3(cx, cy, cz));
-                }
-                if (m_durable_read_failed)
-                    return edited;
                 const auto chunk = find_streamed_chunk(IVec3(cx, cy, cz));
                 if (!chunk || chunk->sdf_data.size() != expected)
                     continue;
                 const IVec3 base =
                     chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                // Authority mutation owns persistence from the first byte through
+                // its revision bump. Never dispatch or wait for jobs under ownership;
+                // the lock order is save ownership, then region-revision mutex.
+                const Persistence::WorldSaveService::SaveOwnership ownership;
                 bool changed = false;
                 for (int z = 0; z < size_z; ++z)
                     for (int y = 0; y < size_y; ++y)
@@ -4500,8 +5200,15 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                         }
                 if (changed) {
                     chunk->mark_voxel_data_dirty();
-                    if (m_voxelEditObserver)
-                        m_voxelEditObserver(chunk->get_coords());
+                    try {
+                        m_activation_index.content_changed(chunk->get_coords());
+                        ++m_dirty_generation;
+                        if (m_voxelEditObserver)
+                            m_voxelEditObserver(chunk->get_coords());
+                    } catch (...) {
+                        bump_far_lod_authority_revision(chunk->get_coords());
+                        throw;
+                    }
                     bump_far_lod_authority_revision(chunk->get_coords());
                     chunk->current_lod.store(-1, std::memory_order_release);
                     ++edited;
@@ -4509,7 +5216,6 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
             }
     if (edited > 0) {
         // Remesh + rebuild colliders for the edited band (rings in chunk units).
-        const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
         EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
         if (m_durable_read_failed)
             return edited;
@@ -4616,6 +5322,7 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
 
     // Performance logging removed from hot path - use profiler instead
 
+    m_snapshot_copies.fetch_add(renderable.size(), std::memory_order_relaxed);
     return renderable;
 }
 
@@ -5076,6 +5783,19 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
     chunk.clear_voxel_data_dirty_after_generation();
 }
 
+std::shared_ptr<HighWaterSeedInputs>
+SHIELD_WorldSystem::request_water_seed_inputs(Chunk& chunk) const {
+    if (!m_water_system || !m_params.lakes_enabled ||
+        m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution ||
+        chunk.has_water_sim.load(std::memory_order_acquire)) {
+        return {};
+    }
+    auto inputs = std::make_shared<HighWaterSeedInputs>();
+    inputs->generation = {water_seed_terrain_generation(), chunk.water_seed_edit_generation()};
+    chunk.stage_water_seed_inputs(inputs);
+    return inputs;
+}
+
 JobHandle
 SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
     // Coordinate-only callers (initial world load, regeneration, tests,
@@ -5097,6 +5817,8 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     // already prevents scheduling-path double-dispatch, boot-path callers
     // dispatch-then-wait, and multi-batch flight is the queue's design).
     StreamingState::GenerationBatch batch;
+    batch.due_tick =
+        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
     std::vector<Luminumbra::Job> jobs;
     for (const auto& request : chunks_to_generate) {
         const IVec3 coords = request.coords;
@@ -5121,13 +5843,18 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
         chunk->set_state(Luminumbra::ChunkState::Loading);
         m_streaming_state.chunks[chunk->get_id()] = chunk;
+        m_activation_index.insert(chunk);
 
         const int target_step = request.target_step;
         chunk->pending_generation_ready.store(false, std::memory_order_release);
         batch.chunks.push_back(chunk);
-        jobs.emplace_back([this, chunk, target_step]() {
+        const auto seed_inputs = request_water_seed_inputs(*chunk);
+        jobs.emplace_back([this, chunk, target_step, seed_inputs]() {
             const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             GenerateChunkData(*chunk, target_step);
+            if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
+                ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
+            }
             // stage completion only — the MAIN thread flips
             // Loading→Idle in publish_completed_generation_jobs, so chunk
             // lifecycle is never a worker-timing side effect.
@@ -5135,27 +5862,60 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         });
     }
 
-    if (m_durable_read_failed)
-        return {};
+    // Both execution backends retain the original dispatch tick until publication.
+    batch.due_tick =
+        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
     if (m_job_system && !jobs.empty()) {
         batch.handle = m_job_system->dispatch_batch(jobs);
-        // tick-keyed activation stamp (inert until the
-        // barrier swap; -1 with no tick source = publish-when-drained).
-        batch.due_tick =
-            m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
         const JobHandle handle = batch.handle;
         m_streaming_state.generation_batches.push_back(std::move(batch));
         return handle;
     }
-    return {}; // no batch dispatched (all requests skipped, or no job system)
+    if (!jobs.empty()) {
+        for (auto& job : jobs) {
+            job();
+        }
+        m_streaming_state.generation_batches.push_back(std::move(batch));
+        publish_completed_generation_jobs(/*force=*/false);
+    }
+    return {}; // inline execution, or every request was already generated
 }
 
-void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
+bool SHIELD_WorldSystem::deferred_meshing_pending() const {
+    return m_deferred_meshing_cursor < m_deferred_meshing.size();
+}
+
+SHIELD_WorldSystem::MeshingDispatchResult SHIELD_WorldSystem::dispatch_deferred_meshing() {
+    const auto result = dispatch_meshing_jobs(
+        std::span<const MeshingWorkItem>(m_deferred_meshing).subspan(m_deferred_meshing_cursor),
+        m_deferred_meshing_due_tick);
+    m_deferred_meshing_cursor += result.consumed;
+    if (!deferred_meshing_pending()) {
+        m_deferred_meshing.clear();
+        m_deferred_meshing_cursor = 0;
+        m_deferred_meshing_due_tick = -1;
+    }
+    return result;
+}
+
+SHIELD_WorldSystem::MeshingDispatchResult
+SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunks_to_mesh,
+                                          std::int64_t due_tick) {
+    const MeshingSnapshotPass snapshot_pass(m_last_meshing_snapshot_bytes,
+                                            m_meshing_snapshot_pass_active);
     process_completed_meshing_jobs(/*force=*/false);
     //  5b: refuse by FIFO depth (deterministic), not by raw job
-    // activity. Refused items re-candidate on a later pass, as always.
-    if (m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight) {
-        return;
+    // activity. Unconsumed descriptors stay queued for a later bounded pass.
+    const auto batch_depth = m_streaming_state.meshing_batches.size();
+    // If every ordinary batch is due after a pending promotion, retain one
+    // of the nine slots for stage B. Batches due by the promotion tick can
+    // fill the lane: activate_due drains them before completing the handoff.
+    if (batch_depth >= kMaxMeshingBatchesInFlight ||
+        (batch_depth + 1u >= kMaxMeshingBatchesInFlight && promotion_pipeline_pending() &&
+         due_tick > m_streaming_state.promotion_due_tick &&
+         m_streaming_state.meshing_batches.front().due_tick >
+             m_streaming_state.promotion_due_tick)) {
+        return {};
     }
 
     //  ( step 1): LOD0 promotions of chunks without a full
@@ -5175,13 +5935,38 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     std::vector<MeshingWorkItem> promotion_items;
     std::vector<MeshingWorkItem> mesh_items;
     mesh_items.reserve(chunks_to_mesh.size());
+    std::size_t reserved_bytes = m_last_meshing_snapshot_bytes;
+    std::size_t consumed = 0;
+    // The existing candidate-count cap bounds classification; this byte budget
+    // additionally bounds all bulk copies, including inline promotion re-entry.
     for (const MeshingWorkItem& work_item : chunks_to_mesh) {
+        const auto live = m_streaming_state.chunks.find(work_item.chunk->get_id());
+        if (live == m_streaming_state.chunks.end() || live->second != work_item.chunk ||
+            work_item.chunk->pending_lod.load(std::memory_order_acquire) >= 0) {
+            ++consumed;
+            continue;
+        }
         const int step = get_lod_step_for_level(work_item.lod_level);
         const bool has_malformed_sdf = work_item.terrain_mesh_required &&
                                        !work_item.chunk->sdf_data.empty() &&
                                        work_item.chunk->sdf_data.size() != kFullSdfLattice;
         const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
                                      work_item.chunk->sdf_data.size() != kFullSdfLattice;
+        const bool promotion_required = needs_sim_truth || has_malformed_sdf;
+        if (promotion_required && promotion_pipeline_pending()) {
+            break;
+        }
+        const std::size_t snapshot_bytes =
+            promotion_required
+                ? kMaxMeshingSnapshotBytes
+                : MeshingSnapshotBytes(*work_item.chunk, work_item.terrain_mesh_required);
+        if (snapshot_bytes > kMeshingSnapshotByteBudget - reserved_bytes) {
+            // Leave the sorted suffix untouched: no flags, versions or pending-LOD
+            // reservations change. A fresh pass always fits one maximum-sized item.
+            break;
+        }
+        reserved_bytes += snapshot_bytes;
+        ++consumed;
         if (has_malformed_sdf) {
             LUMINUMBRA_CORE_WARN(
                 "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
@@ -5192,8 +5977,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 work_item.chunk->sdf_data.size(),
                 kFullSdfLattice);
         }
-        ((needs_sim_truth || has_malformed_sdf) ? promotion_items : mesh_items)
-            .push_back(work_item);
+        (promotion_required ? promotion_items : mesh_items).push_back(work_item);
     }
     // Guard: only hand items to the promotion lane when its whole pipeline is
     // idle. This makes the stage-B re-entry into dispatch_meshing_jobs
@@ -5201,39 +5985,20 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     // dispatch_promotion_jobs' head can only ever see empty state from here),
     // rather than relying on the caller-side scheduling gate alone. Refused
     // items re-candidate on a later pass — the meshing lane's semantics.
+    std::size_t admitted_promotions = 0;
     if (!promotion_items.empty() && !promotion_pipeline_pending()) {
-        dispatch_promotion_jobs(promotion_items);
+        admitted_promotions = dispatch_promotion_jobs(promotion_items, due_tick);
     }
     if (mesh_items.empty()) {
-        return;
+        const auto submitted = static_cast<std::size_t>(std::count_if(
+            promotion_items.begin(), promotion_items.end(), [](const MeshingWorkItem& item) {
+                return item.current_candidate;
+            }));
+        return {admitted_promotions, consumed, admitted_promotions == 0 ? 0 : submitted};
     }
 
-    // Snapshot meshed-chunk LODs per horizontal column once so the
-    // transition-face checks below are hash lookups instead of a full
-    // chunk-map scan per face per work item (O(batch * chunks) before,
-    // which dominated the dispatch frame once backlog-scaled batches
-    // landed). Mirrors the candidate-side snapshot built in update.
-    struct DispatchMeshedColumnEntry {
-        const Luminumbra::Chunk* chunk = nullptr;
-        int y = 0;
-        int lod = 0;
-    };
-    std::unordered_map<u64, std::vector<DispatchMeshedColumnEntry>> meshed_columns;
-    meshed_columns.reserve(m_streaming_state.chunks.size());
-    for (const auto& [neighbor_id, neighbor] : m_streaming_state.chunks) {
-        (void)neighbor_id;
-        if (!neighbor || neighbor->mesh_vertices.empty() || neighbor->mesh_indices.empty()) {
-            continue;
-        }
-        const int neighbor_lod = neighbor->current_lod.load(std::memory_order_acquire);
-        if (neighbor_lod < 0) {
-            continue;
-        }
-        const IVec3 neighbor_coords = neighbor->get_coords();
-        meshed_columns[horizontal_chunk_key(neighbor_coords.x, neighbor_coords.z)].push_back(
-            {neighbor.get(), neighbor_coords.y, neighbor_lod});
-    }
-
+    // Transition masks travel with the finite scheduler prefix. Subpasses
+    // never rescan the world; later scheduler passes detect newly arrived seams.
     // Near-field hole-fill candidates (no active mesh yet, capped prefix of
     // the sorted batch) ride the High job lane so visible gaps close ahead of
     // bulk meshing, generation, and LOD/water remeshes; everything else stays
@@ -5241,12 +6006,12 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     // prefix first, so this mirrors the existing priority order.
     std::vector<Luminumbra::Job> high_priority_jobs;
     std::vector<Luminumbra::Job> normal_priority_jobs;
-    // build this dispatch's batch record locally; it is
-    // appended to the lane FIFO at the dispatch below. The due stamp (5a-3)
+    // Build this dispatch's batch record locally; insert it in stable due
+    // order below. Stage B can arrive after ordinary batches due later.
+    // The due stamp (5a-3)
     // is inert until the barrier swap; -1 = publish-when-drained (client).
     StreamingState::MeshingBatch mesh_batch;
-    mesh_batch.due_tick =
-        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+    mesh_batch.due_tick = due_tick;
     mesh_batch.chunks.reserve(mesh_items.size());
     for (const MeshingWorkItem& work_item : mesh_items) {
         auto& chunk = work_item.chunk;
@@ -5267,86 +6032,71 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(lod_level, std::memory_order_release);
 
-        auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
-        if (terrain_mesh_required && step > 1) {
-            const IVec3 coords = chunk->get_coords();
-            auto add_face_if_neighbor_is_finer =
-                [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
-                    const auto column_it =
-                        meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
-                    if (column_it == meshed_columns.end()) {
-                        return;
-                    }
-                    for (const DispatchMeshedColumnEntry& entry : column_it->second) {
-                        if (entry.chunk == chunk.get()) {
-                            continue;
-                        }
-                        if (entry.lod < lod_level ||
-                            (entry.lod != lod_level && entry.y != coords.y)) {
-                            transition_faces |= static_cast<
-                                Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
-                            return;
-                        }
-                    }
-                };
-
-            add_face_if_neighbor_is_finer(
-                -1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
-            add_face_if_neighbor_is_finer(
-                1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
-            add_face_if_neighbor_is_finer(
-                0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
-            add_face_if_neighbor_is_finer(
-                0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
+        const auto transition_faces = terrain_mesh_required && step > 1
+                                          ? work_item.transition_faces
+                                          : Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+        // Snapshot every mutable chunk input before enqueueing. Water keeps advancing
+        // while batches are pending; workers must never read its live vectors.
+        auto scratch_owner = std::make_shared<Luminumbra::Chunk>(chunk->get_coords());
+        auto& snapshot = *scratch_owner;
+        m_last_meshing_snapshot_bytes += MeshingSnapshotBytes(*chunk, terrain_mesh_required);
+        const int resolution = chunk->current_water_resolution.load(std::memory_order_acquire);
+        snapshot.current_water_resolution.store(resolution, std::memory_order_release);
+        // Water snapshots are bounded by the maximum 32*32 simulation grid.
+        // Validate before multiplying or copying, including corrupt saved metadata.
+        if (resolution > 1 && resolution <= 32) {
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+            const auto copy_mirror = [cells](const auto& source, auto& destination) {
+                destination.assign(source.begin(),
+                                   source.begin() +
+                                       static_cast<std::ptrdiff_t>(std::min(cells, source.size())));
+            };
+            copy_mirror(chunk->water_level_data, snapshot.water_level_data);
+            copy_mirror(chunk->water_flow_data, snapshot.water_flow_data);
+            copy_mirror(chunk->water_sim_terrain_height, snapshot.water_sim_terrain_height);
+            // The mesher uses depth only for an exact grid; missing, partial
+            // and oversized grids all use the procedural-height fallback.
+            if (chunk->water_depth_mm.size() == cells) {
+                snapshot.water_depth_mm = chunk->water_depth_mm;
+            }
+            snapshot.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
+                                         std::memory_order_release);
         }
-        mesh_batch.chunks.push_back({chunk, terrain_mesh_required, transition_faces});
+        const u32 voxel_revision = chunk->voxel_revision();
+        if (terrain_mesh_required) {
+            // Classification above guarantees an empty or exact full lattice.
+            // Each terrain channel is bounded by one chunk's padded lattice.
+            snapshot.sdf_data = chunk->sdf_data;
+            if (chunk->heightmap_data.size() == kHeightmapCells) {
+                snapshot.heightmap_data = chunk->heightmap_data;
+            }
+            if (chunk->material_data.size() == kFullSdfLattice) {
+                snapshot.material_data = chunk->material_data;
+            }
+        }
+        mesh_batch.chunks.push_back({chunk,
+                                     terrain_mesh_required,
+                                     transition_faces,
+                                     scratch_owner,
+                                     chunk->mesh_version.load(std::memory_order_acquire),
+                                     chunk->water_mesh_version.load(std::memory_order_acquire),
+                                     voxel_revision});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
-        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
+        lane_jobs.emplace_back([this,
+                                chunk,
+                                scratch_owner = std::move(scratch_owner),
+                                step,
+                                transition_faces,
+                                terrain_mesh_required]() {
             try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope(); //
-                Luminumbra::Chunk scratch(chunk->get_coords());
-                scratch.water_level_data = chunk->water_level_data;
-                scratch.water_flow_data = chunk->water_flow_data;
-                scratch.water_sim_terrain_height = chunk->water_sim_terrain_height;
-                scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
-                                            std::memory_order_release);
-                scratch.water_mesh_generated.store(false, std::memory_order_release);
-                scratch.current_water_resolution.store(
-                    chunk->current_water_resolution.load(std::memory_order_acquire),
-                    std::memory_order_release);
-
+                // World samplers read seed/params/noise only. Their setters drain the
+                // streaming lanes before mutation; the epoch scope also protects noise.
+                // SetWaterSystem likewise drains meshing before replacing the pointer.
+                const auto worldgen_scope = acquire_worldgen_sample_scope();
+                auto& scratch = *scratch_owner;
                 if (terrain_mesh_required) {
-                    if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
-                        //  tripwire: meshing NEVER generates sim
-                        // truth. A unit-step item without a full live voxel
-                        // field must have been routed through the promotion
-                        // lane at dispatch — reaching here is a regression of
-                        // the activation queue decoupling, not a recoverable state.
-                        LUMINUMBRA_CORE_ERROR(
-                            "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
-                            "lane without full sim truth (sdf size {} != {}) — the  "
-                            "promotion routing is broken; failing the mesh",
-                            chunk->get_coords().x,
-                            chunk->get_coords().y,
-                            chunk->get_coords().z,
-                            chunk->sdf_data.size(),
-                            kFullSdfLattice);
-                        chunk->pending_mesh_failed.store(true, std::memory_order_release);
-                        return;
-                    }
-                    scratch.sdf_data = chunk->sdf_data;
-                    scratch.heightmap_data = chunk->heightmap_data;
-                    // carry the live material channel so stage-B
-                    // promotion meshes classify authored structure voxels
-                    // exactly as the old fused backfill+mesh job did (its
-                    // scratch had materials stamped by GenerateChunkData).
-                    // Also fixes the latent authored-material loss on plain
-                    // remeshes, which copied only sdf+heightmap. Mesh bytes
-                    // are world_hash-excluded either way (empty -> empty,
-                    //  lazy alloc preserved).
-                    scratch.material_data = chunk->material_data;
-
                     // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
                     Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
                     Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
@@ -5374,9 +6124,6 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 }
                 chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
                 chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
-                chunk->water_mesh_generated.store(
-                    scratch.water_mesh_generated.load(std::memory_order_acquire),
-                    std::memory_order_release);
                 chunk->pending_mesh_ready.store(true, std::memory_order_release);
 
                 // Job completion debug logging removed to prevent segfault
@@ -5405,7 +6152,6 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         if (!normal_priority_jobs.empty()) {
             mesh_batch.handle = m_job_system->dispatch_batch(normal_priority_jobs);
         }
-        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
     } else {
         for (auto& job : high_priority_jobs) {
             job();
@@ -5413,9 +6159,32 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
-        process_completed_meshing_jobs(/*force=*/true);
     }
+    // At most nine records: insertion moves only bounded batch descriptors,
+    // never chunk buffers. upper_bound preserves dispatch order for equal ticks,
+    // including unticked (-1) client batches.
+    auto& batches = m_streaming_state.meshing_batches;
+    const auto position =
+        std::upper_bound(batches.begin(),
+                         batches.end(),
+                         due_tick,
+                         [](std::int64_t due, const StreamingState::MeshingBatch& batch) {
+                             return due < batch.due_tick;
+                         });
+    batches.insert(position, std::move(mesh_batch));
+    if (!m_job_system) {
+        process_completed_meshing_jobs(/*force=*/false);
+    }
+    const auto candidate_count = [](const std::vector<MeshingWorkItem>& items) {
+        return static_cast<std::size_t>(
+            std::count_if(items.begin(), items.end(), [](const MeshingWorkItem& item) {
+                return item.current_candidate;
+            }));
+    };
+    return {admitted_promotions + mesh_items.size(),
+            consumed,
+            candidate_count(mesh_items) +
+                (admitted_promotions == 0 ? 0 : candidate_count(promotion_items))};
 }
 
 bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
@@ -5447,7 +6216,17 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
         const bool mesh_ready = chunk->pending_mesh_ready.load(std::memory_order_acquire);
         const bool mesh_failed = chunk->pending_mesh_failed.load(std::memory_order_acquire);
 
-        if (mesh_ready && !mesh_failed) {
+        const auto live = m_streaming_state.chunks.find(chunk->get_id());
+        const bool current_result =
+            live != m_streaming_state.chunks.end() && live->second == chunk &&
+            chunk->mesh_version.load(std::memory_order_acquire) == job_chunk.mesh_version &&
+            chunk->water_mesh_version.load(std::memory_order_acquire) ==
+                job_chunk.water_mesh_version &&
+            // Only terrain jobs consume voxel data. Water-only results remain
+            // independent of edits and must not restore the invalidated terrain LOD.
+            (!job_chunk.terrain_mesh_required ||
+             chunk->voxel_revision() == job_chunk.voxel_revision);
+        if (mesh_ready && !mesh_failed && current_result) {
             if (job_chunk.terrain_mesh_required) {
                 //  ( step 1): the LOD0-promotion backfill
                 // publish that used to live here moved to
@@ -5467,7 +6246,34 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
             chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
             chunk->water_mesh_version++;
-            chunk->water_mesh_dirty_ticks = 0;
+            // Publish the dispatch state, but retain any invalidation caused by
+            // subsequent simulation ticks. Comparison is bounded by 32*32 cells;
+            // malformed/oversized live grids cannot trigger an unbounded copy.
+            const auto& snapshot = *job_chunk.scratch;
+            const int resolution =
+                snapshot.current_water_resolution.load(std::memory_order_acquire);
+            const auto cells =
+                resolution > 1 && resolution <= 32
+                    ? static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)
+                    : 0u;
+            const bool water_unchanged =
+                chunk->current_water_resolution.load(std::memory_order_acquire) == resolution &&
+                chunk->has_water_sim.load(std::memory_order_acquire) ==
+                    snapshot.has_water_sim.load(std::memory_order_acquire) &&
+                cells != 0u && snapshot.water_level_data.size() == cells &&
+                chunk->water_level_data.size() >= cells &&
+                std::equal(snapshot.water_level_data.begin(),
+                           snapshot.water_level_data.end(),
+                           chunk->water_level_data.begin()) &&
+                // Match depth availability as well as values. Unused tails
+                // and unavailable depth values cannot invalidate the mesh.
+                (chunk->water_depth_mm.size() == cells) == !snapshot.water_depth_mm.empty() &&
+                std::equal(snapshot.water_depth_mm.begin(),
+                           snapshot.water_depth_mm.end(),
+                           chunk->water_depth_mm.begin());
+            chunk->water_mesh_generated.store(
+                water_unchanged && snapshot.water_mesh_generated.load(std::memory_order_acquire),
+                std::memory_order_release);
             chunk->set_state(Luminumbra::ChunkState::Ready);
         } else if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
             chunk->set_state(Luminumbra::ChunkState::Idle);
@@ -5494,9 +6300,8 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
 }
 
 void SHIELD_WorldSystem::process_completed_meshing_jobs(bool force) {
-    // Drain every publishable front batch, in FIFO order (publication order
-    // == dispatch order — deterministic; stops at the first still-running or
-    // not-yet-due batch so later batches never publish ahead of an earlier one).
+    // Drain publishable front batches in stable due order. Both job lanes must
+    // finish before publication; explicit force drains ignore tick stamps.
     while (publish_front_meshing_batch(force)) {}
 }
 
@@ -5506,12 +6311,30 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
     // until the whole pipeline (including stage B) has settled.
     wait_for_streaming_jobs();
 
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            (void)id;
+            bump_far_lod_authority_revision(chunk->get_coords());
+        }
+    }
+    // Owner-thread capture cannot run during this setter. Invalidate first,
+    // releasing save ownership before acquiring the generator's exclusive epoch.
     reinitialize_noise(&params);
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
     wait_for_streaming_jobs();
 
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            (void)id;
+            bump_far_lod_authority_revision(chunk->get_coords());
+        }
+    }
+    // Owner-thread capture cannot run during this setter. Invalidate first,
+    // releasing save ownership before acquiring the generator's exclusive epoch.
     reinitialize_noise(nullptr, seed);
 }
 
@@ -5532,12 +6355,19 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_parking_blocked_dirty = 0;
     m_parking_deferred = 0;
     m_persistence_save_requested = false;
+    m_deferred_generation_candidates = 0;
+    m_activation_index.clear();
+    m_activation_plan_valid = false;
+    m_activation_has_run = false;
+    m_last_eviction_radius = -1;
     m_shadow_generation_dispatch_tick.clear();
     m_shadow_promotion_dispatch_tick.clear();
     LUMINUMBRA_CORE_INFO("World cleared.");
 }
 
 void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
+    if (m_durable_read_failed)
+        return;
     wait_for_streaming_jobs();
 
     LUMINUMBRA_CORE_INFO("Regenerating all active chunks...");
@@ -5546,12 +6376,17 @@ void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         coords_to_regenerate.push_back(chunk->get_coords());
     }
+    {
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (const auto& coords : coords_to_regenerate)
+            bump_far_lod_authority_revision(coords);
+    }
     clear_world(physics_system);
     dispatch_generation_jobs(coords_to_regenerate);
 }
 
 void SHIELD_WorldSystem::SetWaterSystem(WaterSystem* water_system) {
-    wait_for_meshing_jobs();
+    wait_for_admitted_streaming_jobs();
 
     m_water_system = water_system;
 }
@@ -5562,21 +6397,25 @@ IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
                  static_cast<int>(std::floor(position.z / CHUNK_SIZE_Z)));
 }
 
-void SHIELD_WorldSystem::wait_for_streaming_jobs() {
-    //  ( step 1): the SEQUENCED drain. Sim truth for LOD0
-    // promotions is generated on the promotion lane and published before its
-    // render mesh is dispatched (stage B) — and the whole two-stage pipeline
-    // still settles inside ONE call, so every per-tick observation point
-    // (availability digest, collision pass, water init, world_hash) sees
-    // exactly the same settled state per tick as the old fused pipeline.
+void SHIELD_WorldSystem::wait_for_admitted_streaming_jobs() {
+    // Fence every admitted lane and publish both promotion stages before a
+    // dependency can change. Budget-deferred descriptors hold no worker inputs
+    // or dependency pointers; full synchronous observations settle those below.
     wait_for_generation_jobs();
+    wait_for_hydro_prefetch_jobs();
     wait_for_meshing_jobs();   // publish any in-flight render meshes; frees the lanes
     wait_for_promotion_jobs(); // publish staged sim truth + dispatch stage B
     wait_for_meshing_jobs();   // publish stage-B render meshes — same call, same tick
-    if (promotion_pipeline_pending()) {
-        LUMINUMBRA_CORE_ERROR(
-            "wait_for_streaming_jobs: promotion pipeline still pending after the "
-            "sequenced drain — the activation queue same-tick settlement invariant is broken");
+}
+
+void SHIELD_WorldSystem::wait_for_streaming_jobs() {
+    wait_for_admitted_streaming_jobs();
+    // The finite scheduler prefix also owns requests not yet admitted under the
+    // 256 KiB snapshot bound. Each subpass consumes at least one descriptor;
+    // promotion stages settle before the next one. No world rescan or retries.
+    while (deferred_meshing_pending()) {
+        dispatch_deferred_meshing();
+        wait_for_admitted_streaming_jobs();
     }
 }
 
@@ -5590,6 +6429,7 @@ SHIELD_WorldSystem::snapshot_streamed_chunks() const {
             chunks.push_back(chunk_ptr);
         }
     }
+    m_snapshot_copies.fetch_add(chunks.size(), std::memory_order_relaxed);
     return chunks;
 }
 
@@ -5620,8 +6460,16 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
     else if (local_z == kChunksPerRegion - 1)
         affected_z[z_count++] = home_rz + 1;
 
+    // Serialize authority changes with the entire tile check/merge/publication.
+    // Take ownership before the region mutex, matching the durable-save path.
+    // Recursive ownership permits notification inside an existing session save;
+    // no jobs are dispatched or awaited while these locks are held.
+    const Persistence::WorldSaveService::SaveOwnership ownership;
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     for (std::size_t z = 0; z < z_count; ++z) {
         for (std::size_t x = 0; x < x_count; ++x) {
             m_far_lod_region_revisions[{affected_x[x], affected_z[z]}] = revision;
@@ -5630,9 +6478,16 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
 }
 
 u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const {
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     const auto found = m_far_lod_region_revisions.find({rx, rz});
     return found == m_far_lod_region_revisions.end() ? 0u : found->second;
+}
+
+void SHIELD_WorldSystem::notify_far_lod_authority_changed(const IVec3& chunk_coords) {
+    bump_far_lod_authority_revision(chunk_coords);
 }
 
 void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coords) {
@@ -5642,10 +6497,6 @@ void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coo
 std::shared_ptr<const FarLodSdfSnapshot>
 SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     constexpr int kRegionChunkSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
-    constexpr std::size_t kFullSdfLatticeSize = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
-                                                static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
-
     const std::int64_t min_chunk_x64 = static_cast<std::int64_t>(rx) * kRegionChunkSpan - 1;
     const std::int64_t max_chunk_x64 =
         static_cast<std::int64_t>(rx) * kRegionChunkSpan + kRegionChunkSpan;
@@ -5666,27 +6517,14 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);
     snapshot->authority_revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
     snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);
-    snapshot->entries.reserve(m_streaming_state.chunks.size());
+    snapshot->min_chunk_coords = IVec2(min_chunk_x, min_chunk_z);
 
-    // This capture runs after the owner thread's normal streaming publication
-    // point. Copying here is the ownership boundary: workers receive only the
-    // owned value vectors below, never a Chunk or a borrowed vector span.
-    auto authoritative = snapshot_authoritative_chunks();
-    std::set<ChunkID> captured;
-    for (const auto& chunk : authoritative)
-        if (chunk)
-            captured.insert(chunk->get_id());
-    for (const auto& [id, coords] : m_durable_chunks)
-        if (!captured.contains(id) && coords.x >= min_chunk_x && coords.x <= max_chunk_x &&
-            coords.z >= min_chunk_z && coords.z <= max_chunk_z) {
-            const auto chunk = read_committed_chunk(coords);
-            if (!chunk)
-                return nullptr;
-            authoritative.push_back(chunk);
-        }
-    for (const auto& chunk : authoritative) {
-        if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize ||
-            (!chunk->material_data.empty() && chunk->material_data.size() != kFullSdfLatticeSize)) {
+    // Capture after streaming publication. Each chunk retains one immutable
+    // payload; overlapping regions and unchanged captures share those bytes.
+    for (const auto& chunk : snapshot_authoritative_chunks()) {
+        // Generation writes live vectors while Loading. Only owner-thread
+        // publication makes those bytes eligible, even if a worker is finished.
+        if (!HasPublishedFarLodSdf(chunk.get())) {
             continue;
         }
         const IVec3& coords = chunk->get_coords();
@@ -5700,8 +6538,7 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
         entry.provenance = chunk->sdf_provenance();
         entry.voxel_revision = chunk->voxel_revision();
         entry.authority_durable = !chunk->is_voxel_data_dirty();
-        entry.sdf_data = chunk->sdf_data;
-        entry.material_data = chunk->material_data;
+        entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);
         snapshot->entries.push_back(std::move(entry));
     }
 
@@ -5720,22 +6557,57 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
 bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const {
     if (m_durable_read_failed)
         return false;
+    constexpr int kFootprintSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X + 2;
     if (snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||
         snapshot.authority_revision !=
-            m_far_lod_authority_revision.load(std::memory_order_acquire)) {
+            m_far_lod_authority_revision.load(std::memory_order_acquire) ||
+        snapshot.min_chunk_coords.x < Chunk::kPackedMinXz ||
+        snapshot.min_chunk_coords.y < Chunk::kPackedMinXz ||
+        static_cast<std::int64_t>(snapshot.min_chunk_coords.x) + kFootprintSpan - 1 >
+            Chunk::kPackedMaxXz ||
+        static_cast<std::int64_t>(snapshot.min_chunk_coords.y) + kFootprintSpan - 1 >
+            Chunk::kPackedMaxXz) {
         return false;
     }
 
     // Eviction is safe because snapshot owns its bytes. A still-resident
     // chunk with a changed local revision/provenance, however, supersedes it.
+    std::size_t captured_resident_sdfs = 0;
     for (const FarLodSdfSnapshotEntry& entry : snapshot.entries) {
-        const auto current = find_authoritative_chunk(entry.coords);
-        if (current && (current->voxel_revision() != entry.voxel_revision ||
+        const auto resident = find_streamed_chunk(entry.coords);
+        const auto parked = m_parked.find(Chunk::calculate_id(entry.coords));
+        const auto current =
+            resident ? resident : (parked != m_parked.end() ? parked->second.chunk : nullptr);
+        if (current && (!HasPublishedFarLodSdf(current.get()) ||
+                        current->voxel_revision() != entry.voxel_revision ||
                         current->sdf_provenance() != entry.provenance)) {
             return false;
         }
+        if (resident)
+            ++captured_resident_sdfs;
     }
-    return !m_durable_read_failed;
+
+    // Count the complete footprint, including chunks absent or Loading at capture.
+    // Every captured resident was checked above, so an additional published SDF
+    // makes the counts differ. Evicted captures still own their immutable bytes.
+    // Fixed bound: 34 x 34 columns, each containing only packed-Y resident chunks;
+    // no allocation or whole-world scan, and constant work per resident item.
+    std::size_t published_sdfs = 0;
+    const auto& columns = m_activation_index.columns();
+    for (int dz = 0; dz < kFootprintSpan; ++dz) {
+        for (int dx = 0; dx < kFootprintSpan; ++dx) {
+            const auto column = columns.find(World::ActivationResidencyIndex::column_key(
+                snapshot.min_chunk_coords.x + dx, snapshot.min_chunk_coords.y + dz));
+            if (column == columns.end())
+                continue;
+            for (const auto& [id, chunk] : column->second.residents) {
+                (void)id;
+                if (HasPublishedFarLodSdf(chunk.get()))
+                    ++published_sdfs;
+            }
+        }
+    }
+    return published_sdfs == captured_resident_sdfs;
 }
 
 std::shared_ptr<Luminumbra::Chunk>
@@ -5862,7 +6734,11 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
             throw std::runtime_error("duplicate durable chunk adoption");
         // Water resolution is session configuration. Migrate restored truth on the owner
         // thread before exposing it to seams/edits; matching resolutions do no work.
-        MigrateWaterSimResolution();
+        if (m_water_system) {
+            // Exactly one restored chunk; the migration cannot scan other residents.
+            const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> restored{{id, chunk}};
+            m_water_system->MigrateChunksToSimResolution(restored);
+        }
         ++m_dirty_generation;
     } catch (const std::exception& error) {
         m_durable_read_failed = true;
@@ -5904,6 +6780,7 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
     if (chunk) {
         chunk->current_lod.store(-1, std::memory_order_release);
         chunk->set_state(Luminumbra::ChunkState::Idle);
+        m_activation_index.insert(chunk);
         m_streaming_state.chunks.emplace(id, std::move(chunk));
         ++m_dirty_generation;
     }
@@ -5937,6 +6814,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     if (!chunk) {
         return false;
     }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
     //   lifecycle rule (streaming-owned, NOT the persistence
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
@@ -5966,6 +6844,14 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
         bump_far_lod_authority_revision(chunk->get_coords());
+    }
+    if (adopted) {
+        // Derived payloads belong to the producing world, never to a saved or
+        // externally adopted chunk (world-local generation numbers can coincide).
+        chunk->stage_water_seed_inputs({});
+        m_activation_index.insert(chunk);
+        m_activation_index.content_changed(chunk->get_coords());
+        ++m_dirty_generation;
     }
     return adopted;
 }

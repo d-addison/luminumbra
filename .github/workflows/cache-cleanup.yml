@@ -1,0 +1,157 @@
+name: Bound Actions cache storage
+
+on:
+  # Every cache writer is covered here. Completion-only cleanup avoids pending
+  # push runs being replaced by completions in GitHub's concurrency queue.
+  workflow_run:
+    workflows: [CI, AddressSanitizer, Performance observations]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Retain rolling caches within the storage budget
+    # Only main/devel pushes save caches; other completions need no runner time.
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'devel')
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Workflow code is trusted and no repository code is checked out. GitHub
+      # also evicts old keys, but that alone would fill the 10 GB free quota.
+      - name: Retain one generation per branch and lane, below 9.5 GB total
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from datetime import datetime, timedelta, timezone
+          from re import search
+
+          PREFIXES = (
+              'linux-x64-gcc-ccache-', 'diligent-rhi-linux-x64-gcc-ccache-',
+              'linux-x64-gcc-asan-ccache-', 'windows-x64-msvc-ccache-',
+              'windows-x64-ucrt64-gcc-ccache-', 'perf-linux-x64-gcc-ccache-',
+              'perf-paired-linux-x64-gcc-', 'qualification-server-linux-x64-gcc-',
+              'tidy-cache-',
+          )
+          BUDGET = 9_500_000_000
+          RECENCY_GRACE = timedelta(hours=6)
+
+          def warning(message):
+              message = str(message).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::warning::{message}')
+
+          def is_current_head(cache, heads):
+              sha = heads.get(cache['ref'])
+              return bool(sha and cache['key'].endswith('-' + sha))
+
+          def is_protected(cache, heads, trigger_sha):
+              return is_current_head(cache, heads) or bool(
+                  trigger_sha and cache['key'].endswith('-' + trigger_sha))
+
+          def is_recent(cache, now):
+              timestamps = [cache['created_at']]
+              if cache.get('last_accessed_at'):
+                  timestamps.append(cache['last_accessed_at'])
+              latest = max(datetime.fromisoformat(t.replace('Z', '+00:00')) for t in timestamps)
+              return latest >= now - RECENCY_GRACE
+
+          def retention_group(cache):
+              prefix = next((p for p in PREFIXES if cache['key'].startswith(p)), None)
+              if prefix == 'tidy-cache-':
+                  # Each shard needs its own generation; unsharded tidy keys
+                  # remain separate, with only same-key versions grouped.
+                  shard = search(r'^(tidy-cache-.+-shard[0-9]+of[0-9]+)-', cache['key'])
+                  prefix = shard[1] if shard else cache['key']
+              return (cache['ref'], prefix) if prefix else None
+
+          def obsolete_caches(caches, heads=None, trigger_sha='', now=None):
+              heads = heads or {}
+              now = now or datetime.now(timezone.utc)
+              # Reserve each group's newest generation unconditionally, before
+              # head/access protection or budget selection. Creation time, not
+              # SHA order or access time, resolves same-key version ties.
+              caches = sorted(caches, key=lambda c: (c['created_at'], c['id']), reverse=True)
+              newest = {}
+              for cache in caches:
+                  group = retention_group(cache)
+                  if group is not None:
+                      newest.setdefault(group, cache['id'])
+              protected_ids = set(newest.values())
+              # Delayed cleanup must preserve its triggering SHA as well as live
+              # heads. Recent saves/accesses protect queued reruns and active runs.
+              protected_ids.update(c['id'] for c in caches
+                                   if is_protected(c, heads, trigger_sha) or is_recent(c, now))
+              protected = [c for c in caches if c['id'] in protected_ids]
+              used = sum(c['size_in_bytes'] for c in protected)
+              if used > BUDGET:
+                  warning(f'Newest, protected and grace-window caches use {used} bytes, exceeding the {BUDGET} byte '
+                          f'(9.5 GB) budget by {used - BUDGET} bytes; skipping cleanup')
+                  return []
+              retained = {retention_group(c) for c in protected}
+              obsolete = []
+              for cache in caches:
+                  if cache['id'] in protected_ids:
+                      continue
+                  group = retention_group(cache)
+                  duplicate = group is not None and group in retained
+                  if group is not None:
+                      retained.add(group)
+                  if duplicate or used + cache['size_in_bytes'] > BUDGET:
+                      obsolete.append(cache['id'])
+                      continue
+                  used += cache['size_in_bytes']
+              return obsolete
+
+          repository = os.environ['GH_REPO']
+
+          def current_heads():
+              refs = json.loads(subprocess.check_output([
+                  'gh', 'api', f'repos/{repository}/git/matching-refs/heads/',
+              ], text=True))
+              return {ref['ref']: ref['object']['sha'] for ref in refs
+                      if ref['ref'] in ('refs/heads/main', 'refs/heads/devel')}
+
+          def cleanup():
+              trigger_sha = os.environ['TRIGGER_SHA']
+              pages = json.loads(subprocess.check_output([
+                  'gh', 'api', '--paginate', '--slurp',
+                  f'repos/{repository}/actions/caches?per_page=100',
+              ], text=True))
+              caches = [cache for page in pages for cache in page['actions_caches']]
+              by_id = {cache['id']: cache for cache in caches}
+              for cache_id in obsolete_caches(caches, current_heads(), trigger_sha):
+                  # A push may advance a branch during cleanup. Recheck before each
+                  # deletion; deleting by ID cannot remove a concurrent replacement.
+                  if is_protected(by_id[cache_id], current_heads(), trigger_sha):
+                      continue
+                  try:
+                      subprocess.run(['gh', 'cache', 'delete', str(cache_id), '--repo', repository], check=True)
+                  except (subprocess.CalledProcessError, OSError) as error:
+                      warning(f'Could not delete cache {cache_id}; continuing best-effort cleanup: {error}')
+
+          # Cache maintenance must not turn a trusted push red or freeze landings.
+          try:
+              cleanup()
+          except (subprocess.CalledProcessError, OSError) as error:
+              warning(f'Cache cleanup API/auth error; skipping remaining cleanup: {error}')
+          except (ValueError, TypeError, KeyError) as error:
+              warning(f'Malformed cache cleanup input ({type(error).__name__}); '
+                      f'skipping remaining cleanup: {error}')
+          PY

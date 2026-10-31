@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 #include "config_constants.gen.glsl"
 out vec4 FragColor;
 
@@ -43,7 +44,7 @@ uniform float u_aetherGlowIntensity = 2.0;
 // aether — crystalGlow scales by (1 + aether * modulation). Default 0.0 is a
 // multiply by exactly 1.0, so the untouched path is pixel-identical even with
 // an active field tap; luminance is monotonic non-decreasing in the uniform.
-uniform float u_aetherMaterialModulation = 0.0;
+uniform float u_aetherMaterialModulation = 1.0;
 //  ( -8): Lumin/Umbra polarity tint. When the RG32F
 // dual tap is live (u_aetherPolarityActive = 1), the field's G channel in
 // [-1, 1] mixes the glow color toward the matching pole by |polarity|.
@@ -121,7 +122,7 @@ struct PointLight {
 uniform PointLight u_pointLights[MAX_POINT_LIGHTS];
 uniform int u_pointLightCount;
 
-// --- Cave / sky-visibility ambient occlusion (render-only, default OFF) ---
+// --- Cave / sky-visibility ambient occlusion (render-only, enabled by default) ---
 // SSAO uses a ~0.8m radius, so a fragment deep in a cave still receives the FULL
 // daylight sky-ambient and reads as flat-lit grey, swamping any point light placed
 // there. This term marches a short ray from the fragment toward the sky through the
@@ -129,7 +130,7 @@ uniform int u_pointLightCount;
 // from the sky and its AMBIENT (sky+ground-bounce) fades toward u_caveAmbientFloor.
 // Sun/moon/point lights are NOT touched, so a lamp in a now-dark cave reads naturally.
 // GATED by u_caveAmbientOcclusion (0 = OFF => skyVis==1 => pixel-identical to pre-fix).
-uniform float u_caveAmbientOcclusion;  // master gate: 0 = OFF (default, C++ sets it)
+uniform float u_caveAmbientOcclusion;  // master gate: 0 = OFF (C++ sets the shipping default to 1)
 uniform float u_caveSkyMaxDist;        // metres of upward ray to probe
 uniform int   u_caveSkySteps;          // march samples
 uniform float u_caveAmbientFloor;      // residual ambient deep inside (0..1)
@@ -408,7 +409,8 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         if (clip.w <= 0.0) break;               // behind eye -> stop
         vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen = treat as open
-        vec3 sampPos = texture(gPosition, uv).rgb;
+        vec3 sampPos = vec3(0.0);
+        if (!farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)) continue;
         // gPosition is 0 where nothing was rendered (sky); skip those (open).
         if (dot(sampPos, sampPos) < 1e-6) continue;
         // The ray point p and the stored surface sampPos share the same screen
@@ -436,7 +438,11 @@ void main() {
     bool authored = authoredSurface.a > 0.5;
     // --- Step 1: Decode compressed G-Buffer ---
 
-    vec3 viewPos = texture(gPosition, TexCoords).rgb;
+    vec3 viewPos = vec3(0.0);
+    if (!farWorldPosition(gPosition, u_sceneDepth, TexCoords, viewPos)) {
+        FragColor = vec4(0.0);
+        return;
+    }
 
     // Decode octahedral normal and material ID
     vec4 normalData = texture(gNormalMaterial, TexCoords);
@@ -700,7 +706,7 @@ void main() {
     }
     // Long-range sky visibility: roofed-over (cave/overhang) fragments lose the
     // flat sky-ambient fill so deep interiors go near-black and any point light
-    // placed there reads as a real pool of light. GATED (default OFF) -> the
+    // placed there reads as a real pool of light. GATED (explicit zero disables modulation) -> the
     // skyVis multiplier is exactly 1.0 when u_caveAmbientOcclusion==0, so the
     // shipped path is pixel-identical. Applied to AMBIENT ONLY; Lo (sun/moon/
     // point) is untouched.

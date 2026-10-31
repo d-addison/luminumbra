@@ -4,6 +4,7 @@
 #include "world/WorldStreamingState.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -84,7 +85,10 @@ bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors);
 // Deterministic world hash over the canonical snapshot bytes (same
 // fnv1a_64_stable_json machinery the WorldHash gate artifact records).
-std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
+// Nonzero cursors append |waterSimCursor:v1: and a uint64 little-endian value
+// to the canonical bytes. Zero/absent appends nothing, preserving legacy hashes.
+std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
+                                           std::uint64_t water_sim_cursor = 0);
 
 // Active-region freeze identity: voxel/material and water solver contents only.
 // Caller filters incomplete live/parked inputs; durable edited records allow every lifecycle.
@@ -93,20 +97,19 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 std::string ComputeRegionContentHash(const WorldStreamingState& state);
 
 //  determinism contract: per-system sub-hashes for desync localization.
-// The TOP-LEVEL world_hash (ComputeWorldStreamingStateHash above) is unchanged
-// byte-for-byte; these are ADDITIVE. Each field is an independent
-// fnv1a_64_stable_json checksum over a PROJECTION of the same canonical
-// per-chunk snapshot, grouping the persisted fields by subsystem so a future
-// lockstep desync reports WHICH system diverged and at what tick
-// (Factorio CRC-per-system playbook, research Area 2 takeaway 4). Same
-// chunk-id-ascending ordering and same Checksum as the top-level hash, so
+// Legacy world and sub-hashes remain byte-identical when the cursor is zero.
+// Chunk fields use independent fnv1a_64_stable_json checksums over a PROJECTION of the same
+// canonical per-chunk snapshot, grouping the persisted fields by subsystem so a future lockstep
+// desync reports WHICH system diverged and at what tick (Factorio CRC-per-system playbook, research
+// Area 2 takeaway 4). Same chunk-id-ascending ordering and same Checksum as the top-level hash, so
 // sub-hashes are as reproducible as the whole.
 struct WorldStreamingStateSubHashes {
     // Terrain field + heightmap + chunk identity/state (the worldgen output).
     std::string terrain;
     // Surface + water mesh geometry (the meshing output).
     std::string mesh;
-    // Water simulation level/flow/terrain-height fields and water flags.
+    // Water fields checksum, plus a labelled cursor checksum only when nonzero.
+    // The separate components allow checkpoint localization to name water/cursor.
     std::string water;
     // ECS entity snapshot hash (RNG-bearing sim entities live here). Empty when
     // no entity snapshot is supplied; ServerWorldRunner fills it from the
@@ -132,7 +135,7 @@ struct WorldStreamingStateSubHashes {
     // (e.g. the persistence fixtures, which never construct one).
     std::string aether;
     // the STATE-ONLY aether_state:v1: sub-hash
-    // (GameSession::ComputeAetherStateSubHash). Codex finding A: the folded
+    // (GameSession::ComputeAetherStateSubHash). The folded
     // |aether: composite embeds the tick-dependent re-derivable half, which the
     // heavy oracle recompute-and-excludes -- so the AUTHORITATIVE stateful
     // layer needs its own named slot for save/load + resim comparison (and
@@ -142,9 +145,11 @@ struct WorldStreamingStateSubHashes {
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure
-// projection of the same snapshot the top-level hash uses; does not touch
-// ComputeWorldStreamingStateHash. The entities field is left empty.
-WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state);
+// projection of the same snapshot and cursor the top-level hash uses. The
+// entities field is left empty.
+WorldStreamingStateSubHashes
+ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
+                                    std::uint64_t water_sim_cursor = 0);
 
 // Overload that also fills the entities sub-hash from a serialized ECS entity
 // snapshot (the canonical SerializeEntityRegistrySnapshotJson output), checksummed
@@ -152,7 +157,8 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
 // empty-snapshot serialization for a terrain/water-only headless world.
 WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
-                                    const std::string& entity_snapshot_json);
+                                    const std::string& entity_snapshot_json,
+                                    std::uint64_t water_sim_cursor = 0);
 
 // Append-only runtime hash order; shared with the production server runner.
 std::string ComposeWorldHash(const std::string& chunk_hash,

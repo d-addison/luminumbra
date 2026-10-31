@@ -11,6 +11,38 @@
 namespace Luminumbra::Rendering {
 
 struct TerrainCullingTestPeer {
+    static void SeedRetainedLegacyInventory(RenderPipeline& pipeline,
+                                            std::size_t bytes,
+                                            std::size_t vertex_arrays) {
+        pipeline.m_legacy_far_resident_bytes = bytes;
+        pipeline.m_legacy_far_vertex_arrays = vertex_arrays;
+    }
+    // Shadow qualification mutates only the fixture transport it needs; callers
+    // retain const renderer access for residency and selection observations.
+    static FarWorldRefusal
+    BindShadowFarWorldFixture(RenderPipeline& pipeline,
+                              JobSystem& jobs,
+                              std::unique_ptr<FarVolumeGpuDriver> driver,
+                              std::shared_ptr<const FarWorldPristineFixture> fixture) {
+        pipeline.m_far_world->InstallBackend(std::move(driver));
+        return pipeline.m_far_world->BindFixture(
+            jobs, std::move(fixture), 1, 1, FarWorldDevelopmentLimits());
+    }
+    static bool AdvanceShadowFarWorldFrame(RenderPipeline& pipeline,
+                                           std::uint64_t frame,
+                                           const std::array<double, 3>& camera,
+                                           std::span<const FarVolumeWantedRequest> requests) {
+        return pipeline.m_far_world->AdvanceFrame(frame, camera, requests);
+    }
+    static bool PublishEmptyShadowFarWorldOwnership(RenderPipeline& pipeline, std::uint64_t frame) {
+        pipeline.m_far_world->BeginLiveOwnership(frame);
+        return pipeline.m_far_world->FinishLiveOwnership();
+    }
+    static FarWorldSubmitStats SubmitShadowFarWorld(RenderPipeline& pipeline,
+                                                    const std::array<double, 3>& camera,
+                                                    const FarWorldPrepareDraw& prepare) {
+        return pipeline.m_far_world->Submit(camera, prepare);
+    }
     // Shadow exclusion qualification: initialize only the real shadow resources
     // and enter the production stage, including its production terrain submitter.
     // Test-only access through the existing peer; no shipping behavior changes.

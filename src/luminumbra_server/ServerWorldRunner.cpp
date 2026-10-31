@@ -38,6 +38,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
@@ -184,7 +185,7 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
     pred(-6.0f, 9.0f);
     pred(6.0f, 9.0f);
     for (int i = 0; i < 6; ++i)
-        prey(-7.0f + i * 2.4f, -2.0f);
+        prey(-7.0f + static_cast<float>(i) * 2.4f, -2.0f);
 }
 
 //  spawn a deterministic PLANT roster so the headless smoke exercises the plant
@@ -228,6 +229,10 @@ ServerWorldRunner::~ServerWorldRunner() {
 }
 
 bool ServerWorldRunner::Boot() {
+    if (!World::SurfaceRadiiSupported(m_config.surface_radius, m_config.collision_radius)) {
+        m_bootError = "Surface and collision radii must be between 0 and 12 chunks";
+        return false;
+    }
     if (m_booted) {
         return true;
     }
@@ -253,24 +258,16 @@ bool ServerWorldRunner::Boot() {
     // host==peer: the headless host must run the SAME water-sim resolution the
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
-    // Resolved against the runner root with a CWD-relative fallback (the client's
-    // load path); a missing file is all-defaults = Medium = byte-identical.
+    // Missing runtime defaults use compiled defaults, independently of the launch directory.
     {
-        namespace fsys = std::filesystem;
-        const fsys::path root =
-            m_config.root_path.empty() ? fsys::path(".") : fsys::path(m_config.root_path);
-        fsys::path systems_json = root / "data" / "common" / "systems.json";
-        std::error_code systems_ec;
-        if (!fsys::exists(systems_json, systems_ec)) {
-            systems_json = fsys::path("data") / "common" / "systems.json";
-        }
-        const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
-        m_session->SetActiveRegionsEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimActiveRegions));
+        const auto sys_cfg =
+            m_config.systems_config_override
+                ? *m_config.systems_config_override
+                : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(m_config.root_path);
+        m_session->ApplySystemConfig(sys_cfg);
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
-        m_session->SetWaterHighResEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     }
+    m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
@@ -278,7 +275,13 @@ bool ServerWorldRunner::Boot() {
     if (!m_config.world_id.empty()) {
         world_ready = m_session->LoadWorld(m_config.world_id);
     } else {
-        world_ready = m_session->CreateWorld(m_config.world_name, m_config.seed, m_config.preset);
+        world_ready = m_session->CreateWorld(
+            m_config.world_name,
+            m_config.seed,
+            m_config.preset,
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr,
+            m_config.preset_use,
+            m_config.required_preset_content_hash);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();
@@ -627,6 +630,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // the simulation entirely (determinism discipline).
         using BudgetStage = luminumbra::simulation::SimBudgetStage;
         auto& budget = m_session->GetSimBudgetTelemetry();
+        const auto snapshots_before = budget.Enabled() ? world_system->snapshot_copies() : 0;
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
         luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
         physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
@@ -748,6 +752,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             const auto scheduled =
                 world_system->get_last_streaming_budget_stats().scheduled_generation;
             const auto* water = m_session->GetWaterSystem();
+            streaming_budget.RecordWorkItems(budget_tick,
+                                             world_system->get_last_streaming_budget_stats(),
+                                             physics_system->work_items(),
+                                             water ? water->cells_stepped_last_update() : 0u,
+                                             world_system->snapshot_copies() - snapshots_before);
             streaming_budget.Record(budget_tick,
                                     timing,
                                     scheduled,
@@ -964,12 +973,12 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     }
 
     Persistence::WorldSaveService service;
-    //   +   hash revisionS: fold the wind AND weather sub-hashes
-    // into the top-level hash. The chunk hash itself is unchanged; the composite
-    // deliberately is not.
+    // Fold the cursor-bound chunk hash and the session's runtime sub-hashes
+    // using the shared append-only order.
     return Persistence::ComposeWorldHash(
-        m_session->ActiveRegionsEnabled() ? m_session->ComputeChunkStateHash()
-                                          : service.world_hash(state),
+        m_session->ActiveRegionsEnabled()
+            ? m_session->ComputeChunkStateHash()
+            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
         WindSubHash(m_session.get()),
         WeatherSubHash(m_session.get()),
         AetherSubHash(m_session.get()),
@@ -980,8 +989,7 @@ std::string ServerWorldRunner::ComputeWorldHash() {
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
     // per-system sub-hashes over the SAME streamed-chunk snapshot the
-    // top-level world_hash is built from. Additive desync localization; the
-    // top-level hash (ComputeWorldHash) is unchanged.
+    // top-level world_hash is built from, including the same water cursor.
     Persistence::WorldStreamingStateSubHashes empty;
     if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
         return empty;
@@ -1002,7 +1010,8 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
     Persistence::WorldStreamingStateSubHashes sub =
-        Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
+        Persistence::ComputeWorldStreamingStateSubHashes(
+            state, entities_snapshot, world_system->GetWaterSimWindowCursor());
     // the wind sub-hash slot, supplied from the session's wind
     // field (not chunk-derived). Present + stable for the WindFieldDeterminism
     // gate and the desync-localization oracle.
@@ -1016,8 +1025,8 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // AetherFieldDeterminism gate and the desync-localization oracle.
     sub.aether = AetherSubHash(m_session.get());
     // the STATE-ONLY stateful-layer sub-hash — the heavy
-    // oracle's authoritative-compare slot when sim.aether_state is ON (Codex
-    // finding A). Always empty on the default (OFF) world.
+    // oracle's authoritative-compare slot when sim.aether_state is ON.
+    // Always empty on the default (OFF) world.
     sub.aether_state = m_session ? m_session->ComputeAetherStateSubHash() : std::string();
     return sub;
 }
@@ -1054,19 +1063,21 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     //   +   +  + gate-populated-world-replay +
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
-    out_world_hash = Persistence::ComposeWorldHash(m_session->ActiveRegionsEnabled()
-                                                       ? m_session->ComputeChunkStateHash()
-                                                       : service.world_hash(state),
-                                                   wind_hash,
-                                                   weather_hash,
-                                                   aether_hash,
-                                                   scent_hash,
-                                                   ecology_hash,
-                                                   plant_hash);
+    out_world_hash = Persistence::ComposeWorldHash(
+        m_session->ActiveRegionsEnabled()
+            ? m_session->ComputeChunkStateHash()
+            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
+        wind_hash,
+        weather_hash,
+        aether_hash,
+        scent_hash,
+        ecology_hash,
+        plant_hash);
 
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
+    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(
+        state, entities_snapshot, world_system->GetWaterSimWindowCursor());
     out_sub.wind = wind_hash;
     out_sub.weather = weather_hash;
     out_sub.aether = aether_hash;
@@ -1083,41 +1094,19 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         !m_session->IsSimulationTickBoundary()) {
         return 0;
     }
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-
     const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
     if (save_dir.empty()) {
         return 0;
     }
-    Persistence::WorldSaveService service;
-    // Flag on: the chunk snapshot, the session state and the metadata are ONE snapshot
-    // transaction (a single index publication); flag off just runs the body.
-    const bool saved = m_session->RunInSnapshotTransaction([&]() {
-        std::vector<std::string> errors;
-        if (!service.save_world(state, save_dir, &errors)) {
-            for (const std::string& error : errors) {
-                LUMINUMBRA_CORE_ERROR("SaveFullSnapshot failed: {}", error);
-            }
-            return false;
-        }
-        // refresh world_info.json alongside the chunk snapshot so world-level
-        // sim state captured there (the water sim-window cursor) reflects THIS save
-        // moment, not world creation. Without this a loaded session resimulates from a
-        // stale cursor and the water evolution diverges from the original's.
-        if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
-            return false;
-        const bool metadata_saved = m_session->SaveWorld();
-        return !m_session->ActiveRegionsEnabled() || metadata_saved;
-    });
-    if (!saved)
+    if (!m_session->SavedPresetCompatible(save_dir)) {
+        LUMINUMBRA_CORE_ERROR(
+            "SaveFullSnapshot failed: destination preset or identity is incompatible");
         return 0;
-    return state.size();
+    }
+    world::WorldStateSaveReport report;
+    if (!m_session->SaveWorldStateTo(save_dir, &report, /*full_snapshot=*/true))
+        return 0;
+    return report.chunks_total;
 }
 
 std::size_t ServerWorldRunner::StreamedChunkCount() {
@@ -1164,7 +1153,7 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
     if (m_booted && m_session) {
         // The host tick loop has returned, so this cannot overlap autosave/snapshot.
         // Save on shutdown via WorldSaveService (incremental contract: a
-        // never-edited world writes nothing and stays on the fresh path).
+        // never-edited world writes no chunk snapshot).
         world::WorldStateSaveReport save_report;
         m_session->SaveWorldState(&save_report);
         if (shutdown_save_report) {

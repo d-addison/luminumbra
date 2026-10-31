@@ -138,7 +138,9 @@ nlohmann::json& WriteKnobLayer(nlohmann::json& preset,
 
 // Resolve generation_params from a knob layer: overlay(ApplyKnobLayer(baseline,
 // knobs), overrides). The override application matches the client BuildCustomPreset
-// semantics (typed, dotted-path writes under /generation_params). This is the
+// semantics (typed, dotted-path writes under /generation_params). Numeric strings
+// must be complete, finite and in range; integers allow a zero fractional suffix.
+// Invalid numeric overrides are ignored. This is the
 // single function the reopen-exactness test pins.
 nlohmann::json ResolveKnobLayer(const nlohmann::json& baseline,
                                 const KnobVector& knobs,

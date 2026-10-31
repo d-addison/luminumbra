@@ -1,9 +1,10 @@
 {
   "name": "Flat Lands",
   "description": "Mostly flat, gently rolling plains — DEM-grounded to real prairie statistics",
-  "schema_rev": 6,
+  "schema_rev": 8,
   "generation_params": {
     "terrain": {
+      "surface_sampling_revision": 2,
       "base_frequency": 0.006,
       "base_amplitude": 14.0,
       "octaves": 5,
@@ -28,7 +29,9 @@
     },
     "biomes": {
       "temperature_frequency": 0.008,
-      "humidity_frequency": 0.008
+      "humidity_frequency": 0.008,
+      "table": "",
+      "relief_enabled": false
     },
     "features": {
       "caves_enabled": false,
@@ -36,7 +39,8 @@
       "rivers_enabled": false,
       "lakes_enabled": false,
       "cliffs_enabled": false,
-      "structures_enabled": true
+      "structures_enabled": true,
+      "surface_breaks_enabled": false
     }
   }
 }

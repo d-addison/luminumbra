@@ -1,9 +1,14 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
+
+#include "../support/UniqueTempPath.h"
 
 #include "luminumbra_client/debug/DebugCamera.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/Shader.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #define GLFW_INCLUDE_NONE
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -15,7 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -41,10 +46,7 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
 
 struct TempSaveDir {
     TempSaveDir() {
-        path = std::filesystem::temp_directory_path() /
-               ("luminumbra_far_worker_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_far_worker_");
     }
     ~TempSaveDir() {
         std::error_code error;
@@ -54,7 +56,7 @@ struct TempSaveDir {
 };
 
 TerrainGenParams FlatParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.005f;
     params.base_amplitude = 0.0f;
     params.height_offset = 12.0f;
@@ -114,7 +116,7 @@ std::vector<PlaneSegmentBits> SharedPlaneSegments(const FarLodRegionMesh& mesh,
             indices[2] >= mesh.vertices.size()) {
             continue;
         }
-        for (int edge = 0; edge < 3; ++edge) {
+        for (std::size_t edge = 0; edge < 3; ++edge) {
             const VoxelVertex& a = mesh.vertices[indices[edge]];
             const VoxelVertex& b = mesh.vertices[indices[(edge + 1) % 3]];
             // A region mesh is closed on one side of this exact sample plane,
@@ -138,56 +140,6 @@ std::vector<PlaneSegmentBits> SharedPlaneSegments(const FarLodRegionMesh& mesh,
     }
     std::sort(segments.begin(), segments.end());
     return segments;
-}
-
-std::size_t CountIndexedWorldVertex(const FarLodRegionMesh& mesh,
-                                    int region_x,
-                                    int region_z,
-                                    float world_x,
-                                    float world_y,
-                                    float world_z,
-                                    u32 material) {
-    const float local_x = world_x - static_cast<float>(region_x * kFarLodRegionSizeMeters);
-    const float local_z = world_z - static_cast<float>(region_z * kFarLodRegionSizeMeters);
-    std::set<u32> matches;
-    for (const u32 index : mesh.indices) {
-        if (index >= mesh.vertices.size())
-            continue;
-        const VoxelVertex& vertex = mesh.vertices[index];
-        if (vertex.position.x == local_x && vertex.position.y == world_y &&
-            vertex.position.z == local_z && vertex.material_id == material) {
-            matches.insert(index);
-        }
-    }
-    return matches.size();
-}
-
-std::size_t CountIndexedWorldPosition(const FarLodRegionMesh& mesh,
-                                      int region_x,
-                                      int region_z,
-                                      float world_x,
-                                      float world_y,
-                                      float world_z) {
-    const float local_x = world_x - static_cast<float>(region_x * kFarLodRegionSizeMeters);
-    const float local_z = world_z - static_cast<float>(region_z * kFarLodRegionSizeMeters);
-    std::set<u32> matches;
-    for (const u32 index : mesh.indices) {
-        if (index >= mesh.vertices.size())
-            continue;
-        const VoxelVertex& vertex = mesh.vertices[index];
-        if (vertex.position.x == local_x && vertex.position.y == world_y &&
-            vertex.position.z == local_z) {
-            matches.insert(index);
-        }
-    }
-    return matches.size();
-}
-
-bool PlaneSegmentsContainHeight(const std::vector<PlaneSegmentBits>& segments, float world_y) {
-    const u32 height_bits = std::bit_cast<u32>(world_y);
-    return std::any_of(segments.begin(), segments.end(), [&](const auto& segment) {
-        return segment[0][1] == height_bits || segment[1][1] == height_bits;
-    });
 }
 
 struct CrossRegionBuildResult {
@@ -223,27 +175,6 @@ bool SetPlanarAuthority(Chunk& chunk, float surface_y, u8 material) {
                                           static_cast<std::size_t>(y) * side +
                                           static_cast<std::size_t>(z) * side * side;
                 chunk.sdf_data[index] = static_cast<float>(y) - surface_y;
-            }
-        }
-    }
-    chunk.mark_voxel_data_dirty();
-    return true;
-}
-
-bool SetBoundaryRampedAuthority(Chunk& chunk, float shared_face_y, float interior_y, u8 material) {
-    const int side = CHUNK_SIZE_X + 1;
-    const std::size_t expected_samples = static_cast<std::size_t>(side) * side * side;
-    if (chunk.sdf_data.size() != expected_samples)
-        return false;
-    chunk.material_data.assign(expected_samples, material);
-    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
-        for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
-            for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
-                const float surface = x == 0 ? shared_face_y : interior_y;
-                const std::size_t index = static_cast<std::size_t>(x) +
-                                          static_cast<std::size_t>(y) * side +
-                                          static_cast<std::size_t>(z) * side * side;
-                chunk.sdf_data[index] = static_cast<float>(y) - surface;
             }
         }
     }
@@ -466,8 +397,10 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
         static_cast<std::size_t>(old_authority - old_outcome.tile.sdf_bricks.begin());
     const std::size_t samples = FarLodSdfBrickSampleCount(FarLodTier::F1);
     const std::vector<i16> old_density(
-        old_outcome.tile.sdf_density_q.begin() + old_authority_index * samples,
-        old_outcome.tile.sdf_density_q.begin() + (old_authority_index + 1u) * samples);
+        old_outcome.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>(old_authority_index * samples),
+        old_outcome.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>((old_authority_index + 1u) * samples));
 
     TerrainGenParams new_params = old_params;
     new_params.height_offset = 24.0f;
@@ -496,8 +429,10 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
     const std::size_t new_authority_index =
         static_cast<std::size_t>(new_authority - rebased.tile.sdf_bricks.begin());
     const std::vector<i16> new_density(
-        rebased.tile.sdf_density_q.begin() + new_authority_index * samples,
-        rebased.tile.sdf_density_q.begin() + (new_authority_index + 1u) * samples);
+        rebased.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>(new_authority_index * samples),
+        rebased.tile.sdf_density_q.begin() +
+            static_cast<std::ptrdiff_t>((new_authority_index + 1u) * samples));
     EXPECT_EQ(new_density, old_density);
 }
 
@@ -1259,7 +1194,7 @@ void main() {
     const std::array<float, 8> albedo{0.2f, 0.4f, 0.05f, 1.0f, 0, 0, 0, 0};
     const std::array<float, 8> normal_surface{0.5f, 0.5f, 0.8f, 0.4f, 0, 0, 0, 0};
     for (int i = 0; i < 2; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(i));
         glBindTexture(GL_TEXTURE_2D, gl.textures[static_cast<std::size_t>(5 + i)]);
         glTexImage2D(GL_TEXTURE_2D,
                      0,
@@ -1301,7 +1236,7 @@ void main() {
             EXPECT_EQ(color, clear) << "low-coverage gaps must remain empty";
             continue;
         }
-        for (int i = 0; i < 3; ++i)
+        for (std::size_t i = 0; i < 3u; ++i)
             EXPECT_NEAR(color[i], albedo[i], 0.002f);
         EXPECT_NEAR(color[3], 0.8f, 0.002f);
         glReadBuffer(GL_COLOR_ATTACHMENT1);
@@ -1359,6 +1294,9 @@ void main() { color = vec4(1); }
     SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
     FarLodSystem far;
     far.attach_job_system(&jobs);
+    // Exercise camera-region ownership without a distant-tier upload backlog.
+    // The full-horizon byte/count admission policy has its own FIFO regressions.
+    far.set_horizon(FarLodSystem::kF1OuterRangeMeters, FarLodSystem::kF1OuterRangeMeters + 50.0f);
     const glm::vec3 camera(256, 1200, 256);
     for (int frame = 0; frame < 12; ++frame) {
         far.update(world, camera);
@@ -1387,7 +1325,8 @@ void main() { color = vec4(1); }
     // resident regions cannot fill a missing centre tile from this camera.
     for (int y : {16, 32, 48})
         for (int x : {16, 32, 48})
-            EXPECT_EQ(pixels[(y * 64 + x) * 4], 255) << "missing ground at " << x << "," << y;
+            EXPECT_EQ(pixels[static_cast<std::size_t>((y * 64 + x) * 4)], 255)
+                << "missing ground at " << x << "," << y;
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     far.shutdown();
     jobs.shutdown();
@@ -1463,7 +1402,7 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glGenTextures(1, &gl.array);
     for (int unit = 1; unit <= 6; ++unit) {
-        glActiveTexture(GL_TEXTURE0 + unit);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
         glBindTexture(GL_TEXTURE_2D_ARRAY, gl.array);
     }
     const std::array<unsigned char, 4> texel{128, 128, 255, 255};
@@ -1530,6 +1469,10 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
         SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
         FarLodSystem far;
         far.attach_job_system(&jobs);
+        // Keep all nine neighbouring regions, including boundary crossings,
+        // while isolating ownership from the full-horizon FIFO upload budget.
+        far.set_horizon(FarLodSystem::kF1OuterRangeMeters,
+                        FarLodSystem::kF1OuterRangeMeters + 50.0f);
         far.set_coverage_diagnostics_enabled(true);
         const glm::mat4 projection =
             ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);
@@ -1714,4 +1657,21 @@ TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {
         }
     }
     jobs.shutdown();
+}
+
+TEST(FarLodWorker, MissingImmutableAuthorityPayloadIsRejected) {
+    const SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
+    Systems::FarLodSdfSnapshot snapshot;
+    snapshot.params_hash = ComputeTerrainParamsHash(world.get_params(), world.get_seed());
+    snapshot.entries.push_back(FarLodSdfSnapshotEntry{
+        .coords = IVec3(0, 0, 0),
+        .provenance = ChunkSdfProvenance::LoadedOrEdited,
+        .voxel_revision = 1,
+        .authority_durable = true,
+        .payload = {},
+    });
+    const auto outcome = BuildFarLodWorkerTile(world, snapshot, FarLodTier::F1, 0, 0, {});
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_FALSE(outcome.error.empty());
+    EXPECT_TRUE(outcome.mesh.vertices.empty());
 }

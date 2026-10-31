@@ -2,14 +2,22 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/Log.h"
+#include "core/Profiler.h"
+#include "core/WaterSeedInputs.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra {
+
+namespace World {
+struct FarLodSdfSnapshot;
+}
 
 enum class ChunkState : u8 {
     Unloaded,
@@ -50,14 +58,21 @@ public:
 
     // Thread-safe state management
     ChunkState get_state() const {
-        std::lock_guard<std::mutex> lock(m_state_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
         return m_state;
     }
 
     void set_state(ChunkState new_state) {
-        std::lock_guard<std::mutex> lock(m_state_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
         m_state = new_state;
     }
+
+    // Owner-thread capture at streaming publication. Reuses immutable bytes for
+    // identical input; mutation creates a new value while workers retain the old.
+    std::shared_ptr<const World::FarLodSdfSnapshot>
+    capture_far_lod_sdf(std::size_t& bytes_copied) const;
 
     // --- Voxel edit tracking ---
     // True when sdf/heightmap voxel data was mutated AFTER generation and has
@@ -65,6 +80,7 @@ public:
     // clear; runtime voxel edits must call mark_voxel_data_dirty, and a
     // successful save clears it again.
     void mark_voxel_data_dirty() {
+        advance_water_seed_edit_generation();
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
         u32 revision = m_voxel_revision.load(std::memory_order_acquire);
@@ -105,6 +121,7 @@ public:
         }
     }
     void mark_sdf_loaded_or_edited() {
+        advance_water_seed_edit_generation();
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
         u32 expected = 0u;
@@ -228,6 +245,21 @@ public:
         std::vector<u8>().swap(pending_material_data);
         set_state(ChunkState::Idle);
     }
+    // Unlike voxel_revision, this derived-input key never resets on regeneration:
+    // an edit followed by regeneration must not revive a retired seed payload.
+    [[nodiscard]] std::uint64_t water_seed_edit_generation() const {
+        return m_water_seed_edit_generation.load(std::memory_order_acquire);
+    }
+    void stage_water_seed_inputs(std::shared_ptr<HighWaterSeedInputs> inputs) {
+        m_water_seed_inputs = std::move(inputs);
+    }
+    std::shared_ptr<HighWaterSeedInputs> take_water_seed_inputs() {
+        return std::exchange(m_water_seed_inputs, {});
+    }
+    // Const diagnostic of the pending acceleration data; never simulation state.
+    [[nodiscard]] const HighWaterSeedInputs* water_seed_inputs() const {
+        return m_water_seed_inputs.get();
+    }
 
     // --- Voxel & SDF Data ---
     std::vector<f32> sdf_data;
@@ -342,6 +374,19 @@ public:
     bool try_set_state(ChunkState expected_state, ChunkState new_state);
 
 private:
+    void advance_water_seed_edit_generation() {
+        auto generation = m_water_seed_edit_generation.load(std::memory_order_acquire);
+        while (
+            generation != std::numeric_limits<std::uint64_t>::max() &&
+            !m_water_seed_edit_generation.compare_exchange_weak(
+                generation, generation + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
+    }
+    std::atomic<std::uint64_t> m_water_seed_edit_generation{0};
+    // Main-thread owned handle. Workers capture a separate handle, never access
+    // this member, and only publish immutable inputs through the ready flag.
+    std::shared_ptr<HighWaterSeedInputs> m_water_seed_inputs;
+    mutable std::shared_ptr<const World::FarLodSdfSnapshot> m_far_lod_snapshot;
     const IVec3 m_coords;
     const ChunkID m_id;
     ChunkState m_state;

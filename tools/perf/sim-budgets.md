@@ -8,7 +8,8 @@ string seed format; the proposal emitter converts it to an integer.
 
 A capture's `fixture_hash`, and any non-null budget `identity.fixture_hash`,
 must contain exactly 64 lowercase hexadecimal characters. Null budget
-fixture hashes remain allowed while the workload identity is being pinned.
+fixture hashes are allowed, including under `--require-complete`; completeness
+requires pinned seed, ticks, stage limits and total limits, not a fixture hash.
 
 Each stage entry has `max_work_per_tick` (a non-negative integer or null)
 and an optional boolean `expect_inactive`, defaulting to false. A stage
@@ -23,6 +24,144 @@ Any exceeded pinned work limit exits with code 1, even when identities or
 other limits remain unpinned. Invalid input or mismatched pinned workload
 identity exits with code 2. Durations remain advisory.
 
-The committed limits remain null until AC2p pins them from the first devel
-push's `sim-budget-evidence` artifact. The CI capture step then switches to
-`--require-complete`.
+The committed limits enforce the shipping-default workload in CI with
+`--require-complete`: seed 1337, 600 ticks, surface radius 1 and collision
+radius 1, across default, mountains and archipelago. The capture script uses
+its own checkout root and `data/common/systems.json`, with populated ecology
+and plant rosters and autosaves every 30 ticks. The separate base-versus-head
+comparison retains its gates-off `perf-common` fixture; its marker-guarded
+source adapter does not apply to the shipping capture root.
+
+Baseline `identity.fixture_hash` and `identity.revision` remain null so the
+work limits can gate later content and code revisions. The capture manifest
+and proposal retain the measured revision and fixture hash for evidence.
+New captures also record `preset_hash`, hashing the preset tree and referenced
+dependencies under `data`, including tables outside `data/common`. Proposals
+and emitted budgets retain it; comparisons refuse different preset hashes and
+the budget checker enforces a non-null pinned preset hash. It uses the same
+64 lowercase hexadecimal format. Historical captures may omit it, but cannot
+compare with captures that record it. Existing baselines may leave it unpinned.
+The common-data `fixture_hash` uses `fixture_hash(..., scope="headless-server")` over `data/common`;
+that scope still includes some client-only content, so pinning it would reject
+unrelated changes before checking simulation work. Simulation work changes
+still have to satisfy the pinned limits or receive a new capture and explicit
+budget calibration. Seed, ticks and both radii remain pinned.
+
+Capture validates preset biome references against `data` before launching the
+server. All perf fixture consumers use the shared containment resolver: absolute
+POSIX and Windows paths, normalized escapes, and symlink targets outside the
+selected root are refused on every host. Portable parsing of authored references
+is deliberately stricter than the native loader's host path grammar. Enumerated
+filenames retain their native spelling and undergo physical containment checks.
+Accepted authored references also retain native spelling: backslashes are literal
+filename characters on POSIX and separators on Windows.
+Contained directory links and junctions contribute files under each logical name;
+directory cycles are refused. Fixture and capture readers require regular files,
+open without blocking where supported, and validate the opened descriptor before
+reading. POSIX opens anchor canonical components to directory descriptors;
+Windows checks the owning handle's normalized long path. Path validation alone
+does not authorize a later pathname read.
+In-root references remain valid; hashes without additional dependencies stay
+unchanged. See the
+[fixture reference rules](../../docs/performance.md).
+
+Each `capture.json` run's `artifact` is relative to its capture directory and
+uses the same containment rules. Proposal, comparison and budget checking all
+refuse an escaping artifact before reading it, including file or directory
+symlinks. Nested in-root artifact paths use host path semantics, including literal
+backslash filenames on POSIX.
+Capture recomputes both common-data and preset hashes after all three runs and
+refuses to publish `capture.json` if either changed during capture.
+
+Positive stage maxima and the maximum of the summed per-tick traces receive
+integer ceiling headroom of 3/2. All three presets measured a total maximum
+of 147526 and pin a total limit of 221289. Stage maxima are not summed to
+derive that total limit.
+
+The proposal emitter deliberately leaves `idle` (samples > 0, maximum work 0)
+limits null for calibration. The schema permits zero, and the checker treats
+zero as pinned: any positive work exceeds it. The committed baseline pins
+every zero-work stage to zero, symmetrically across stages and presets. This
+includes animation, instinct, perception, locomotion, energy, irrigation,
+disease, fire, circadian, events and server_streaming, each of which has 600
+samples. They remain expected-active; their zero counts describe this fixed
+workload's participants or submissions, not an absence of execution. New work
+requires measurement and an explicit budget update, rather than an arbitrary
+minimum allowance. Durations still do not gate.
+
+Only the separate `wind` and `weather` stages set `expect_inactive: true`,
+also with zero limits. With shipping `sim.active_regions` enabled and both
+fields initialized, `GameSession::TickSimulation` directly invokes
+`WeatherSystem::UpdateFromClock` every fixed tick; these fields have no
+separate scheduler registration or delayed cadence. The server loads and
+applies the shipping system configuration before creating the world and
+drives that fixed tick. The combined call executes wind, weather, then wind
+again, including storm processing. Telemetry intentionally attributes its
+entire duration and 8192 input cells to `wind_weather`, with 600 samples and a
+pinned limit of 12288. The alternative separate hooks are not reached, so
+their zero samples are expected, not missing telemetry. See
+[telemetry stage definitions](../../docs/sim-budget-telemetry.md) and
+`GameSession.cpp`'s `Stage::WindWeather` branch. A switch to the separate path
+would exceed its zero limits and leave `wind_weather` unexpectedly inactive.
+
+## Re-pin the shipping-default budgets
+
+Start from a clean checkout of the revision to measure (`git status --porcelain`
+must be empty), with its matching server binary already built using the `perf`
+preset. Run from the repository root. Use a new evidence directory each time;
+the capture refuses an existing one. The ignored `build/` paths keep capture
+outputs out of the source status.
+
+```sh
+python3 tools/perf/capture_sim_budget.py \
+  --binary build/perf/bin/luminumbra_server_app \
+  --evidence-dir build/sim-budget-capture \
+  --ticks 600 --seed 1337 --radius 1 --collision-radius 1
+python3 tools/perf/propose_sim_budgets.py build/sim-budget-capture \
+  --headroom-num 3 --headroom-den 2 \
+  --output build/sim-budget-proposal.json \
+  --emit-budgets build/sim-budget-candidate.json
+```
+
+The capture covers default, mountains and archipelago with the shipping
+configuration, both populated rosters and autosaves every 30 ticks. Its general
+default is 3,600 ticks; the explicit `--ticks 600` above matches the CI baseline.
+`--output` writes proposal evidence; `--emit-budgets` creates the candidate
+baseline. Review the observations before applying it. Keep the proposed positive
+stage and per-preset total limits with 3/2 headroom. For every preset, calibrate
+each `idle` stage to limit 0 with `expect_inactive: false`. Only `wind` and
+`weather` may be `inactive`; give those limit 0 and `expect_inactive: true` for
+the combined path described above. Investigate any other inactivity instead of
+accepting it. The following applies that policy and writes the baseline:
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+proposal = json.loads(Path("build/sim-budget-proposal.json").read_text(encoding="utf-8"))
+budgets = json.loads(Path("build/sim-budget-candidate.json").read_text(encoding="utf-8"))
+for preset, data in proposal["presets"].items():
+    inactive = {name for name, stage in data["stages"].items()
+                if stage["status"] == "inactive"}
+    if inactive != {"wind", "weather"}:
+        raise SystemExit(f"Investigate unexpected inactive stages in {preset}: {inactive}")
+    for name, stage in data["stages"].items():
+        entry = budgets["presets"][preset]["stages"][name]
+        entry["expect_inactive"] = name in inactive
+        if stage["status"] in {"idle", "inactive"}:
+            entry["max_work_per_tick"] = 0
+budgets["identity"]["revision"] = None
+budgets["identity"]["fixture_hash"] = None
+Path("tools/perf/baselines/sim-budgets.json").write_text(
+    json.dumps(budgets, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+python3 tools/perf/check_sim_budgets.py build/sim-budget-capture \
+  tools/perf/baselines/sim-budgets.json --require-complete \
+  --output build/sim-budget-check.json
+```
+
+Keep the capture and proposal evidence unchanged, including their revision and
+fixture hash. The final check must exit 0 with no failures, unpinned, unbudgeted,
+missing or unexpected-inactive entries. All stage and total limits must be
+non-null; seed 1337, ticks 600 and both radii 1 must stay pinned in the baseline.

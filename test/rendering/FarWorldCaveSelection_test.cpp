@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <map>
 #include <tuple>
@@ -94,7 +95,7 @@ void ExpectSharedMeshFace(const FarVolumeMesh& a,
             vertex.position[0] += mesh.origin_meters.x;
             vertex.position[1] += mesh.origin_meters.y;
             vertex.position[2] += mesh.origin_meters.z;
-            if (vertex.position[axis] != plane)
+            if (vertex.position[static_cast<std::size_t>(axis)] != plane)
                 continue;
             // Central differences of this quadratic field equal its analytic
             // gradient. Wrong halo coordinates must also fail this oracle.
@@ -192,7 +193,9 @@ TEST(FarWorldCaveSelection, DefaultAndExactCodesReuseCanonicalEnum) {
     EXPECT_EQ(ResolveFarWorldCaveField(0), FarCaveMode::BandLimited);
     EXPECT_EQ(ResolveFarWorldCaveField(-0.0), FarCaveMode::BandLimited);
     EXPECT_EQ(ResolveFarWorldCaveField(1), FarCaveMode::BoxFiltered);
+    // The default renderer requests Ladder; without authority it has no effective cave policy.
     const FarWorldRenderer renderer;
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).requested, FarWorldMode::Ladder);
     const auto policy = renderer.CavePolicy(FarWorldPurpose::World);
     EXPECT_EQ(policy.requested, FarCaveMode::BandLimited);
     EXPECT_FALSE(policy.bound);
@@ -230,7 +233,7 @@ TEST(FarWorldCaveSelection, LegacyPreviewAndShaderRefusalHaveNoEffectiveCavePoli
     for (const auto requested : {std::optional(FarCaveMode::BandLimited),
                                  std::optional(FarCaveMode::BoxFiltered),
                                  std::optional<FarCaveMode>{}}) {
-        FarWorldRenderer legacy;
+        FarWorldRenderer legacy(FarWorldMode::Legacy);
         legacy.SetRequestedCavePolicy(requested);
         const auto selected = legacy.Selection(FarWorldPurpose::World);
         EXPECT_EQ(selected.effective, FarWorldMode::Legacy);
@@ -379,6 +382,14 @@ TEST(FarWorldCaveSelection, ProductionFacadeAdjacentTilesShareBordersHalosAndVer
 
 TEST(FarWorldCaveSelection, AnalyticOpeningSilhouettesRemainUnfilteredThroughOuterRadius) {
     auto params = CaveParams();
+    // Keep the analytic oracle on a flat surface: hydrology/terracing can otherwise
+    // lower adjacent box-filter taps enough to expose the noise router.
+    params.island_mask_enabled = false;
+    params.hydro_enabled = false;
+    params.rivers_enabled = false;
+    params.lakes_enabled = false;
+    params.cliffs_enabled = false;
+    params.biome_relief_enabled = false;
     // Prevent the noise router lifting the surface cap. At this shallow slice
     // all eight taps (including 64 m spacing) remain above the 18 m cap, leaving
     // the signed analytic mouth as an independent silhouette oracle.
@@ -430,6 +441,8 @@ TEST(FarWorldCaveSelection, OldCompletedBuildRefusesChangedContentOrCaveIdentity
                              [](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
                                  return FarVolumeSample{1, 7};
                              }};
+        request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0.0f);
+        request.water_bound = FarWorldWaterBound{true, 0, 0};
         ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
         ASSERT_EQ(queue.Pump(1), 1u);
         jobs.shutdown(); // Old completion exists; consumption still belongs to owner.

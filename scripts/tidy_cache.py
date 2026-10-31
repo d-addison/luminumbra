@@ -39,15 +39,26 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import importlib.util
 import json
+import ntpath
 import os
+import re
 import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+
+_PATH_SPEC = importlib.util.spec_from_file_location(
+    "_tidy_path_safety", os.path.join(os.path.dirname(__file__), "..", "tools", "ci", "path_safety.py"))
+_PATH_SAFETY = importlib.util.module_from_spec(_PATH_SPEC)
+_PATH_SPEC.loader.exec_module(_PATH_SAFETY)
+reject_reparse_points = _PATH_SAFETY.reject_reparse_points
 
 FORMAT_VERSION = "tidy-cache-v1"
 DEPS_TIMEOUT_SECONDS = 300
@@ -79,11 +90,254 @@ class CacheMiss(Exception):
     """The key for this unit cannot be established; run clang-tidy."""
 
 
+class _WindowsJob:
+    """Own a suspended driver and all descendants, including orphaned ones."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
+                        ("tpBasePri", wintypes.LONG), ("tpDeltaPri", wintypes.LONG),
+                        ("dwFlags", wintypes.DWORD)]
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_longlong) for name in (
+                "TotalUserTime", "TotalKernelTime", "ThisPeriodTotalUserTime", "ThisPeriodTotalKernelTime"
+            )] + [(name, wintypes.DWORD) for name in (
+                "TotalPageFaultCount", "TotalProcesses", "ActiveProcesses", "TotalTerminatedProcesses")]
+
+        self._ctypes, self._thread_entry, self._accounting = ctypes, ThreadEntry, Accounting
+        self._api = ctypes.WinDLL("kernel32", use_last_error=True)
+        signatures = {
+            "CreateJobObjectW": (wintypes.HANDLE, (ctypes.c_void_p, wintypes.LPCWSTR)),
+            "AssignProcessToJobObject": (wintypes.BOOL, (wintypes.HANDLE, wintypes.HANDLE)),
+            "TerminateJobObject": (wintypes.BOOL, (wintypes.HANDLE, wintypes.UINT)),
+            "QueryInformationJobObject": (wintypes.BOOL, (wintypes.HANDLE, ctypes.c_int,
+                                                       ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p)),
+            "CreateToolhelp32Snapshot": (wintypes.HANDLE, (wintypes.DWORD, wintypes.DWORD)),
+            "Thread32First": (wintypes.BOOL, (wintypes.HANDLE, ctypes.POINTER(ThreadEntry))),
+            "Thread32Next": (wintypes.BOOL, (wintypes.HANDLE, ctypes.POINTER(ThreadEntry))),
+            "OpenThread": (wintypes.HANDLE, (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)),
+            "ResumeThread": (wintypes.DWORD, (wintypes.HANDLE,)),
+            "CloseHandle": (wintypes.BOOL, (wintypes.HANDLE,)),
+        }
+        for name, (result, arguments) in signatures.items():
+            function = getattr(self._api, name)
+            function.restype, function.argtypes = result, arguments
+        self._handle = self._require(self._api.CreateJobObjectW(None, None))
+
+    def _require(self, value):
+        if not value:
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        return value
+
+    def start(self, process):
+        self._require(self._api.AssignProcessToJobObject(self._handle, int(process._handle)))
+        # Popen closes the primary thread handle. Find that sole suspended
+        # thread with Toolhelp, then resume it only after job assignment.
+        snapshot = self._api.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == self._ctypes.c_void_p(-1).value:
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        try:
+            entry = self._thread_entry()
+            entry.dwSize = self._ctypes.sizeof(entry)
+            found = self._api.Thread32First(snapshot, self._ctypes.byref(entry))
+            while found:
+                if entry.dwSize < self._ctypes.sizeof(entry):
+                    raise OSError("incomplete tool thread information")
+                if entry.th32OwnerProcessID == process.pid:
+                    thread = self._require(self._api.OpenThread(2, False, entry.th32ThreadID))
+                    try:
+                        if self._api.ResumeThread(thread) == 0xFFFFFFFF:
+                            raise self._ctypes.WinError(self._ctypes.get_last_error())
+                        return
+                    finally:
+                        self._api.CloseHandle(thread)
+                found = self._api.Thread32Next(snapshot, self._ctypes.byref(entry))
+            raise OSError("cannot find suspended tool thread")
+        finally:
+            self._api.CloseHandle(snapshot)
+
+    def terminate(self):
+        self._require(self._api.TerminateJobObject(self._handle, 1))
+        accounting = self._accounting()
+        while True:
+            self._require(self._api.QueryInformationJobObject(
+                self._handle, 1, self._ctypes.byref(accounting), self._ctypes.sizeof(accounting), None))
+            if not accounting.ActiveProcesses:
+                return
+            time.sleep(0.01)
+
+    def close(self):
+        self._api.CloseHandle(self._handle)
+
+
+_PROCESS_CONTEXT = threading.local()
+
+
+def parallel_map(function, items, jobs, *, collect_errors=()):
+    """Fail fast, drain owned tools, then report errors in input order."""
+    cancelled = threading.Event()
+    skipped = object()
+
+    def invoke(item):
+        _PROCESS_CONTEXT.cancelled = cancelled
+        try:
+            if cancelled.is_set():
+                return skipped
+            try:
+                return function(item)
+            except concurrent.futures.CancelledError:
+                if cancelled.is_set():
+                    # An owned tool interrupted by another worker's failure
+                    # must not hide that failure with a cancellation error.
+                    return skipped
+                raise
+        except BaseException:
+            # Publish cancellation before this worker can take another item,
+            # even if the coordinator is still submitting or awaiting work.
+            cancelled.set()
+            raise
+        finally:
+            del _PROCESS_CONTEXT.cancelled
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs))
+    try:
+        futures = [pool.submit(invoke, item) for item in items]
+        concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_EXCEPTION)
+    except BaseException:
+        cancelled.set()
+        raise
+    finally:
+        # Do this before waiting: workers observe cancellation within 100ms,
+        # terminate their own group/job and drain/reap their driver as usual.
+        pool.shutdown(wait=True, cancel_futures=cancelled.is_set())
+
+    # Shutdown has drained every active worker. Preserve input order for both
+    # successful values and collected diagnostics, ignoring only cancelled work.
+    results, errors = [], []
+    for future in futures:
+        if future.cancelled():
+            continue
+        try:
+            result = future.result()
+            if result is not skipped:
+                results.append(result)
+        except collect_errors as error:
+            errors.append(str(error))
+    if errors:
+        raise ValueError("\n".join(errors))
+    return results
+
+
+def run_process(command, *, timeout, capture_output=False, check=False, **kwargs):
+    """Run a timed tool and terminate its entire tree before releasing files."""
+    if capture_output:
+        if "stdout" in kwargs or "stderr" in kwargs:
+            raise ValueError("capture_output cannot be combined with stdout or stderr")
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    cancelled = getattr(_PROCESS_CONTEXT, "cancelled", None)
+    if cancelled is not None and cancelled.is_set():
+        raise concurrent.futures.CancelledError()
+    job = None
+    if os.name == "nt":
+        # CREATE_SUSPENDED closes the race between launch and job assignment:
+        # even a fast wrapper cannot spawn a child outside the job.
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 4
+        job = _WindowsJob()
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        with subprocess.Popen(command, **kwargs) as process:
+            try:
+                if job is not None:
+                    job.start(process)
+                if cancelled is None:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                else:
+                    deadline = time.monotonic() + timeout
+                    while True:
+                        if cancelled.is_set():
+                            raise concurrent.futures.CancelledError()
+                        remaining = deadline - time.monotonic()
+                        try:
+                            stdout, stderr = process.communicate(timeout=max(0, min(0.1, remaining)))
+                            break
+                        except subprocess.TimeoutExpired as error:
+                            if time.monotonic() >= deadline:
+                                error.timeout = timeout
+                                raise
+            except BaseException as error:
+                try:
+                    if job is not None:
+                        job.terminate()
+                        # Assignment may have failed while the driver was
+                        # still suspended, outside the otherwise empty job.
+                        if process.poll() is None:
+                            process.kill()
+                    else:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass  # The entire group has already exited.
+                except BaseException:
+                    process.kill()
+                    process.wait()
+                    raise
+                stdout, stderr = process.communicate()
+                if isinstance(error, subprocess.TimeoutExpired) and job is not None:
+                    # Windows reader threads collect partial output on join.
+                    error.stdout, error.stderr = stdout, stderr
+                raise
+            completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            if check:
+                completed.check_returncode()
+            return completed
+    finally:
+        if job is not None:
+            job.close()
+
+
+def parse_shard(value: str) -> tuple[int, int]:
+    """Parse a 1-based INDEX/COUNT without accepting signs or non-integers."""
+    if re.fullmatch(r"[0-9]+/[0-9]+", value):
+        index, count = map(int, value.split("/"))
+        if 1 <= index <= count:
+            return index, count
+    raise argparse.ArgumentTypeError("--shard must be INDEX/COUNT with 1 <= INDEX <= COUNT")
+
+
+def select_shard(files: list[str], repo_root: str, shard: tuple[int, int]) -> list[str]:
+    """Assign each repo-relative POSIX path by SHA-256 modulo the shard count.
+
+    The checkout location, input order and other files cannot change a unit's
+    shard. Sort and deduplicate the result for deterministic execution order.
+    """
+    index, count = shard
+    selected = []
+    for path in sorted(set(files)):
+        relative = os.path.relpath(path, repo_root).replace(os.sep, "/")
+        digest = hashlib.sha256(relative.encode("utf-8", "surrogateescape")).digest()
+        if int.from_bytes(digest, "big") % count + 1 == index:
+            selected.append(path)
+    return selected
+
+
+def shard_command(args: argparse.Namespace) -> int:
+    for path in select_shard(args.files, args.repo_root, args.shard):
+        sys.stdout.buffer.write(os.fsencode(path) + b"\0")
+    return 0
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def sha256_file(path: str) -> str:
+    reject_reparse_points(path)
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
@@ -142,11 +396,112 @@ def parse_make_deps(text: str) -> list[str]:
     return deps
 
 
+def windows_command_arguments(command: str) -> list[str]:
+    """Split a Windows command without a shell, using CommandLineToArgvW rules.
+
+    Backslashes are literal except immediately before a double quote: pairs
+    produce one slash, and an odd remaining slash escapes the quote. Quote
+    runs use the Windows three-quote rule, including within quoted arguments.
+    """
+    arguments, index = [], 0
+    while index < len(command):
+        if command[index] in " \t":
+            index += 1
+            continue
+        current, quotes, backslashes = [], 0, 0
+        while index < len(command):
+            char = command[index]
+            if char in " \t" and not quotes:
+                break
+            if char == "\\":
+                current.append(char)
+                backslashes += 1
+                index += 1
+            elif char == '"':
+                remove = (backslashes + 1) // 2
+                if remove:
+                    del current[-remove:]
+                if backslashes % 2:
+                    current.append('"')
+                else:
+                    quotes += 1
+                index += 1
+                backslashes = 0
+                while index < len(command) and command[index] == '"':
+                    quotes += 1
+                    if quotes == 3:
+                        current.append('"')
+                        quotes = 0
+                    index += 1
+                if quotes == 2:
+                    quotes = 0
+            else:
+                current.append(char)
+                backslashes = 0
+                index += 1
+        arguments.append("".join(current))
+    return arguments
+
+
+def has_posix_quoted_token(command: str) -> bool:
+    """Recognize shell-quoted tokens, excluding native paths and double quotes."""
+    index, double_quoted = 0, False
+    while index < len(command):
+        char = command[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            double_quoted = not double_quoted
+        elif char == "'" and not double_quoted and (index == 0 or command[index - 1].isspace()):
+            try:
+                shlex.split(command)
+            except ValueError:
+                return False
+            return True
+        index += 1
+    return False
+
+
 def entry_arguments(entry: dict) -> list[str]:
+    """Parse using the producer's context; command_platform can override it.
+
+    POSIX shell quoting is also used by MSYS producers with native working
+    directories. Prefer that syntax when present, then use the directory or
+    native driver path as evidence; an .exe suffix alone is not evidence.
+    Explicit markers resolve commands that are valid in both dialects.
+    """
     if "arguments" in entry:
         arguments = [str(a) for a in entry["arguments"]]
     elif "command" in entry:
-        arguments = shlex.split(entry["command"])
+        command = entry["command"]
+        windows = windows_command_arguments(command)
+        drivers = windows[:1]
+        if drivers and ntpath.basename(drivers[0]).casefold().removesuffix(".exe") in {"ccache", "sccache"}:
+            drivers += windows[1:2]
+        platform = entry.get("command_platform")
+        if platform not in {None, "windows", "posix"}:
+            raise CacheMiss("command_platform must be windows or posix")
+        directory = str(entry.get("directory", ""))
+        if platform is None:
+            # shlex.join uses single-quoted tokens, including on Windows.
+            # Ignore apostrophes inside double quotes or native path words.
+            # A complete shell-quoted token is producer evidence stronger than
+            # the working directory's path syntax (MSYS uses both forms).
+            if has_posix_quoted_token(command):
+                platform = "posix"
+            elif ntpath.splitdrive(directory)[0]:
+                platform = "windows"
+            elif directory.startswith("/"):
+                platform = "posix"
+            elif any(ntpath.splitdrive(driver)[0] or "\\" in driver for driver in drivers):
+                platform = "windows"
+            else:
+                platform = "posix"
+        if platform == "windows":
+            arguments = windows
+        else:
+            arguments = shlex.split(command)
     else:
         raise CacheMiss("compile database entry has no command")
     if not arguments:
@@ -184,48 +539,83 @@ class ToolIdentity:
     """Executable identity: resolved path, content SHA-256 and --version output.
 
     The (expensive) content hash and version query are memoized per executable
-    fingerprint (realpath, size, mtime_ns, inode), which is re-stat'ed for every
-    key, so replacing or rebuilding a tool invalidates its identity.
+    fingerprint (realpath, kind, device, inode, size, mtime_ns), re-stat'ed for every
+    key, so replacing or rebuilding a tool invalidates its identity. A sample
+    taken within its mtime's two-second tick is revalidated on reuse until an
+    observation after the tick closes establishes a stable identity. Identical
+    content reuses its version result; concurrent checks share one observation.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[tuple, str] = {}
+        self._cache: dict[str, tuple[tuple, str, str, int]] = {}
+        self._pending: dict[str, concurrent.futures.Future] = {}
         self._lock = threading.Lock()
 
     def describe(self, executable: str, directory: str) -> str:
         probe = executable
-        if os.sep in probe and not os.path.isabs(probe):
+        has_directory = bool(os.path.dirname(probe))
+        if has_directory and not os.path.isabs(probe):
             probe = os.path.join(directory, probe)
-        resolved = probe if os.sep in probe else (shutil.which(probe) or "")
+        resolved = probe if has_directory else (shutil.which(probe) or "")
         if not resolved or not os.path.isfile(resolved):
             raise CacheMiss(f"cannot resolve executable {executable}")
-        resolved = os.path.realpath(resolved)
+        resolved = os.path.normcase(os.path.realpath(resolved))
+        with self._lock:
+            pending = self._pending.get(resolved)
+            owner = pending is None
+            if owner:
+                pending = concurrent.futures.Future()
+                self._pending[resolved] = pending
+        if not owner:
+            return pending.result()
+        try:
+            value = self._describe(executable, resolved)
+        except BaseException as error:
+            pending.set_exception(error)
+            raise
+        else:
+            pending.set_result(value)
+            return value
+        finally:
+            with self._lock:
+                del self._pending[resolved]
+
+    def _describe(self, executable: str, resolved: str) -> str:
+        # Record the start, not the end: identification itself can span ticks.
+        checked_at = time.time_ns()
         try:
             info = os.stat(resolved)
         except OSError as error:
             raise CacheMiss(f"cannot stat {resolved}: {error}") from error
-        fingerprint = (resolved, info.st_size, info.st_mtime_ns, info.st_ino)
+        if not stat.S_ISREG(info.st_mode):
+            raise CacheMiss(f"executable is not a regular file: {resolved}")
+        fingerprint = (resolved, stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino,
+                       info.st_size, info.st_mtime_ns)
         with self._lock:
-            known = self._cache.get(fingerprint)
-        if known is not None:
-            return known
+            known = self._cache.get(resolved)
+        if (known is not None and fingerprint == known[0]
+                and info.st_mtime_ns + 2_000_000_000 <= known[3]):
+            return known[2]
         try:
             content = sha256_file(resolved)
-            completed = subprocess.run(
-                [resolved, "--version"],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
+            if known is not None and content == known[1]:
+                value = known[2]
+            else:
+                completed = run_process(
+                    [resolved, "--version"],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+                if completed.returncode != 0 or not completed.stdout:
+                    raise CacheMiss(f"{executable} --version failed")
+                text = completed.stdout.decode("utf-8", "replace")
+                value = f"{resolved}\n{content}\n{text}"
         except (OSError, subprocess.SubprocessError) as error:
             raise CacheMiss(f"cannot identify {executable}: {error}") from error
-        if completed.returncode != 0 or not completed.stdout:
-            raise CacheMiss(f"{executable} --version failed")
-        text = completed.stdout.decode("utf-8", "replace")
-        value = f"{resolved}\n{content}\n{text}"
         with self._lock:
-            self._cache[fingerprint] = value
+            self._cache[resolved] = (fingerprint, content, value, checked_at)
         return value
 
 
@@ -238,6 +628,7 @@ class KeyBuilder:
     @staticmethod
     def _hash_dependency(path: str) -> str:
         try:
+            reject_reparse_points(path)
             with open(path, "rb") as handle:
                 data = handle.read()
         except OSError as error:
@@ -266,7 +657,7 @@ class KeyBuilder:
             compiler_version = self._tools.describe(arguments[0], directory)
             command = dependency_command(arguments)
             try:
-                completed = subprocess.run(
+                completed = run_process(
                     command,
                     cwd=directory,
                     stdin=subprocess.DEVNULL,
@@ -297,7 +688,9 @@ class KeyBuilder:
                     sort_keys=True,
                 )
             )
-        parts.extend(sorted(entry_parts))
+        # clang-tidy may choose the first matching command for a duplicated
+        # source. Database order is therefore part of the analysis input.
+        parts.extend(entry_parts)
         return sha256_bytes("\n".join(parts).encode("utf-8"))
 
 
@@ -360,7 +753,7 @@ def store(cache_dir: str, key: str, tu: str) -> None:
 
 def combined_tool_hash(tool_files: list[str]) -> str:
     digest = hashlib.sha256()
-    for path in [os.path.abspath(__file__), *tool_files]:
+    for path in [os.path.abspath(__file__), _PATH_SPEC.origin, *tool_files]:
         digest.update(os.path.basename(path).encode("utf-8") + b"\0")
         digest.update(sha256_file(path).encode("ascii") + b"\0")
     return digest.hexdigest()
@@ -387,23 +780,23 @@ def run_command(args: argparse.Namespace) -> int:
             return tu, None, False
         return tu, key, read_enabled and lookup(args.cache_dir, key)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        prepared = list(pool.map(prepare, files))
+    prepared = parallel_map(prepare, files, args.jobs)
 
     hits = [item for item in prepared if item[2]]
     misses = [item for item in prepared if not item[2]]
     print(f"tidy cache: {len(hits)} hit(s), {len(misses)} to analyze ({args.mode}, {len(files)} unit(s))")
 
     failures: list[str] = []
+    analyzed = 0
     recorded = 0
     output_lock = threading.Lock()
 
     def analyze(item: tuple[str, str | None, bool]) -> None:
-        nonlocal recorded
+        nonlocal analyzed, recorded
         tu, key, _ = item
         command = [args.clang_tidy, "-p", args.build_dir, "-quiet", f"--config={args.config}", tu]
         try:
-            completed = subprocess.run(
+            completed = run_process(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -416,7 +809,12 @@ def run_command(args: argparse.Namespace) -> int:
         except (OSError, subprocess.SubprocessError) as error:
             status = -1
             output = f"clang-tidy did not complete: {error}\n"
+        if status != 0:
+            # Signal before acquiring the output lock or flushing diagnostics:
+            # either can block while another worker is ready to take more work.
+            _PROCESS_CONTEXT.cancelled.set()
         with output_lock:
+            analyzed += 1
             if output.strip():
                 sys.stdout.write(output)
                 sys.stdout.flush()
@@ -443,10 +841,9 @@ def run_command(args: argparse.Namespace) -> int:
         with output_lock:
             recorded += 1
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        list(pool.map(analyze, misses))
+    parallel_map(analyze, misses, args.jobs)
 
-    print(f"tidy cache: analyzed {len(misses)}, recorded {recorded}, failed {len(failures)}")
+    print(f"tidy cache: analyzed {analyzed}, recorded {recorded}, failed {len(failures)}")
     for tu in failures:
         print(f"tidy cache: clang-tidy failed on {tu}", file=sys.stderr)
     return 1 if failures else 0
@@ -473,6 +870,12 @@ def prune_command(args: argparse.Namespace) -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    shard = sub.add_parser("shard", help="select a stable path-hash shard; emit NUL-separated paths")
+    shard.add_argument("--repo-root", required=True)
+    shard.add_argument("--shard", type=parse_shard, default=(1, 1))
+    shard.add_argument("files", nargs="*")
+    shard.set_defaults(func=shard_command)
 
     run = sub.add_parser("run", help="analyze translation units, skipping proven-identical ones")
     run.add_argument("--build-dir", required=True)

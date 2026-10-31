@@ -11,6 +11,7 @@
 #include "core/ScenarioRunnerImpl.h"
 
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -18,6 +19,7 @@
 #include "nlohmann/json.hpp"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
+#include "rendering/UploadBudget.h"
 #include "rendering/passes/WaterPass.h"
 
 #include <algorithm>
@@ -33,6 +35,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 // The moved code names the scenario-harness and app vocabulary unqualified,
@@ -133,6 +136,8 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
         deps.render_and_read = [&, sweep_stream_frames](std::vector<unsigned char>& out_pixels,
                                                         int& w,
                                                         int& h) mutable -> bool {
+            LUMIN_PROFILE_FRAME_N("Client capture");
+            LUMIN_PROFILE_ZONE_N("Client capture frame");
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (sweep_stream_frames < 24) {
                 gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
@@ -145,6 +150,24 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                                         *g_camera,
                                         1.0f / 60.0f,
                                         g_app.overlay.wireframe_mode);
+            if (!Luminumbra::Rendering::settle_uploads(
+                    [&] {
+                        const auto& pending = renderPipeline.get_last_mesh_upload_stats();
+                        return std::pair{
+                            pending.terrain_uploads_deferred + pending.water_uploads_deferred,
+                            pending.terrain_budget.adopted + pending.water_budget.adopted};
+                    },
+                    [&] {
+                        // Adoption retries preserve the selected sun and cloud phase.
+                        renderPipeline.render_frame(
+                            gameSession->GetRegistry(),
+                            *gameSession->GetWorldSystem(),
+                            *g_camera,
+                            0.0f,
+                            g_app.overlay.wireframe_mode,
+                            Luminumbra::Rendering::UploadPresentation::Settled);
+                    }))
+                return false;
             glfwGetFramebufferSize(window, &w, &h);
             if (w <= 0 || h <= 0) {
                 return false;
@@ -154,7 +177,7 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             // glReadPixels itself synchronizes; no explicit glFinish needed.
             glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, out_pixels.data());
-            glfwSwapBuffers(window);
+            LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             glfwPollEvents();
             return true;
         };
@@ -1510,6 +1533,7 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
 
 void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_point now,
                                               float deltaTime) {
+    (void)deltaTime; // paired replay uses the retained prepared frame
     if (scenario_config.farlod_horizon_smoke() && scenario_ready &&
         !farlod_horizon_stations.empty() && g_camera) {
         const double elapsed_play_seconds =
@@ -1529,29 +1553,30 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
         }
 
         if (progress >= kFarLodHorizonPhaseSplit) {
-            const double sweep =
-                (progress - kFarLodHorizonPhaseSplit) / (1.0 - kFarLodHorizonPhaseSplit);
-            const std::size_t station_count = farlod_horizon_stations.size();
-            const std::size_t time_station_index =
-                std::min(station_count - 1u,
-                         static_cast<std::size_t>(sweep * static_cast<double>(station_count)));
-            // capture the station the
-            // rendered back buffer actually shows (the camera-apply
-            // clamp), not the bare time index. station_progress is
-            // only meaningful when station_index == time_station_index.
             const std::size_t station_index = farlod_horizon_applied_station;
-            const double station_progress =
-                sweep * static_cast<double>(station_count) - static_cast<double>(station_index);
-            // when behind schedule the
-            // settle wait is skipped - the stations are yaw rotations
-            // of an already-settled world (and at ~1 fps a full second
-            // of simulation precedes each frame), so capture
-            // immediately to catch up; when on schedule, keep the 0.7
-            // settle gate.
-            const bool behind_schedule = station_index < time_station_index;
+            const double settle_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                              farlod_horizon_station_started_at)
+                    .count();
+            const auto& fw = renderPipeline.far_world_diagnostic();
+            auto& expected = farlod_horizon_expected_tiles;
+            const bool expected_ok = Luminumbra::World::ComputeFarWantedSet(
+                                         g_camera->Position.x, g_camera->Position.z, expected) ==
+                                     Luminumbra::World::FarWantedError::None;
+            bool station_ready = false;
+            if (fw.selection.effective == Luminumbra::Rendering::FarWorldMode::Ladder)
+                station_ready = expected_ok && Luminumbra::Rendering::FarWorldStationReady(
+                                                   fw, expected, settle_seconds);
+            else if (const auto* legacy = renderPipeline.legacy_far_compatibility())
+                station_ready =
+                    fw.captured &&
+                    fw.selection.requested == Luminumbra::Rendering::FarWorldMode::Legacy &&
+                    fw.selection.refusal == Luminumbra::Rendering::FarWorldRefusal::None &&
+                    legacy->stats().regions_wanted > 0 && legacy->stats().regions_missing == 0 &&
+                    settle_seconds >= 0 && settle_seconds <= 90;
             if (station_index < farlod_horizon_captures_written.size() &&
                 !farlod_horizon_captures_written[station_index] &&
-                (behind_schedule || station_progress >= 0.7)) {
+                (station_ready || settle_seconds >= 90)) {
                 int screenshot_width = 0;
                 int screenshot_height = 0;
                 glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
@@ -1593,12 +1618,23 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
 
                     FarLodHorizonStationCapture capture;
                     capture.station = farlod_horizon_stations[station_index];
+                    // Value copy retains water capability/readiness/submission across far OFF.
+                    capture.far_world = fw;
+                    capture.settle_seconds = settle_seconds;
+                    capture.ready_within_deadline = station_ready;
                     //  record the resolved eye world position so the
                     // analysis can confirm all stations share one XZ (constant
                     // ring).
                     capture.camera_world_x = g_camera->Position.x;
                     capture.camera_world_y = g_camera->Position.y;
                     capture.camera_world_z = g_camera->Position.z;
+                    // Derive from the rendered direction; stale Euler labels cannot
+                    // certify a different pose than the view matrix actually uses.
+                    const auto rendered_direction = glm::normalize(g_camera->Front);
+                    capture.camera_yaw_degrees =
+                        glm::degrees(std::atan2(rendered_direction.z, rendered_direction.x));
+                    capture.camera_pitch_degrees =
+                        glm::degrees(std::asin(std::clamp(rendered_direction.y, -1.0f, 1.0f)));
                     capture.sky = AnalyzePlayerViewPixels(
                         frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                     int band_top = 0;
@@ -1644,13 +1680,10 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     // above-horizon thin-sliver scan (far ON).
                     capture.sky_sliver = AnalyzeFarLodHorizonSkySliver(
                         frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
-                    // snapshot the far-LOD
-                    // scheduler stats for the ON frame BEFORE the paired
-                    // far-OFF render below - that render updates
-                    // farlod->stats to the disabled frame (no wanted/
-                    // resident regions, zero draws), which is not the
-                    // state this capture asserts on.
-                    if (const auto* farlod = renderPipeline.farlod()) {
+                    // Retained v1 counters belong only to effective Legacy.
+                    // Ladder evidence uses the immutable ON value snapshot;
+                    // the paired replay mutates neither scheduler nor snapshot.
+                    if (const auto* farlod = renderPipeline.legacy_far_compatibility()) {
                         const auto& farlod_stats = farlod->stats();
                         capture.regions_wanted = farlod_stats.regions_wanted;
                         capture.regions_resident = farlod_stats.regions_resident;
@@ -1688,15 +1721,8 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     // live streak and the legitimate far-LOD horizon
                     // silhouette fuse into one far-ON-only span.)
                     int far_off_sliver_px = -1;
-                    if (auto* farlod = renderPipeline.farlod()) {
-                        const bool was_enabled = farlod->enabled();
-                        farlod->set_enabled(false);
-                        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-                        renderPipeline.render_frame(gameSession->GetRegistry(),
-                                                    *gameSession->GetWorldSystem(),
-                                                    *g_camera,
-                                                    deltaTime,
-                                                    g_app.overlay.wireframe_mode);
+                    if (renderPipeline.render_far_world_off_pair(*g_camera)) {
+                        capture.paired_capture_preserved = true;
                         std::vector<unsigned char> off_pixels(
                             static_cast<std::size_t>(screenshot_width) *
                             static_cast<std::size_t>(screenshot_height) * 3u);
@@ -1712,7 +1738,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                         const auto off_sliver = AnalyzeFarLodHorizonSkySliver(
                             off_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                         far_off_sliver_px = off_sliver.tallest_sliver_px;
-                        farlod->set_enabled(was_enabled);
+                        // The retained ON diagnostic and scheduler were never mutated.
                         // Masked far-attributable analysis of the ON
                         // frame, cancelling the paired far-OFF intrusion
                         // pixels in a 3x3 neighborhood.

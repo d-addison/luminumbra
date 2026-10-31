@@ -11,7 +11,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -617,19 +619,19 @@ TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
     EXPECT_FALSE(fs::exists(journal_directory(save.path())));
 }
 
-TEST(SaveTransaction, RecoverySweepsStagingTemporariesOfAnIndexedDirectoryWithoutJournal) {
+TEST(SaveTransaction, RecoveryPreservesUnknownTemporariesOfAnIndexedDirectoryWithoutJournal) {
     TempSave dir;
     ASSERT_TRUE(CommitOnce(dir.path(), 1, {{"world_info.json", "w"}}));
     Put(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4", "partial");
     Put(dir.path() / "world_info.json.tmp.5.6", "partial");
     std::vector<std::string> errors;
-    EXPECT_EQ(recover_pending_journal(dir.path(), &errors), RecoveryOutcome::NothingToDo);
-    EXPECT_FALSE(fs::exists(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4"));
-    EXPECT_FALSE(fs::exists(dir.path() / "world_info.json.tmp.5.6"));
+    EXPECT_EQ(recover_pending_journal(dir.path(), &errors), RecoveryOutcome::Failed);
+    EXPECT_TRUE(fs::exists(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4"));
+    EXPECT_TRUE(fs::exists(dir.path() / "world_info.json.tmp.5.6"));
     EXPECT_EQ(Get(dir.path() / "world_info.json"), "w");
 }
 
-TEST(SaveTransaction, RecoverySweepsStagingTemporaries) {
+TEST(SaveTransaction, RecoveryPreservesUnknownTemporaries) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "w"}}));
     Put(save.path() / "chunks/region/r.0.0.lmr.tmp.123.4", "partial");
@@ -637,10 +639,48 @@ TEST(SaveTransaction, RecoverySweepsStagingTemporaries) {
     fs::create_directories(journal_directory(save.path()));
 
     std::vector<std::string> errors;
-    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::DiscardedStale);
-    EXPECT_FALSE(fs::exists(save.path() / "chunks/region/r.0.0.lmr.tmp.123.4"));
-    EXPECT_FALSE(fs::exists(save.path() / "world_info.json.tmp.5.6"));
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+    EXPECT_TRUE(fs::exists(save.path() / "chunks/region/r.0.0.lmr.tmp.123.4"));
+    EXPECT_TRUE(fs::exists(save.path() / "world_info.json.tmp.5.6"));
     EXPECT_TRUE(fs::exists(save.path() / "world_info.json"));
+}
+
+TEST(SaveTransaction, RecoveryPreservesNeutralStagingOutsideStrictInventory) {
+    const TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "w"}}));
+    const auto temporary = save.path() / "world_info.json.tmp.5.6";
+    Put(temporary, "other occupant");
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::NothingToDo);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(Get(temporary), "other occupant");
+}
+
+TEST(SaveTransaction, RecoveryRefusesNonFileTransactionWithoutDeletingJournal) {
+    const TempSave save;
+    const auto transaction = journal_directory(save.path()) / "txn.json";
+    fs::create_directories(transaction);
+    Put(transaction / "occupant", "preserve");
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(Get(transaction / "occupant"), "preserve");
+}
+
+TEST(SaveTransaction, InitialIndexRefusesNonFileMemberWithoutPublishingPartialInventory) {
+    const TempSave save;
+    const auto invalid = save.path() / "chunks/region/r.0.0.lmr";
+    fs::create_directory(invalid);
+    Put(invalid / "occupant", "preserve");
+    SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(transaction.begin(&errors));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, &errors));
+    EXPECT_FALSE(transaction.commit(&errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_FALSE(snapshot_index_exists(save.path()));
+    EXPECT_FALSE(journal_pending(save.path()));
+    EXPECT_EQ(Get(invalid / "occupant"), "preserve");
 }
 
 #if !defined(_WIN32)
@@ -908,4 +948,162 @@ TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) 
 }
 #endif
 
+} // namespace Luminumbra::Persistence
+
+namespace Luminumbra::Persistence {
+TEST(SaveTransaction, SnapshotInputsDistinguishMissingInvalidAndOversized) {
+    const TempSave save;
+    const auto path = snapshot_index_path(save.path());
+    fs::create_directories(path.parent_path());
+    SnapshotIndex index;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(read_snapshot_index(save.path(), index, &errors));
+    EXPECT_FALSE(snapshot_index_exists(save.path()));
+    fs::create_directory(path);
+    EXPECT_TRUE(snapshot_index_exists(save.path()));
+    EXPECT_FALSE(read_snapshot_index(save.path(), index, &errors));
+    std::uint64_t bytes = 0;
+    std::uint64_t hash = 0;
+    bool present = false;
+    EXPECT_FALSE(hash_file(path, bytes, hash, present, &errors));
+    ASSERT_TRUE(fs::remove(path));
+    Put(path, "{");
+    EXPECT_FALSE(read_snapshot_index(save.path(), index, &errors));
+    fs::resize_file(path, kMaxSnapshotIndexBytes + 1);
+    EXPECT_FALSE(read_snapshot_index(save.path(), index, &errors));
+    ASSERT_TRUE(fs::remove(path));
+    EXPECT_TRUE(hash_file(path, bytes, hash, present, &errors));
+    EXPECT_FALSE(present);
+    EXPECT_EQ(bytes, 0u);
+    EXPECT_EQ(hash, 0u);
+}
+} // namespace Luminumbra::Persistence
+
+namespace Luminumbra::Persistence {
+TEST(SaveTransaction, ControlJsonRefusesExcessiveNestingBeforeParsing) {
+    const std::string nested = std::string(65, '[') + "0" + std::string(65, ']');
+    auto encoded = encode_snapshot_index(MakeIndex());
+    encoded.insert(encoded.rfind('}'), ",\"deep\":" + nested);
+    SnapshotIndex index;
+    std::string error;
+    EXPECT_FALSE(decode_snapshot_index(encoded, index, error));
+    EXPECT_FALSE(error.empty());
+    const TempSave save;
+    fs::create_directories(journal_directory(save.path()));
+    const std::string journal =
+        R"({"schema":"luminumbra.journal.v1","txn_id":1,"base_generation":0,"new_generation":1,"entries":[],"deep":)" +
+        nested + "}";
+    Put(journal_directory(save.path()) / "txn.json", journal);
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_TRUE(fs::exists(journal_directory(save.path()) / "txn.json"));
+}
+
+TEST(SaveTransaction, ExhaustedGenerationAndTransactionRefuseBeforeJournalCreation) {
+    for (const bool exhaust_generation : {false, true}) {
+        const TempSave save;
+        auto index = MakeIndex();
+        if (exhaust_generation)
+            index.generation = std::numeric_limits<std::uint64_t>::max();
+        else
+            index.txn_id = std::numeric_limits<std::uint64_t>::max();
+        fs::create_directories(snapshot_index_path(save.path()).parent_path());
+        Put(snapshot_index_path(save.path()), encode_snapshot_index(index));
+        SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(transaction.begin(&errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, SnapshotAnchorsRefuseOutOfFloatRangeBeforeConversion) {
+    auto encoded = nlohmann::json::parse(encode_snapshot_index(MakeIndex()));
+    encoded["anchors"] = nlohmann::json::array({nlohmann::json::array({1e300, 0, 0})});
+    SnapshotIndex index;
+    std::string error;
+    EXPECT_FALSE(decode_snapshot_index(encoded.dump(), index, error));
+    EXPECT_FALSE(error.empty());
+}
+
+TEST(SaveTransaction, RecoveryRefusesUnknownGenerationAndDuplicateMembersWithoutMutation) {
+    const nlohmann::json entry = {{"path", "world_info.json"},
+                                  {"action", "create"},
+                                  {"prev_bytes", 0},
+                                  {"prev_fnv64", "0000000000000000"},
+                                  {"undo", ""}};
+    for (const bool duplicate : {false, true}) {
+        const TempSave save;
+        Put(save.path() / "world_info.json", "other owner's bytes");
+        fs::create_directories(journal_directory(save.path()));
+        const nlohmann::json journal = {
+            {"schema", kJournalSchema},
+            {"txn_id", 1},
+            {"base_generation", duplicate ? 0 : 3},
+            {"new_generation", duplicate ? 1 : 4},
+            {"entries",
+             duplicate ? nlohmann::json::array({entry, entry}) : nlohmann::json::array({entry})}};
+        Put(journal_directory(save.path()) / "txn.json", journal.dump());
+        std::vector<std::string> errors;
+        EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "other owner's bytes");
+        EXPECT_TRUE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, RecoveryRefusesInvalidJournalIdentityBeforeMutation) {
+    const nlohmann::json entry = {{"path", "world_info.json"},
+                                  {"action", "create"},
+                                  {"prev_bytes", 0},
+                                  {"prev_fnv64", "0000000000000000"},
+                                  {"undo", ""}};
+    const nlohmann::json valid = {{"schema", kJournalSchema},
+                                  {"txn_id", 1},
+                                  {"base_generation", 0},
+                                  {"new_generation", 1},
+                                  {"entries", nlohmann::json::array({entry})}};
+    for (int invalid_case = 0; invalid_case != 8; ++invalid_case) {
+        const TempSave save;
+        Put(save.path() / "world_info.json", "preserve");
+        auto journal = valid;
+        switch (invalid_case) {
+            case 0:
+                journal["txn_id"] = 0;
+                break;
+            case 1:
+                journal["base_generation"] = std::numeric_limits<std::uint64_t>::max();
+                break;
+            case 2:
+                journal["new_generation"] = 2;
+                break;
+            case 3:
+                journal["entries"][0]["undo"] = "undo/0";
+                break;
+            case 4:
+                journal["entries"][0]["prev_bytes"] = 1;
+                break;
+            case 5:
+                journal["entries"][0]["prev_fnv64"] = "0000000000000001";
+                break;
+            case 6:
+                journal["entries"][0]["action"] = "replace";
+                break;
+            case 7:
+                journal["entries"][0]["action"] = "replace";
+                journal["entries"][0]["undo"] = "undo/0";
+                journal["entries"][0]["prev_bytes"] = std::numeric_limits<std::uint64_t>::max();
+                break;
+        }
+        const auto transaction = journal_directory(save.path()) / "txn.json";
+        Put(transaction, journal.dump());
+        std::vector<std::string> errors;
+        EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed)
+            << invalid_case;
+        EXPECT_FALSE(errors.empty()) << invalid_case;
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "preserve") << invalid_case;
+        EXPECT_EQ(Get(transaction), journal.dump()) << invalid_case;
+    }
+}
 } // namespace Luminumbra::Persistence

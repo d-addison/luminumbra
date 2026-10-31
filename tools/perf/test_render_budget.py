@@ -4,9 +4,11 @@ import copy
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import perf
 import render_budget as budget
@@ -43,6 +45,23 @@ class RenderBudgetTests(unittest.TestCase):
         verdict = budget.evaluate(with_wall([16.68, 16.68, 16.68, 16.68]))
         self.assertEqual(verdict['floor']['verdict'], 'fail')
         self.assertFalse(budget.verdict_passes(verdict))
+
+    def test_v4_headless_cannot_pass_floor(self):
+        script = FIXTURES / 'save-load.traversal'
+        data = base.workload_artifact('save_load', script)
+        self.assertTrue(budget.verdict_passes(budget.evaluate(data)))
+        data['settings']['effective_render']['window_mode'] = 'headless'
+        data['render_identity'] = contract.render_identity(data['settings'])
+        with self.assertRaisesRegex(budget.BudgetInputError, 'headless'):
+            budget.evaluate(data)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'capture.json'
+            path.write_text(json.dumps(data), encoding='utf-8')
+            for flags in ((), ('--enforce-floor',)):
+                with self.subTest(flags=flags):
+                    result = self.run_cli(path, '--traversal', str(script), *flags)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn('headless', result.stdout + result.stderr)
 
     def test_target_flags_do_not_fail(self):
         slow = budget.evaluate(with_wall([9.0, 9.0, 9.0, 9.0]))
@@ -90,8 +109,8 @@ class RenderBudgetTests(unittest.TestCase):
             budget.evaluate(data)
 
     def run_cli(self, path, *extra):
-        return subprocess.run([sys.executable, str(Path(capture.__file__)), str(path),
-                               '--qualified-renderer', base.QUALIFIED, *extra],
+        return subprocess.run(base.isolated_script(capture.__file__, str(path),
+                                        '--qualified-renderer', base.QUALIFIED, *extra),
                               capture_output=True, text=True, check=False)
 
     def test_cli_floor_flag_is_opt_in(self):
@@ -125,9 +144,8 @@ class RenderBudgetTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
 
     def test_cli_adapter_mismatch_with_enforce_floor(self):
-        result = subprocess.run([sys.executable, str(Path(capture.__file__)),
-                                 str(FIXTURES / 'adapter-mismatch.v3.json'),
-                                 '--qualified-renderer', base.QUALIFIED, '--enforce-floor'],
+        result = subprocess.run(base.isolated_script(capture.__file__, str(FIXTURES / 'adapter-mismatch.v3.json'),
+                                      '--qualified-renderer', base.QUALIFIED, '--enforce-floor'),
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 1)
 
