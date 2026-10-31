@@ -236,7 +236,7 @@ restore the previous committed tree without acknowledging dirty work. Failed
 rollback retains the journal and refuses admission; creation alone may retire the
 journal first because its created-artifacts registry retains failed-rollback
 evidence and identities until cleanup succeeds. Cleanup failure after the index
-commit leaves the new save committed. See [save compatibility](active-regions.md#file-and-compatibility).
+commit leaves the new save committed. See the "File and compatibility" section of [save compatibility](active-regions.md).
 The shipping clock/ledger foundation is enabled by default. Indexed authority
 durability/rehydration is in preparation with native qualification pending. Durable completed work and ground-object continuation,
 durable regional fields/weather/scent/energy, and regional foliage/water
