@@ -116,23 +116,41 @@ def check_windows_spelling(path: str, long_name: str) -> None:
 
 def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str] | None = None,
               *, live_git: bool = False) -> dict[str, os.stat_result]:
-    """Allow transient extra links only below .git during an owned command.
+    """Allow transient link counts below .git and entries that vanish mid-scan in an owned command.
 
     All admission, verification and post-exit inventories keep sole-link checks.
+
+    Git replaces working-tree files itself (checkout creates them, apply unlinks and
+    recreates the patched ones), so during a live scan any entry below the root can
+    vanish between scandir and lstat. Skipping a vanished entry only drops a path that no
+    longer exists; every surviving entry is still checked, and the strict post-exit
+    inventory validates the final tree.
     """
     result = {}
     pending = [root]
     entries = size = 0
     while pending:
         directory = pending.pop()
-        require(ordinary(os.lstat(directory), True), "nonordinary source directory")
-        with os.scandir(directory) as scan:
+        try:
+            require(ordinary(os.lstat(directory), True), "nonordinary source directory")
+            scan = os.scandir(directory)
+        except FileNotFoundError:
+            if live_git and directory != root:
+                continue
+            raise
+        with scan:
             for entry in scan:
                 entries += 1
                 require(entries <= STORAGE_ENTRIES, "source entry bound exceeded")
                 name = Path(entry.path).relative_to(root).as_posix()
                 safe_relative(name)
-                info = os.lstat(entry.path)
+                transient_git = live_git and name.startswith(".git/")
+                try:
+                    info = os.lstat(entry.path)
+                except FileNotFoundError:
+                    if live_git:
+                        continue
+                    raise
                 if ignore_git and name == ".git":
                     require(ordinary(info, True), "Git administration must be a local directory")
                     continue
@@ -140,10 +158,12 @@ def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str
                     require(allowed_directories is None or name in allowed_directories, "extra source directory")
                     pending.append(Path(entry.path))
                 else:
-                    # Git publishes objects by linking a temporary file, then unlinking it.
+                    # Git links objects before unlinking temporary names. A lookup
+                    # racing the last unlink can also observe zero remaining links.
                     links_ok = (info.st_nlink == 1 or
-                                (live_git and name.startswith(".git/") and info.st_nlink > 1))
-                    require(ordinary(info) and links_ok, "nonordinary source entry")
+                                (transient_git and info.st_nlink >= 0))
+                    require(ordinary(info) and links_ok,
+                            f"nonordinary source entry: {name} mode={oct(info.st_mode)} nlink={info.st_nlink}")
                     size += info.st_size
                     require(size <= STORAGE_BYTES, "source storage bound exceeded")
                     result[name] = info
@@ -516,9 +536,6 @@ def owned_command(source: Path, argv: list[str], environment: dict[str, str],
         def scan() -> None:
             try:
                 inventory(source, live_git=True)
-            except FileNotFoundError:
-                # Git renames its own locks/packs. The final scan stays strict.
-                pass
             except (OSError, Refusal) as error:
                 raise Refusal("Git storage refused: " + str(error)) from error
         scan()

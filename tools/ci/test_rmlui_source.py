@@ -1199,21 +1199,18 @@ class DeliveryRefusals(unittest.TestCase):
             self.assertIn("rmlui_source.py init --root", text)
         self.assertIn("tools/ci/ci_paths.py python-tests", (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8", errors="strict"))
 
-    def test_git_live_rename_is_transient_but_final_scan_and_other_errors_are_strict(self):
+    def test_git_inventory_errors_are_strict_during_live_and_final_scans(self):
         real_process, real_inventory = subprocess.Popen, M.inventory
-        for error, final_error in ((FileNotFoundError, False), (PermissionError, False),
-                                   (FileNotFoundError, True)):
+        for error, final_error in itertools.product((FileNotFoundError, PermissionError), (False, True)):
             with self.subTest(error=error.__name__, final_error=final_error):
                 observed = threading.Event()
                 calls = 0
                 def scan(source, **kwargs):
                     nonlocal calls
                     calls += 1
-                    if calls == 1:
-                        observed.set()
-                        raise error("controlled administration entry")
-                    if final_error:
-                        raise FileNotFoundError("final scan remains strict")
+                    observed.set()
+                    if not final_error or not kwargs.get("live_git", False):
+                        raise error("controlled inventory error")
                     return real_inventory(source, **kwargs)
                 class Output:
                     def __init__(self, stream):
@@ -1234,12 +1231,12 @@ class DeliveryRefusals(unittest.TestCase):
                     process.stdout = Output(process.stdout)
                     return process
                 with mock.patch.object(M, "inventory", side_effect=scan), mock.patch.object(M.subprocess, "Popen", side_effect=launch):
-                    if error is FileNotFoundError and not final_error:
-                        self.assertTrue(M.git(self.w.root.parent, "--version").startswith(b"git version"))
+                    with self.assertRaisesRegex((M.Refusal, OSError), "controlled inventory error"):
+                        M.git(self.w.root.parent, "--version")
+                    if final_error:
                         self.assertGreaterEqual(calls, 2)
                     else:
-                        with self.assertRaises((M.Refusal, FileNotFoundError)):
-                            M.git(self.w.root.parent, "--version")
+                        self.assertEqual(calls, 1)
                 self.assertFalse(self.w.root.exists())
 
     def git_with_two_link_inventory(self, *, remove_after_live_scan):
@@ -1285,10 +1282,42 @@ class DeliveryRefusals(unittest.TestCase):
     def test_git_post_exit_inventory_refuses_two_link_admin_file(self):
         self.git_with_two_link_inventory(remove_after_live_scan=False)
 
-    def test_live_git_inventory_refuses_source_links_and_unknown_link_counts(self):
+    def test_git_zero_link_admin_entry_is_live_only(self):
+        root = self.w.root.parent
+        target = root / ".git/objects/tmp_obj_1"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"object")
+        inventory, lstat = M.inventory, os.lstat
+        for transient in (True, False):
+            live_scans = final_scans = 0
+            def scan(candidate, **kwargs):
+                nonlocal live_scans, final_scans
+                live = kwargs.get("live_git", False)
+                if live:
+                    live_scans += 1
+                else:
+                    final_scans += 1
+                def inspect(path, *args, **stat_kwargs):
+                    info = lstat(path, *args, **stat_kwargs)
+                    if Path(path) == target and (live or not transient):
+                        return StatFields(info, st_nlink=0)
+                    return info
+                with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    return inventory(candidate, **kwargs)
+            with self.subTest(transient=transient), mock.patch.object(M, "inventory", side_effect=scan):
+                if transient:
+                    self.assertTrue(M.git(root, "--version").startswith(b"git version"))
+                else:
+                    with self.assertRaisesRegex(M.Refusal, r"nonordinary source entry: \.git/objects/tmp_obj_1 mode=0o[0-7]+ nlink=0"):
+                        M.git(root, "--version")
+            self.assertGreaterEqual(live_scans, 1)
+            self.assertEqual(final_scans, 1)
+        self.assertEqual(target.read_bytes(), b"object")
+
+    def test_live_git_inventory_link_counts_are_scoped_to_ordinary_admin_files(self):
         cases = (("source", (1,)), ("nested/.git/object", (1,)),
-                 (".git-object", (1,)), (".git/object", (1, 2)))
-        for (name, accepted), links, reparse in itertools.product(cases, (0, 1, 2), (False, True)):
+                 (".git-object", (1,)), (".git/objects/xx/tmp_obj_1", (0, 1, 2)))
+        for (name, accepted), links, reparse in itertools.product(cases, (-1, 0, 1, 2), (False, True)):
             with self.subTest(name=name, links=links, reparse=reparse), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 path = root / name
@@ -1315,11 +1344,149 @@ class DeliveryRefusals(unittest.TestCase):
                                 self.assertEqual(getattr(actual[name], field), getattr(native, field), field)
                         self.assertEqual(actual[name].st_nlink, links)
                     else:
-                        with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                        expected = f"nonordinary source entry: {name} mode={oct(real_lstat(path).st_mode)} nlink={links}"
+                        with self.assertRaises(M.Refusal) as refused:
                             M.inventory(root, live_git=True)
+                        self.assertEqual(str(refused.exception), expected)
                     if links != 1 or reparse:
-                        with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                        with self.assertRaises(M.Refusal) as refused:
                             M.inventory(root)
+                        self.assertEqual(str(refused.exception),
+                                         f"nonordinary source entry: {name} mode={oct(real_lstat(path).st_mode)} nlink={links}")
+
+    def test_inventory_missing_entries_are_transient_only_during_live_scans(self):
+        names = (".git/objects/xx/tmp_obj_1", ".git/index.lock", "source",
+                 "nested/.git/object", ".git-object/file", ".git")
+        for name, live, error in itertools.product(names, (False, True), (FileNotFoundError, PermissionError)):
+            with self.subTest(name=name, live=live, error=error), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if name == ".git":
+                    target.mkdir()
+                else:
+                    target.write_bytes(b"temporary object")
+                # A vanished entry must not abort the rest of the bounded scan.
+                (root / "retained").write_bytes(b"source")
+                lstat = os.lstat
+                hits = 0
+                def inspect(candidate, *args, **kwargs):
+                    nonlocal hits
+                    if Path(candidate) == target:
+                        hits += 1
+                        raise error("controlled missing entry")
+                    return lstat(candidate, *args, **kwargs)
+                with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    if live and error is FileNotFoundError:
+                        self.assertEqual(set(M.inventory(root, live_git=live)), {"retained"})
+                    else:
+                        with self.assertRaisesRegex(error, "controlled missing entry"):
+                            M.inventory(root, live_git=live)
+                self.assertEqual(hits, 1)
+
+    def test_live_scan_skips_vanished_worktree_entries_but_refuses_surviving_ones_and_final_scan_is_strict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            vanished = root / "src" / "patched.cpp"
+            vanished.write_bytes(b"replaced by git apply")
+            (root / "kept.txt").write_bytes(b"source")
+            lstat = os.lstat
+            def inspect(candidate, *args, **kwargs):
+                if Path(candidate) == vanished:
+                    raise FileNotFoundError("controlled missing entry")
+                return lstat(candidate, *args, **kwargs)
+            with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                self.assertEqual(set(M.inventory(root, live_git=True)), {"kept.txt"})
+            os.link(root / "kept.txt", root / "src" / "second-link.txt")
+            with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                    M.inventory(root, live_git=True)
+            vanished.write_bytes(b"recreated")
+            with self.assertRaisesRegex(M.Refusal, "nonordinary source entry"):
+                M.inventory(root)
+
+    def test_inventory_missing_queued_directories_are_transient_only_during_live_scans(self):
+        cases = itertools.product((".git/objects/xx", "source", "nested/.git", ".git-objects", ".git", "."),
+                                  (False, True), ("lstat", "scandir"), (FileNotFoundError, PermissionError))
+        for name, live, boundary, error in cases:
+            with self.subTest(name=name, live=live, boundary=boundary, error=error), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / name
+                target.mkdir(parents=True, exist_ok=True)
+                (root / "retained").write_bytes(b"source")
+                lstat, scandir = os.lstat, os.scandir
+                hits = 0
+                def inspect(candidate, *args, **kwargs):
+                    nonlocal hits
+                    if Path(candidate) == target:
+                        hits += 1
+                        # Non-root directories are first checked while enqueuing.
+                        if hits == (1 if name == "." else 2):
+                            raise error("controlled missing directory")
+                    return lstat(candidate, *args, **kwargs)
+                def scan(candidate):
+                    nonlocal hits
+                    if Path(candidate) == target:
+                        hits += 1
+                        raise error("controlled missing directory")
+                    return scandir(candidate)
+                with mock.patch.object(M.os, boundary, side_effect=inspect if boundary == "lstat" else scan):
+                    if live and error is FileNotFoundError and name != ".":
+                        self.assertEqual(set(M.inventory(root, live_git=live)), {"retained"})
+                    else:
+                        with self.assertRaisesRegex(error, "controlled missing directory"):
+                            M.inventory(root, live_git=live)
+                self.assertEqual(hits, 2 if boundary == "lstat" and name != "." else 1)
+
+    def test_live_git_inventory_refuses_nonregular_modes_at_every_link_count(self):
+        cases = itertools.product((".git/objects/xx/tmp_obj_1", "source"), (-1, 0, 1, 2),
+                                  (0, stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFLNK, stat.S_IFCHR, stat.S_IFBLK))
+        for name, links, mode in cases:
+            with self.subTest(name=name, links=links, mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"object")
+                lstat = os.lstat
+                def inspect(candidate, *args, **kwargs):
+                    info = lstat(candidate, *args, **kwargs)
+                    return StatFields(info, st_mode=mode, st_nlink=links) if Path(candidate) == target else info
+                with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    for live in (False, True):
+                        with self.assertRaises(M.Refusal) as refused:
+                            M.inventory(root, live_git=live)
+                        self.assertEqual(str(refused.exception),
+                                         f"nonordinary source entry: {name} mode={oct(mode)} nlink={links}")
+
+    def test_live_git_transients_remain_within_entry_and_storage_bounds(self):
+        root = self.w.root.parent
+        admin = root / ".git/objects"
+        admin.mkdir(parents=True)
+        target = admin / "tmp_obj_1"
+        target.write_bytes(b"object")
+        lstat = os.lstat
+        for links in (0, 2):
+            def inspect(candidate, *args, **kwargs):
+                info = lstat(candidate, *args, **kwargs)
+                return StatFields(info, st_nlink=links) if Path(candidate) == target else info
+            with self.subTest(links=links), mock.patch.object(M.os, "lstat", side_effect=inspect):
+                with mock.patch.object(M, "STORAGE_BYTES", 6):
+                    self.assertEqual(set(M.inventory(root, live_git=True)), {".git/objects/tmp_obj_1"})
+                with mock.patch.object(M, "STORAGE_BYTES", 5):
+                    with self.assertRaisesRegex(M.Refusal, "source storage bound exceeded"):
+                        M.inventory(root, live_git=True)
+        def vanished(candidate, *args, **kwargs):
+            if Path(candidate) == target:
+                raise FileNotFoundError("controlled missing entry")
+            return lstat(candidate, *args, **kwargs)
+        with mock.patch.object(M.os, "lstat", side_effect=vanished):
+            with mock.patch.object(M, "STORAGE_ENTRIES", 3):
+                self.assertEqual(M.inventory(root, live_git=True), {})
+            with mock.patch.object(M, "STORAGE_ENTRIES", 2):
+                with self.assertRaisesRegex(M.Refusal, "source entry bound exceeded"):
+                    M.inventory(root, live_git=True)
 
     def test_population_is_empty_ordinary_and_never_evaluates_foreign_cmake(self):
         self.w.initialize()
