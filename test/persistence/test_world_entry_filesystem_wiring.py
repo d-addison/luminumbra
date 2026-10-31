@@ -106,7 +106,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
         self.assertEqual(writer.count("Detail::WindowsPublishWithoutReplacement("), 2)
         promotion = body(writer, "bool promote_seed(")
-        self.assertEqual(writer.count("::MoveFileExW("), 3)
+        self.assertEqual(writer.count("::MoveFileExW("), 2)
         self.assertIn("::MoveFileExW(m_path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)",
                       promotion)
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", promotion)
@@ -115,7 +115,12 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertIn("MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH", replacing)
         self.assertNotIn("::ReplaceFileW(", replacing)
         self.assertIn("retained_payload->retain_publication_identity()", replacing)
-        self.assertIn("MOVEFILE_WRITE_THROUGH", removing)
+        self.assertIn("StagingFile retained(path, StagingFile::Mode::Inspect)", removing)
+        self.assertIn("SaveTransaction::check_publication_target(path, errors)", removing)
+        self.assertIn("retained.remove()", removing)
+        bound_removal = body(self.journal, "void remove_owned(").split("#else", 1)[0]
+        self.assertLess(bound_removal.index("identity_from(owned.get())"),
+                        bound_removal.index("FileDispositionInfo"))
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", removing)
         self.assertNotIn("::MoveFileExW(", writer.replace(promotion, "").replace(replacing, "").replace(removing, ""))
         for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):

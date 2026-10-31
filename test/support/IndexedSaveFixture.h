@@ -11,11 +11,13 @@ namespace Luminumbra::Test {
 // Publish a valid replacement from an admitted baseline. Corruption is injected only after
 // this function returns. Writers join one transaction; absent members remain explicit tombstones.
 template<typename Write>
-bool PublishIndexedSave(const std::filesystem::path& directory, const Write& write,
+bool PublishIndexedSave(const std::filesystem::path& directory,
+                        const Write& write,
                         std::vector<std::string>* errors = nullptr) {
     {
         const Persistence::WorldSaveService::SaveOwnership ownership;
-        if (Persistence::recover_pending_journal(directory, errors) == Persistence::RecoveryOutcome::Failed)
+        if (Persistence::recover_pending_journal(directory, errors) ==
+            Persistence::RecoveryOutcome::Failed)
             return false;
         Persistence::WorldSaveService::SaveFactsScope facts(directory);
         if (!facts.validate(errors))
@@ -23,8 +25,10 @@ bool PublishIndexedSave(const std::filesystem::path& directory, const Write& wri
         Persistence::SnapshotIndex previous;
         if (!Persistence::read_snapshot_index(directory, previous, errors))
             return false;
-        Persistence::SaveTransaction transaction(directory, previous.tick, previous.anchors,
-                                                  &Persistence::WorldSaveService::member_digest);
+        Persistence::SaveTransaction transaction(directory,
+                                                 previous.tick,
+                                                 previous.anchors,
+                                                 &Persistence::WorldSaveService::member_digest);
         if (!transaction.begin(errors) || !write() ||
             !Persistence::WorldSaveService::finalize_indexed_envelope(directory, errors) ||
             !transaction.commit(errors))

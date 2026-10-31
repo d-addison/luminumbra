@@ -2081,9 +2081,9 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
 
 namespace {
 
-// One flag-on save is one snapshot transaction (S4): recovery, one validation, then every indexed
-// member writer joins this transaction and the index is published once at Commit. Owner thread
-// only.
+// Every enabled or already indexed save uses one snapshot transaction: recovery, validation,
+// then every indexed member writer joins it and the index is published once at Commit.
+// Owner thread only.
 class OuterSaveTransaction {
 public:
     OuterSaveTransaction(const fs::path& save_dir,
@@ -2605,7 +2605,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         ok = prepared_plants.publish(save_dir, &errors);
     if (ok && prepared_energy.has_value()) {
         const auto energy_path = save_dir / "aether_state.efs";
-        if (m_activeRegionsEnabled) {
+        if (m_activeRegionsEnabled || Persistence::SaveTransaction::active_for(save_dir)) {
             ok = remove_energy ? Persistence::WorldSaveService::remove_member(
                                      save_dir, "aether_state.efs", &errors)
                                : Persistence::WorldSaveService::write_member_bytes(

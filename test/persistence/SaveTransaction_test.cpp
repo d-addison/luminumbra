@@ -16,6 +16,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -140,6 +141,22 @@ void Put(const fs::path& file, const std::string& bytes) {
 std::string Get(const fs::path& file) {
     std::ifstream in(file, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+std::vector<nlohmann::json> JournalRecords(const fs::path& save) {
+    std::istringstream input(Get(journal_directory(save) / "txn.json"));
+    std::vector<nlohmann::json> records;
+    std::string line;
+    while (std::getline(input, line))
+        records.push_back(nlohmann::json::parse(line));
+    return records;
+}
+
+std::string EncodeJournalRecords(const std::vector<nlohmann::json>& records) {
+    std::string bytes;
+    for (const auto& record : records)
+        bytes += record.dump() + "\n";
+    return bytes;
 }
 
 TreeMap Tree(const fs::path& root) {
@@ -583,6 +600,54 @@ TEST(SaveTransaction, AbortRefusesSubstitutedJournalAndRecoveryRefusesUnknownDeb
     EXPECT_EQ(Get(displaced.path() / "foreign-journal/foreign"), "retain");
 }
 
+TEST(SaveTransaction, PreviousCommitUsesJournalRollbackEvenWithArtifactRegistry) {
+    for (const bool replacing : {false, true}) {
+        for (const bool foreign : {false, true}) {
+            SCOPED_TRACE(replacing);
+            SCOPED_TRACE(foreign);
+            TempSave save, displaced;
+            ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+            const auto baseline = Tree(save.path());
+            const std::string relative = replacing ? "world_info.json" : "aether_state.efs";
+            const auto member = save.path() / relative;
+            CreatedWorldArtifacts artifacts;
+            {
+                SaveTransaction transaction(save.path(), 2, {}, &RawDigest, &artifacts);
+                ASSERT_TRUE(transaction.begin(nullptr));
+                ASSERT_TRUE(transaction.protect({relative}, nullptr));
+                ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), relative, "ours"));
+                if (foreign) {
+                    fs::rename(member, displaced.path() / "owned");
+                    Put(member, "foreign occupant");
+                }
+                std::vector<std::string> errors;
+                transaction.abort(&errors);
+                EXPECT_EQ(errors.empty(), !foreign);
+                EXPECT_EQ(journal_pending(save.path()), foreign);
+                if (foreign) {
+                    EXPECT_EQ(Get(member), "foreign occupant");
+                }
+            }
+            if (foreign) {
+                {
+                    SaveTransaction admission(save.path(), 3, {}, &RawDigest);
+                    std::vector<std::string> errors;
+                    EXPECT_FALSE(admission.begin(&errors));
+                    EXPECT_FALSE(errors.empty());
+                    EXPECT_TRUE(journal_pending(save.path()));
+                    EXPECT_EQ(Get(member), "foreign occupant");
+                }
+                fs::rename(member, displaced.path() / "foreign");
+                fs::rename(displaced.path() / "owned", member);
+                EXPECT_EQ(recover_pending_journal(save.path(), nullptr),
+                          RecoveryOutcome::RolledBack);
+            }
+            EXPECT_EQ(Tree(save.path()), baseline);
+            EXPECT_FALSE(journal_pending(save.path()));
+        }
+    }
+}
+
 TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
@@ -601,6 +666,110 @@ TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {
 
     EXPECT_EQ(Tree(save.path()), before);
     EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, RecoveryRestoresRetiredIndexBeforeExclusivePublication) {
+    for (const bool empty : {false, true}) {
+        SCOPED_TRACE(empty);
+        TempSave save;
+        const std::map<std::string, std::string> members =
+            empty ? std::map<std::string, std::string>{}
+                  : std::map<std::string, std::string>{{"world_info.json", "old"}};
+        ASSERT_TRUE(CommitOnce(save.path(), 1, members));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({}, nullptr));
+        // Represent interruption between retiring the bound index and publishing its successor.
+        ASSERT_TRUE(fs::remove(snapshot_index_path(save.path())));
+        ASSERT_TRUE(journal_pending(save.path()));
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+    }
+}
+
+TEST(SaveTransaction, RetiredIndexRecoveryPreservesMissingOrCorruptUndoEvidence) {
+    for (const int invalid : {0, 1, 2, 3}) {
+        SCOPED_TRACE(invalid);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({}, nullptr));
+        ASSERT_TRUE(fs::remove(snapshot_index_path(save.path())));
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        if (invalid == 0) {
+            ASSERT_TRUE(fs::remove(undo));
+        } else if (invalid == 1) {
+            // Preserve the inode so decoding, rather than ownership, rejects the partial data.
+            Put(undo, "partial undo");
+        } else if (invalid == 2) {
+            ASSERT_TRUE(fs::remove(undo));
+            ASSERT_TRUE(fs::create_directory(undo));
+            Put(undo / "occupant", "preserve");
+        } else {
+            fs::resize_file(undo, kMaxSnapshotIndexBytes + 1);
+        }
+        const auto evidence = Tree(save.path());
+        std::vector<std::string> errors;
+        EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_TRUE(journal_pending(save.path()));
+        EXPECT_EQ(Tree(save.path()), evidence);
+    }
+}
+
+TEST(SaveTransaction, RecoveryRefusesMismatchedBaseGenerationOrTransaction) {
+    for (const bool retired_index : {false, true}) {
+        for (const bool generation : {false, true}) {
+            SCOPED_TRACE(retired_index);
+            SCOPED_TRACE(generation);
+            TempSave save;
+            ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({}, nullptr));
+            if (retired_index) {
+                ASSERT_TRUE(fs::remove(snapshot_index_path(save.path())));
+            }
+            auto records = JournalRecords(save.path());
+            ASSERT_FALSE(records.empty());
+            for (auto& record : records) {
+                if (generation) {
+                    record["base_generation"] = 2;
+                    record["new_generation"] = 3;
+                } else {
+                    record["txn_id"] = 3;
+                }
+            }
+            Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+            const auto evidence = Tree(save.path());
+            std::vector<std::string> errors;
+            EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+            EXPECT_FALSE(errors.empty());
+            EXPECT_TRUE(journal_pending(save.path()));
+            EXPECT_EQ(Tree(save.path()), evidence);
+        }
+    }
+}
+
+TEST(SaveTransaction, RecoveryRefusesNoninitialTransactionWithoutCommittedIndex) {
+    TempSave save;
+    SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    auto records = JournalRecords(save.path());
+    ASSERT_FALSE(records.empty());
+    for (auto& record : records)
+        record["txn_id"] = 2;
+    Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+    const auto evidence = Tree(save.path());
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_TRUE(journal_pending(save.path()));
+    EXPECT_EQ(Tree(save.path()), evidence);
 }
 
 TEST(SaveTransaction, FailedCommitValidationRollsBack) {
@@ -969,10 +1138,17 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
 
 #if defined(_WIN32)
 namespace {
-int g_windows_cut = 0;
-int g_windows_calls = 0;
+struct WindowsInterruptionState {
+    int cut = 0;
+    int calls = 0;
+};
+WindowsInterruptionState& WindowsInterruption() {
+    static WindowsInterruptionState state;
+    return state;
+}
 void WindowsKillHook(const char*, const fs::path&) {
-    if (++g_windows_calls == g_windows_cut)
+    auto& state = WindowsInterruption();
+    if (++state.calls == state.cut)
         std::_Exit(7);
 }
 
@@ -1017,8 +1193,8 @@ std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_CUT", cut_text.c_str()) &&
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER", recovery ? L"1" : L"0");
     std::wstring command = L"\"" + executable +
-                           L"\" --gtest_filter=SaveTransaction.DISABLED_WindowsInterruptionChild "
-                           L"--gtest_also_run_disabled_tests --gtest_color=no";
+                           L"\" --gtest_filter=SaveTransaction.WindowsInterruptionChild "
+                           L"--gtest_color=no";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -1053,14 +1229,28 @@ std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery
 }
 } // namespace
 
-// Direct GoogleTest runs must leave this child to the interruption matrix below.
-// CTest also labels it manual via SaveTransactionCTest.cmake after discovery.
-TEST(SaveTransaction, DISABLED_WindowsInterruptionChild) {
+// Direct runs verify the same publication scenario. The interruption matrix supplies
+// the child directory and cut point when exercising process termination.
+TEST(SaveTransaction, WindowsInterruptionChild) {
     const auto dir = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DIR");
-    if (dir.empty())
-        GTEST_SKIP() << "invoked only by the Windows interruption matrix";
-    g_windows_cut = std::stoi(WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT"));
-    g_windows_calls = 0;
+    if (dir.empty()) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(),
+                               1,
+                               {{"world_info.json", "w0"},
+                                {"aether_state.efs", "e0"},
+                                {"chunks/region/active-regions.arl", "a0"}}));
+        ASSERT_TRUE(WindowsScenario(save.path()));
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "w1");
+        EXPECT_EQ(Get(save.path() / "aether_state.efs"), "e1");
+        EXPECT_EQ(Get(save.path() / "chunks/region/plant-entities.json"), "p1");
+        EXPECT_FALSE(fs::exists(save.path() / "chunks/region/active-regions.arl"));
+        EXPECT_FALSE(journal_pending(save.path()));
+        return;
+    }
+    auto& state = WindowsInterruption();
+    state.cut = std::stoi(WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT"));
+    state.calls = 0;
     set_snapshot_step_hook_for_testing(&WindowsKillHook);
     if (WindowsTestEnv(L"LUM_TXN_TEST_CHILD_RECOVER") == L"1")
         std::_Exit(recover_pending_journal(fs::path(dir), nullptr) == RecoveryOutcome::Failed ? 9
@@ -1209,46 +1399,47 @@ TEST(SaveTransaction, SnapshotAnchorsRefuseOutOfFloatRangeBeforeConversion) {
 }
 
 TEST(SaveTransaction, RecoveryRefusesUnknownGenerationAndDuplicateMembersWithoutMutation) {
-    const nlohmann::json entry = {{"path", "world_info.json"},
-                                  {"action", "create"},
-                                  {"prev_bytes", 0},
-                                  {"prev_fnv64", "0000000000000000"},
-                                  {"undo", ""}};
     for (const bool duplicate : {false, true}) {
         const TempSave save;
-        Put(save.path() / "world_info.json", "other owner's bytes");
-        fs::create_directories(journal_directory(save.path()));
-        const nlohmann::json journal = {
-            {"schema", kJournalSchema},
-            {"txn_id", 1},
-            {"base_generation", duplicate ? 0 : 3},
-            {"new_generation", duplicate ? 1 : 4},
-            {"entries",
-             duplicate ? nlohmann::json::array({entry, entry}) : nlohmann::json::array({entry})}};
-        Put(journal_directory(save.path()) / "txn.json", journal.dump());
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "other owner's bytes"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        auto records = JournalRecords(save.path());
+        ASSERT_FALSE(records.empty());
+        ASSERT_EQ(records.back().at("entries").size(), 1u);
+        if (duplicate) {
+            const auto entry = records.back().at("entries").front();
+            records.back()["entries"].push_back(entry);
+        } else {
+            for (auto& record : records) {
+                record["base_generation"] = 3;
+                record["new_generation"] = 4;
+            }
+        }
+        Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+        const auto evidence = Tree(save.path());
         std::vector<std::string> errors;
         EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
         EXPECT_FALSE(errors.empty());
         EXPECT_EQ(Get(save.path() / "world_info.json"), "other owner's bytes");
         EXPECT_TRUE(journal_pending(save.path()));
+        EXPECT_EQ(Tree(save.path()), evidence);
     }
 }
 
 TEST(SaveTransaction, RecoveryRefusesInvalidJournalIdentityBeforeMutation) {
-    const nlohmann::json entry = {{"path", "world_info.json"},
-                                  {"action", "create"},
-                                  {"prev_bytes", 0},
-                                  {"prev_fnv64", "0000000000000000"},
-                                  {"undo", ""}};
-    const nlohmann::json valid = {{"schema", kJournalSchema},
-                                  {"txn_id", 1},
-                                  {"base_generation", 0},
-                                  {"new_generation", 1},
-                                  {"entries", nlohmann::json::array({entry})}};
     for (int invalid_case = 0; invalid_case != 8; ++invalid_case) {
         const TempSave save;
         Put(save.path() / "world_info.json", "preserve");
-        auto journal = valid;
+        SaveTransaction writer(save.path(), 1, {}, &RawDigest);
+        ASSERT_TRUE(writer.begin(nullptr));
+        ASSERT_TRUE(writer.protect({"aether_state.efs"}, nullptr));
+        auto records = JournalRecords(save.path());
+        ASSERT_FALSE(records.empty());
+        ASSERT_EQ(records.back().at("entries").size(), 1u);
+        ASSERT_EQ(records.back().at("entries").front().at("action"), "create");
+        auto& journal = records.back();
         switch (invalid_case) {
             case 0:
                 journal["txn_id"] = 0;
@@ -1278,13 +1469,14 @@ TEST(SaveTransaction, RecoveryRefusesInvalidJournalIdentityBeforeMutation) {
                 break;
         }
         const auto transaction = journal_directory(save.path()) / "txn.json";
-        Put(transaction, journal.dump());
+        const auto encoded = EncodeJournalRecords(records);
+        Put(transaction, encoded);
         std::vector<std::string> errors;
         EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed)
             << invalid_case;
         EXPECT_FALSE(errors.empty()) << invalid_case;
         EXPECT_EQ(Get(save.path() / "world_info.json"), "preserve") << invalid_case;
-        EXPECT_EQ(Get(transaction), journal.dump()) << invalid_case;
+        EXPECT_EQ(Get(transaction), encoded) << invalid_case;
     }
 }
 } // namespace Luminumbra::Persistence

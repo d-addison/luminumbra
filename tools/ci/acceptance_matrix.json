@@ -479,7 +479,7 @@
     {
       "id": "render.frame-scan-schema",
       "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
-      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 72 existing column indices, including dirty_columns at index 62, and appends worker_dispatched, worker_completed, worker_stale_rejected and worker_queue_age_frames at indices 72\u201375, for 76 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 72 existing column indices, including dirty_columns at index 62, and appends worker_dispatched, worker_completed, worker_stale_rejected and worker_queue_age_frames at indices 72–75, for 76 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
       "status": "covered",
       "evidence": [
         {
@@ -3845,7 +3845,7 @@
     {
       "id": "contract.dw.intro.02",
       "source": "docs/distant-world.md#distant-world-and-distant-simulation-contract",
-      "statement": "Acceptance obligations: Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9 closure, and the committed-generation edited-SDF producer and FW S8 consumer are planned for v0.3.1. / The per-system continuation and transaction requirements below describe that planned work. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).",
+      "statement": "Acceptance obligations: Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9 closure, and the committed-generation edited-SDF producer and FW S8 consumer are planned for v0.3.1. / The per-system continuation and transaction requirements below describe that planned work. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).",
       "status": "planned",
       "requirements": [
         "dw.intro.011",
@@ -3863,7 +3863,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -3965,7 +3965,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -4357,7 +4357,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -4378,7 +4378,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -4416,7 +4416,7 @@
     {
       "id": "contract.dw.persistence.01",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "statement": "Acceptance obligations: Unchanged: LMR1 container v2 for `chunks/region/*.lmr` including its lod-level and flag validation, the `luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept decodable with its existing dimensions and validation; / no longer written by the runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes and placement, the plant record payload, canonical in-memory serialization, the replay checkpoint bytes and lockstep hash message. / There is no obsolete-world migration. / New records, each declared before its slice lands with exact version identity, byte order, lengths, checksums, allocation limits and section-evolution rules in the engine guide: / | `simulationTick`, `calendar` keys in `world_info.json` | existing file | tick 0 and pinned defaults | corrupt-metadata refusal | not applicable | / | `active-regions.arl` | `<save>/chunks/region/` | empty ledger | refuse | refuse as future format |",
+      "statement": "Acceptance obligations: Unchanged: LMR1 container v2 for `chunks/region/*.lmr` including its lod-level and flag validation, FSD2 far payload v3 (kept decodable with its existing dimensions and validation; / no longer written by the runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes and placement, the plant record payload, canonical in-memory serialization, the replay checkpoint bytes and lockstep hash message. / There is no obsolete-world migration. / New records, each declared before its slice lands with exact version identity, byte order, lengths, checksums, allocation limits and section-evolution rules in the engine guide: / | `simulationTick`, `calendar` keys in `world_info.json` | existing file | tick 0 and pinned defaults | corrupt-metadata refusal | not applicable | / | `active-regions.arl` | `<save>/chunks/region/` | empty ledger | refuse | refuse as future format |",
       "status": "planned",
       "requirements": [
         "dw.persistence.001",
@@ -4628,7 +4628,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -4722,7 +4722,7 @@
     {
       "id": "contract.ar.scope.01",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
+      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
       "status": "planned",
       "requirements": [
         "ar.scope.001",
@@ -4847,7 +4847,7 @@
     {
       "id": "contract.ar.file.01",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "status": "planned",
       "requirements": [
         "ar.file.001",
@@ -4855,7 +4855,6 @@
         "ar.file.003",
         "ar.file.004",
         "ar.file.005",
-        "ar.file.006",
         "ar.file.119"
       ],
       "evidence": [
@@ -4869,10 +4868,9 @@
     {
       "id": "contract.ar.file.02",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: this slice uses the existing durable temporary-write and atomic replacement primitive for the ledger, without claiming cross-file atomicity. / Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process. / The client calls them during world creation, its main-thread pause-menu quit callback, and shutdown after the main loop returns. / Its explicit persistence scenario also runs on that thread. / The server calls them synchronously from `RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick loop. / Job workers do not call the pair writer.",
+      "statement": "Acceptance obligations: Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process. / The client calls them during world creation, its main-thread pause-menu quit callback, and shutdown after the main loop returns. / Its explicit persistence scenario also runs on that thread. / The server calls them synchronously from `RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick loop. / Job workers do not call the pair writer.",
       "status": "planned",
       "requirements": [
-        "ar.file.007",
         "ar.file.008",
         "ar.file.009",
         "ar.file.010",
@@ -7805,6 +7803,68 @@
         }
       ],
       "requirements": []
+    },
+    {
+      "id": "persistence.indexed-envelope-and-rollback",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Indexed metadata uses version 3 while region containers remain version 2. Indexed envelope witnesses preserve legacy admission and require an index after upgrade. Compound indexed saves restore the committed tree and pending acknowledgements on failure; creation retains failed cleanup evidence in its artifact registry. Ownership checks cover publication, rollback and retirement on both platforms. Region digest work and client autosave refusal gates have registered regressions. Native execution and crash qualification remain pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.006",
+        "ar.file.007",
+        "indexed.persistence.001",
+        "indexed.persistence.002",
+        "indexed.persistence.003",
+        "indexed.persistence.004",
+        "indexed.persistence.005",
+        "indexed.persistence.006",
+        "indexed.persistence.007",
+        "indexed.persistence.008",
+        "indexed.persistence.009",
+        "indexed.persistence.010",
+        "indexed.persistence.011",
+        "indexed.persistence.012",
+        "indexed.persistence.013",
+        "indexed.persistence.014",
+        "indexed.persistence.015",
+        "indexed.persistence.016",
+        "indexed.persistence.017",
+        "indexed.persistence.018",
+        "indexed.persistence.019",
+        "indexed.persistence.020",
+        "indexed.persistence.021"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SaveTransaction.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldDurableResidency.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CompleteSaveFailure.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Run registered native persistence, host and interruption regressions on supported platforms; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        }
+      ]
     }
   ]
 }

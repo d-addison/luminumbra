@@ -10,8 +10,8 @@ immutable authority and fall back from the default Ladder request to Legacy.
 Saved-world far production authority remains fixture-only until FW S8 (v0.3.1);
 the renderer reports an explicit unavailable/refusal diagnostic.
 
-Indexed authority durability/rehydration, durable completed work and ground-object
-continuation, durable regional fields/weather/scent/energy, regional foliage/water
+Indexed authority durability and rehydration are in preparation with native qualification pending.
+Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water
 continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9
 closure, and the committed-generation edited-SDF producer and FW S8 consumer are
 planned for v0.3.1. The per-system continuation and transaction requirements below
@@ -422,8 +422,7 @@ configuration plus resolved preset/dependency content; older layouts are refused
 See the [identity contract](development/system-config-identity.md).
 
 Unchanged: LMR1 container v2 for `chunks/region/*.lmr`
-including its lod-level and flag validation, the
-`luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept
+including its lod-level and flag validation, FSD2 far payload v3 (kept
 decodable with its existing dimensions and validation; no longer written by the
 runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes
 and placement, the plant record payload, canonical in-memory serialization, the

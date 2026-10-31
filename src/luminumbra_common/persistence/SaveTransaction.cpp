@@ -11,6 +11,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -296,27 +297,36 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
             error = "journal publication identity invalid";
             return false;
         }
-        const auto temporary_name = [&](const char* key, const fs::path& base,
-                                        std::string& output) {
-            const auto* value = Field(item, key);
-            if (!value || !value->is_string())
-                return false;
-            output = value->get<std::string>();
-            if (output.empty())
-                return true;
-            const auto prefix = Filesystem::GenericUtf8PathString(base) + ".tmp.";
-            if (!output.starts_with(prefix))
-                return false;
-            const std::string_view suffix(output.data() + prefix.size(), output.size() - prefix.size());
-            const auto separator = suffix.find('.');
-            return separator != std::string_view::npos && AllDigits(suffix.substr(0, separator)) &&
-                   AllDigits(suffix.substr(separator + 1));
-        };
-        if (!temporary_name("undo_temporary", fs::path("journal") / entry.undo, entry.undo_temporary) ||
-            (!temporary_name("incoming_temporary", fs::path(entry.path).filename(), entry.incoming_temporary) &&
-             !temporary_name("incoming_temporary", fs::path("journal") / fs::path(entry.path).filename(), entry.incoming_temporary) &&
-             !temporary_name("incoming_temporary", fs::path(entry.path), entry.incoming_temporary)) ||
-            !temporary_name("restored_temporary", fs::path("journal") / fs::path(entry.path).filename(), entry.restored_temporary)) {
+        const auto temporary_name =
+            [&](const char* key, const fs::path& prefix_path, std::string& output) {
+                const auto* value = Field(item, key);
+                if (!value || !value->is_string())
+                    return false;
+                output = value->get<std::string>();
+                if (output.empty())
+                    return true;
+                const auto prefix = Filesystem::GenericUtf8PathString(prefix_path) + ".tmp.";
+                if (!output.starts_with(prefix))
+                    return false;
+                const std::string_view suffix(output.data() + prefix.size(),
+                                              output.size() - prefix.size());
+                const auto separator = suffix.find('.');
+                return separator != std::string_view::npos &&
+                       AllDigits(suffix.substr(0, separator)) &&
+                       AllDigits(suffix.substr(separator + 1));
+            };
+        if (!temporary_name(
+                "undo_temporary", fs::path("journal") / entry.undo, entry.undo_temporary) ||
+            (!temporary_name(
+                 "incoming_temporary", fs::path(entry.path).filename(), entry.incoming_temporary) &&
+             !temporary_name("incoming_temporary",
+                             fs::path("journal") / fs::path(entry.path).filename(),
+                             entry.incoming_temporary) &&
+             !temporary_name(
+                 "incoming_temporary", fs::path(entry.path), entry.incoming_temporary)) ||
+            !temporary_name("restored_temporary",
+                            fs::path("journal") / fs::path(entry.path).filename(),
+                            entry.restored_temporary)) {
             error = "journal temporary name invalid";
             return false;
         }
@@ -489,6 +499,30 @@ bool AppendEntry(const fs::path& save_dir,
                                                    errors);
 }
 
+bool VerifyRetiredIndexUndo(const fs::path& save_dir,
+                            const JournalDocument& document,
+                            std::vector<std::string>* errors) {
+    const auto entry =
+        std::find_if(document.entries.begin(), document.entries.end(), [](const auto& candidate) {
+            return candidate.path == kSnapshotIndexRelativePath && candidate.action == "replace";
+        });
+    if (entry == document.entries.end())
+        return false;
+    const SavedInputFile undo(journal_directory(save_dir) / entry->undo);
+    ArtifactIdentity identity{};
+    std::string bytes;
+    SnapshotIndex previous;
+    std::string error;
+    if (!undo.identity(identity) || identity != entry->undo_identity ||
+        !undo.read(bytes, kMaxSnapshotIndexBytes) ||
+        !decode_snapshot_index(bytes, previous, error) ||
+        previous.generation != document.base_generation || previous.txn_id != document.txn_id - 1) {
+        AddError(errors, "retired snapshot index undo identity invalid");
+        return false;
+    }
+    return true;
+}
+
 // Undo is replayable: the identity of a restoration is itself journaled before publication.
 // Never overwrite an occupant merely because its bytes differ from the old commit.
 bool RollbackEntries(const fs::path& save_dir,
@@ -547,7 +581,8 @@ bool RollbackEntries(const fs::path& save_dir,
                 if (!entry->restored_temporary.empty()) {
                     temporary = save_dir / entry->restored_temporary;
                     ArtifactIdentity actual{};
-                    if (!WorldSaveService::artifact_identity(temporary, actual, temporary_missing) ||
+                    if (!WorldSaveService::artifact_identity(
+                            temporary, actual, temporary_missing) ||
                         (!temporary_missing && actual != entry->restored_identity)) {
                         AddError(errors, "snapshot restoration ownership changed");
                         return false;
@@ -556,15 +591,18 @@ bool RollbackEntries(const fs::path& save_dir,
                 if (temporary_missing) {
                     if (!WorldSaveService::prepare_restoration(journal_directory(save_dir) /
                                                                    destination.filename(),
-                                                               restored, temporary,
-                                                               entry->restored_identity, errors))
+                                                               restored,
+                                                               temporary,
+                                                               entry->restored_identity,
+                                                               errors))
                         return false;
                     entry->restored_temporary =
                         Filesystem::GenericUtf8PathString(temporary.lexically_relative(save_dir));
                     if (!AppendEntry(save_dir, document, *entry, control, errors))
                         return false;
                 }
-                if (!WorldSaveService::publish_restoration(temporary, destination, current, entry->restored_identity, errors))
+                if (!WorldSaveService::publish_restoration(
+                        temporary, destination, current, entry->restored_identity, errors))
                     return false;
             }
         }
@@ -1001,9 +1039,23 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
         if (!read_snapshot_index(save_dir, committed, errors)) {
             return RecoveryOutcome::Failed;
         }
-        if (committed.generation != document.base_generation &&
+        // Exclusive publication can be interrupted after retiring the old index and before
+        // installing the new one. The journal's protected index is the undo authority then.
+        const bool retired_index =
+            committed.generation == 0 &&
+            std::any_of(document.entries.begin(), document.entries.end(), [](const auto& entry) {
+                return entry.path == kSnapshotIndexRelativePath && entry.action == "replace";
+            });
+        if (retired_index && !VerifyRetiredIndexUndo(save_dir, document, errors))
+            return RecoveryOutcome::Failed;
+        if (!retired_index && committed.generation != document.base_generation &&
             committed.generation != document.new_generation) {
             AddError(errors, "journal does not belong to committed snapshot generation");
+            return RecoveryOutcome::Failed;
+        }
+        if (committed.generation == document.base_generation &&
+            committed.txn_id != document.txn_id - 1) {
+            AddError(errors, "journal does not follow committed transaction");
             return RecoveryOutcome::Failed;
         }
         if (committed.generation == document.new_generation &&
@@ -1583,7 +1635,11 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
             copy.restored_temporary = entry.restored_temporary;
             document.entries.push_back(std::move(copy));
         }
-        if (m_artifacts) {
+        if (m_artifacts && m_previous.generation == 0) {
+            // Creation has no previous commit to restore. Its created-artifacts registry
+            // retains identities and failed-rollback diagnostics until cleanup succeeds, so
+            // the journal may retire first even if artifact rollback subsequently refuses.
+            // Replacements must retain the recovery journal whenever rollback fails.
             if (FinishJournal(m_save_dir, document, m_control_identity, errors)) {
                 const auto error = m_artifacts->rollback();
                 if (!error.empty())

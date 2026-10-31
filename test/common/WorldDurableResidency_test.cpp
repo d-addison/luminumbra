@@ -13,11 +13,11 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
-#include <sstream>
-#include <stdexcept>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -325,6 +325,7 @@ TEST(WorldDurableResidency, ByteLimitKeepsDirtyChunkResidentAndRequestsSave) {
 }
 
 TEST(WorldDurableResidency, ClientRefusalGatesDueAndPressureSaves) {
+    EXPECT_FALSE(Luminumbra::Client::SaveSessionWhenDue(nullptr, true));
     for (const bool pressure : {false, true}) {
         SCOPED_TRACE(pressure);
         DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
@@ -386,6 +387,9 @@ TEST(WorldDurableResidency, ClientRefusalGatesDueAndPressureSaves) {
         EXPECT_FALSE(edited->is_voxel_data_dirty());
         EXPECT_FALSE(fx.session->PersistenceSaveRequested());
         EXPECT_FALSE(fx.session->PersistenceAutosaveDue());
+        const auto saved = tree();
+        EXPECT_FALSE(Luminumbra::Client::SaveSessionWhenDue(fx.session.get(), true));
+        EXPECT_EQ(tree(), saved);
     }
 }
 
@@ -411,8 +415,9 @@ TEST(WorldDurableResidency, RegionDigestWorkIsLinearAndPublicationInvalidatesAdm
         const Luminumbra::world::RegionKey key{region, 0};
         const auto grouped = fx.world->region_digest_inputs(region, 0);
         ASSERT_EQ(grouped.live.size(), 1u);
-        EXPECT_EQ(operation.digest(key, grouped), P::WorldSaveService::region_simulation_digest(
-                                                     fx.session->GetWorldSaveDir(), key, complete));
+        EXPECT_EQ(operation.digest(key, grouped),
+                  P::WorldSaveService::region_simulation_digest(
+                      fx.session->GetWorldSaveDir(), key, complete));
     }
     EXPECT_EQ(fx.world->region_digest_input_items() - before, regions);
     EXPECT_EQ(operation.input_items(), regions);
@@ -423,8 +428,9 @@ TEST(WorldDurableResidency, RegionDigestWorkIsLinearAndPublicationInvalidatesAdm
     EXPECT_EQ(operation.digest({0, 0}, grouped), expected);
     EXPECT_EQ(operation.index_reads(), 2u);
     {
-        std::ofstream payload(P::WorldSaveService::region_file_path(fx.session->GetWorldSaveDir(), 0, 0),
-                              std::ios::binary | std::ios::trunc);
+        std::ofstream payload(
+            P::WorldSaveService::region_file_path(fx.session->GetWorldSaveDir(), 0, 0),
+            std::ios::binary | std::ios::trunc);
         payload << "damaged actual member";
         ASSERT_TRUE(payload.good());
     }

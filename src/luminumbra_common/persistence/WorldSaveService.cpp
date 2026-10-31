@@ -1576,6 +1576,7 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
             AddError(errors, "snapshot publication occupant changed");
             return false;
         }
+        report_snapshot_step("after-retire", destination);
     }
     if (!source.publish_bound(destination)) {
         AddError(errors, "cannot exclusively publish protected snapshot member");
@@ -1881,7 +1882,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
             std::array<std::uint64_t, 3> expected{}, incoming{};
             const bool protected_member =
                 SaveTransaction::publication_identity(destination, expected, incoming);
-            if (protected_member && !PublishProtectedMember(temp, destination, expected, incoming, errors))
+            if (protected_member &&
+                !PublishProtectedMember(temp, destination, expected, incoming, errors))
                 return false;
             if (!protected_member && std::rename(temp.c_str(), destination.c_str()) != 0) {
                 const int error = errno;
@@ -3467,6 +3469,8 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     std::error_code ec;
     if (m_empty) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
+        if (scope.engaged())
+            return durable_remove(path, errors) && scope.commit(errors);
         {
             const auto publish = LockPublication(path);
             if (!AllowPublication(path, true, errors)) {
@@ -3716,9 +3720,10 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
 
 RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_dir,
                                              bool require_index)
-    : m_ownership(SaveMutex()), m_save_dir(save_dir),
-      m_publication_revision(PublicationRevision().load(std::memory_order_relaxed)),
-      m_require_index(require_index) {
+    : m_ownership(SaveMutex())
+    , m_save_dir(save_dir)
+    , m_publication_revision(PublicationRevision().load(std::memory_order_relaxed))
+    , m_require_index(require_index) {
     if (save_dir.empty())
         return;
     WorldSaveService::SaveFormat format;

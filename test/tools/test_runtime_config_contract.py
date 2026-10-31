@@ -99,11 +99,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         publish = service[service.index("classNewFilePublication{"):]
         publish = publish[:publish.index("boolCompressPayload(")]
-        self.assertIn("::link(m_temp.c_str(),m_destination.c_str())", publish)
-        self.assertIn("::syscall(SYS_renameat2,AT_FDCWD,m_temp.c_str(),AT_FDCWD,"
-                      "m_destination.c_str(),RENAME_NOREPLACE)", publish)
-        self.assertIn("::renamex_np(m_temp.c_str(),m_destination.c_str(),RENAME_EXCL)", publish)
-        self.assertIn("errno==ENOSYS||errno==EINVAL||errno==EOPNOTSUPP", publish)
+        self.assertIn("CreatedWorldArtifacts::publish_bound_file(m_temp,m_destination,m_descriptor)", publish)
+        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_destination,m_descriptor,false)", publish)
         self.assertIn("Detail::WindowsPublishWithoutReplacement(std::exchange(m_handle,INVALID_HANDLE_VALUE),"
                       "m_temp,m_destination,GENERIC_WRITE|DELETE|FILE_READ_ATTRIBUTES)", publish)
         self.assertIn("::FlushFileBuffers(m_handle)", publish)
@@ -119,9 +116,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("::MoveFileExW(", publish)
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", publish)
         self.assertNotIn("std::rename(", publish)
-        self.assertIn("::fstat(m_descriptor,&published)==0", publish)
-        self.assertIn("::lstat(m_destination.c_str(),&named)==0", publish)
-        self.assertIn("published.st_dev==named.st_dev&&published.st_ino==named.st_ino", publish)
+        publication = journal[journal.index("voidpublish_posix("):journal.index("voidcreate_owned_directory(")]
+        self.assertIn("::fstatat(container.get(),\"artifact\",&info,AT_SYMLINK_NOFOLLOW)", publication)
+        self.assertIn("moved!=source.identity", publication)
+        self.assertIn("container.get(),\"artifact\",target_parent.get(),target_name.c_str()", publication)
+        self.assertIn("Detail::RenameWithoutReplacement(", publication)
         self.assertIn("m_published&&!m_committed", publish)
         self.assertIn("::SetFileInformationByHandle(m_handle,FileDispositionInfo,", publish)
         self.assertIn("returnFlushRemovalDirectory(m_destination,errors);", publish)
@@ -303,10 +302,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         native = service[service.index("classStagingFile{"):service.index("std::filesystem::pathOwnershipPath(")]
         for required in ("O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", "::fstat(m_descriptor,&info)",
                          "FILE_FLAG_OPEN_REPARSE_POINT", "::GetFileInformationByHandle(m_handle,&info)",
-                         "FILE_DISPOSITION_INFO", "::lstat(m_path.c_str(),&named)",
+                         "FILE_DISPOSITION_INFO", "ReadFileIdentity(path,named)",
                          "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
             self.assertIn(required, native)
         self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))
+        identity = service[service.index("boolReadFileIdentity("):service.index("boolSameFileIdentity(")]
+        self.assertIn("::lstat(path.c_str(),&information)", identity)
 
     def test_ledger_orphan_cleanup_validates_proof_and_absence_before_verified_removal(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -566,7 +567,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                          service.index("std::filesystem::pathOwnershipPath(")]
         self.assertIn("O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", native)
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", native)
-        self.assertIn("::lstat(m_path.c_str(),&named)", native)
+        self.assertIn("ReadFileIdentity(path,named)", native)
+        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_path,m_descriptor,false)", native)
         self.assertIn("info.nNumberOfLinks>links", native)
         self.assertIn("info.st_nlink>links", native)
 

@@ -14,13 +14,13 @@ fallback, including when obsolete artifacts coexist with current region files.
 
 | Layer | Current identity |
 |---|---|
-| World metadata | `world_info.json` declares `container_version: 2` at creation, before any chunk records exist; missing versions are obsolete |
+| World metadata | `world_info.json` declares `container_version: 2` for ordinary unindexed saves, or `container_version: 3` with `snapshotFormat: 1` for indexed saves; missing versions are obsolete |
 | Region container | `chunks/region/r.<rx>.<rz>.lmr`: `LMR1` magic, little-endian `u16` container version `2`, `u16` record count, record headers and LZ4 payloads |
-| World manifest | `chunks/region/world-manifest.json`: `schema: "luminumbra.persistence.world_manifest.v1"`, `container: "LMR1"`, `container_version: 2` |
+| World manifest | `chunks/region/world-manifest.json`: unindexed schema `luminumbra.persistence.world_manifest.v1`, indexed schema `luminumbra.persistence.world_manifest.v2`; both use `container: "LMR1"`, `container_version: 2` |
 | Far-LOD record payload | `FSD2` magic, payload version `3` inside the LMR1 container |
 | Terrain preset | New presets use integer `schema_rev: 8` with sampling revision `2`; revision `6` and omitted revisions retain historical missing-field semantics |
 
-The manifest schema is still v1; it is distinct from container v2, FSD2 payload
+Manifest schemas v1 and v2 are distinct from LMR1 container v2, FSD2 payload
 v3, and project version 0.3.0. Lod-0 records retain the canonical
 `world_state_snapshot.v1` in-memory serialization. This does not restore support
 for obsolete on-disk snapshots, their backups, LMR1 v1, or older far-LOD payloads.
@@ -85,7 +85,8 @@ performance/default enablement remains v0.4.0 (issue #320).
 The hashed `sim.active_regions` key is enabled by default for v0.3.0. When
 enabled, each successful persistent `GameSession` save writes the resolved clock
 in `world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
-temporary-file and atomic replacement path. The container remains version 2:
+temporary-file and atomic replacement path. Region containers remain version 2;
+indexed metadata uses envelope version 3 as described above:
 
 ```json
 "simulationTick": 317,
@@ -228,16 +229,27 @@ are unchanged. This is a bounded C1 bridge: it does not provide ambient coverage
 following the player at distance. C4 replaces the fixed grids with world-anchored
 pages, regional storm records and activation history. Older clock snapshots
 without an anchor use their saved spawn; a historical anchor already lost by
-such a snapshot cannot be recovered. The snapshot commit index, rollback
-journal, and multi-file recovery belong to C2/C3. C1 uses the existing metadata write path and is not a
-claim of atomic publication across chunk, entity, energy and metadata files.
+such a snapshot cannot be recovered. Indexed saves now stage undo and publication
+ownership in a versioned journal and publish the snapshot index last, atomically
+committing chunks, plants, energy, ledger and metadata. Failed precommit saves
+restore the previous committed tree without acknowledging dirty work. Failed
+rollback retains the journal and refuses admission; creation alone may retire the
+journal first because its created-artifacts registry retains failed-rollback
+evidence and identities until cleanup succeeds. Cleanup failure after the index
+commit leaves the new save committed. See [save compatibility](active-regions.md#file-and-compatibility).
 The shipping clock/ledger foundation is enabled by default. Indexed authority
-durability/rehydration, durable completed work and ground-object continuation,
+durability/rehydration is in preparation with native qualification pending. Durable completed work and ground-object continuation,
 durable regional fields/weather/scent/energy, and regional foliage/water
 continuation are planned for v0.3.1. Five-minute dedicated-server autosave does
 not implement those persistence slices. LMR1 v2,
-world_manifest.v1, FSD2 v3, and existing canonical chunk and entity serialization
+FSD2 v3, and existing canonical chunk and entity serialization
 are unchanged; preset revision 7 retains revision 6 omission compatibility.
+Ordinary unindexed flag-off saves retain metadata v2 and manifest v1 bytes.
+Indexed saves use metadata v3 and manifest v2 as independent required-index
+witnesses, including empty saves and flag-off writes to indexed destinations.
+Valid legacy clock/ledger saves remain readable without an index; the first
+indexed save upgrades atomically. Old readers refuse the new envelope, and
+already stripped draft saves remain historically ambiguous.
 The additive metadata contract `presetFormat: 1` requires an embedded preset
 and its canonical-JSON checksum. It changes neither the container version nor
 the existing `StableChecksum` algorithm or runtime dependency-content hash.

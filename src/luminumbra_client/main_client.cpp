@@ -5293,7 +5293,7 @@ int main(int argc, char* argv[]) {
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                     Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
-                                                          session_persistence_allowed());
+                                                           session_persistence_allowed());
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //

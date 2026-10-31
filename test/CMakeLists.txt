@@ -2218,10 +2218,6 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     endif()
 endforeach()
 
-# Apply child-only labels after discovery has registered the tests. This CTest
-# include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
-set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake")
 # GoogleTest's discovery includes must run before case labeling and COST hints.
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")

@@ -451,7 +451,8 @@ TEST_F(HostSchedulerFault, RefusedCapturePreservesReplacementSave) {
             metadata["name"] = "Capture replaced";
             metadata["spawnPoint"]["x"] = 321.0f;
             const auto stamp = fs::last_write_time(metadata_path);
-            ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata(metadata.dump(4) + "\n", directory));
+            ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata(
+                metadata.dump(4) + "\n", directory));
             fs::last_write_time(metadata_path, stamp);
             ASSERT_TRUE(
                 Luminumbra::Persistence::InspectSavedWorld(root, session.GetMetadata().worldId)
@@ -503,7 +504,8 @@ TEST_F(HostSchedulerFault, VerifiedSnapshotLoadsOriginalAfterLiveSaveReplacement
             const auto metadata_path = directory / "world_info.json";
             auto metadata = nlohmann::json::parse(ReadHostFile(metadata_path));
             metadata["name"] = "Snapshot replaced";
-            ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata(metadata.dump(4) + "\n", directory));
+            ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata(
+                metadata.dump(4) + "\n", directory));
             const auto replacement = ReadHostFile(metadata_path);
             ASSERT_TRUE(session.LoadWorldFrom(id, snapshot.root()));
             EXPECT_EQ(session.GetMetadata().name, "Snapshot original");

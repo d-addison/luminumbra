@@ -2589,9 +2589,13 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
             chunk->set_state(Luminumbra::ChunkState::Idle);
         }
         ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(snapshot, [&] {
-            return P::WorldSaveService::write_member_bytes(snapshot, "world_info.json", ReadClockTestFile(source_save / "world_info.json")) &&
-                P::WorldSaveService::remove_member(snapshot, "chunks/region/active-regions.arl") &&
-                (!with_chunks || P::WorldSaveService{}.save_world(state, snapshot));
+            return P::WorldSaveService::write_member_bytes(
+                       snapshot,
+                       "world_info.json",
+                       ReadClockTestFile(source_save / "world_info.json")) &&
+                   P::WorldSaveService::remove_member(snapshot,
+                                                      "chunks/region/active-regions.arl") &&
+                   (!with_chunks || P::WorldSaveService{}.save_world(state, snapshot));
         }));
         ASSERT_FALSE(fs::exists(P::WorldSaveService::active_regions_path(snapshot)));
         ASSERT_TRUE(fs::exists(P::WorldSaveService::world_manifest_path(snapshot)));
@@ -2614,8 +2618,10 @@ TEST_P(SavedWorldPresetTest, SnapshotLoadRestoresWaterCursorAndDefaultsMissingMe
         ASSERT_FALSE(fs::exists(snapshot / "world_info.json"));
         ASSERT_TRUE(fs::exists(P::WorldSaveService::world_manifest_path(snapshot)));
         reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
+        before = SavedPresetTestDiskBytes(snapshot);
         ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+        EXPECT_EQ(SavedPresetTestDiskBytes(snapshot), before);
     }
     reader.GetWorldSystem()->SetWaterSimWindowCursor(19);
     ASSERT_TRUE(reader.LoadWorldStateFrom(Root().path() / "missing-water-snapshot"));

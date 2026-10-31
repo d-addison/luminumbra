@@ -9,7 +9,7 @@
 // journal when the committed index already carries the transaction's new generation.
 //
 // All functions here are owner-thread only. They never run unless a save directory is indexed or a
-// flag-on GameSession save opens a transaction, so flag-off saves are untouched.
+// flag-on GameSession save opens a transaction. Ordinary unindexed flag-off saves are untouched.
 
 #include <array>
 #include <cstddef>
@@ -98,7 +98,8 @@ enum class RecoveryOutcome : std::uint8_t {
     Failed
 };
 
-// Idempotent and crash-safe (see the protocol in specs/ds/s4-impl.md). Failed appends a diagnostic.
+// Idempotent recovery follows the protected identities and undo records. Failed appends a
+// diagnostic.
 RecoveryOutcome recover_pending_journal(const std::filesystem::path& save_dir,
                                         std::vector<std::string>* errors);
 
@@ -223,8 +224,8 @@ private:
 };
 
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",
-// "after-replace", "before-delete", "after-delete", "commit-point", "journal-unlinked",
-// "rollback-entry").
+// "after-retire", "after-replace", "before-delete", "after-delete", "commit-point",
+// "journal-unlinked", "before-rollback", "rollback-entry").
 using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
 void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
 void report_snapshot_step(const char* step, const std::filesystem::path& path);
