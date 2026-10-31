@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 59 |
+| covered | 60 |
 | partial | 16 |
 | needs-native-run | 21 |
 | planned | 86 |
-| Total | 182 |
+| Total | 183 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
