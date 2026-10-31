@@ -1797,8 +1797,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault) {
         // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
         // probe.
-        m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
-        m_worldSystem->sync_water_authority();
+        if (m_worldSystem) {
+            m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
+            m_worldSystem->sync_water_authority();
+        }
         const auto anchors =
             m_replicatedSimulationAnchors
                 ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
@@ -1817,9 +1819,12 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return Persistence::WorldSaveService::region_simulation_digest(
                         directory,
                         key,
-                        Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                        m_worldSystem->snapshot_parked_chunks(),
-                                                        m_worldSystem->durable_chunk_inventory()});
+                        m_worldSystem
+                            ? Persistence::
+                                  RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
+                                                     m_worldSystem->snapshot_parked_chunks(),
+                                                     m_worldSystem->durable_chunk_inventory()}
+                            : Persistence::RegionDigestInputs{});
                 },
                 // Later slices extend this probe with ground objects,
                 // pages, creatures, plants and water debt.
@@ -1828,6 +1833,8 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
+                        if (!m_worldSystem)
+                            return owned_regions->contains(key);
                         for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
@@ -2799,6 +2806,13 @@ bool GameSession::ReadPreparedWorldState(
                     ? "Incompatible configuration: this world requires sim.active_regions."
                     : errors.front();
         state.input_refused = error.find("Saved-input admission refused:") == 0;
+        return false;
+    }
+    // Enabled session saves have a snapshot commit point. The standalone persistence
+    // helpers also support legacy clock/ledger pairs, but session admission must not
+    // silently regenerate authority after an indexed save loses its index and marker.
+    if (requires_active_regions && !Persistence::snapshot_index_exists(save_dir)) {
+        error = "inconsistent snapshot: enabled records without index";
         return false;
     }
     if (options.active_regions) {

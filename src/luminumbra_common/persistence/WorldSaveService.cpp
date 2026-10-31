@@ -2577,7 +2577,8 @@ public:
     TransactionScope(const std::filesystem::path& save_dir,
                      const std::vector<std::string>& relative_paths,
                      std::vector<std::string>* errors,
-                     bool require_index = false) {
+                     bool require_index = false,
+                     CreatedWorldArtifacts* artifacts = nullptr) {
         if (SaveTransaction* active = SaveTransaction::active_for(save_dir)) {
             m_engaged = true;
             m_ok = active->protect(relative_paths, errors);
@@ -2606,7 +2607,7 @@ public:
         read_snapshot_index(save_dir, previous, nullptr);
         m_facts = std::make_unique<WorldSaveService::SaveFactsScope>(save_dir);
         m_transaction = std::make_unique<SaveTransaction>(
-            save_dir, previous.tick, previous.anchors, &WorldSaveService::member_digest);
+            save_dir, previous.tick, previous.anchors, &WorldSaveService::member_digest, artifacts);
         m_engaged = true;
         // Recover first (begin), then refuse to bless a corrupt baseline: an implicit writer must
         // not overwrite a checksum-mismatched member and publish an index that conceals it.
@@ -2743,13 +2744,8 @@ bool VerifyRegionMembership(const std::filesystem::path& region_file,
             AddError(errors, error.empty() ? "inconsistent snapshot: index missing" : error);
             return false;
         }
-        world::WorldClock clock;
-        bool required = false;
-        if (!WorldSaveService::read_clock_metadata(save_dir, clock, required, errors) || required) {
-            if (required)
-                AddError(errors, "inconsistent snapshot: enabled records without index");
-            return false;
-        }
+        // Clock and ledger records predate indexing. Only the explicit format marker
+        // requires an index; legacy active-region worlds upgrade on their next full save.
         return true;
     }
     SnapshotIndex index;
@@ -2919,7 +2915,8 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, clock_error);
         return false;
     }
-    TransactionScope scope(save_dir, {"world_info.json"}, errors, has_clock);
+    TransactionScope scope(
+        save_dir, {"world_info.json"}, errors, metadata.contains("snapshotFormat"), artifacts);
     if (!scope.ok())
         return false;
     if (!validate_save(save_dir, errors))
@@ -3000,8 +2997,11 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
-    TransactionScope scope(
-        save_dir, {"world_info.json", "chunks/region/active-regions.arl"}, errors, true);
+    TransactionScope scope(save_dir,
+                           {"world_info.json", "chunks/region/active-regions.arl"},
+                           errors,
+                           metadata.contains("snapshotFormat"),
+                           artifacts);
     if (!scope.ok())
         return false;
     world::WorldClock previous_clock;
@@ -3366,9 +3366,8 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors,
                                            CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    const bool has_ledger = !ledger.records().empty() || ledger.local_anchor() ||
-                            std::filesystem::exists(active_regions_path(save_dir));
-    TransactionScope scope(save_dir, {"chunks/region/active-regions.arl"}, errors, has_ledger);
+    TransactionScope scope(
+        save_dir, {"chunks/region/active-regions.arl"}, errors, false, artifacts);
     if (!scope.ok() || !validate_save(save_dir, errors))
         return false;
     world::WorldClock previous_clock;
@@ -3885,9 +3884,10 @@ bool WorldSaveService::durable_flush_directory(const std::filesystem::path& dire
 
 bool WorldSaveService::durable_write_file(const std::filesystem::path& destination,
                                           const std::string& bytes,
-                                          std::vector<std::string>* errors) {
+                                          std::vector<std::string>* errors,
+                                          const std::filesystem::path& staging) {
     std::filesystem::path temp;
-    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+    if (!WriteDurableRegionTemp(staging.empty() ? destination : staging, bytes, temp, errors))
         return false;
     if (!ReplaceMember(temp, destination, errors)) {
         RemoveTemporaryFile(temp);
@@ -4019,9 +4019,6 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             return true;
         }
 
-        const SavedInputFile input(path);
-        if (input.missing())
-            return true;
         std::uint64_t maximum = SavedInputLimits::kManifestBytes;
         if (relative == "chunks/region/plant-entities.json")
             maximum = SavedInputLimits::kPlantFileBytes;
@@ -4030,9 +4027,14 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
         else if (relative == "aether_state.efs")
             maximum = luminumbra::fields::kEnergyReadRecordBytes;
         std::string member_bytes;
-        if (!input.read(member_bytes, maximum)) {
-            error = "unreadable or oversized snapshot member";
-            return false;
+        {
+            const SavedInputFile input(path);
+            if (input.missing())
+                return true;
+            if (!input.read(member_bytes, maximum)) {
+                error = "unreadable or oversized snapshot member";
+                return false;
+            }
         }
         nlohmann::json document;
         if (relative == "world_info.json" || relative == "chunks/region/world-manifest.json") {
@@ -4150,7 +4152,11 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
     const std::filesystem::path destination = save_dir / relative;
     std::error_code ec;
     std::filesystem::create_directories(destination.parent_path(), ec);
-    return durable_write_file(destination, bytes, errors) && scope.commit(errors);
+    // A killed transactional writer leaves its temporary under the journal,
+    // where recovery can retire it without claiming unknown strict-inventory files.
+    const auto staging =
+        scope.engaged() ? journal_directory(save_dir) / destination.filename() : destination;
+    return durable_write_file(destination, bytes, errors, staging) && scope.commit(errors);
 }
 
 bool WorldSaveService::remove_member(const std::filesystem::path& save_dir,
@@ -4225,7 +4231,8 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
     const SaveGuard guard;
     if (!artifacts)
         ReclaimAbandonedStaging(destination);
-    return WriteFileDurably(destination, bytes, destination, errors, nullptr, artifacts);
+    const auto staging = artifacts ? region_staging_path(destination) : destination;
+    return WriteFileDurably(destination, bytes, staging, errors, nullptr, artifacts);
 }
 
 bool WorldSaveService::create_file_durably(const std::filesystem::path& destination,
@@ -4588,15 +4595,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         SnapshotIndex snapshot_index;
         if (indexed && !read_snapshot_index(save_dir, snapshot_index, &errors))
             return reject("inconsistent snapshot: corrupt snapshot index");
-        if (!indexed && !metadata_missing &&
-            (metadata.contains("snapshotFormat") || metadata.contains("simulationTick") ||
-             metadata.contains("calendar")))
-            return reject("inconsistent snapshot: enabled records without index");
-        if (!indexed) {
-            const SavedInputFile ledger_input(active_regions_path(save_dir));
-            if (!ledger_input.missing())
-                return reject("inconsistent snapshot: enabled records without index");
-        }
+        if (!indexed && !metadata_missing && metadata.contains("snapshotFormat"))
+            return reject("inconsistent snapshot: index missing");
         const auto chunks_dir = save_dir / kChunksDirectoryName;
         const auto region_dir = region_directory(save_dir);
         if (std::filesystem::exists(world_state_path(save_dir)) ||

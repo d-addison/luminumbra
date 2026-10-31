@@ -1390,6 +1390,7 @@ TEST(GameSessionHeadlessWorldTest, CatalogResolvesPackagedPresetsUnderRuntimeRoo
         session.SetJobSystem(&jobs);
         session.SetRootPath(assets.root_string());
         session.SetSaveRootPath(storage.path());
+        session.SetActiveRegionsEnabled(false);
         ASSERT_TRUE(session.CreateWorld("PackagedPreset", "12345", "default"));
         const auto world_id = session.GetMetadata().worldId;
         const auto metadata = session.GetWorldSaveDir() / "world_info.json";
@@ -2824,7 +2825,13 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     metadata["calendar"] = {{"dayLengthTicks", calendar.dayLengthTicks},
                             {"daysPerYear", calendar.daysPerYear}};
     const auto imported_bytes = metadata.dump();
-    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << imported_bytes;
+    {
+        P::SaveTransaction imported(save, 0, {}, &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(imported.begin(nullptr));
+        ASSERT_TRUE(
+            P::WorldSaveService::write_member_bytes(save, "world_info.json", imported_bytes));
+        ASSERT_TRUE(imported.commit(nullptr));
+    }
     ASSERT_TRUE(original.LoadWorldStateFrom(save));
     ASSERT_TRUE(control.LoadWorldStateFrom(save));
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), imported_bytes);
@@ -5511,6 +5518,8 @@ void EnableSnapshotSession(GameSession& session, const HeadlessRoot& root, JobSy
     session.SetRootPath(root.root_string());
     session.SetJobSystem(&jobs);
     session.SetActiveRegionsEnabled(true);
+    session.SetWaterHighResEnabled(false);
+    session.SetWeatherRainEnabled(false);
 }
 
 } // namespace
@@ -5540,6 +5549,7 @@ TEST(GameSessionHeadlessWorldTest, SnapshotFlagOnSaveWritesIndexAndMarkerAndFlag
 
     const HeadlessRoot plain_root;
     GameSession plain;
+    plain.SetActiveRegionsEnabled(false);
     plain.SetRootPath(plain_root.root_string());
     plain.SetJobSystem(&jobs);
     ASSERT_TRUE(plain.CreateWorld("Snapshot off", "1337", "default"));
@@ -5629,6 +5639,7 @@ TEST(GameSessionHeadlessWorldTest,
     JobSystem jobs;
     jobs.startup(1);
     GameSession owner;
+    owner.SetActiveRegionsEnabled(false);
     owner.SetRootPath(root.root_string());
     owner.SetJobSystem(&jobs);
     ASSERT_TRUE(owner.CreateWorld("Legacy upgrade", "1337", "default"));

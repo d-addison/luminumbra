@@ -1,6 +1,7 @@
 #include "SaveTransaction.h"
 #include "core/FilesystemPath.h"
 
+#include "CreatedWorldArtifacts.h"
 #include "SavedInputFile.h"
 #include "SavedInputLimits.h"
 #include "SavedJsonAdmission.h"
@@ -365,7 +366,11 @@ bool RollbackEntries(const fs::path& save_dir,
                     AddError(errors, "journal undo copy missing or corrupt: " + entry.path);
                     return false;
                 }
-                if (!WorldSaveService::durable_write_file(destination, restored, errors)) {
+                if (!WorldSaveService::durable_write_file(destination,
+                                                          restored,
+                                                          errors,
+                                                          journal_directory(save_dir) /
+                                                              destination.filename())) {
                     return false;
                 }
             }
@@ -708,8 +713,17 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             return RecoveryOutcome::Failed;
         }
         const fs::path txn_path = journal / "txn.json";
-        const SavedInputFile transaction_input(txn_path);
-        if (transaction_input.missing()) {
+        std::string bytes;
+        bool missing = false;
+        {
+            const SavedInputFile transaction_input(txn_path);
+            missing = transaction_input.missing();
+            if (!missing && !transaction_input.read(bytes, kMaxSnapshotIndexBytes)) {
+                AddError(errors, "unreadable or oversized snapshot journal");
+                return RecoveryOutcome::Failed;
+            }
+        } // Close the handle and release its stripe before recovery publishes or removes files.
+        if (missing) {
             // Debris from a journal that was never published.
             fs::remove_all(journal, ec);
             if (ec) {
@@ -719,11 +733,6 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                 return RecoveryOutcome::Failed;
             }
             return RecoveryOutcome::DiscardedStale;
-        }
-        std::string bytes;
-        if (!transaction_input.read(bytes, kMaxSnapshotIndexBytes)) {
-            AddError(errors, "unreadable or oversized snapshot journal");
-            return RecoveryOutcome::Failed;
         }
         JournalDocument document;
         std::string error;
@@ -774,11 +783,13 @@ void report_snapshot_step(const char* step, const fs::path& path) {
 SaveTransaction::SaveTransaction(std::filesystem::path save_dir,
                                  std::uint64_t tick,
                                  std::vector<std::array<float, 3>> anchors,
-                                 MemberDigestFn digest_fn)
+                                 MemberDigestFn digest_fn,
+                                 CreatedWorldArtifacts* artifacts)
     : m_save_dir(std::move(save_dir))
     , m_tick(tick)
     , m_anchors(std::move(anchors))
-    , m_digest_fn(digest_fn) {
+    , m_digest_fn(digest_fn)
+    , m_artifacts(artifacts) {
     if (ActiveTransaction() == nullptr) {
         ActiveTransaction() = this;
         m_registered = true;
@@ -823,24 +834,29 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         }
         m_new_generation = m_previous.generation + 1;
         m_txn_id = m_previous.txn_id + 1;
+        // From here on, even a directory-create/flush failure needs journal cleanup.
+        m_state = State::Open;
         std::error_code ec;
         fs::create_directories(journal_directory(m_save_dir) / "undo", ec);
         if (ec) {
             AddError(errors,
                      "cannot create snapshot journal: " +
                          Filesystem::GenericUtf8PathString(m_save_dir));
+            abort(errors);
             return false;
         }
         if (!WorldSaveService::durable_flush_directory(journal_directory(m_save_dir), errors)) {
+            abort(errors);
             return false;
         }
         if (!WorldSaveService::durable_flush_directory(m_save_dir, errors)) {
+            abort(errors);
             return false;
         }
-        m_state = State::Open;
         return true;
     } catch (const std::exception& ex) {
         AddError(errors, std::string("cannot begin snapshot transaction: ") + ex.what());
+        abort(errors);
         return false;
     }
 }
@@ -874,13 +890,17 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             const fs::path destination = m_save_dir / rel;
             Entry entry;
             entry.path = rel;
-            const SavedInputFile input(destination);
-            if (!input.missing()) {
-                std::string previous;
-                if (!input.read(previous, kMaxUndoBytes)) {
+            std::string previous;
+            bool missing = false;
+            {
+                const SavedInputFile input(destination);
+                missing = input.missing();
+                if (!missing && !input.read(previous, kMaxUndoBytes)) {
                     AddError(errors, "unreadable or oversized transaction member: " + rel);
                     return false;
                 }
+            } // An undo filename can share this reader's publication stripe.
+            if (!missing) {
                 const std::string undo_name = std::to_string(m_next_undo);
                 if (!WorldSaveService::durable_write_file(
                         undo_directory / undo_name, previous, errors)) {
@@ -1076,7 +1096,19 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         m_state = State::Committing;
         const fs::path index_path = snapshot_index_path(m_save_dir);
         std::error_code directory_error;
-        fs::create_directories(index_path.parent_path(), directory_error);
+        if (m_artifacts) {
+            for (const auto& directory : {m_save_dir / "chunks", index_path.parent_path()}) {
+                if (!fs::exists(directory))
+                    m_artifacts->create_directory(directory);
+            }
+        } else {
+            fs::create_directories(index_path.parent_path(), directory_error);
+        }
+        if (directory_error) {
+            AddError(errors, "cannot create snapshot index directory");
+            abort(errors);
+            return false;
+        }
         // First saves create chunks/region (and possibly the save directory itself): persist each
         // new directory entry through its parent before the index can become the commit point.
         for (const fs::path& directory :
@@ -1100,7 +1132,12 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 ancestor = parent;
             }
         }
-        if (!WorldSaveService::durable_write_file(index_path, encoded, errors)) {
+        const bool published =
+            m_artifacts
+                ? WorldSaveService::write_file_durably(index_path, encoded, errors, m_artifacts)
+                : WorldSaveService::durable_write_file(
+                      index_path, encoded, errors, journal_directory(m_save_dir) / "snapshot.json");
+        if (!published) {
             abort(errors);
             return false;
         }
@@ -1132,6 +1169,17 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
         return;
     }
     try {
+        if (m_artifacts) {
+            // Creation owns identities, including staged and published index names.
+            // Path-only transaction undo must never remove a substituted occupant.
+            FinishJournal(m_save_dir);
+            const auto error = m_artifacts->rollback();
+            if (!error.empty())
+                AddError(errors, error);
+            m_state = State::RolledBack;
+            m_committed_actions.clear();
+            return;
+        }
         std::vector<JournalEntry> entries;
         entries.reserve(m_entries.size());
         for (const Entry& entry : m_entries) {

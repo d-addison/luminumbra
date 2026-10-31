@@ -891,10 +891,12 @@ TEST(WaterSeedInputs, SeedAndLegacyQuantizationBoundExtremeSurfaces) {
         ASSERT_TRUE(fixture.water().ResizeSimulationGrid(chunk, Systems::WaterDetailLevel::Medium));
         for (const auto depth : chunk.water_depth_mm) {
             EXPECT_GE(depth, 0);
-            if (std::isfinite(height) && height > 2147484.0f)
+            if (std::isfinite(height) && height > 2147484.0f) {
                 EXPECT_EQ(depth, kMax);
-            if (height < -2147484.0f || std::isnan(height))
+            }
+            if (height < -2147484.0f || std::isnan(height)) {
                 EXPECT_EQ(depth, 0);
+            }
         }
     }
 }
@@ -930,8 +932,9 @@ TEST(WaterSeedInputs, MaximumWeatherRainSaturatesAtTheDepthLimit) {
         for (const auto depth : chunk.water_depth_mm)
             EXPECT_GE(depth, initial);
         EXPECT_LE(fixture.water().dbg_last_source_mm(), 4);
-        if (initial == kMax - 1)
+        if (initial == kMax - 1) {
             EXPECT_GE(fixture.water().dbg_last_source_mm(), 1);
+        }
     }
 }
 
@@ -1281,6 +1284,80 @@ TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits)
     }
 }
 
+TEST(WaterSeedInputs, PristineSleepBookkeepingBecomesPersistentAuthority) {
+    for (const int resolution : {8, 16}) {
+        for (const int calm_ticks :
+             {0, 119, std::numeric_limits<int>::max() - 1, std::numeric_limits<int>::max()}) {
+            SCOPED_TRACE(resolution);
+            SCOPED_TRACE(calm_ticks);
+            SeedFixture fixture;
+            auto& chunk = *fixture.chunks().begin()->second;
+            chunk.set_state(ChunkState::Idle);
+            chunk.mark_sdf_generated_current_params();
+            chunk.is_water_sleeping.store(true);
+            fixture.water().SetSimResolution(resolution);
+            fixture.water().SetHydrology(true, 0, 0);
+            fixture.tick(); // Pure initialization of an isolated sleeping chunk is regenerable.
+            ASSERT_FALSE(chunk.needs_authority());
+            const auto cells = static_cast<std::size_t>(resolution * resolution);
+            chunk.water_bed_mm.assign(cells, 4000);
+            chunk.water_depth_mm.assign(cells, 0);
+            chunk.water_edge_flux.assign(2 * cells, 0);
+            chunk.ticks_below_threshold = calm_ticks;
+            chunk.is_water_sleeping.store(false);
+            fixture.tick();
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, 0));
+            EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * cells, 0));
+            const int expected_ticks =
+                calm_ticks == std::numeric_limits<int>::max() ? calm_ticks : calm_ticks + 1;
+            EXPECT_EQ(chunk.ticks_below_threshold, expected_ticks);
+            EXPECT_EQ(chunk.is_water_sleeping.load(), calm_ticks >= 119);
+            ASSERT_TRUE(chunk.is_water_state_dirty());
+            fixture.world().sync_water_authority();
+            EXPECT_TRUE(chunk.has_water_authority());
+            EXPECT_TRUE(chunk.is_voxel_data_dirty());
+            WorldStreamingState saved;
+            ASSERT_TRUE(saved.insert_chunk(fixture.chunks().begin()->second));
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+                Persistence::SerializeWorldStreamingStateSnapshotJson(saved), restored, errors));
+            const auto loaded = restored.snapshot_chunks();
+            ASSERT_EQ(loaded.size(), 1u);
+            EXPECT_EQ(loaded.front()->ticks_below_threshold, chunk.ticks_below_threshold);
+            EXPECT_EQ(loaded.front()->is_water_sleeping.load(), chunk.is_water_sleeping.load());
+            EXPECT_TRUE(loaded.front()->needs_authority());
+        }
+    }
+}
+
+TEST(WaterSeedInputs, PristineNeighborWakeCreatesAuthority) {
+    SeedFixture fixture(2);
+    fixture.water().SetSimResolution(8);
+    fixture.water().SetHydrology(true, 0, 0);
+    for (const auto& [id, chunk] : fixture.chunks()) {
+        (void)id;
+        chunk->mark_sdf_generated_current_params();
+        chunk->is_water_sleeping.store(true);
+    }
+    fixture.tick();
+    for (const auto& [id, chunk] : fixture.chunks()) {
+        (void)id;
+        ASSERT_FALSE(chunk->needs_authority());
+        chunk->water_bed_mm.assign(64, 4000);
+        chunk->water_depth_mm.assign(64, 0);
+        chunk->water_edge_flux.assign(128, 0);
+        chunk->is_water_sleeping.store(chunk->get_coords().x == -4);
+    }
+    const auto sleeping = fixture.world().find_streamed_chunk({-4, 0, -2});
+    ASSERT_TRUE(sleeping);
+    const auto before = sleeping->water_revision();
+    fixture.tick();
+    EXPECT_FALSE(sleeping->is_water_sleeping.load());
+    // Wake and subsequent bookkeeping are separate persisted mutations.
+    EXPECT_GE(sleeping->water_revision(), before + 2u);
+}
+
 TEST(WaterSeedInputs, InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep) {
     for (const int resolution : {0, 1, 3, 33, std::numeric_limits<int>::max()}) {
         SeedFixture fixture(2);
@@ -1323,8 +1400,9 @@ TEST(WaterSeedInputs, InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep) 
         EXPECT_EQ(fixture.water().dbg_seam_wet_pairs(), 0);
         for (const auto& [id, chunk] : fixture.chunks()) {
             (void)id;
-            if (chunk.get() != &malformed)
+            if (chunk.get() != &malformed) {
                 EXPECT_TRUE(chunk->is_water_sleeping.load());
+            }
         }
     }
 }
@@ -1415,9 +1493,10 @@ TEST(WaterSeedInputs, SourceReadinessRequiresTheSameArraysAsInjection) {
                 chunk.water_sim_terrain_height.resize(length);
             const bool ready = field < 2 ? length == 64u : length >= 64u;
             EXPECT_EQ(fixture.world().debug_water_grid_at(position.x, position.z), ready);
-            if (ready)
+            if (ready) {
                 EXPECT_FLOAT_EQ(fixture.world().live_water_surface_at(position.x, position.z),
                                 expected_surface);
+            }
         }
     }
     for (const int resolution : {0, 1, 3, 33, std::numeric_limits<int>::max()}) {

@@ -181,9 +181,15 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         }
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
-        // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.
+        // Preserve version diagnostics before attempting preset resolution. For a current
+        // container, resolve preset identity before comparing the snapshot fingerprint so
+        // malformed identity fields retain their actionable admission diagnostics.
         std::vector<std::string> errors;
-        if (!WorldSaveService::validate_save(save, &errors, stop)) {
+        const bool current_container =
+            json.is_object() && json.contains("container_version") &&
+            json.at("container_version").is_number_integer() &&
+            json.at("container_version") == WorldSaveService::kContainerVersion;
+        if (!current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
@@ -220,6 +226,10 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         if (!ResolveSavedPreset(runtime_root, save, json, result, stop)) {
             if (stop.stop_requested())
                 result.error = "Saved-world validation cancelled.";
+            return result;
+        }
+        if (current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
+            result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
         if (stop.stop_requested()) {

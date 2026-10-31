@@ -1,4 +1,5 @@
 #include "luminumbra_common/fields/EnergyFieldState.h"
+#include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
@@ -15,6 +16,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -567,6 +569,125 @@ TEST(SaveTransaction, FailedCommitValidationRollsBack) {
     EXPECT_FALSE(errors.empty());
     EXPECT_EQ(Tree(save.path()), before);
     EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, ProtectClosesSourceBeforePublishingCollidingUndoFile) {
+    TempSave save;
+    const std::map<std::string, std::string> baseline{
+        {"world_info.json", "metadata"},
+        {"aether_state.efs", "energy"},
+        {"chunks/region/world-manifest.json", "manifest"},
+        {"chunks/region/plant-entities.json", "plants"},
+        {"chunks/region/r.-2.-2.lmr", "region"}};
+    ASSERT_TRUE(CommitOnce(save.path(), 1, baseline));
+    const auto before = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    // The existing index takes undo 0. These four members take 1 through 4,
+    // so r.-2.-2.lmr and its undo file 5 both use publication stripe 53.
+    ASSERT_TRUE(transaction.protect({"world_info.json",
+                                     "aether_state.efs",
+                                     "chunks/region/world-manifest.json",
+                                     "chunks/region/plant-entities.json",
+                                     "chunks/region/r.-2.-2.lmr"},
+                                    nullptr));
+    EXPECT_EQ(Get(journal_directory(save.path()) / "undo/5"), "region");
+    ASSERT_TRUE(
+        WorldSaveService::write_member_bytes(save.path(), "chunks/region/r.-2.-2.lmr", "changed"));
+    transaction.abort(nullptr);
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, InterruptedPublicationsKeepTemporaryFilesInsideTheJournal) {
+    for (const std::string_view member :
+         {"world_info.json", "chunks/region/r.-2.-2.lmr", "chunks/region/snapshot.json"}) {
+        SCOPED_TRACE(member);
+        TempSave save;
+        ASSERT_TRUE(
+            CommitOnce(save.path(),
+                       1,
+                       {{"world_info.json", "metadata"}, {"chunks/region/r.-2.-2.lmr", "region"}}));
+        const auto before = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        if (member != kSnapshotIndexRelativePath) {
+            ASSERT_TRUE(transaction.protect({std::string(member)}, nullptr));
+        } else {
+            ASSERT_TRUE(transaction.protect({}, nullptr));
+        }
+        set_snapshot_step_hook_for_testing(+[](const char* step, const fs::path&) {
+            if (std::string_view(step) == "before-replace")
+                throw std::runtime_error("publication interrupted after durable staging");
+        });
+        if (member == kSnapshotIndexRelativePath) {
+            EXPECT_FALSE(transaction.commit(nullptr));
+        } else {
+            EXPECT_THROW(WorldSaveService::write_member_bytes(save.path(), member, "changed"),
+                         std::runtime_error);
+        }
+        set_snapshot_step_hook_for_testing(nullptr);
+        transaction.abort(nullptr);
+        EXPECT_EQ(Tree(save.path()), before);
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+    }
+}
+
+TEST(SaveTransaction, CreationIndexPublicationRetainsIdentitiesForRollback) {
+    for (const std::string_view failure :
+         {"none", "before-replace", "after-replace", "occupied", "substituted"}) {
+        SCOPED_TRACE(failure);
+        TempSave parent;
+        const auto root = parent.path() / "created";
+        CreatedWorldArtifacts artifacts;
+        artifacts.create_root(root);
+        SaveTransaction transaction(root, 0, {}, &RawDigest, &artifacts);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({}, nullptr));
+        // Set the existing publication hook only for the index's publication.
+        if (failure == "before-replace") {
+            set_snapshot_step_hook_for_testing(+[](const char* step, const fs::path& path) {
+                if (path.filename() == "snapshot.json" &&
+                    std::string_view(step) == "before-replace")
+                    throw std::runtime_error("interrupted index publication");
+            });
+        } else if (failure == "after-replace") {
+            set_snapshot_step_hook_for_testing(+[](const char* step, const fs::path& path) {
+                if (path.filename() == "snapshot.json" && std::string_view(step) == "after-replace")
+                    throw std::runtime_error("interrupted index publication");
+            });
+        } else if (failure == "occupied") {
+            artifacts.create_directory(root / "chunks");
+            artifacts.create_directory(root / "chunks/region");
+            Put(snapshot_index_path(root), "unowned");
+        } else if (failure == "substituted") {
+            set_snapshot_step_hook_for_testing(+[](const char* step, const fs::path& path) {
+                if (path.filename() == "snapshot.json" &&
+                    std::string_view(step) == "after-replace") {
+                    if (!fs::remove(path))
+                        throw std::runtime_error("could not retire index publication");
+                    Put(path, "unowned");
+                    throw std::runtime_error("index publication substituted");
+                }
+            });
+        }
+        std::vector<std::string> errors;
+        const bool committed = transaction.commit(&errors);
+        set_snapshot_step_hook_for_testing(nullptr);
+        EXPECT_EQ(committed, failure == "none");
+        if (failure == "occupied" || failure == "substituted") {
+            EXPECT_EQ(Get(snapshot_index_path(root)), "unowned");
+            EXPECT_FALSE(artifacts.rollback().empty());
+            ASSERT_TRUE(fs::remove(snapshot_index_path(root)));
+        } else if (committed) {
+            EXPECT_TRUE(snapshot_index_exists(root));
+        } else {
+            EXPECT_FALSE(errors.empty());
+        }
+        EXPECT_FALSE(journal_pending(root));
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_FALSE(fs::exists(root));
+    }
 }
 
 TEST(SaveTransaction, RecoveryDiscardsStaleJournalWhenIndexAlreadyCommitted) {

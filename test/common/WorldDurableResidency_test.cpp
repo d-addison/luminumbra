@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -60,7 +61,7 @@ std::uint64_t HashVec(const std::vector<T>& v) {
     return Fnv1a64(v.data(), v.size() * sizeof(T));
 }
 
-// Temp root containing ONLY the world preset (headless — no res/data assets).
+// Temp root containing the world preset and its simulation dependencies.
 // The root is unique per fixture instance so concurrent common_tests processes
 // never share (or clobber) a directory. The destructor removes the tree.
 class HeadlessRoot {
@@ -73,6 +74,7 @@ public:
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;

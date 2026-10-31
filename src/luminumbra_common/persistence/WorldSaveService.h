@@ -331,12 +331,14 @@ public:
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
     // --- S4 durable primitives (SaveTransaction and flag-on writers) ---
-    // Writes bytes beside `destination` (staged temp, file fsync), atomically replaces it and
-    // flushes the directory. Fires the snapshot step hook "before-replace"/"after-replace". Binary,
-    // no newline translation.
+    // Writes bytes beside `staging` (or destination when empty), then atomically replaces
+    // destination and flushes its directory. A supplied staging parent must exist on the same
+    // filesystem. Fires the snapshot step hook "before-replace"/"after-replace". Binary, no newline
+    // translation.
     static bool durable_write_file(const std::filesystem::path& destination,
                                    const std::string& bytes,
-                                   std::vector<std::string>* errors = nullptr);
+                                   std::vector<std::string>* errors = nullptr,
+                                   const std::filesystem::path& staging = {});
     // Unlinks `path` when it exists (a missing file is success) and flushes the parent directory.
     // Fires "before-delete"/"after-delete".
     static bool durable_remove(const std::filesystem::path& path,

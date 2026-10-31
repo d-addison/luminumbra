@@ -1214,11 +1214,11 @@ private:
     // retain their journal entries until release or rollback. At most one
     // retained native handle per entry, including both publication names.
     static constexpr std::size_t kCreationDirectories = 3;   // Save root, chunks, region.
-    static constexpr std::size_t kCreationDurableFiles = 3;  // Preset, metadata, ledger.
+    static constexpr std::size_t kCreationDurableFiles = 4;  // Preset, metadata, ledger, index.
     static constexpr std::size_t kEntriesPerDurableFile = 2; // Destination and temporary.
     static constexpr std::size_t kCreationArtifactCapacity =
         kCreationDirectories + kCreationDurableFiles * kEntriesPerDurableFile;
-    static_assert(kCreationArtifactCapacity == 9);
+    static_assert(kCreationArtifactCapacity == 11);
     std::array<Artifact, kCreationArtifactCapacity> m_artifacts{};
     bool m_borrowed_root = false;
     std::size_t m_count = 0;

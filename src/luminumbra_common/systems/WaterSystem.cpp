@@ -1171,8 +1171,7 @@ void WaterSystem::update(entt::registry& registry,
     }
     for (Chunk* chunk : chunks_to_wake) {
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
-        if (chunk->needs_authority())
-            chunk->mark_water_state_dirty();
+        chunk->mark_water_state_dirty();
     }
 
     // Bound per-tick work to MAX_WATER_CELLS_PER_TICK. Medium retains its historical flat rotating
@@ -1433,10 +1432,11 @@ void WaterSystem::update(entt::registry& registry,
     const float SLEEP_THRESHOLD = 0.0001f; // The max water level change to be considered "calm"
 
     for (Chunk* chunk : chunks_to_sim) {
-        if (chunk->needs_authority())
-            chunk->mark_water_state_dirty();
+        const auto previous_counter = chunk->ticks_below_threshold;
+        const bool was_sleeping = chunk->is_water_sleeping.load(std::memory_order_relaxed);
         if (chunk->max_water_delta_last_tick < SLEEP_THRESHOLD) {
-            chunk->ticks_below_threshold++;
+            if (chunk->ticks_below_threshold < std::numeric_limits<int>::max())
+                chunk->ticks_below_threshold++;
             if (chunk->ticks_below_threshold >= TICKS_TO_SLEEP) {
                 // GO TO SLEEP: Chunk has been calm for long enough.
                 chunk->is_water_sleeping.store(true, std::memory_order_relaxed);
@@ -1446,6 +1446,9 @@ void WaterSystem::update(entt::registry& registry,
             chunk->ticks_below_threshold = 0;
             chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
         }
+        if (chunk->ticks_below_threshold != previous_counter ||
+            chunk->is_water_sleeping.load(std::memory_order_relaxed) != was_sleeping)
+            chunk->mark_water_state_dirty();
         if (m_sim_resolution != static_cast<int>(WaterDetailLevel::Medium)) {
             m_water_activity_cache[chunk->get_id()] = WaterActivityScore(*chunk);
         }

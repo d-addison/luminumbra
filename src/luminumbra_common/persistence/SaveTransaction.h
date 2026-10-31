@@ -23,6 +23,8 @@
 
 namespace Luminumbra::Persistence {
 
+class CreatedWorldArtifacts;
+
 enum class MemberClass : std::uint8_t {
     Authoritative,
     Derived
@@ -114,10 +116,13 @@ class SaveTransaction {
 public:
     // Opens the thread_local "active transaction" slot for save_dir. Only one may be active per
     // thread.
+    // For initial creation, artifacts must outlive the transaction. Publication records the
+    // index's identities there; abort uses that journal's identity-checked rollback.
     SaveTransaction(std::filesystem::path save_dir,
                     std::uint64_t tick,
                     std::vector<std::array<float, 3>> anchors,
-                    MemberDigestFn digest_fn);
+                    MemberDigestFn digest_fn,
+                    CreatedWorldArtifacts* artifacts = nullptr);
     SaveTransaction(const SaveTransaction&) = delete;
     SaveTransaction& operator=(const SaveTransaction&) = delete;
     ~SaveTransaction(); // aborts (rolls back) when still Open; no-op once Committed
@@ -176,6 +181,7 @@ private:
     std::uint64_t m_tick = 0;
     std::vector<std::array<float, 3>> m_anchors;
     MemberDigestFn m_digest_fn = nullptr;
+    CreatedWorldArtifacts* m_artifacts = nullptr;
     State m_state = State::Idle;
     SnapshotIndex m_previous;
     std::uint64_t m_txn_id = 0;

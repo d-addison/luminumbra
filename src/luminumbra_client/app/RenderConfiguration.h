@@ -495,8 +495,8 @@ inline std::string render_identity(const nlohmann::json& settings) {
         hash = (hash ^ value) * 1099511628211ull;
     };
     const auto text = [&](std::string_view value) {
-        for (const unsigned char item : value)
-            byte(item);
+        for (const char item : value)
+            byte(static_cast<unsigned char>(item));
     };
     const auto visit = [&](const auto& self, const nlohmann::json& value) -> void {
         if (value.is_object()) {

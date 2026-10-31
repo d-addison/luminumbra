@@ -1568,12 +1568,15 @@ TEST(WorldSaveService, CreationLedgerStagingCleansFailuresAndJournalsPublication
         const auto directory = save_dir.path() / "created-world";
         Luminumbra::Persistence::CreatedWorldArtifacts artifacts;
         artifacts.create_root(directory);
-        // Exercise the complete nine-entry creation budget: root, both chunk
-        // directories, and destination/temporary pairs for all three files.
+        // Legacy helpers use nine slots; indexed creation reserves two more for
+        // its index. Three extra owned files exhaust that full eleven-slot bound.
         ASSERT_TRUE(WorldSaveService::write_file_durably(
             directory / "preset.json", "preset bytes\n", nullptr, &artifacts));
-        if (outcome == Outcome::JournalFull)
+        if (outcome == Outcome::JournalFull) {
             artifacts.write_file(directory / "partial.bin", "partial bytes\n");
+            artifacts.write_file(directory / "partial-second.bin", "partial bytes\n");
+            artifacts.write_file(directory / "partial-third.bin", "partial bytes\n");
+        }
         const Luminumbra::world::WorldClock clock;
         Luminumbra::world::ActiveRegionLedger ledger;
         ledger.set_local_anchor(Vec3(1, 2, 3));
