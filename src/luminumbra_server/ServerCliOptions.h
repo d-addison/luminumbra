@@ -23,6 +23,8 @@ struct ServerCliOptions {
     int test_streaming_radius_cap = 0;
     // Five minutes at the canonical 30 Hz clock; 0 disables autosave.
     std::uint64_t autosave_ticks = 9000;
+    bool autosave_ticks_explicit = false;
+    std::uint64_t parked_bytes_limit = 256ull * 1024ull * 1024ull;
     //  spawn N deterministic player avatars (phyllotaxis ring
     // around spawn). 0 = none (byte-identical to the zero-avatar lane). With --smoke the
     // double-run already asserts the entities sub-hash matches, so --smoke --avatars N

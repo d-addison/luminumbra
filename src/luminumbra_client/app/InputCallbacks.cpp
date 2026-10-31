@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <backends/imgui_impl_glfw.h>
+#include <cstddef>
 #include <imgui.h>
 
 namespace Luminumbra::Client::App {
@@ -198,11 +199,11 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         const auto captured = CaptureGameplayBinding(app.hud.rebindCaptureAction, key, action);
         if (captured &&
             captured->actionIndex < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
-            const char* name = Luminumbra::Client::kInputActionDefs[captured->actionIndex].name;
+            const auto actionIndex = static_cast<std::size_t>(captured->actionIndex);
+            const char* name = Luminumbra::Client::kInputActionDefs[actionIndex].name;
             bool conflict = false;
             if (console) {
-                const auto actionDef =
-                    Luminumbra::Client::kInputActionDefs[captured->actionIndex].action;
+                const auto actionDef = Luminumbra::Client::kInputActionDefs[actionIndex].action;
                 const bool photoOnly =
                     actionDef >= Luminumbra::Client::InputAction::Shutter &&
                     actionDef <= Luminumbra::Client::InputAction::PhotoWeatherCycle;

@@ -990,6 +990,62 @@ public:
     // is already active.
     bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
 
+    // --- Durable residency (S3). All of it is inert unless set_durable_residency(true). ---
+    struct ParkingStatus {
+        std::size_t parked_count = 0;
+        std::size_t parked_bytes = 0;
+        std::int64_t oldest_parked_tick = -1; // m_current_sim_tick at parking time; -1 when empty
+        std::size_t blocked_dirty = 0; // dirty authoritative chunks kept resident by the byte limit
+        bool save_requested = false;
+    };
+    void set_durable_residency(bool on) {
+        m_durable_residency = on;
+    }
+    bool durable_residency() const {
+        return m_durable_residency;
+    }
+    // 0 = unlimited. Default 256 MiB.
+    void set_parked_bytes_limit(std::size_t bytes) {
+        if (bytes != m_parked_bytes_limit) {
+            ++m_dirty_generation; // re-run activation so a changed limit takes effect
+        }
+        m_parked_bytes_limit = bytes;
+    }
+    // Clock used only to stamp parked chunks. Deliberately separate from begin_tick so it never
+    // changes activation-queue scheduling on hosts that do not drive begin_tick.
+    void note_persistence_tick(std::int64_t sim_tick) {
+        m_persistence_tick = sim_tick;
+    }
+    ParkingStatus parking_status() const;
+    bool persistence_save_requested() const {
+        return m_persistence_save_requested;
+    }
+    void clear_persistence_save_request() {
+        m_persistence_save_requested = false;
+    }
+    // Resident chunk, else parked chunk, else nullptr.
+    std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
+    // Resident chunks plus parked chunks (parked ones sorted by id). No duplicates.
+    std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_authoritative_chunks() const;
+    std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_parked_chunks() const;
+    // Moves every water-dirty chunk (resident and parked) to LoadedOrEdited authority and re-arms
+    // its save-dirty bit. Only call with sim.active_regions on.
+    void sync_water_authority();
+    // Moves a parked chunk back into the resident map. Returns true iff the id was parked.
+    bool unpark_chunk(ChunkID id);
+    // Owner-thread committed identity inventory. Durable payloads are loaded only when wanted;
+    // the loader must return the exact identity or throw (never regenerate expected authority).
+    void set_durable_chunk_loader(std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
+                                  std::function<void(std::string)> fault);
+    void remember_durable_chunks(const std::vector<IVec3>& coords);
+    std::vector<IVec3> durable_chunk_inventory() const;
+    bool restore_authoritative_chunk(const IVec3& coords);
+    void release_clean_parked_chunks();
+    void note_persistence_outcome(bool ok) {
+        m_evictions_suspended = !ok;
+        ++m_dirty_generation;
+    }
+
 private:
     struct StreamingState {
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
@@ -1109,6 +1165,26 @@ private:
     std::uint64_t m_dirty_generation = 0;
     std::uint64_t m_last_serviced_generation = 0;
     std::function<void(const IVec3&)> m_voxelEditObserver;
+    struct ParkedChunk {
+        std::shared_ptr<::Luminumbra::Chunk> chunk;
+        std::size_t bytes = 0;
+        std::int64_t tick = -1;
+    };
+    std::unordered_map<ChunkID, ParkedChunk> m_parked;
+    std::map<ChunkID, IVec3> m_durable_chunks;
+    std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
+    std::function<void(std::string)> m_durable_chunk_fault;
+    mutable bool m_durable_read_failed = false;
+    bool m_evictions_suspended = false;
+    std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
+    std::size_t m_parked_bytes = 0;
+    bool m_durable_residency = false;
+    std::size_t m_parked_bytes_limit = static_cast<std::size_t>(256) * 1024u * 1024u;
+    bool m_persistence_save_requested = false;
+    std::int64_t m_persistence_tick = -1;
+    std::size_t m_parking_blocked_dirty = 0;
+    std::size_t m_parking_deferred =
+        0; // authoritative chunks kept resident this pass (not quiescent)
     std::vector<Vec3> m_last_anchor_positions;
 
     // Elide update_chunk_activation's O(radius^2)

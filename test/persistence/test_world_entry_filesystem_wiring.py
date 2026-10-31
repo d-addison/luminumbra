@@ -106,11 +106,18 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
         self.assertEqual(writer.count("Detail::WindowsPublishWithoutReplacement("), 2)
         promotion = body(writer, "bool promote_seed(")
-        self.assertEqual(writer.count("::MoveFileExW("), 1)
+        self.assertEqual(writer.count("::MoveFileExW("), 3)
         self.assertIn("::MoveFileExW(m_path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)",
                       promotion)
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", promotion)
-        self.assertNotIn("::MoveFileExW(", writer.replace(promotion, ""))
+        replacing = body(writer, "bool ReplaceRegionFileAtomically(").split("#else", 1)[0]
+        removing = body(writer, "bool WorldSaveService::durable_remove(")
+        self.assertIn("MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH", replacing)
+        self.assertNotIn("::ReplaceFileW(", replacing)
+        self.assertIn("retained_payload->retain_publication_identity()", replacing)
+        self.assertIn("MOVEFILE_WRITE_THROUGH", removing)
+        self.assertNotIn("MOVEFILE_REPLACE_EXISTING", removing)
+        self.assertNotIn("::MoveFileExW(", writer.replace(promotion, "").replace(replacing, "").replace(removing, ""))
         for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):
             publishing = body(writer, marker).split("#else", 1)[0]
             linking = publishing.index("Detail::WindowsPublishWithoutReplacement(")

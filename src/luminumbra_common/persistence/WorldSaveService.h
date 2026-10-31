@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SaveTransaction.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
@@ -7,12 +8,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace Luminumbra::Ecs {
@@ -37,6 +41,7 @@ struct WorldSaveDirtyReport {
 struct RegionDigestInputs {
     std::vector<std::shared_ptr<Chunk>> live;
     std::vector<std::shared_ptr<Chunk>> parked;
+    std::vector<IVec3> durable;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
@@ -215,6 +220,25 @@ public:
                                                  int max_chunk_z,
                                                  std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                                  std::vector<std::string>* errors = nullptr);
+    enum class ChunkReadStatus {
+        Found,
+        Absent,
+        Error
+    };
+    struct ChunkReadResult {
+        ChunkReadStatus status = ChunkReadStatus::Absent;
+        std::shared_ptr<Chunk> chunk;
+        std::string error;
+    };
+    // Reads the exact lod-0 identity only. Indexed membership is checked before decoding;
+    // missing records are distinct from corrupt/unreadable expected authority.
+    static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
+                                      const IVec3& coords,
+                                      bool require_index = false);
+    // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
+    // or saturated revision retains its dirty obligation.
+    static std::function<void()>
+    chunk_save_acknowledgement(const std::vector<std::shared_ptr<Chunk>>& chunks);
     // Inserts/replaces the given records keyed (lod_level, id), preserving
     // all other records of the file verbatim.
     static bool upsert_container_records(const std::filesystem::path& region_file,
@@ -306,6 +330,82 @@ public:
     // The hook runs while save ownership is held; nullptr disables it.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
+    // --- S4 durable primitives (SaveTransaction and flag-on writers) ---
+    // Writes bytes beside `staging` (or destination when empty), then atomically replaces
+    // destination and flushes its directory. A supplied staging parent must exist on the same
+    // filesystem. Fires the snapshot step hook "before-replace"/"after-replace". Binary, no newline
+    // translation.
+    static bool durable_write_file(const std::filesystem::path& destination,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr,
+                                   const std::filesystem::path& staging = {});
+    // Unlinks `path` when it exists (a missing file is success) and flushes the parent directory.
+    // Fires "before-delete"/"after-delete".
+    static bool durable_remove(const std::filesystem::path& path,
+                               std::vector<std::string>* errors = nullptr);
+    // fsync of a directory (no-op success where the platform cannot open directories).
+    static bool durable_flush_directory(const std::filesystem::path& directory,
+                                        std::vector<std::string>* errors = nullptr);
+    // Number of full load_world decodes since process start (single-decode contract tests).
+    static std::uint64_t decode_count_for_testing();
+
+    // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
+    // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0
+    // record; every other member hashes its raw bytes after a format check.
+    static bool member_digest(const std::filesystem::path& save_dir,
+                              std::string_view relative_path,
+                              MemberDigest& out,
+                              std::string& error);
+    // Durable single-member writers for flag-on GameSession members (plants, energy). They join the
+    // active transaction for save_dir, else run an implicit one when the directory is indexed, else
+    // just replace the file durably. relative_path must satisfy member_path_allowed.
+    static bool write_member_bytes(const std::filesystem::path& save_dir,
+                                   std::string_view relative_path,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr);
+    static bool remove_member(const std::filesystem::path& save_dir,
+                              std::string_view relative_path,
+                              std::vector<std::string>* errors = nullptr);
+    // Thread-local per-save facts. While live for a directory, validate_save / has_world_save /
+    // has_chunk_snapshot reuse the first load_world result instead of decoding the world again, and
+    // post-commit actions (dirty-flag clearing) are deferred until the owning transaction commits.
+    class SaveFactsScope {
+    public:
+        explicit SaveFactsScope(const std::filesystem::path& save_dir);
+        SaveFactsScope(const SaveFactsScope&) = delete;
+        SaveFactsScope& operator=(const SaveFactsScope&) = delete;
+        ~SaveFactsScope();
+        static SaveFactsScope* active_for(const std::filesystem::path& save_dir);
+        // First call decodes the world once; later calls return the cached verdict.
+        bool validate(std::vector<std::string>* errors);
+        void defer_until_commit(std::function<void()> action);
+        // Runs and clears the deferred actions (after a successful commit).
+        void run_deferred();
+        // Drops the deferred actions (rollback).
+        void discard_deferred();
+        void invalidate_presence_facts();
+        // Cached presence is diagnostic only; callers validate before consulting it.
+        [[nodiscard]] bool presence_known() const {
+            return m_presence_known;
+        }
+        [[nodiscard]] bool snapshot_present() const {
+            return m_snapshot_present;
+        }
+        [[nodiscard]] bool chunk_snapshot_present() const {
+            return m_chunk_snapshot_present;
+        }
+
+    private:
+        std::filesystem::path m_save_dir;
+        SaveFactsScope* m_previous = nullptr;
+        bool m_validated = false;
+        bool m_validated_ok = false;
+        std::vector<std::string> m_diagnostics;
+        bool m_presence_known = false;
+        bool m_snapshot_present = false;
+        bool m_chunk_snapshot_present = false;
+        std::vector<std::function<void()>> m_deferred;
+    };
     // Preparation retains process save ownership through publication or destruction.
     // Inputs must remain stable while preparing; publication reuses compressed records.
     // Publication consumes the preparation, including on failure.
@@ -346,7 +446,10 @@ public:
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
-                    const std::stop_token& stop = {}) const;
+                    const std::stop_token& stop = {},
+                    const std::unordered_set<ChunkID>* retain_chunks = nullptr,
+                    std::vector<IVec3>* authoritative_inventory = nullptr,
+                    std::size_t* decoded_chunk_count = nullptr) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

@@ -605,12 +605,14 @@ TEST_F(WorldEntryFilesystem, CreatesWorldWithActiveRegionsAndFullArtifactJournal
             << session.GetWorldOpenError();
         save = root / "worlds/saves" / session.GetMetadata().worldId;
         const auto bytes = DiskBytes(save);
-        EXPECT_EQ(bytes.size(), 5u);
+        EXPECT_EQ(bytes.size(), 6u);
         EXPECT_TRUE(bytes.contains("preset.json"));
         EXPECT_TRUE(bytes.contains("world_info.json"));
         EXPECT_TRUE(bytes.contains("chunks"));
         EXPECT_TRUE(bytes.contains("chunks/region"));
         EXPECT_TRUE(bytes.contains("chunks/region/active-regions.arl"));
+        EXPECT_TRUE(bytes.contains("chunks/region/snapshot.json"));
+        EXPECT_FALSE(Luminumbra::Persistence::journal_pending(save));
     }
     jobs.shutdown();
     EXPECT_TRUE(artifacts.rollback().empty());
@@ -634,7 +636,8 @@ TEST_F(WorldEntryFilesystem, UnicodeSaveRootCreatesAndReloadsTheExactPresetAndSa
         const auto preset = session.PresetContentHash();
         const auto save = save_root / "worlds/saves" / id;
         const auto before = DiskBytes(save);
-        ASSERT_EQ(before.size(), 5u);
+        ASSERT_EQ(before.size(), 6u);
+        ASSERT_TRUE(before.contains("chunks/region/snapshot.json"));
         ASSERT_FALSE(preset.empty());
         artifacts.release();
         ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
@@ -1101,9 +1104,11 @@ TEST_F(WorldEntryFilesystem, FailedFinalLedgerReservationRollsBackEveryOwnedArti
     std::vector<std::string> errors;
     ASSERT_TRUE(WorldSaveService::write_file_durably(
         save / "preset.json", "preset bytes\n", &errors, &artifacts));
-    // Consume one slot with an owned partial file so the final ledger temporary
+    // Consume three slots with owned partial files so the final ledger temporary
     // reservation exhausts the journal, after metadata and both directories exist.
     artifacts.write_file(save / "partial.bin", "partial bytes\n");
+    artifacts.write_file(save / "partial-second.bin", "partial bytes\n");
+    artifacts.write_file(save / "partial-third.bin", "partial bytes\n");
     const Luminumbra::world::WorldClock clock;
     Luminumbra::world::ActiveRegionLedger ledger;
     ASSERT_TRUE(ledger.try_set_local_anchor(Luminumbra::Vec3(0.0f, 100.0f, 0.0f)));
@@ -1117,6 +1122,8 @@ TEST_F(WorldEntryFilesystem, FailedFinalLedgerReservationRollsBackEveryOwnedArti
               "Cannot save active-region ledger: Invalid world artifact journal capacity.");
     EXPECT_EQ(Read(save / "preset.json"), "preset bytes\n");
     EXPECT_EQ(Read(save / "partial.bin"), "partial bytes\n");
+    EXPECT_EQ(Read(save / "partial-second.bin"), "partial bytes\n");
+    EXPECT_EQ(Read(save / "partial-third.bin"), "partial bytes\n");
     EXPECT_TRUE(std::filesystem::is_regular_file(save / "world_info.json"));
     EXPECT_TRUE(std::filesystem::is_directory(save / "chunks/region"));
     EXPECT_FALSE(std::filesystem::exists(save / "chunks/region/active-regions.arl"));

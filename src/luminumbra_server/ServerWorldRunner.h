@@ -28,6 +28,8 @@
 
 namespace Luminumbra::Server {
 
+inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
+
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
@@ -58,6 +60,8 @@ struct ServerWorldRunnerConfig {
     std::uint64_t autosave_interval_ticks = 9000;
     // Explicit workload override, applied before world creation or loading.
     bool finite_hydrology = true;
+    bool autosave_default_when_unset = false;
+    std::uint64_t parked_bytes_limit = 256ull * 1024ull * 1024ull;
     //  number of deterministic player avatars to spawn at
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the

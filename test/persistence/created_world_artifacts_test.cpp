@@ -2061,4 +2061,47 @@ TEST_F(CreatedWorldCleanup, RestoringAMismatchCannotOverwriteAnotherConcurrentOc
     EXPECT_EQ(Read(file), "second replacement\n");
 }
 #endif
+
+TEST_F(CreatedWorldCleanup, BorrowedRootRollbackRetainsExistingContentsAndDirectory) {
+    const auto save = Root() / "existing-save";
+    ASSERT_TRUE(std::filesystem::create_directory(save));
+    Write(save / "unowned.bin", "existing bytes");
+    CreatedWorldArtifacts artifacts;
+    artifacts.bind_existing_root(save);
+    artifacts.write_file(save / "preset.json", "created bytes");
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_TRUE(std::filesystem::is_directory(save));
+    EXPECT_EQ(Read(save / "unowned.bin"), "existing bytes");
+    EXPECT_FALSE(std::filesystem::exists(save / "preset.json"));
+}
+
+TEST_F(CreatedWorldCleanup, BorrowedRootRefusesSubstitutedFileAndAllowsRetry) {
+    const auto save = Root() / "existing-save";
+    ASSERT_TRUE(std::filesystem::create_directory(save));
+    CreatedWorldArtifacts artifacts;
+    artifacts.bind_existing_root(save);
+    const auto file = save / "preset.json";
+    const auto retained = save / "retained.json";
+    artifacts.write_file(file, "created bytes");
+    std::filesystem::rename(file, retained);
+    Write(file, "other owner");
+    EXPECT_FALSE(artifacts.rollback().empty());
+    EXPECT_EQ(Read(file), "other owner");
+    ASSERT_TRUE(std::filesystem::remove(file));
+    std::filesystem::rename(retained, file);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(file));
+    EXPECT_TRUE(std::filesystem::is_directory(save));
+}
+
+TEST_F(CreatedWorldCleanup, BorrowedRootRefusesMissingAndNonDirectoryInputs) {
+    CreatedWorldArtifacts artifacts;
+    const auto path = Root() / "missing";
+    EXPECT_THROW(artifacts.bind_existing_root(path), std::filesystem::filesystem_error);
+    Write(path, "file bytes");
+    EXPECT_THROW(artifacts.bind_existing_root(path), std::runtime_error);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_EQ(Read(path), "file bytes");
+}
+
 } // namespace

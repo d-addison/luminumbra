@@ -1506,8 +1506,9 @@ void CheckStagingRegistration(bool scoped_removal) {
         EXPECT_THROW(artifacts.forget_removed_staged_file(payload, native), std::runtime_error);
     }
     file.reset();
-    if (scoped_removal)
+    if (scoped_removal) {
         EXPECT_TRUE(std::filesystem::is_empty(directory));
+    }
     EXPECT_TRUE(artifacts.rollback().empty());
     EXPECT_FALSE(std::filesystem::exists(directory));
 }
@@ -1567,12 +1568,15 @@ TEST(WorldSaveService, CreationLedgerStagingCleansFailuresAndJournalsPublication
         const auto directory = save_dir.path() / "created-world";
         Luminumbra::Persistence::CreatedWorldArtifacts artifacts;
         artifacts.create_root(directory);
-        // Exercise the complete nine-entry creation budget: root, both chunk
-        // directories, and destination/temporary pairs for all three files.
+        // Legacy helpers use nine slots; indexed creation reserves two more for
+        // its index. Three extra owned files exhaust that full eleven-slot bound.
         ASSERT_TRUE(WorldSaveService::write_file_durably(
             directory / "preset.json", "preset bytes\n", nullptr, &artifacts));
-        if (outcome == Outcome::JournalFull)
+        if (outcome == Outcome::JournalFull) {
             artifacts.write_file(directory / "partial.bin", "partial bytes\n");
+            artifacts.write_file(directory / "partial-second.bin", "partial bytes\n");
+            artifacts.write_file(directory / "partial-third.bin", "partial bytes\n");
+        }
         const Luminumbra::world::WorldClock clock;
         Luminumbra::world::ActiveRegionLedger ledger;
         ledger.set_local_anchor(Vec3(1, 2, 3));
@@ -2325,11 +2329,16 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     EXPECT_FALSE(WorldSaveService::save_metadata(
         R"({"container_version":2,"simulationTick":-1})", save_dir.path(), &errors));
     EXPECT_FALSE(std::filesystem::exists(metadata_path));
+    EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
     nlohmann::json metadata = {{"container_version", 2}};
     Luminumbra::world::WorldClock(123, {12000, 4}).write_metadata(metadata);
     const auto valid = metadata.dump(4) + "\n";
     ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
     EXPECT_EQ(read(), valid);
+    const auto index_path = Luminumbra::Persistence::snapshot_index_path(save_dir.path());
+    ASSERT_TRUE(std::filesystem::exists(index_path));
+    std::ifstream index_file(index_path, std::ios::binary);
+    const std::string index_before(std::istreambuf_iterator<char>{index_file}, {});
     EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path()));
     EXPECT_EQ(read(), valid);
     metadata["calendar"]["daysPerYear"] = 0;
@@ -2345,8 +2354,14 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     PopulateFixtureWorld(state);
     EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
     EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path()));
-    EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
+    // Clock-bearing metadata is an enabled indexed snapshot, so its region directory
+    // already exists. Refusal must preserve the published index, not remove that directory.
+    std::ifstream index_after_file(index_path, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>{index_after_file}, {}), index_before);
     EXPECT_EQ(read(), damaged);
+    std::ofstream(metadata_path, std::ios::binary | std::ios::trunc) << "{";
+    EXPECT_NO_THROW(EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path(), &errors)));
+    EXPECT_EQ(read(), "{");
 }
 
 TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {
@@ -2409,7 +2424,7 @@ TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge
     EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, chunks),
               expected_digest);
     EXPECT_EQ(WorldSaveService::region_simulation_digest(
-                  root.path(), {0, 0}, RegionDigestInputs{chunks, {}}),
+                  root.path(), {0, 0}, RegionDigestInputs{chunks, {}, {}}),
               expected_digest);
 
     const std::vector<std::shared_ptr<Chunk>> empty;
@@ -2467,19 +2482,21 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
         return ledger.records().at(key).frozen_digest;
     };
     chunk->set_state(ChunkState::Idle);
-    const auto settled = freeze({}, RegionDigestInputs{resident.snapshot_chunks(), {}});
+    const auto settled = freeze({}, RegionDigestInputs{resident.snapshot_chunks(), {}, {}});
     ASSERT_NE(settled, freeze({}, RegionDigestInputs{}));
-    EXPECT_EQ(freeze(root.path(), RegionDigestInputs{resident.snapshot_chunks(), {}}), settled);
-    EXPECT_EQ(freeze({}, RegionDigestInputs{{}, resident.snapshot_chunks()}), settled);
+    EXPECT_EQ(freeze(root.path(), RegionDigestInputs{resident.snapshot_chunks(), {}, {}}), settled);
+    EXPECT_EQ(freeze({}, RegionDigestInputs{{}, resident.snapshot_chunks(), {}}), settled);
 
     // Incomplete live/parked content must fall back to the edited durable Loading record.
     auto incomplete = std::make_shared<Chunk>(chunk->get_coords());
     incomplete->heightmap_data = {99.0f};
     incomplete->mark_voxel_data_dirty();
     incomplete->set_state(ChunkState::Loading);
-    EXPECT_EQ(freeze({}, RegionDigestInputs{{incomplete}, {}}), freeze({}, RegionDigestInputs{}));
-    EXPECT_EQ(freeze({}, RegionDigestInputs{{}, {incomplete}}), freeze({}, RegionDigestInputs{}));
-    EXPECT_EQ(freeze(root.path(), RegionDigestInputs{{incomplete}, {incomplete}}), settled);
+    EXPECT_EQ(freeze({}, RegionDigestInputs{{incomplete}, {}, {}}),
+              freeze({}, RegionDigestInputs{}));
+    EXPECT_EQ(freeze({}, RegionDigestInputs{{}, {incomplete}, {}}),
+              freeze({}, RegionDigestInputs{}));
+    EXPECT_EQ(freeze(root.path(), RegionDigestInputs{{incomplete}, {incomplete}, {}}), settled);
 
     resident.clear();
     chunk.reset();
@@ -2508,7 +2525,7 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
                 chunk->mark_voxel_data_dirty();
             chunk->set_state(ChunkState::Idle);
             const auto settled = WorldSaveService::region_simulation_digest(
-                {}, {0, 0}, RegionDigestInputs{{chunk}, {}});
+                {}, {0, 0}, RegionDigestInputs{{chunk}, {}, {}});
             if (edited) {
                 ASSERT_NE(settled, empty);
             } else {
@@ -2517,10 +2534,10 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
             chunk->set_state(lifecycle);
             const auto in_memory = lifecycle == ChunkState::Loading ? empty : settled;
             EXPECT_EQ(WorldSaveService::region_simulation_digest(
-                          {}, {0, 0}, RegionDigestInputs{{chunk}, {}}),
+                          {}, {0, 0}, RegionDigestInputs{{chunk}, {}, {}}),
                       in_memory);
             EXPECT_EQ(WorldSaveService::region_simulation_digest(
-                          {}, {0, 0}, RegionDigestInputs{{}, {chunk}}),
+                          {}, {0, 0}, RegionDigestInputs{{}, {chunk}, {}}),
                       in_memory);
 
             ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path()));
@@ -2568,13 +2585,14 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                                 RegionKey{32767, -32768},
                                 RegionKey{32767, 32767},
                                 RegionKey{0, 0}}) {
+        EXPECT_EQ(WorldSaveService::region_simulation_digest({}, key, inputs), empty_digest);
         EXPECT_EQ(WorldSaveService::region_simulation_digest(missing_save, key, inputs),
                   empty_digest);
         WorldStreamingState region;
         const auto chunk =
             AddFixtureChunk(region, IVec3(key.x * 32, 0, key.z * 32), ChunkState::Idle, 1u);
         chunk->mark_voxel_data_dirty();
-        const Luminumbra::Persistence::RegionDigestInputs edited_inputs{{chunk}, {}};
+        const Luminumbra::Persistence::RegionDigestInputs edited_inputs{{chunk}, {}, {}};
         const auto expected_digest =
             std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(region), nullptr, 16);
         EXPECT_EQ(WorldSaveService::region_simulation_digest({}, key, edited_inputs),
@@ -2763,3 +2781,168 @@ TEST(WorldSaveService, SavedInputReadCancellationStopsAnInterruptedRetry) {
     EXPECT_EQ(attempts, 1);
 }
 #endif
+
+TEST(WorldSaveService, UnindexedCorruptClockRefusesWithoutCreatingChunkDirectory) {
+    const TempSaveDir save_dir("unindexed_corrupt_clock");
+    {
+        std::ofstream output(save_dir.path() / "world_info.json", std::ios::binary);
+        output << R"({"container_version":2,"simulationTick":-1})";
+    }
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
+    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
+}
+
+namespace {
+Luminumbra::Chunk*& ChunkChangedDuringDirtyPublication() {
+    static Luminumbra::Chunk* chunk = nullptr;
+    return chunk;
+}
+void EditChunkAfterRegionPublication(const char* step, const std::filesystem::path& path) {
+    auto*& chunk = ChunkChangedDuringDirtyPublication();
+    if (chunk && std::string_view(step) == "after-replace" && path.extension() == ".lmr") {
+        chunk->sdf_data.front() += 1.0f;
+        chunk->mark_voxel_data_dirty();
+        chunk = nullptr;
+    }
+}
+struct RemovalSubstitution {
+    bool attempted = false;
+    bool replaced = false;
+};
+RemovalSubstitution& RemovalSubstitutionState() {
+    static RemovalSubstitution state;
+    return state;
+}
+void SubstituteBeforeRemoval(const char* step, const std::filesystem::path& path) {
+    auto& state = RemovalSubstitutionState();
+    if (state.attempted || std::string_view(step) != "before-delete")
+        return;
+    state.attempted = true;
+    std::error_code error;
+    std::filesystem::rename(path, path.parent_path() / "retained-original", error);
+    if (error)
+        return;
+    std::ofstream replacement(path, std::ios::binary);
+    replacement << "replacement";
+    replacement.close();
+    state.replaced = replacement.good();
+}
+} // namespace
+
+TEST(WorldSaveService, DurableRemovalRefusesSubstitutedOccupant) {
+    const TempSaveDir save("remove_substitution");
+    const auto path = save.path() / "world_info.json";
+    {
+        std::ofstream original(path, std::ios::binary);
+        original << "original";
+        original.close();
+        ASSERT_TRUE(original.good());
+    }
+    RemovalSubstitutionState() = {};
+    Luminumbra::Persistence::set_snapshot_step_hook_for_testing(&SubstituteBeforeRemoval);
+    std::vector<std::string> errors;
+    const bool removed = WorldSaveService::durable_remove(path, &errors);
+    Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+    ASSERT_TRUE(RemovalSubstitutionState().attempted);
+    ASSERT_TRUE(RemovalSubstitutionState().replaced);
+    EXPECT_FALSE(removed);
+    EXPECT_FALSE(errors.empty());
+    std::ifstream replacement(path, std::ios::binary);
+    std::string bytes;
+    replacement >> bytes;
+    EXPECT_EQ(bytes, "replacement");
+    std::ifstream retained(save.path() / "retained-original", std::ios::binary);
+    retained >> bytes;
+    EXPECT_EQ(bytes, "original");
+}
+
+TEST(WorldSaveService, IndexOnlySnapshotRefusesUnlistedInvalidSingleton) {
+    const TempSaveDir save("invalid_unlisted_singleton");
+    Luminumbra::Persistence::SnapshotIndex index;
+    index.generation = 1;
+    index.txn_id = 1;
+    const auto index_path = Luminumbra::Persistence::snapshot_index_path(save.path());
+    std::filesystem::create_directories(index_path.parent_path());
+    {
+        std::ofstream output(index_path, std::ios::binary);
+        output << Luminumbra::Persistence::encode_snapshot_index(index);
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    WorldStreamingState state;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService{}.load_world(state, save.path(), errors));
+    EXPECT_TRUE(errors.empty());
+    const auto invalid = save.path() / "aether_state.efs";
+    std::filesystem::create_directory(invalid);
+    EXPECT_FALSE(WorldSaveService{}.load_world(state, save.path(), errors));
+    EXPECT_FALSE(errors.empty());
+#if !defined(_WIN32)
+    ASSERT_TRUE(std::filesystem::remove(invalid));
+    std::filesystem::create_symlink(save.path() / "missing", invalid);
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService{}.load_world(state, save.path(), errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_TRUE(std::filesystem::is_symlink(invalid));
+#endif
+}
+
+TEST(WorldSaveService, SnapshotMarkerRequiresTheSupportedIntegerWithoutNarrowing) {
+    const TempSaveDir save("snapshot_marker_admission");
+    const std::vector<nlohmann::json> invalid = {
+        nullptr, false, "1", -1, 0, 2, std::numeric_limits<std::uint64_t>::max()};
+    for (const auto& marker : invalid) {
+        SCOPED_TRACE(marker.dump());
+        {
+            std::ofstream output(save.path() / "world_info.json", std::ios::binary);
+            output << nlohmann::json{{"container_version", 2}, {"snapshotFormat", marker}};
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        Luminumbra::Persistence::MemberDigest digest;
+        std::string error;
+        EXPECT_FALSE(
+            WorldSaveService::member_digest(save.path(), "world_info.json", digest, error));
+        EXPECT_FALSE(error.empty());
+        WorldStreamingState state;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService{}.load_world(state, save.path(), errors));
+        EXPECT_FALSE(errors.empty());
+        const auto exact = WorldSaveService::read_chunk(save.path(), {0, 0, 0});
+        EXPECT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Error);
+    }
+    for (const bool indexed_marker : {false, true}) {
+        {
+            nlohmann::json metadata = {{"container_version", 2}};
+            if (indexed_marker)
+                metadata["snapshotFormat"] = 1;
+            std::ofstream output(save.path() / "world_info.json", std::ios::binary);
+            output << metadata;
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        Luminumbra::Persistence::MemberDigest digest;
+        std::string error;
+        EXPECT_TRUE(WorldSaveService::member_digest(save.path(), "world_info.json", digest, error));
+        EXPECT_TRUE(error.empty());
+    }
+}
+
+TEST(ChunkDirtyTracking, DirtySaveDoesNotAcknowledgeRevisionChangedDuringPublication) {
+    const TempSaveDir save("dirty_revision_publication");
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, -4.0f);
+    chunk->mark_voxel_data_dirty();
+    ChunkChangedDuringDirtyPublication() = chunk.get();
+    Luminumbra::Persistence::set_snapshot_step_hook_for_testing(&EditChunkAfterRegionPublication);
+    const auto report = WorldSaveService{}.save_dirty_chunks(state, save.path());
+    Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+    ChunkChangedDuringDirtyPublication() = nullptr;
+    EXPECT_TRUE(report.saved);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(chunk->sdf_data.front(), -3.0f);
+}

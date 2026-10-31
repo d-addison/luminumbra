@@ -703,9 +703,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         tile.index("upsert_container_records("))
         self.assertRegex(tile, r"upsert_container_records\(\s*ownership, region_file,")
         persistence = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
-        owned = persistence.split(
-            "bool WorldSaveService::upsert_container_records(const SaveOwnership&", 1)[1].split(
-                "void WorldSaveService::set_interrupt_before_region_replace_for_testing", 1)[0]
+        signature = "bool WorldSaveService::upsert_container_records(const SaveOwnership&"
+        owned = self.function(persistence[persistence.index(signature):],
+                              "upsert_container_records", "WorldSaveService::")
         for recursive_guard in ("SaveGuard ", "SaveOwnership ", "RegionFileWriteGuard "):
             self.assertNotIn(recursive_guard, owned)
         self.assertIn("WriteRegionFile(region_file, raw_records, errors)", owned)

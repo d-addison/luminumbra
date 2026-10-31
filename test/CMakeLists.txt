@@ -274,6 +274,7 @@ add_executable(common_tests
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
+    common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
@@ -1603,6 +1604,7 @@ add_executable(frontier_gates_test
     persistence/persistence_hardening_test.cpp
     persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
+    persistence/SaveTransaction_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE
@@ -2216,6 +2218,10 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     endif()
 endforeach()
 
+# Apply child-only labels after discovery has registered the tests. This CTest
+# include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake")
 # GoogleTest's discovery includes must run before case labeling and COST hints.
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")

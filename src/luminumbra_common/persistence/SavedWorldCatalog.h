@@ -23,6 +23,9 @@ struct SavedWorld {
     world::WorldClock clock{0, world::WorldCalendar::Legacy()};
     std::optional<world::WorldCalendar> render_calendar;
     bool requires_active_regions = false;
+    // An interrupted indexed save left a journal. The listing is metadata-only; opening the world
+    // recovers it first (inspection itself never mutates).
+    bool pending_recovery = false;
     // Empty only when metadata, preset and all existing save artifacts are supported.
     std::string error;
 };

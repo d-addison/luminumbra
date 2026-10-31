@@ -393,6 +393,39 @@ public:
         create_owned_directory(std::move(artifact));
     }
 
+    // Bind a pre-existing save directory while owning only subsequently created
+    // files. Rollback verifies this directory's identity but never removes it
+    // or requires unrelated contents to belong to this journal.
+    void bind_existing_root(const std::filesystem::path& path) {
+        if (m_count != 0)
+            throw std::runtime_error("A world artifact journal is already active.");
+        const auto root = std::filesystem::canonical(path);
+#if defined(_WIN32)
+        ScopedFile file(::CreateFileW(root.c_str(),
+                                      FILE_READ_ATTRIBUTES,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                      nullptr));
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (file.get() == INVALID_HANDLE_VALUE ||
+            !::GetFileInformationByHandle(file.get(), &information) ||
+            (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            throw std::runtime_error("Could not bind save directory.");
+#else
+        ScopedFile file(::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (file.get() < 0)
+            throw std::runtime_error("Could not bind save directory.");
+#endif
+        const auto identity = identity_from(file.get());
+        m_artifacts[0] = {
+            .path = root, .directory = true, .identity = identity, .retained = std::move(file)};
+        m_count = 1;
+        m_borrowed_root = true;
+    }
+
     void create_directory(const std::filesystem::path& path) {
         create_owned_directory(vacant_artifact(path, true));
     }
@@ -533,6 +566,7 @@ public:
         for (std::size_t index = 0; index < m_count; ++index)
             m_artifacts[index] = Artifact{};
         m_count = 0;
+        m_borrowed_root = false;
     }
 
     // Preflight the entire journal and every owned directory before deleting
@@ -550,7 +584,7 @@ public:
                 if (!validate(artifact))
                     continue;
                 validate_parents(artifact);
-                if (artifact.directory) {
+                if (artifact.directory && !(m_borrowed_root && index == 0)) {
                     for (const auto& child : std::filesystem::directory_iterator(artifact.path)) {
                         if (!tracked(child.path()))
                             throw std::runtime_error(
@@ -564,7 +598,7 @@ public:
                 // Recheck the root and every owning directory as well as the
                 // object immediately before removal, not only at preflight.
                 validate_parents(artifact);
-                if (validate(artifact))
+                if (validate(artifact) && !(m_borrowed_root && index == 1))
                     remove_owned(artifact);
                 // Windows completes deletion when the last handle closes,
                 // before removing the owning directory. Forget the removed
@@ -1180,12 +1214,13 @@ private:
     // retain their journal entries until release or rollback. At most one
     // retained native handle per entry, including both publication names.
     static constexpr std::size_t kCreationDirectories = 3;   // Save root, chunks, region.
-    static constexpr std::size_t kCreationDurableFiles = 3;  // Preset, metadata, ledger.
+    static constexpr std::size_t kCreationDurableFiles = 4;  // Preset, metadata, ledger, index.
     static constexpr std::size_t kEntriesPerDurableFile = 2; // Destination and temporary.
     static constexpr std::size_t kCreationArtifactCapacity =
         kCreationDirectories + kCreationDurableFiles * kEntriesPerDurableFile;
-    static_assert(kCreationArtifactCapacity == 9);
+    static_assert(kCreationArtifactCapacity == 11);
     std::array<Artifact, kCreationArtifactCapacity> m_artifacts{};
+    bool m_borrowed_root = false;
     std::size_t m_count = 0;
 };
 

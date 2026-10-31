@@ -1,6 +1,7 @@
 #include "SavedWorldCatalog.h"
 
 #include "RegionFileWriteGuard.h"
+#include "SaveTransaction.h"
 #include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
@@ -141,6 +142,28 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         if (!fs::is_directory(save) || fs::is_symlink(save))
             return result;
         const auto metadata_path = save / "world_info.json";
+        if (journal_pending(save)) {
+            result.pending_recovery = true;
+            result.error.clear();
+            nlohmann::json pending;
+            bool missing = false;
+            if (ReadSavedJson(metadata_path,
+                              SavedInputLimits::kMetadataBytes,
+                              pending,
+                              missing,
+                              true,
+                              nullptr,
+                              stop) &&
+                !missing && pending.is_object()) {
+                if (pending.contains("name") && pending.at("name").is_string())
+                    result.metadata.name = pending.at("name").get<std::string>();
+                if (pending.contains("seed") && pending.at("seed").is_string())
+                    result.metadata.seed = pending.at("seed").get<std::string>();
+            }
+            if (stop.stop_requested())
+                result.error = "Saved-world validation cancelled.";
+            return result;
+        }
         nlohmann::json json;
         bool missing = false;
         const bool readable = ReadSavedJson(
@@ -158,9 +181,15 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         }
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
-        // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.
+        // Preserve version diagnostics before attempting preset resolution. For a current
+        // container, resolve preset identity before comparing the snapshot fingerprint so
+        // malformed identity fields retain their actionable admission diagnostics.
         std::vector<std::string> errors;
-        if (!WorldSaveService::validate_save(save, &errors, stop)) {
+        const bool current_container =
+            json.is_object() && json.contains("container_version") &&
+            json.at("container_version").is_number_integer() &&
+            json.at("container_version") == WorldSaveService::kContainerVersion;
+        if (!current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
@@ -197,6 +226,10 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         if (!ResolveSavedPreset(runtime_root, save, json, result, stop)) {
             if (stop.stop_requested())
                 result.error = "Saved-world validation cancelled.";
+            return result;
+        }
+        if (current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
+            result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
         if (stop.stop_requested()) {
@@ -236,7 +269,10 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
             }
             if (entry.is_directory() || entry.is_symlink())
                 result.worlds.push_back(
-                    InspectSavedWorld(root, runtime_root, entry.path().filename().string(), stop));
+                    InspectSavedWorld(root,
+                                      runtime_root,
+                                      Filesystem::GenericUtf8PathString(entry.path().filename()),
+                                      stop));
         }
         if (stop.stop_requested()) {
             result.worlds.clear();
