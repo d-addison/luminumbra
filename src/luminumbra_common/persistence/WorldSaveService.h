@@ -42,6 +42,8 @@ struct RegionDigestInputs {
     std::vector<std::shared_ptr<Chunk>> live;
     std::vector<std::shared_ptr<Chunk>> parked;
     std::vector<IVec3> durable;
+    // Legacy admitted saves need no index until their first complete indexed save.
+    bool require_index = true;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.

@@ -2260,6 +2260,28 @@ INSTANTIATE_TEST_SUITE_P(RegionModesWritersAndSavePaths,
                          CompleteSaveFailure,
                          testing::Combine(testing::Values(0, 1), testing::Range(0, 14)));
 
+TEST_F(WorldOpenRefusal, CanonicalSaveWithTrailingSeparatorAcknowledgesPendingEdits) {
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        const auto config = SnapshotRunnerConfig(RootString(), regions);
+        Server::ServerWorldRunner runner(config);
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        const auto destination = session->GetWorldSaveDir() / "";
+        ASSERT_TRUE(destination.filename().empty());
+        const PendingSnapshotState pending(*session);
+        world::WorldStateSaveReport report;
+        ASSERT_TRUE(session->SaveWorldStateTo(destination, &report));
+        EXPECT_TRUE(report.saved);
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectSnapshotReloaded(pending, *chunk, config, session->GetMetadata().worldId, jobs));
+        runner.Shutdown();
+    }
+}
+
 TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits) {
     for (const bool regions : {false, true}) {
         SCOPED_TRACE(regions);

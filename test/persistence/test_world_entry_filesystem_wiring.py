@@ -242,7 +242,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
     def test_snapshot_refusals_keep_the_live_world_or_change_revision_when_it_is_torn_down(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
         preparation = body(session, "GameSession::PrepareWorldLoad(")
-        self.assertIn("ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop)",
+        self.assertIn("ReadPreparedWorldState(worldPath, state_options, loaded, prepared->error, true, stop)",
                       preparation)
         self.assertNotIn("ResetWorldSystems();", preparation)
         self.assertLess(preparation.index("ReadPreparedWorldState("),

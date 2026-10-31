@@ -1,4 +1,5 @@
 #include "SaveTransaction.h"
+#include "core/CaptureContentPaths.h"
 #include "core/FilesystemPath.h"
 
 #include "CreatedWorldArtifacts.h"
@@ -150,15 +151,15 @@ bool ReadAllBytes(const fs::path& file, std::string& out, std::vector<std::strin
 
 bool SamePath(const fs::path& lhs, const fs::path& rhs) {
     std::error_code ec;
-    fs::path lhs_canonical = fs::weakly_canonical(lhs, ec);
+    fs::path lhs_canonical = Filesystem::WeaklyCanonicalPath(lhs, ec);
     if (ec) {
         return false;
     }
-    fs::path rhs_canonical = fs::weakly_canonical(rhs, ec);
+    fs::path rhs_canonical = Filesystem::WeaklyCanonicalPath(rhs, ec);
     if (ec) {
         return false;
     }
-    return lhs_canonical == rhs_canonical;
+    return Filesystem::PathSpellingEqual(lhs_canonical, rhs_canonical);
 }
 
 // Devel stages outside strict save inventories. Legacy-looking temporary names
@@ -604,15 +605,26 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
 
 bool read_snapshot_index(const fs::path& save_dir,
                          SnapshotIndex& out,
-                         std::vector<std::string>* errors) {
+                         std::vector<std::string>* errors,
+                         const std::stop_token& stop) {
     out = SnapshotIndex{};
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
     const fs::path path = snapshot_index_path(save_dir);
     const SavedInputFile input(path);
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
     if (input.missing())
         return true;
     std::string bytes;
-    if (!input.read(bytes, kMaxSnapshotIndexBytes)) {
-        AddError(errors, "unreadable or oversized snapshot index");
+    if (!input.read(bytes, kMaxSnapshotIndexBytes, stop)) {
+        AddError(errors,
+                 stop.stop_requested() ? "Saved-world validation cancelled."
+                                       : "unreadable or oversized snapshot index");
         return false;
     }
     std::string error;
@@ -638,11 +650,20 @@ bool hash_file(const fs::path& path,
                std::uint64_t& bytes,
                std::uint64_t& fnv64,
                bool& exists,
-               std::vector<std::string>* errors) {
+               std::vector<std::string>* errors,
+               const std::stop_token& stop) {
     bytes = 0;
     fnv64 = 0;
     exists = false;
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
     const SavedInputFile input(path);
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
     if (input.missing())
         return true;
     std::uint64_t length = 0;
@@ -658,14 +679,14 @@ bool hash_file(const fs::path& path,
     while (bytes < length) {
         const auto count =
             static_cast<std::size_t>(std::min<std::uint64_t>(block.size(), length - bytes));
-        if (!input.read_exact(block.data(), count)) {
+        if (!input.read_exact(block.data(), count, stop)) {
             AddError(errors, "partial snapshot member read");
             return false;
         }
         fnv64 = Fnv1aUpdate(fnv64, block.data(), count);
         bytes += count;
     }
-    if (!input.at_end()) {
+    if (!input.at_end(stop)) {
         AddError(errors, "snapshot member changed while reading");
         return false;
     }

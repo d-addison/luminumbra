@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -72,7 +73,8 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
 // An absent index file is a clean miss: returns true with out = {} (generation 0).
 bool read_snapshot_index(const std::filesystem::path& save_dir,
                          SnapshotIndex& out,
-                         std::vector<std::string>* errors);
+                         std::vector<std::string>* errors,
+                         const std::stop_token& stop = {});
 bool snapshot_index_exists(const std::filesystem::path& save_dir);
 
 // FNV-1a 64 over raw bytes (shared by the index and the journal).
@@ -82,7 +84,8 @@ bool hash_file(const std::filesystem::path& path,
                std::uint64_t& bytes,
                std::uint64_t& fnv64,
                bool& exists,
-               std::vector<std::string>* errors);
+               std::vector<std::string>* errors,
+               const std::stop_token& stop = {});
 
 // True when <save>/journal exists. Read-only; used by the catalog.
 bool journal_pending(const std::filesystem::path& save_dir);

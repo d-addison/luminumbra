@@ -54,6 +54,7 @@
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
+#include "../core/CaptureContentPaths.h"
 #include "../core/FilesystemPath.h"
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
@@ -198,6 +199,7 @@ struct GameSession::LoadedWorldState {
     std::optional<WorldCalendar> render_calendar;
     std::optional<ActiveRegionLedger> ledger;
     bool snapshot_present = false;
+    bool requires_index = false;
     Ecs::EntityRegistrySnapshot plants;
     bool input_refused = false;
     std::optional<luminumbra::fields::EnergyFieldState> energy;
@@ -212,6 +214,7 @@ struct GameSession::WorldPreparation {
     std::string preset_json;
     fs::path state_directory;
     LoadedWorldState loaded;
+    int world_seed = 0;
     bool create = false;
     bool state_only = false;
     bool transient = false;
@@ -224,6 +227,9 @@ GameSession::WorldPreparationOptions GameSession::CaptureWorldPreparationOptions
             .save_root = GetSaveRootPath(),
             .configured_save_root = GetSaveRootPath(),
             .required_assets = m_requiredClientAssets,
+            .wanted_chunks = m_activeRegionsEnabled && m_worldSystem
+                                 ? m_worldSystem->GetInitialChunkLoadList(m_metadata.spawnPoint)
+                                 : std::vector<IVec3>{},
             .ledger_config = m_activeRegionLedger.config(),
             .scheduler_override = m_regionSchedulerOverride,
             .simulation_tick = GetSimulationTickCount(),
@@ -309,6 +315,7 @@ void GameSession::ResetWorldSystems() {
     m_regionFault.reset();
     m_regionInputRejections = {};
     m_regionDurableDirectory.clear();
+    m_regionRequiresIndex = false;
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
     m_lastSaveTick = -1;
@@ -1665,9 +1672,23 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
         }
         return prepared;
     }
+    // Resolve the same terrain-bounded wanted set before reading any chunks. Worker
+    // preparation owns its sampler and never reads a live session or starts jobs.
+    prepared->world_seed = static_cast<int>(StringToSeed(saved.metadata.seed));
+    auto state_options = options;
+    if (options.active_regions) {
+        TerrainGenParams params = preset.params;
+        ClampTerrainParams(params);
+        const Systems::SHIELD_WorldSystem sampler(nullptr, nullptr, params, prepared->world_seed);
+        const Vec3 spawn =
+            saved.has_spawn_point
+                ? saved.metadata.spawnPoint
+                : Vec3(8.0f, sampler.GetTerrainHeightAt(8.0f, 8.0f) + kSpawnEyeHeight, 8.0f);
+        state_options.wanted_chunks = sampler.GetInitialChunkLoadList(spawn);
+    }
     // Validate all refusing state readers before replacing the live world.
     auto& loaded = prepared->loaded;
-    if (!ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop))
+    if (!ReadPreparedWorldState(worldPath, state_options, loaded, prepared->error, true, stop))
         return prepared;
 
     if (stop.stop_requested())
@@ -1705,6 +1726,7 @@ bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
     const auto worldPath = prepared.options.save_root / "worlds/saves" / prepared.metadata.worldId;
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
+    const int world_seed = prepared.world_seed;
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = std::move(saved.preset_json);
@@ -1715,8 +1737,6 @@ bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
-    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
-
     // Initialize Physics System after config and preset validation passes.
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
@@ -1823,7 +1843,8 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             ? Persistence::
                                   RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
                                                      m_worldSystem->snapshot_parked_chunks(),
-                                                     m_worldSystem->durable_chunk_inventory()}
+                                                     m_worldSystem->durable_chunk_inventory(),
+                                                     m_regionRequiresIndex}
                             : Persistence::RegionDigestInputs{});
                 },
                 // Later slices extend this probe with ground objects,
@@ -1931,8 +1952,8 @@ void GameSession::AttachRegionEditObserver() {
             [this](const IVec3& coords) {
                 const auto directory =
                     m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
-                const auto result =
-                    Persistence::WorldSaveService::read_chunk(directory, coords, true);
+                const auto result = Persistence::WorldSaveService::read_chunk(
+                    directory, coords, m_regionRequiresIndex);
                 if (result.status != Persistence::WorldSaveService::ChunkReadStatus::Found)
                     throw std::runtime_error(
                         result.error.empty() ? "expected durable chunk is missing" : result.error);
@@ -2055,15 +2076,17 @@ std::string GameSession::ComputeChunkStateHash() {
     std::string projection =
         "authoritative_chunks:v2:" + std::to_string(m_worldSystem->GetWaterSimWindowCursor()) + ":";
     try {
-        if (!durable.empty() && !Persistence::snapshot_index_exists(directory))
+        if (m_regionRequiresIndex && !durable.empty() &&
+            !Persistence::snapshot_index_exists(directory))
             throw std::runtime_error("inconsistent snapshot: index missing");
         for (const auto key : keys) {
             const auto record = m_activeRegionLedger.records().find(key);
-            const auto digest = record != m_activeRegionLedger.records().end() &&
-                                        record->second.state == RegionState::Frozen
-                                    ? record->second.frozen_digest
-                                    : Persistence::WorldSaveService::region_simulation_digest(
-                                          directory, key, {live, parked, durable});
+            const auto digest =
+                record != m_activeRegionLedger.records().end() &&
+                        record->second.state == RegionState::Frozen
+                    ? record->second.frozen_digest
+                    : Persistence::WorldSaveService::region_simulation_digest(
+                          directory, key, {live, parked, durable, m_regionRequiresIndex});
             projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
                           std::to_string(digest) + ";";
         }
@@ -2388,7 +2411,15 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                                          save_started)
             .count();
     };
-    const bool canonical_save = save_dir == GetWorldSaveDir();
+    // Resolve aliases, including a trailing separator, before deciding which
+    // destination may acknowledge canonical edits or change live persistence state.
+    std::error_code canonical_path_error, target_path_error;
+    const auto canonical_directory =
+        Filesystem::WeaklyCanonicalPath(GetWorldSaveDir(), canonical_path_error);
+    const auto target_directory = Filesystem::WeaklyCanonicalPath(save_dir, target_path_error);
+    const bool canonical_save =
+        !canonical_path_error && !target_path_error &&
+        Filesystem::PathSpellingEqual(canonical_directory, target_directory);
     full_snapshot =
         full_snapshot || (m_activeRegionsEnabled && !m_transientWorld && !canonical_save);
     WorldStateSaveReport result;
@@ -2396,6 +2427,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         *report = result;
     }
     if (!IsSimulationTickBoundary() || !m_worldUsable || !m_worldSystem || save_dir.empty() ||
+        target_path_error ||
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
     }
@@ -2446,8 +2478,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
 
     const auto acknowledge =
         Persistence::WorldSaveService::chunk_save_acknowledgement(state.snapshot_chunks());
-    const auto defer_success = [this, &save_dir, &state, &elapsed_ms]() {
-        if (!m_activeRegionsEnabled)
+    const auto defer_success = [this, &save_dir, &state, &elapsed_ms, canonical_save]() {
+        if (!m_activeRegionsEnabled || !canonical_save)
             return;
         std::vector<IVec3> covered;
         for (const auto& chunk : state.snapshot_chunks())
@@ -2457,6 +2489,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         auto committed =
             [this, directory = save_dir, covered = std::move(covered), completed_ms]() {
                 m_regionDurableDirectory = directory;
+                m_regionRequiresIndex = true;
                 m_worldSystem->remember_durable_chunks(covered);
                 m_worldSystem->release_clean_parked_chunks();
                 RecordPersistenceSaveOutcome(true, completed_ms);
@@ -2530,15 +2563,15 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
             return false;
     }
 
-    std::error_code source_path_error, target_path_error;
-    const auto source_directory = fs::weakly_canonical(m_regionDurableDirectory, source_path_error);
-    const auto target_directory = fs::weakly_canonical(save_dir, target_path_error);
+    std::error_code source_path_error;
+    const auto source_directory =
+        Filesystem::WeaklyCanonicalPath(m_regionDurableDirectory, source_path_error);
     if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
         (source_path_error || target_path_error)) {
         return false;
     }
     if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
-        source_directory != target_directory) {
+        !Filesystem::PathSpellingEqual(source_directory, target_directory)) {
         // Transfer each source region once. Resident/parked truth supersedes disk;
         // memory and decode work are bounded by one admitted region at a time.
         Persistence::WorldSaveService copier;
@@ -2583,7 +2616,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     }
 
     if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
-        source_directory != target_directory && write_chunks &&
+        !Filesystem::PathSpellingEqual(source_directory, target_directory) && write_chunks &&
         !prepared_chunks.prepare(state, save_dir, false, &errors))
         return false;
     bool ok = true;
@@ -2612,7 +2645,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                      ? Persistence::WorldSaveService::remove_file_and_staging(energy_path)
                      : Persistence::WorldSaveService::write_file_durably(energy_path, energy_bytes);
         }
-        if (ok && !remove_energy) {
+        if (ok && !remove_energy && (m_transientWorld || canonical_save)) {
             if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
                 transaction->defer_until_commit([this, energy = *prepared_energy]() mutable {
                     *m_energyFieldState = std::move(energy);
@@ -2666,7 +2699,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         else
             acknowledge();
     }
-    if (m_activeRegionsEnabled) {
+    if (m_activeRegionsEnabled && canonical_save) {
         const auto expected_ledger = m_activeRegionLedger.canonical_bytes();
         auto saved_ledger = m_activeRegionLedger;
         saved_ledger.mark_saved(m_worldClock);
@@ -2774,13 +2807,20 @@ bool GameSession::ReadPreparedWorldState(
                                : errors.front();
         return false;
     }
-    const std::unordered_set<ChunkID> retain_none;
+    // The 25-by-25 initial surface-column set bounds retained chunks; all other
+    // records are still decoded and validated, then released during this pass.
+    std::unordered_set<ChunkID> wanted;
+    for (const auto& coords : options.wanted_chunks)
+        wanted.insert(Chunk::calculate_id(coords));
+    state.requires_index = Persistence::snapshot_index_exists(save_dir);
+    if (cancelled())
+        return false;
     state.snapshot_present =
         service.load_world(state.chunks,
                            save_dir,
                            errors,
                            stop,
-                           options.active_regions ? &retain_none : nullptr,
+                           options.active_regions ? &wanted : nullptr,
                            options.active_regions ? &state.durable_inventory : nullptr);
     if (!state.snapshot_present && !errors.empty()) {
         error = errors.front();
@@ -2811,7 +2851,9 @@ bool GameSession::ReadPreparedWorldState(
     // Enabled session saves have a snapshot commit point. The standalone persistence
     // helpers also support legacy clock/ledger pairs, but session admission must not
     // silently regenerate authority after an indexed save loses its index and marker.
-    if (requires_active_regions && !Persistence::snapshot_index_exists(save_dir)) {
+    if (cancelled())
+        return false;
+    if (requires_active_regions && !state.requires_index) {
         error = "inconsistent snapshot: enabled records without index";
         return false;
     }
@@ -2834,6 +2876,8 @@ bool GameSession::ReadPreparedWorldState(
     }
 
     if (options.aether_state) {
+        if (cancelled())
+            return false;
         const Persistence::SavedInputFile input(save_dir / "aether_state.efs");
         const auto tick_base = options.active_regions
                                    ? state.clock.tick()
@@ -2887,6 +2931,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;
+        m_regionRequiresIndex = saved.requires_index;
         m_worldSystem->remember_durable_chunks(saved.durable_inventory);
         m_regionSchedule = {};
         m_regionWork.clear();
@@ -2903,7 +2948,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     auto& loaded = saved.chunks;
     std::size_t adopted = 0;
     for (const auto& chunk : loaded.snapshot_chunks()) {
-        if (!chunk) {
+        if (!chunk || (m_activeRegionsEnabled && !chunk->needs_authority())) {
             continue;
         }
 
@@ -2931,13 +2976,6 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
 
         if (m_worldSystem->adopt_streamed_chunk(chunk)) {
             ++adopted;
-        }
-    }
-
-    if (m_activeRegionsEnabled) {
-        for (const auto& coords : m_worldSystem->GetInitialChunkLoadList(m_metadata.spawnPoint)) {
-            if (m_worldSystem->restore_authoritative_chunk(coords))
-                ++adopted;
         }
     }
 
@@ -2987,7 +3025,7 @@ std::string GameSession::GenerateWorldId() {
     return ss.str();
 }
 
-uint32_t GameSession::StringToSeed(const std::string& seedStr) const {
+uint32_t GameSession::StringToSeed(const std::string& seedStr) {
     if (seedStr.empty()) {
         return std::random_device{}();
     }

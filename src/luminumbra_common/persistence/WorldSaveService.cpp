@@ -2663,7 +2663,8 @@ std::string RelativeRegionMember(int rx, int rz) {
 // load_world already read; singleton members are hashed as raw bytes.
 std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                 const SnapshotIndex& index,
-                                const std::map<std::string, MemberDigest>& region_digests) {
+                                const std::map<std::string, MemberDigest>& region_digests,
+                                const std::stop_token& stop) {
     static const char* const kSingletons[] = {"world_info.json",
                                               "aether_state.efs",
                                               "chunks/region/world-manifest.json",
@@ -2671,6 +2672,8 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                               "chunks/region/active-regions.arl"};
     std::set<std::string> listed;
     for (const SnapshotMember& member : index.members) {
+        if (stop.stop_requested())
+            return "Saved-world validation cancelled.";
         listed.insert(member.path);
         MemberDigest actual;
         const auto region = region_digests.find(member.path);
@@ -2682,12 +2685,14 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             std::uint64_t bytes = 0;
             std::uint64_t fnv64 = 0;
             bool exists = false;
-            if (!hash_file(save_dir / member.path, bytes, fnv64, exists, nullptr))
+            if (!hash_file(save_dir / member.path, bytes, fnv64, exists, nullptr, stop))
                 return member.path;
             actual.present = exists;
             actual.bytes = bytes;
             actual.fnv64 = fnv64;
             if (member.path == "aether_state.efs" && actual.present) {
+                if (stop.stop_requested())
+                    return "Saved-world validation cancelled.";
                 std::string error;
                 if (!WorldSaveService::member_digest(save_dir, member.path, actual, error))
                     return member.path + ": " + error;
@@ -2703,6 +2708,8 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             return path;
     }
     for (const char* single : kSingletons) {
+        if (stop.stop_requested())
+            return "Saved-world validation cancelled.";
         if (listed.count(single) != 0)
             continue;
         const SavedInputFile input(save_dir / single);
@@ -2915,8 +2922,11 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, clock_error);
         return false;
     }
-    TransactionScope scope(
-        save_dir, {"world_info.json"}, errors, metadata.contains("snapshotFormat"), artifacts);
+    TransactionScope scope(save_dir,
+                           {"world_info.json"},
+                           errors,
+                           (has_clock && !artifacts) || metadata.contains("snapshotFormat"),
+                           artifacts);
     if (!scope.ok())
         return false;
     if (!validate_save(save_dir, errors))
@@ -2997,11 +3007,8 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
-    TransactionScope scope(save_dir,
-                           {"world_info.json", "chunks/region/active-regions.arl"},
-                           errors,
-                           metadata.contains("snapshotFormat"),
-                           artifacts);
+    TransactionScope scope(
+        save_dir, {"world_info.json", "chunks/region/active-regions.arl"}, errors, true, artifacts);
     if (!scope.ok())
         return false;
     world::WorldClock previous_clock;
@@ -3272,6 +3279,10 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     }
     const std::filesystem::path path = plant_entities_path(save_dir);
     const SavedInputFile input(path);
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
     if (input.missing()) {
         out = Luminumbra::Ecs::EntityRegistrySnapshot{};
         return true; // clean miss: a fresh / no-plant world
@@ -3329,6 +3340,10 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
     try {
         const auto path = active_regions_path(save_dir);
         const SavedInputFile input(path);
+        if (stop.stop_requested()) {
+            AddError(errors, "Saved-world validation cancelled.");
+            return false;
+        }
         if (input.missing()) {
             ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
@@ -3366,8 +3381,17 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors,
                                            CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    TransactionScope scope(
-        save_dir, {"chunks/region/active-regions.arl"}, errors, false, artifacts);
+    bool has_ledger = !ledger.records().empty() || ledger.local_anchor();
+    {
+        // Close the admitted reader before transaction publication takes its lock.
+        const SavedInputFile input(active_regions_path(save_dir));
+        has_ledger = has_ledger || !input.missing();
+    }
+    TransactionScope scope(save_dir,
+                           {"chunks/region/active-regions.arl"},
+                           errors,
+                           has_ledger && !artifacts,
+                           artifacts);
     if (!scope.ok() || !validate_save(save_dir, errors))
         return false;
     world::WorldClock previous_clock;
@@ -3383,8 +3407,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     if (!artifacts)
         ReclaimAbandonedStaging(staging);
     // Keep an anchor-only ledger: it restores last walking feet before activation.
-    if (ledger.records().empty() && !ledger.local_anchor() &&
-        !std::filesystem::exists(active_regions_path(save_dir)))
+    if (!has_ledger)
         return true;
     auto saved = ledger;
     saved.mark_saved(clock);
@@ -3489,7 +3512,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
             region.insert_chunk(chunk);
     }
     if (!save_dir.empty()) {
-        if (!inputs.durable.empty() && !snapshot_index_exists(save_dir))
+        if (inputs.require_index && !inputs.durable.empty() && !snapshot_index_exists(save_dir))
             throw std::runtime_error("inconsistent snapshot: index missing");
         std::vector<std::shared_ptr<Chunk>> durable_chunks;
         std::vector<std::string> errors;
@@ -3984,12 +4007,6 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                     const auto chunk = DecodeChunkRecord(record, path, &diagnostics);
                     if (!chunk) {
                         error = first_error("corrupt chunk record");
-                        return false;
-                    }
-                    constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                     (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-                    if (!chunk->sdf_data.empty() && chunk->sdf_data.size() != kLattice) {
-                        error = "corrupt world chunk SDF lattice";
                         return false;
                     }
                     int chunk_rx = 0;
@@ -4593,7 +4610,9 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         }
         const bool indexed = snapshot_index_exists(save_dir);
         SnapshotIndex snapshot_index;
-        if (indexed && !read_snapshot_index(save_dir, snapshot_index, &errors))
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
+        if (indexed && !read_snapshot_index(save_dir, snapshot_index, &errors, stop))
             return reject("inconsistent snapshot: corrupt snapshot index");
         if (!indexed && !metadata_missing && metadata.contains("snapshotFormat"))
             return reject("inconsistent snapshot: index missing");
@@ -4659,7 +4678,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             // An index-only region directory is still an indexed snapshot: verify it before
             // reporting a clean miss, or tampered metadata/energy would go unnoticed.
             if (indexed) {
-                const std::string mismatch = VerifySnapshotIndex(save_dir, snapshot_index, {});
+                const std::string mismatch =
+                    VerifySnapshotIndex(save_dir, snapshot_index, {}, stop);
+                if (stop.stop_requested())
+                    return reject("Saved-world validation cancelled.");
                 if (!mismatch.empty())
                     return reject("inconsistent snapshot: " + mismatch);
             }
@@ -4743,7 +4765,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                         return reject("");
                     constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                                      (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-                    if ((indexed || authoritative_inventory) && !chunk->sdf_data.empty() &&
+                    if (authoritative_inventory && !chunk->sdf_data.empty() &&
                         chunk->sdf_data.size() != kLattice)
                         return reject("corrupt world chunk SDF lattice");
                     int chunk_rx = 0, chunk_rz = 0;
@@ -4801,9 +4823,13 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             return reject("Saved-world validation cancelled.");
         if (!load_plant_entities(plants, save_dir, &errors, stop))
             return reject("");
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
         if (indexed) {
             const std::string mismatch =
-                VerifySnapshotIndex(save_dir, snapshot_index, region_digests);
+                VerifySnapshotIndex(save_dir, snapshot_index, region_digests, stop);
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
             if (!mismatch.empty())
                 return reject("inconsistent snapshot: " + mismatch);
         }

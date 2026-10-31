@@ -394,6 +394,9 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
     chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
+    // A raw snapshot is loaded authority. Region containers subsequently restore their
+    // explicit edited flag, allowing pristine cache records to remain regenerable.
+    chunk.mark_sdf_loaded_or_edited();
 }
 
 std::string StableDump(const nlohmann::json& value) {

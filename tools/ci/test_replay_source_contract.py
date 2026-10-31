@@ -936,7 +936,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(metadata_failure.index("m_worldUsable = false;"),
                         metadata_failure.index("return false;"))
         prepare = self.function(source, "PrepareWorldLoad")
-        self.assertIn("ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop)",
+        self.assertIn("ReadPreparedWorldState(worldPath, state_options, loaded, prepared->error, true, stop)",
                       prepare)
         self.assertLess(prepare.index("ReadPreparedWorldState("),
                         prepare.index("prepared->ready = true;"))

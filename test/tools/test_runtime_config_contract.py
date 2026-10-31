@@ -801,7 +801,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         ledger = service[service.index("boolWorldSaveService::save_active_regions("):]
         self.assertLess(ledger.index("ReclaimAbandonedStaging(staging);"),
-                        ledger.index("if(ledger.records().empty()"))
+                        ledger.index("if(!has_ledger)"))
         remove = service[service.index("boolWorldSaveService::remove_file_and_staging("):]
         self.assertLess(remove.index("ReclaimAbandonedStaging(destination);"),
                         remove.index("std::filesystem::remove(destination,error);"))

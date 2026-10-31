@@ -153,6 +153,8 @@ public:
         std::filesystem::path save_root;
         std::filesystem::path configured_save_root;
         std::vector<std::filesystem::path> required_assets;
+        // Owner-thread snapshot for state-only loads; candidate opens derive their own set.
+        std::vector<IVec3> wanted_chunks;
         RegionSchedulerConfig ledger_config;
         std::optional<RegionSchedulerConfig> scheduler_override;
         std::uint64_t simulation_tick = 0;
@@ -653,6 +655,7 @@ private:
     void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     std::filesystem::path m_regionDurableDirectory;
+    bool m_regionRequiresIndex = false;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
@@ -712,7 +715,7 @@ private:
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
     // Convert string seed to numeric seed
-    uint32_t StringToSeed(const std::string& seedStr) const;
+    static uint32_t StringToSeed(const std::string& seedStr);
     void InitializeScentField(const Vec3& anchor);
     // Construct the stateful energy layer iff
     // m_aetherStateEnabled (called at CreateWorld/LoadWorld after the
