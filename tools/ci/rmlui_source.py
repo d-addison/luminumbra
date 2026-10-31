@@ -767,8 +767,12 @@ class Workspace:
         except FileNotFoundError:
             return
         require(ordinary(info, True), "nonordinary population directory")
-        with os.scandir(self.population) as entries:
-            require(next(entries, None) is None, "nonempty population directory")
+        try:
+            with os.scandir(self.population) as entries:
+                require(next(entries, None) is None, "nonempty population directory")
+        except FileNotFoundError:
+            # The directory vanished after the lstat above; absent is eligible.
+            return
 
     def verify(self) -> None:
         owner = self.owner()
