@@ -1518,6 +1518,13 @@ class DeliveryRefusals(unittest.TestCase):
         self.assertEqual(list(self.w.population.iterdir()), [])
         self.assertFalse(self.w.receipt.exists())
 
+    def test_population_removed_after_lstat_is_treated_as_absent(self):
+        self.w.initialize()
+        self.w.population.parent.mkdir()
+        self.w.population.mkdir()
+        with mock.patch.object(M.os, "scandir", side_effect=FileNotFoundError("population vanished")):
+            self.w.verify_population()
+
     def test_delivery_inputs_select_python_and_native_lanes(self):
         loader = importlib.util.spec_from_file_location("ci_paths", ROOT / "tools/ci/ci_paths.py")
         paths = importlib.util.module_from_spec(loader)
