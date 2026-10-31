@@ -5078,6 +5078,7 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                                    .emplace(id, std::make_shared<Luminumbra::Chunk>(coords))
                                    .first;
                     m_activation_index.insert(iterator->second);
+                    note_digest_chunk(iterator->second, false, true);
                     ++m_dirty_generation;
                 }
                 auto& chunk = iterator->second;
@@ -5849,6 +5850,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         chunk->set_state(Luminumbra::ChunkState::Loading);
         m_streaming_state.chunks[chunk->get_id()] = chunk;
         m_activation_index.insert(chunk);
+        note_digest_chunk(chunk, false, true);
 
         const int target_step = request.target_step;
         chunk->pending_generation_ready.store(false, std::memory_order_release);

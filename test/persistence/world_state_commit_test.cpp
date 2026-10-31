@@ -237,11 +237,17 @@ protected:
         const auto ledger_path = WorldSaveService::active_regions_path(save);
         ASSERT_EQ(fs::exists(ledger_path), clock_case);
         if (failure == LoadFailure::Sdf) {
-            // The baseline is valid. Publish only the targeted lattice defect through the
-            // container writer so its fingerprint does not mask the session's SDF diagnostic.
+            // Encode the targeted defect outside the indexed baseline, then corrupt only its
+            // region bytes. Indexed publication must refuse malformed lattices; admission must
+            // diagnose the lattice before comparing its fingerprint.
             chunk->sdf_data = {1.0f};
             chunk->mark_voxel_data_dirty();
-            ASSERT_TRUE(WorldSaveService{}.save_world(state, save));
+            const auto malformed = root / "malformed-lattice";
+            fs::remove_all(malformed);
+            ASSERT_TRUE(WorldSaveService{}.save_world(state, malformed));
+            fs::copy_file(WorldSaveService::region_file_path(malformed, 0, 0),
+                          WorldSaveService::region_file_path(save, 0, 0),
+                          fs::copy_options::overwrite_existing);
         }
         if (failure == LoadFailure::PartialLedger || failure == LoadFailure::EmptyLedger) {
             ASSERT_TRUE(WorldSaveService::write_file_durably(

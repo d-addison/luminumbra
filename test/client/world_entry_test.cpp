@@ -605,13 +605,14 @@ TEST_F(WorldEntryFilesystem, CreatesWorldWithActiveRegionsAndFullArtifactJournal
             << session.GetWorldOpenError();
         save = root / "worlds/saves" / session.GetMetadata().worldId;
         const auto bytes = DiskBytes(save);
-        EXPECT_EQ(bytes.size(), 6u);
+        EXPECT_EQ(bytes.size(), 7u);
         EXPECT_TRUE(bytes.contains("preset.json"));
         EXPECT_TRUE(bytes.contains("world_info.json"));
         EXPECT_TRUE(bytes.contains("chunks"));
         EXPECT_TRUE(bytes.contains("chunks/region"));
         EXPECT_TRUE(bytes.contains("chunks/region/active-regions.arl"));
         EXPECT_TRUE(bytes.contains("chunks/region/snapshot.json"));
+        EXPECT_TRUE(bytes.contains("chunks/region/world-manifest.json"));
         EXPECT_FALSE(Luminumbra::Persistence::journal_pending(save));
     }
     jobs.shutdown();
@@ -636,8 +637,9 @@ TEST_F(WorldEntryFilesystem, UnicodeSaveRootCreatesAndReloadsTheExactPresetAndSa
         const auto preset = session.PresetContentHash();
         const auto save = save_root / "worlds/saves" / id;
         const auto before = DiskBytes(save);
-        ASSERT_EQ(before.size(), 6u);
+        ASSERT_EQ(before.size(), 7u);
         ASSERT_TRUE(before.contains("chunks/region/snapshot.json"));
+        ASSERT_TRUE(before.contains("chunks/region/world-manifest.json"));
         ASSERT_FALSE(preset.empty());
         artifacts.release();
         ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();

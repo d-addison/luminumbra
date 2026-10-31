@@ -104,6 +104,28 @@ bool AllDigits(std::string_view text) {
     return true;
 }
 
+bool IsTemporaryName(std::string_view name, const fs::path& prefix_path, bool ledger) {
+    const auto prefix = Filesystem::GenericUtf8PathString(prefix_path) + ".tmp.";
+    if (!name.starts_with(prefix))
+        return false;
+    name.remove_prefix(prefix.size());
+    const auto process_end = name.find('.');
+    if (process_end == std::string_view::npos || !AllDigits(name.substr(0, process_end)))
+        return false;
+    name.remove_prefix(process_end + 1);
+    const auto sequence_end = name.find('.');
+    if (sequence_end == std::string_view::npos)
+        return AllDigits(name);
+    if (!ledger || !AllDigits(name.substr(0, sequence_end)))
+        return false;
+    name.remove_prefix(sequence_end + 1);
+    // Ledger staging adds exactly 128 bits of lowercase hexadecimal entropy.
+    // Sidecar extensions and extra path components are never payload names.
+    return name.size() == 32 && std::all_of(name.begin(), name.end(), [](char unit) {
+               return (unit >= '0' && unit <= '9') || (unit >= 'a' && unit <= 'f');
+           });
+}
+
 // Optional leading '-' followed by 1 to 10 decimal digits.
 bool IsRegionCoordinate(std::string_view text) {
     if (!text.empty() && text.front() == '-') {
@@ -297,33 +319,31 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
             error = "journal publication identity invalid";
             return false;
         }
-        const auto temporary_name =
-            [&](const char* key, const fs::path& prefix_path, std::string& output) {
-                const auto* value = Field(item, key);
-                if (!value || !value->is_string())
-                    return false;
-                output = value->get<std::string>();
-                if (output.empty())
-                    return true;
-                const auto prefix = Filesystem::GenericUtf8PathString(prefix_path) + ".tmp.";
-                if (!output.starts_with(prefix))
-                    return false;
-                const std::string_view suffix(output.data() + prefix.size(),
-                                              output.size() - prefix.size());
-                const auto separator = suffix.find('.');
-                return separator != std::string_view::npos &&
-                       AllDigits(suffix.substr(0, separator)) &&
-                       AllDigits(suffix.substr(separator + 1));
-            };
+        const auto temporary_name = [&](const char* key,
+                                        const fs::path& prefix_path,
+                                        std::string& output,
+                                        bool ledger = false) {
+            const auto* value = Field(item, key);
+            if (!value || !value->is_string())
+                return false;
+            output = value->get<std::string>();
+            if (output.empty())
+                return true;
+            return IsTemporaryName(output, prefix_path, ledger);
+        };
+        const bool ledger = entry.path == "chunks/region/active-regions.arl";
         if (!temporary_name(
                 "undo_temporary", fs::path("journal") / entry.undo, entry.undo_temporary) ||
-            (!temporary_name(
-                 "incoming_temporary", fs::path(entry.path).filename(), entry.incoming_temporary) &&
+            (!temporary_name("incoming_temporary",
+                             fs::path(entry.path).filename(),
+                             entry.incoming_temporary,
+                             ledger) &&
              !temporary_name("incoming_temporary",
                              fs::path("journal") / fs::path(entry.path).filename(),
-                             entry.incoming_temporary) &&
+                             entry.incoming_temporary,
+                             ledger) &&
              !temporary_name(
-                 "incoming_temporary", fs::path(entry.path), entry.incoming_temporary)) ||
+                 "incoming_temporary", fs::path(entry.path), entry.incoming_temporary, ledger)) ||
             !temporary_name("restored_temporary",
                             fs::path("journal") / fs::path(entry.path).filename(),
                             entry.restored_temporary)) {

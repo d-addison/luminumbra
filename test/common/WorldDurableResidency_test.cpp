@@ -437,6 +437,60 @@ TEST(WorldDurableResidency, RegionDigestWorkIsLinearAndPublicationInvalidatesAdm
     EXPECT_THROW((void)operation.digest({0, 0}, grouped), std::runtime_error);
 }
 
+TEST(WorldDurableResidency, GenerationAndTerrainPreparationRegisterLiveDigestAuthority) {
+    namespace P = Luminumbra::Persistence;
+    for (const int insertion : {0, 1, 2}) {
+        SCOPED_TRACE(insertion);
+        DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+        ASSERT_TRUE(fx.created) << fx.error;
+        const IVec3 coords(128, 0, 128);
+        if (insertion == 2) {
+            ASSERT_TRUE(fx.world->PrepareTerrainVoxelEdit(Vec3(2056, 8, 2056), 1.0f));
+        } else {
+            if (insertion == 1) {
+                const auto placeholder = std::make_shared<Chunk>(coords);
+                ASSERT_TRUE(fx.world->adopt_streamed_chunk(placeholder));
+            }
+            fx.world->dispatch_generation_jobs(std::vector<IVec3>{coords});
+            fx.world->wait_for_streaming_jobs();
+        }
+        const auto chunk = fx.world->find_streamed_chunk(coords);
+        ASSERT_TRUE(chunk);
+        ASSERT_FALSE(chunk->sdf_data.empty());
+        auto grouped = fx.world->region_digest_inputs(4, 4);
+        ASSERT_EQ(grouped.live.size(), 1u);
+        EXPECT_EQ(grouped.live.front(), chunk);
+        const auto compare_digest = [&] {
+            const P::RegionDigestInputs complete{fx.world->snapshot_streamed_chunks(),
+                                                 fx.world->snapshot_parked_chunks(),
+                                                 fx.world->durable_chunk_inventory()};
+            grouped = fx.world->region_digest_inputs(4, 4);
+            const auto digest = P::WorldSaveService::region_simulation_digest(
+                fx.session->GetWorldSaveDir(), {4, 4}, grouped);
+            EXPECT_EQ(digest,
+                      P::WorldSaveService::region_simulation_digest(
+                          fx.session->GetWorldSaveDir(), {4, 4}, complete));
+            return digest;
+        };
+        chunk->sdf_data.front() = -3.0f;
+        chunk->mark_voxel_data_dirty();
+        const auto edited = compare_digest();
+        ASSERT_TRUE(fx.session->SaveWorldState());
+        EXPECT_EQ(compare_digest(), edited);
+        chunk->sdf_data.front() = -7.0f;
+        chunk->mark_voxel_data_dirty();
+        EXPECT_NE(compare_digest(), edited);
+        // Water changes on a previously saved generated chunk also override durable bytes.
+        const auto terrain_digest = compare_digest();
+        chunk->water_level_data = {3.0f};
+        chunk->mark_water_state_dirty();
+        EXPECT_NE(compare_digest(), terrain_digest);
+        fx.world->clear_world(fx.physics);
+        EXPECT_TRUE(fx.world->region_digest_inputs(4, 4).live.empty());
+        EXPECT_FALSE(fx.world->has_region_members(4, 4));
+    }
+}
+
 TEST(WorldDurableResidency, EditOfParkedChunkUnparksIt) {
     DurableFixture fx(/*durable=*/true);
     ASSERT_TRUE(fx.created) << fx.error;

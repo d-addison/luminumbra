@@ -1034,6 +1034,9 @@ public:
     bool publish_bound(const std::filesystem::path& destination) {
         try {
 #if defined(_WIN32)
+            // Exclusive publication reopens the named source without delete sharing.
+            // Keep only an attributes-only, open-by-ID handle across that reopen.
+            retain_publication_identity();
             CreatedWorldArtifacts::publish_bound_file(m_path, destination, m_handle);
 #else
             CreatedWorldArtifacts::publish_bound_file(m_path, destination, m_descriptor);
@@ -2547,12 +2550,15 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
             return "unsupported future world metadata container version " + version.dump();
         return "corrupt world metadata container version";
     }
-    if (metadata.contains("simulationTick") || metadata.contains("calendar")) {
+    if (metadata.contains("simulationTick") || metadata.contains("calendar") ||
+        metadata.contains("renderCalendar")) {
         world::WorldClock clock;
         std::string error;
         std::optional<Vec3> anchor;
+        std::optional<world::WorldCalendar> render_calendar;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
-            !ReadAmbientAnchor(metadata, anchor, error))
+            !ReadAmbientAnchor(metadata, anchor, error) ||
+            !world::WorldClock::read_render_calendar(metadata, render_calendar, error))
             return error;
     }
     if (metadata.contains("snapshotFormat") &&
@@ -3756,6 +3762,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                                                          world::RegionKey key,
                                                          const RegionDigestInputs& inputs,
                                                          const SnapshotIndex* admitted_index) {
+    const SaveOwnership ownership;
     ValidateRegionDigestKey(key);
     WorldStreamingState region;
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
@@ -3953,6 +3960,7 @@ bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
 bool WorldSaveService::read_container_records(const std::filesystem::path& region_file,
                                               std::vector<ContainerRecord>& out_records,
                                               std::vector<std::string>* errors) {
+    const SaveOwnership ownership;
     out_records.clear();
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors, {}, true)) {
@@ -3978,6 +3986,7 @@ bool WorldSaveService::read_container_records(const std::filesystem::path& regio
 bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_file,
                                           std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                           std::vector<std::string>* errors) {
+    const SaveOwnership ownership;
     out_chunks.clear();
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors, {}, true) ||
@@ -4011,6 +4020,7 @@ bool WorldSaveService::read_authoritative_region_chunks(
     std::vector<std::shared_ptr<Chunk>>& out_chunks,
     std::vector<std::string>* errors,
     const SnapshotIndex* admitted_index) {
+    const SaveOwnership ownership;
     out_chunks.clear();
     if (min_chunk_x > max_chunk_x || min_chunk_z > max_chunk_z) {
         AddError(errors, "authoritative chunk read bounds are invalid");
@@ -4420,6 +4430,12 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                     const auto chunk = DecodeChunkRecord(record, path, &diagnostics);
                     if (!chunk) {
                         error = first_error("corrupt chunk record");
+                        return false;
+                    }
+                    constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                                     (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+                    if (!chunk->sdf_data.empty() && chunk->sdf_data.size() != kLattice) {
+                        error = "corrupt world chunk SDF lattice";
                         return false;
                     }
                     int chunk_rx = 0;
@@ -4857,6 +4873,7 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
 
 WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
     const std::filesystem::path& save_dir, const IVec3& coords, bool require_index) {
+    const SaveOwnership ownership;
     ChunkReadResult result;
     const auto fail = [&result](std::string error) {
         result.status = ChunkReadStatus::Error;
@@ -4870,30 +4887,16 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         const auto path = region_file_path(save_dir, rx, rz);
         std::vector<std::string> errors;
         SnapshotIndex index;
-        const bool indexed = snapshot_index_exists(save_dir);
-        if (require_index && !indexed)
-            return fail("inconsistent snapshot: index missing");
-        if (indexed && !read_snapshot_index(save_dir, index, &errors))
+        SaveFormat format;
+        if (!read_save_format(save_dir, format, &errors, {}, &index))
             return fail(errors.empty() ? "corrupt snapshot index" : errors.front());
+        if (require_index && !format.indexed)
+            return fail("inconsistent snapshot: index missing");
         std::vector<RegionRecord> records;
         if (!ReadRegionFile(path, records, &errors, {}, true))
             return fail(errors.empty() ? "unreadable chunk region" : errors.front());
-        if (!VerifyRegionMembership(path, records, &errors))
+        if (!VerifyRegionMembership(path, records, &errors, &index))
             return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
-        if (indexed) {
-            const auto relative = RelativeRegionMember(rx, rz);
-            const auto member = std::find_if(
-                index.members.begin(),
-                index.members.end(),
-                [&relative](const SnapshotMember& value) { return value.path == relative; });
-            const auto digest = Lod0Fingerprint(records);
-            if ((member == index.members.end() && digest.present) ||
-                (member != index.members.end() &&
-                 (member->present != digest.present ||
-                  (digest.present &&
-                   (member->bytes != digest.bytes || member->fnv64 != digest.fnv64)))))
-                return fail("inconsistent snapshot: " + relative);
-        }
         const auto id = Chunk::calculate_id(coords);
         for (const auto& record : records) {
             if (record.lod_level != 0 || record.id != id)
@@ -5120,7 +5123,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                         return reject("");
                     constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                                      (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-                    if (authoritative_inventory && !chunk->sdf_data.empty() &&
+                    if ((indexed || authoritative_inventory) && !chunk->sdf_data.empty() &&
                         chunk->sdf_data.size() != kLattice)
                         return reject("corrupt world chunk SDF lattice");
                     int chunk_rx = 0, chunk_rz = 0;

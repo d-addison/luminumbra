@@ -2209,40 +2209,56 @@ TEST_P(SavedWorldPresetTest, RefusedOpenAndMissingJobsPreserveSaveEligibility) {
 }
 
 TEST_P(SavedWorldPresetTest, CandidateLatticeRefusalPreservesLiveWorldAndSaveEligibility) {
-    GameSession live, candidate;
-    ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(live));
-    Configure(candidate);
-    ASSERT_TRUE(candidate.CreateWorld("Candidate lattice", "7331", "default"));
-    const auto candidate_save = candidate.GetWorldSaveDir();
-    Luminumbra::WorldStreamingState snapshot;
-    auto malformed = snapshot.get_or_create_chunk(Luminumbra::IVec3(40, 0, 40));
-    malformed->set_state(Luminumbra::ChunkState::Idle);
-    malformed->sdf_data = {-2.0f, 0.25f};
-    ASSERT_TRUE(P::WorldSaveService{}.save_world(snapshot, candidate_save));
-    // The container is readable; only the session's final lattice check refuses it.
-    ASSERT_TRUE(P::InspectSavedWorld(Root().path(), candidate.GetMetadata().worldId).error.empty());
-    std::shared_ptr<Luminumbra::Chunk> chunk;
-    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(live, chunk, true));
-    const PendingSnapshotState pending(live);
-    const RetainedCreationState retained(live);
-    const auto disk = SavedPresetTestDiskBytes(Root().path());
-    for (const bool explicit_root : {false, true}) {
-        SCOPED_TRACE(explicit_root);
-        EXPECT_FALSE(explicit_root
-                         ? live.LoadWorldFrom(candidate.GetMetadata().worldId, Root().path())
-                         : live.LoadWorld(candidate.GetMetadata().worldId));
-        EXPECT_EQ(live.GetWorldOpenError(), "corrupt world chunk SDF lattice");
-        retained.ExpectUnchanged(live);
-        pending.ExpectUnchanged(live, *chunk);
-        const auto residents = live.GetWorldSystem()->snapshot_streamed_chunks();
-        ASSERT_EQ(residents.size(), 1u);
-        EXPECT_EQ(residents.front(), chunk);
-        EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+    for (const bool indexed_candidate : {false, true}) {
+        GameSession live, candidate;
+        ASSERT_NO_FATAL_FAILURE(CreateSnapshotSession(live));
+        Configure(candidate);
+        candidate.SetActiveRegionsEnabled(indexed_candidate);
+        ASSERT_TRUE(candidate.CreateWorld("Candidate lattice", "7331", "default"));
+        const auto candidate_save = candidate.GetWorldSaveDir();
+        Luminumbra::WorldStreamingState snapshot;
+        auto malformed = snapshot.get_or_create_chunk(Luminumbra::IVec3(40, 0, 40));
+        malformed->set_state(Luminumbra::ChunkState::Idle);
+        malformed->sdf_data.assign(17u * 17u * 17u, -2.0f);
+        ASSERT_TRUE(P::WorldSaveService{}.save_world(snapshot, candidate_save));
+        // Publish a valid baseline, then inject the defect through a separate legacy encoder.
+        // Indexed writers must refuse malformed lattice publication themselves.
+        malformed->sdf_data = {-2.0f, 0.25f};
+        const auto corrupt = Root().path() / "malformed-candidate";
+        ASSERT_TRUE(P::WorldSaveService{}.save_world(snapshot, corrupt));
+        fs::copy_file(P::WorldSaveService::region_file_path(corrupt, 1, 1),
+                      P::WorldSaveService::region_file_path(candidate_save, 1, 1),
+                      fs::copy_options::overwrite_existing);
+        const auto inspected = P::InspectSavedWorld(Root().path(), candidate.GetMetadata().worldId);
+        if (indexed_candidate) {
+            ASSERT_EQ(inspected.error, "corrupt world chunk SDF lattice");
+        } else {
+            // Legacy containers reach the session's final lattice check after catalog admission.
+            ASSERT_TRUE(inspected.error.empty());
+        }
+        std::shared_ptr<Luminumbra::Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(live, chunk, true));
+        const PendingSnapshotState pending(live);
+        const RetainedCreationState retained(live);
+        const auto disk = SavedPresetTestDiskBytes(Root().path());
+        for (const bool explicit_root : {false, true}) {
+            SCOPED_TRACE(explicit_root);
+            EXPECT_FALSE(explicit_root
+                             ? live.LoadWorldFrom(candidate.GetMetadata().worldId, Root().path())
+                             : live.LoadWorld(candidate.GetMetadata().worldId));
+            EXPECT_EQ(live.GetWorldOpenError(), "corrupt world chunk SDF lattice");
+            retained.ExpectUnchanged(live);
+            pending.ExpectUnchanged(live, *chunk);
+            const auto residents = live.GetWorldSystem()->snapshot_streamed_chunks();
+            ASSERT_EQ(residents.size(), 1u);
+            EXPECT_EQ(residents.front(), chunk);
+            EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), disk);
+        }
+        ASSERT_TRUE(live.SaveWorld());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        ASSERT_NO_FATAL_FAILURE(ExpectSnapshotReloaded(
+            pending, *chunk, live.GetWorldSaveDir(), live.GetMetadata().worldId));
     }
-    ASSERT_TRUE(live.SaveWorld());
-    EXPECT_FALSE(chunk->is_voxel_data_dirty());
-    ASSERT_NO_FATAL_FAILURE(ExpectSnapshotReloaded(
-        pending, *chunk, live.GetWorldSaveDir(), live.GetMetadata().worldId));
 }
 
 TEST_P(SavedWorldPresetTest, CandidateSchedulerRefusalsPreservePendingLiveState) {

@@ -218,7 +218,7 @@ protected:
             fs::rename(region, save / "chunks/region/r.invalid.lmr");
         } else if (kind == 21) {
             auto json = nlohmann::json::parse(Read(manifest));
-            json["schema"] = "luminumbra.persistence.world_manifest.v2";
+            json["schema"] = "luminumbra.persistence.world_manifest.v3";
             Write(manifest, json.dump());
         } else if (kind == 18) {
             auto json = nlohmann::json::parse(Read(manifest));
@@ -241,7 +241,7 @@ protected:
             } else if (kind == 23)
                 json.erase("container_version"); // mixed old metadata and current chunks
             else if (kind == 24)
-                json["container_version"] = 3;
+                json["container_version"] = 4;
             else if (kind == 25)
                 json["container_version"] = "2";
             else if (kind == 27)

@@ -17,14 +17,17 @@
 #include "world/WorldStreamingState.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -662,19 +665,86 @@ TEST(WorldSaveRegionFormat, IndexedCommitRefusesMalformedLatticeWithoutAcknowled
         ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
         ASSERT_TRUE(transaction.commit(nullptr));
     }
-    chunk->sdf_data.resize(4);
-    chunk->mark_voxel_data_dirty();
-    {
+    for (const auto size : {4u, 17u * 17u * 17u - 1u, 17u * 17u * 17u + 1u}) {
+        SCOPED_TRACE(size);
+        chunk->sdf_data.resize(size);
+        chunk->mark_voxel_data_dirty();
+        {
+            P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            EXPECT_EQ(WorldSaveService{}.save_dirty_chunks(state, save.path).regions_written, 1u);
+            EXPECT_FALSE(transaction.commit(nullptr));
+        }
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        const auto recovered = WorldSaveService::read_chunk(save.path, {0, 0, 0}, true);
+        ASSERT_EQ(recovered.status, WorldSaveService::ChunkReadStatus::Found);
+        ASSERT_NE(recovered.chunk, nullptr);
+        EXPECT_EQ(recovered.chunk->sdf_data.size(), 17u * 17u * 17u);
+    }
+}
+
+TEST(WorldSaveRegionFormat, IndexedReadersWaitForTheCompleteCommit) {
+    namespace P = Luminumbra::Persistence;
+    for (int reader_kind = 0; reader_kind != 4; ++reader_kind) {
+        SCOPED_TRACE(reader_kind);
+        TempSaveDir save("indexed_read_publication");
+        WorldStreamingState state;
+        const auto chunk = state.get_or_create_chunk({0, 0, 0});
+        chunk->set_state(ChunkState::Idle);
+        chunk->sdf_data.assign(17u * 17u * 17u, -1.0f);
+        chunk->mark_voxel_data_dirty();
+        {
+            P::SaveTransaction baseline(save.path, 1, {}, &WorldSaveService::member_digest);
+            ASSERT_TRUE(baseline.begin(nullptr));
+            ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+            ASSERT_TRUE(baseline.commit(nullptr));
+        }
+        std::optional<WorldSaveService::SaveOwnership> ownership(std::in_place);
         P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
-        EXPECT_EQ(WorldSaveService{}.save_dirty_chunks(state, save.path).regions_written, 1u);
-        EXPECT_FALSE(transaction.commit(nullptr));
+        chunk->sdf_data.front() = -9.0f;
+        chunk->mark_voxel_data_dirty();
+        ASSERT_EQ(WorldSaveService{}.save_dirty_chunks(state, save.path).regions_written, 1u);
+        // Region bytes are new; the index is still the old commit. Each public reader must
+        // wait for ownership rather than treating this internal state as corrupted authority.
+        std::atomic<bool> finished{false};
+        bool read_ok = false;
+        std::vector<std::shared_ptr<Chunk>> chunks;
+        const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+        std::jthread reader([&] {
+            if (reader_kind == 0) {
+                const auto result = WorldSaveService::read_chunk(save.path, {0, 0, 0}, true);
+                read_ok = result.status == WorldSaveService::ChunkReadStatus::Found;
+                if (result.chunk)
+                    chunks.push_back(result.chunk);
+            } else if (reader_kind == 1) {
+                read_ok = WorldSaveService::read_region_chunks(region, chunks);
+            } else if (reader_kind == 2) {
+                read_ok = WorldSaveService::read_authoritative_region_chunks(
+                    region, 0, 31, 0, 31, chunks);
+            } else {
+                std::vector<WorldSaveService::ContainerRecord> records;
+                read_ok = WorldSaveService::read_container_records(region, records) &&
+                          records.size() == 1u && records.front().id == chunk->get_id();
+            }
+            finished.store(true, std::memory_order_release);
+        });
+        while (WorldSaveService::waiting_save_writers() == 0 &&
+               !finished.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        EXPECT_FALSE(finished.load(std::memory_order_acquire));
+        EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+        EXPECT_TRUE(transaction.commit(nullptr));
+        ownership.reset();
+        reader.join();
+        EXPECT_TRUE(read_ok);
+        if (reader_kind != 3) {
+            ASSERT_EQ(chunks.size(), 1u);
+            ASSERT_FALSE(chunks.front()->sdf_data.empty());
+            EXPECT_EQ(chunks.front()->sdf_data.front(), -9.0f);
+        }
+        EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
     }
-    EXPECT_TRUE(chunk->is_voxel_data_dirty());
-    const auto recovered = WorldSaveService::read_chunk(save.path, {0, 0, 0}, true);
-    ASSERT_EQ(recovered.status, WorldSaveService::ChunkReadStatus::Found);
-    ASSERT_NE(recovered.chunk, nullptr);
-    EXPECT_EQ(recovered.chunk->sdf_data.size(), 17u * 17u * 17u);
 }
 
 TEST(WorldSaveRegionFormat, FilteredBootValidatesDistantLatticesAndPublishesInventoryAtomically) {

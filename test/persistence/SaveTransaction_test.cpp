@@ -945,6 +945,123 @@ TEST(SaveTransaction, RecoveryOnCleanDirectoryIsNothingToDo) {
     EXPECT_TRUE(errors.empty());
 }
 
+TEST(SaveTransaction, RecoveryAcceptsWriterTemporaryNamesAtEveryStagingLocation) {
+    for (const auto* member : {"world_info.json", "chunks/region/active-regions.arl"}) {
+        for (const auto* location : {"", "journal/", "chunks/region/"}) {
+            if (std::string_view(member) == "world_info.json" &&
+                std::string_view(location) == "chunks/region/")
+                continue; // Metadata has no region-directory staging location.
+            for (const auto* suffix : {".tmp.1.2", ".tmp.1.2.0123456789abcdef0123456789abcdef"}) {
+                const bool ledger = std::string_view(member) == "chunks/region/active-regions.arl";
+                if (!ledger && std::string_view(suffix) != ".tmp.1.2")
+                    continue;
+                SCOPED_TRACE(std::string(member) + ":" + location + suffix);
+                TempSave save;
+                SaveTransaction writer(save.path(), 1, {}, &RawDigest);
+                ASSERT_TRUE(writer.begin(nullptr));
+                ASSERT_TRUE(writer.protect({member}, nullptr));
+                auto records = JournalRecords(save.path());
+                records.back()["entries"][0]["incoming_temporary"] =
+                    std::string(location) + fs::path(member).filename().generic_string() + suffix;
+                // An absent incoming file is a legitimate interruption before publication.
+                Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+                std::vector<std::string> errors;
+                EXPECT_EQ(recover_pending_journal(save.path(), &errors),
+                          RecoveryOutcome::RolledBack);
+                EXPECT_TRUE(errors.empty());
+                EXPECT_FALSE(journal_pending(save.path()));
+                EXPECT_FALSE(fs::exists(save.path() / member));
+            }
+        }
+    }
+}
+
+TEST(SaveTransaction, RecoveryRejectsMalformedTemporaryNamesWithoutMutation) {
+    const std::vector<std::string> invalid{
+        "active-regions.arl.tmp.",
+        "active-regions.arl.tmp.1",
+        "active-regions.arl.tmp..2",
+        "active-regions.arl.tmp.1.",
+        "active-regions.arl.tmp.1.x",
+        "active-regions.arl.tmp.1.2.",
+        "active-regions.arl.tmp.1.2.0123456789abcdef0123456789abcde",
+        "active-regions.arl.tmp.1.2.0123456789abcdef0123456789abcdef0",
+        "active-regions.arl.tmp.1.2.0123456789abcdef0123456789abcdeg",
+        "active-regions.arl.tmp.1.2.0123456789abcdef0123456789abcdeF",
+        "active-regions.arl.tmp.1.2.0123456789abcdef0123456789abcdef.owner",
+        "active-regions.arl.tmp.1.2.0123456789abcdef0123456789abcdef.claim",
+        "../active-regions.arl.tmp.1.2",
+        "journal/../active-regions.arl.tmp.1.2",
+        "chunks/region/active-regions.arl.tmp.1.2/child",
+        "chunks\\region\\active-regions.arl.tmp.1.2",
+        "/active-regions.arl.tmp.1.2"};
+    for (const auto& name : invalid) {
+        SCOPED_TRACE(name);
+        TempSave save;
+        SaveTransaction writer(save.path(), 1, {}, &RawDigest);
+        ASSERT_TRUE(writer.begin(nullptr));
+        ASSERT_TRUE(writer.protect({"chunks/region/active-regions.arl"}, nullptr));
+        auto records = JournalRecords(save.path());
+        records.back()["entries"][0]["incoming_temporary"] = name;
+        Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+        const auto evidence = Tree(save.path());
+        std::vector<std::string> errors;
+        EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_EQ(errors.front(), "corrupt snapshot journal: journal temporary name invalid");
+        EXPECT_EQ(Tree(save.path()), evidence);
+    }
+    for (const auto* field : {"undo_temporary", "restored_temporary", "incoming_temporary"}) {
+        TempSave save;
+        Put(save.path() / "world_info.json", "preserve");
+        SaveTransaction writer(save.path(), 1, {}, &RawDigest);
+        ASSERT_TRUE(writer.begin(nullptr));
+        ASSERT_TRUE(writer.protect({"world_info.json"}, nullptr));
+        auto records = JournalRecords(save.path());
+        const auto& entry = records.back()["entries"][0];
+        const auto prefix = std::string_view(field) == "undo_temporary"
+                                ? "journal/" + entry.at("undo").get<std::string>()
+                                : "journal/world_info.json";
+        records.back()["entries"][0][field] = prefix + ".tmp.1.2.0123456789abcdef0123456789abcdef";
+        Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+    }
+}
+
+TEST(SaveTransaction, ProtectedPublicationClosesNamedSourceAndPreservesForeignOccupants) {
+    for (const auto* occupant : {"absent", "owned", "foreign"}) {
+        SCOPED_TRACE(occupant);
+        TempSave save;
+        const auto destination = save.path() / "world_info.json";
+        WorldSaveService::ArtifactIdentity expected{}, incoming{};
+        bool missing = false;
+        if (std::string_view(occupant) != "absent") {
+            Put(destination, "previous");
+            ASSERT_TRUE(WorldSaveService::artifact_identity(destination, expected, missing));
+            ASSERT_FALSE(missing);
+        }
+        fs::path temporary;
+        ASSERT_TRUE(WorldSaveService::prepare_restoration(
+            save.path() / "restore", "incoming", temporary, incoming, nullptr));
+        if (std::string_view(occupant) == "foreign") {
+            // Retain the previous inode under another name so the replacement cannot reuse it.
+            fs::rename(destination, save.path() / "previous");
+            Put(destination, "foreign");
+            EXPECT_FALSE(WorldSaveService::publish_restoration(
+                temporary, destination, expected, incoming, nullptr));
+            EXPECT_EQ(Get(destination), "foreign");
+            EXPECT_EQ(Get(temporary), "incoming");
+        } else {
+            ASSERT_TRUE(WorldSaveService::publish_restoration(
+                temporary, destination, expected, incoming, nullptr));
+            EXPECT_EQ(Get(destination), "incoming");
+            EXPECT_FALSE(fs::exists(temporary));
+        }
+    }
+}
+
 TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
     TempSave save;
     Put(journal_directory(save.path()) / "txn.json", "garbage");
