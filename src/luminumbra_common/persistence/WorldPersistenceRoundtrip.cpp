@@ -414,9 +414,10 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
 }
 
 std::string StableDump(const nlohmann::json& value) {
-    std::ostringstream stream;
-    stream << std::setw(4) << value << '\n';
-    return stream.str();
+    // Same serializer and settings as streaming with std::setw(4), without the stream copy.
+    std::string text = value.dump(4);
+    text.push_back('\n');
+    return text;
 }
 
 std::string Checksum(const std::string& text, std::string_view suffix = {}) {

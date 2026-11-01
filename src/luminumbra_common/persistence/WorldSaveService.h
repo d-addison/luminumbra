@@ -430,6 +430,16 @@ public:
     static std::uint64_t decode_count_for_testing();
     // Number of lod-0 chunk record payload decodes since process start.
     static std::uint64_t chunk_record_decode_count_for_testing();
+    // Compares the admitted-check entry of every lod-0 record in a region file with a fresh
+    // decode of that record (which advances the decode counter). False when the file is
+    // unreadable.
+    struct AdmittedChunkRecordAudit {
+        std::size_t records = 0;
+        std::size_t admitted = 0;
+        std::size_t mismatched = 0;
+    };
+    static bool audit_admitted_chunk_records_for_testing(const std::filesystem::path& region_file,
+                                                         AdmittedChunkRecordAudit& audit);
 
     // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
     // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0

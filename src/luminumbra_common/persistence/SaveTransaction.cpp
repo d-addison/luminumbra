@@ -1752,6 +1752,9 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             members.emplace(member.path, member);
         }
 
+        // Nothing writes between the baseline and entry passes of one commit, so an entry
+        // the baseline already digested reuses that result.
+        std::map<std::string, MemberDigest> baseline_digests;
         if (m_previous.generation == 0) {
             // First indexing of this directory: enumerate the baseline members.
             std::vector<std::string> baseline = {
@@ -1796,6 +1799,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                     abort(errors);
                     return false;
                 }
+                baseline_digests.insert_or_assign(rel, digest);
                 if (!digest.present) {
                     continue;
                 }
@@ -1815,7 +1819,10 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 continue;
             }
             MemberDigest digest;
-            if (!digest_member(entry.path, digest)) {
+            if (const auto baseline = baseline_digests.find(entry.path);
+                baseline != baseline_digests.end()) {
+                digest = baseline->second;
+            } else if (!digest_member(entry.path, digest)) {
                 abort(errors);
                 return false;
             }

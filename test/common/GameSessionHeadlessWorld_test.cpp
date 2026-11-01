@@ -5860,6 +5860,81 @@ TEST(GameSessionHeadlessWorldTest, UnchangedSnapshotSaveDoesNotReparseCommittedC
     EXPECT_GT(P::WorldSaveService::chunk_record_decode_count_for_testing(), before);
 }
 
+TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
+    constexpr std::size_t kLattice = std::size_t{17} * 17 * 17;
+    // Distinctive values keep these record bytes unseen by any earlier admission.
+    const auto representative = []() {
+        std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks;
+        const auto add = [&chunks](int x) {
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 5));
+            chunk->heightmap_data = {7.75f, 8.25f};
+            chunks.push_back(chunk);
+            return chunk;
+        };
+        const auto generated = add(8);
+        generated->sdf_data.assign(kLattice, 1.125f);
+        generated->mark_sdf_generated_current_params();
+        const auto edited = add(9);
+        edited->sdf_data.assign(kLattice, -3.25f);
+        edited->mark_voxel_data_dirty();
+        const auto water_over_generated = add(10);
+        water_over_generated->sdf_data.assign(kLattice, 1.375f);
+        water_over_generated->has_water_sim.store(true);
+        water_over_generated->set_water_authority();
+        water_over_generated->mark_sdf_generated_current_params();
+        const auto water_over_edited = add(11);
+        water_over_edited->sdf_data.assign(kLattice, -1.625f);
+        water_over_edited->has_water_sim.store(true);
+        water_over_edited->mark_voxel_data_dirty();
+        water_over_edited->set_water_authority();
+        add(12)->mark_voxel_data_dirty(); // no SDF lattice
+        return chunks;
+    };
+
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Encoded checks", "1337", "default"));
+    for (const auto& chunk : representative())
+        ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    // The commit digests every written region file in full; the records this
+    // save encoded are admitted without a payload parse.
+    const auto before = P::WorldSaveService::chunk_record_decode_count_for_testing();
+    ASSERT_TRUE(owner.SaveWorldState());
+    EXPECT_EQ(P::WorldSaveService::chunk_record_decode_count_for_testing(), before);
+    P::WorldSaveService::AdmittedChunkRecordAudit audit;
+    ASSERT_TRUE(P::WorldSaveService::audit_admitted_chunk_records_for_testing(
+        P::WorldSaveService::region_file_path(owner.GetWorldSaveDir(), 0, 0), audit));
+    EXPECT_GE(audit.records, std::size_t{5});
+    EXPECT_EQ(audit.admitted, audit.records);
+    EXPECT_EQ(audit.mismatched, std::size_t{0});
+
+    // A plain directory accepts records an indexed commit refuses: a partial
+    // lattice is admitted as such, and a non-finite value is left to a real decode.
+    Luminumbra::WorldStreamingState state;
+    for (const auto& chunk : representative())
+        ASSERT_TRUE(state.insert_chunk(chunk));
+    const auto partial = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(13, 0, 5));
+    partial->sdf_data = {-2.5f, 0.75f, 1.5f, 3.0f};
+    partial->mark_voxel_data_dirty();
+    ASSERT_TRUE(state.insert_chunk(partial));
+    const auto non_finite = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(14, 0, 5));
+    non_finite->sdf_data.assign(kLattice, 2.0f);
+    non_finite->sdf_data[3] = std::numeric_limits<float>::quiet_NaN();
+    non_finite->mark_voxel_data_dirty();
+    ASSERT_TRUE(state.insert_chunk(non_finite));
+    const fs::path plain = root.path() / "worlds" / "saves" / "encoded_checks_plain";
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(state, plain, &errors));
+    ASSERT_TRUE(P::WorldSaveService::audit_admitted_chunk_records_for_testing(
+        P::WorldSaveService::region_file_path(plain, 0, 0), audit));
+    EXPECT_EQ(audit.records, std::size_t{7});
+    EXPECT_EQ(audit.admitted, std::size_t{6});
+    EXPECT_EQ(audit.mismatched, std::size_t{0});
+}
+
 TEST(GameSessionHeadlessWorldTest, LegacyEvolvedWaterOnGeneratedChunkSurvivesRegionsUpgrade) {
     const HeadlessRoot root;
     JobSystem jobs;
