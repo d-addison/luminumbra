@@ -5159,6 +5159,18 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                     if (m_durable_read_failed)
                         return 0;
                 }
+        // The remesh restores every absent member of its band; admit them all first.
+        for (int dz = -rings; dz <= rings; ++dz)
+            for (int dx = -rings; dx <= rings; ++dx) {
+                const auto span = column_surface_span(center.x + dx, center.z + dz);
+                for (int cy = span.min_y - 1; cy <= span.max_y + 1; ++cy) {
+                    const IVec3 coords(center.x + dx, cy, center.z + dz);
+                    if (!m_streaming_state.chunks.contains(Chunk::calculate_id(coords)))
+                        restore_authoritative_chunk(coords);
+                    if (m_durable_read_failed)
+                        return 0;
+                }
+            }
     }
     int edited = 0;
     for (int cz = lo.z; cz <= hi.z; ++cz)
@@ -6982,6 +6994,8 @@ void SHIELD_WorldSystem::sync_water_authority() {
         chunk->set_water_authority();
         chunk->mark_dirty_for_save();
         chunk->clear_water_state_dirty();
+        if (m_waterAuthorityObserver)
+            m_waterAuthorityObserver(chunk->get_coords());
     };
     if (!m_durable_residency) {
         // Explicit synchronization also supports ordinary resident worlds. Their

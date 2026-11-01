@@ -46,6 +46,7 @@
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -5888,6 +5889,10 @@ TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
         water_over_edited->mark_voxel_data_dirty();
         water_over_edited->set_water_authority();
         add(12)->mark_voxel_data_dirty(); // no SDF lattice
+        const auto water_without_terrain = add(15);
+        water_without_terrain->sdf_data.assign(kLattice, 1.875f);
+        water_without_terrain->has_water_sim.store(true);
+        water_without_terrain->set_water_authority();
         return chunks;
     };
 
@@ -5907,9 +5912,39 @@ TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
     P::WorldSaveService::AdmittedChunkRecordAudit audit;
     ASSERT_TRUE(P::WorldSaveService::audit_admitted_chunk_records_for_testing(
         P::WorldSaveService::region_file_path(owner.GetWorldSaveDir(), 0, 0), audit));
-    EXPECT_GE(audit.records, std::size_t{5});
+    EXPECT_GE(audit.records, std::size_t{6});
     EXPECT_EQ(audit.admitted, audit.records);
     EXPECT_EQ(audit.mismatched, std::size_t{0});
+    // Water authority over non-authoritative terrain decodes as durable authority.
+    for (const int x : {10, 15}) {
+        SCOPED_TRACE(x);
+        const auto decoded =
+            P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), {x, 0, 5}, true);
+        ASSERT_EQ(decoded.status, P::WorldSaveService::ChunkReadStatus::Found) << decoded.error;
+        ASSERT_NE(decoded.chunk, nullptr);
+        EXPECT_TRUE(decoded.chunk->has_water_authority());
+        EXPECT_FALSE(decoded.chunk->has_terrain_authority());
+        EXPECT_EQ(decoded.chunk->sdf_provenance(), Luminumbra::ChunkSdfProvenance::LoadedOrEdited);
+    }
+    // An inventory from admitted checks equals the one a full decode derives.
+    const auto inventory_xs = [&owner](const std::unordered_set<Luminumbra::ChunkID>* retain) {
+        Luminumbra::WorldStreamingState loaded;
+        std::vector<std::string> load_errors;
+        std::vector<Luminumbra::IVec3> inventory;
+        EXPECT_TRUE(P::WorldSaveService{}.load_world(
+            loaded, owner.GetWorldSaveDir(), load_errors, {}, retain, &inventory));
+        EXPECT_TRUE(load_errors.empty());
+        std::vector<int> xs;
+        xs.reserve(inventory.size());
+        for (const auto& coords : inventory)
+            xs.push_back(coords.x);
+        std::ranges::sort(xs);
+        return xs;
+    };
+    const std::unordered_set<Luminumbra::ChunkID> retain_none;
+    const auto admitted_inventory = inventory_xs(&retain_none);
+    EXPECT_EQ(admitted_inventory, (std::vector<int>{9, 10, 11, 12, 15}));
+    EXPECT_EQ(inventory_xs(nullptr), admitted_inventory);
 
     // A plain directory accepts records an indexed commit refuses: a partial
     // lattice is admitted as such, and a non-finite value is left to a real decode.
@@ -5930,8 +5965,8 @@ TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
     ASSERT_TRUE(P::WorldSaveService{}.save_world(state, plain, &errors));
     ASSERT_TRUE(P::WorldSaveService::audit_admitted_chunk_records_for_testing(
         P::WorldSaveService::region_file_path(plain, 0, 0), audit));
-    EXPECT_EQ(audit.records, std::size_t{7});
-    EXPECT_EQ(audit.admitted, std::size_t{6});
+    EXPECT_EQ(audit.records, std::size_t{8});
+    EXPECT_EQ(audit.admitted, std::size_t{7});
     EXPECT_EQ(audit.mismatched, std::size_t{0});
 }
 
@@ -6416,6 +6451,123 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
                   session.GetActiveRegionLedger().encode());
         EXPECT_EQ(after_retention.ComputeChunkStateHash(), session.ComputeChunkStateHash());
     }
+}
+
+TEST(GameSessionHeadlessWorldTest, FrozenRegionWaterChangeHashesCurrentAuthority) {
+    using Luminumbra::Chunk;
+    using Luminumbra::ChunkState;
+    using Luminumbra::IVec3;
+    using Luminumbra::Vec3;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const RegionKey water_region{40, -40}, work_region{30, -40};
+    const IVec3 coords(water_region.x * 32, 0, water_region.z * 32);
+    const Vec3 visit_position(water_region.x * 512 + 256, 0, water_region.z * 512 + 256);
+    const Vec3 displacement_position(coords.x * 16 + 8, 0, coords.z * 16 + 8);
+    const auto empty_digest = P::WorldSaveService::region_simulation_digest({}, water_region, {});
+    RegionalWaterScenario scenario;
+    auto& session = scenario.session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetRegionSchedulerConfig({0, 1, 1});
+    ASSERT_TRUE(session.CreateWorld("Frozen water change", "1337", "default"));
+    auto chunk = std::make_shared<Chunk>(coords);
+    chunk->set_state(ChunkState::Idle);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->is_water_sleeping.store(true);
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    std::vector<std::int32_t> generated_depth;
+    ASSERT_NO_FATAL_FAILURE(SeedRegionalWaterFixture(
+        scenario, chunk, water_region, work_region, visit_position, empty_digest, generated_depth));
+    const auto initial_record = session.GetActiveRegionLedger().records().at(water_region);
+    ASSERT_NO_FATAL_FAILURE(FreezeRegionalWaterFixture(scenario,
+                                                       chunk,
+                                                       true,
+                                                       water_region,
+                                                       work_region,
+                                                       displacement_position,
+                                                       generated_depth,
+                                                       initial_record));
+    const auto frozen_hash = session.ComputeChunkStateHash();
+    ASSERT_FALSE(session.GetActiveRegionLedger().records().at(water_region).wake_pending);
+
+    // Resident water keeps evolving after the freeze; the frozen digest must not hide it.
+    chunk->water_depth_mm.front() += 7;
+    chunk->mark_water_state_dirty();
+    const auto changed_hash = session.ComputeChunkStateHash();
+    EXPECT_NE(changed_hash, frozen_hash);
+    EXPECT_FALSE(chunk->is_water_state_dirty());
+    const auto& woken = session.GetActiveRegionLedger().records().at(water_region);
+    EXPECT_EQ(woken.state, RegionState::Frozen);
+    EXPECT_TRUE(woken.wake_pending);
+    EXPECT_EQ(session.ComputeChunkStateHash(), changed_hash);
+
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(session.ComputeChunkStateHash(), changed_hash);
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(reopened.GetActiveRegionLedger().encode(), session.GetActiveRegionLedger().encode());
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), changed_hash);
+
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    session.RecordActiveRegionWork({work_region, 1, 0, 0, 0});
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    const auto& resumed = session.GetActiveRegionLedger().records().at(water_region);
+    EXPECT_NE(resumed.state, RegionState::Frozen);
+    EXPECT_FALSE(resumed.wake_pending);
+    EXPECT_EQ(session.ComputeChunkStateHash(), changed_hash);
+}
+
+TEST(GameSessionHeadlessWorldTest, CanonicalSaveAfterAlternateLoadWritesCleanResidentAuthority) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const Luminumbra::IVec3 coords(0, 0, 0);
+    const auto alternate = root.path() / "alternate-authority";
+    GameSession owner, adopter, reopened;
+    for (auto* s : {&owner, &adopter, &reopened})
+        EnableSnapshotSession(*s, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Alternate authority", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {8.5f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldStateTo(alternate));
+    const auto save = owner.GetWorldSaveDir();
+    // The export leaves the canonical save without this authority.
+    ASSERT_NE(P::WorldSaveService::read_chunk(save, coords, true).status,
+              P::WorldSaveService::ChunkReadStatus::Found);
+
+    ASSERT_TRUE(adopter.LoadWorld(owner.GetMetadata().worldId)) << adopter.GetWorldOpenError();
+    ASSERT_TRUE(adopter.LoadWorldStateFrom(alternate)) << adopter.GetWorldOpenError();
+    auto* world = adopter.GetWorldSystem();
+    ASSERT_TRUE(world->restore_authoritative_chunk(coords));
+    const auto resident = world->find_authoritative_chunk(coords);
+    ASSERT_NE(resident, nullptr);
+    EXPECT_FALSE(resident->is_voxel_data_dirty());
+    EXPECT_EQ(resident->heightmap_data, chunk->heightmap_data);
+
+    // Retargeting the durable directory must first write clean resident authority there.
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(adopter.SaveWorldState(&report));
+    EXPECT_EQ(report.chunks_dirty, 0u);
+    EXPECT_TRUE(report.saved);
+    const auto written = P::WorldSaveService::read_chunk(save, coords, true);
+    ASSERT_EQ(written.status, P::WorldSaveService::ChunkReadStatus::Found) << written.error;
+    ASSERT_NE(written.chunk, nullptr);
+    EXPECT_EQ(written.chunk->heightmap_data, chunk->heightmap_data);
+
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(reopened.GetWorldSystem()->durable_chunk_inventory().size(), 1u);
+    ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk(coords));
+    const auto restored = reopened.GetWorldSystem()->find_authoritative_chunk(coords);
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->heightmap_data, chunk->heightmap_data);
+    EXPECT_FALSE(reopened.GetRegionSchedulerFault());
 }
 
 TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved) {

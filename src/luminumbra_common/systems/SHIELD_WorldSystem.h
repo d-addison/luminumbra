@@ -857,6 +857,10 @@ public:
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
+    // Runs for each chunk whose water change sync_water_authority() promotes.
+    void SetWaterAuthorityObserver(std::function<void(const IVec3&)> observer) {
+        m_waterAuthorityObserver = std::move(observer);
+    }
     // Host-thread preparation for bounded scripted edits (radius <= 16 m,
     // coordinates within +/-32000 m). Drains streaming, then supplies full SDF
     // lattices throughout the edit AABB, including chunks below the surface.
@@ -1183,6 +1187,7 @@ private:
     std::uint64_t m_dirty_generation = 0;
     std::uint64_t m_last_serviced_generation = 0;
     std::function<void(const IVec3&)> m_voxelEditObserver;
+    std::function<void(const IVec3&)> m_waterAuthorityObserver;
     struct ParkedChunk {
         std::shared_ptr<::Luminumbra::Chunk> chunk;
         std::size_t bytes = 0;

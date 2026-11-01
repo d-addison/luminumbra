@@ -1954,6 +1954,12 @@ void GameSession::AttachRegionEditObserver() {
                 ++m_regionInputRejections.edits;
             }
         });
+        // A frozen digest no longer describes a region whose water authority moved.
+        m_worldSystem->SetWaterAuthorityObserver([this](const IVec3& chunk) {
+            int x = 0, z = 0;
+            Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
+            m_activeRegionLedger.wake_frozen({x, z});
+        });
     }
 }
 
@@ -2050,7 +2056,7 @@ std::string GameSession::ComputeChunkStateHash() {
             const auto record = m_activeRegionLedger.records().find(key);
             std::uint64_t digest = 0;
             if (record != m_activeRegionLedger.records().end() &&
-                record->second.state == RegionState::Frozen) {
+                record->second.state == RegionState::Frozen && !record->second.wake_pending) {
                 digest = record->second.frozen_digest;
             } else {
                 auto inputs = m_worldSystem->region_digest_inputs(rx, rz);
@@ -2486,7 +2492,17 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         return false;
 
     std::vector<std::string> errors;
-    const bool write_chunks = full_snapshot || !dirty_ids.empty();
+    std::error_code source_path_error;
+    const auto source_directory =
+        Filesystem::WeaklyCanonicalPath(m_regionDurableDirectory, source_path_error);
+    const bool retarget = m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
+                          !Filesystem::PathSpellingEqual(source_directory, target_directory);
+    // A new backing directory receives every resident authority before it becomes durable.
+    const bool write_chunks =
+        full_snapshot || !dirty_ids.empty() ||
+        (retarget && std::ranges::any_of(state.snapshot_chunks(), [](const auto& chunk) {
+             return chunk && chunk->needs_authority();
+         }));
     // A first chunk snapshot includes all residents. Later incremental saves
     // replace only dirty regions, even when unrelated residents exceed writer caps.
     const bool has_snapshot =
@@ -2538,15 +2554,11 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
             return false;
     }
 
-    std::error_code source_path_error;
-    const auto source_directory =
-        Filesystem::WeaklyCanonicalPath(m_regionDurableDirectory, source_path_error);
     if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
         (source_path_error || target_path_error)) {
         return false;
     }
-    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
-        !Filesystem::PathSpellingEqual(source_directory, target_directory)) {
+    if (retarget) {
         // Transfer each source region once. Resident/parked truth supersedes disk;
         // memory and decode work are bounded by one admitted region at a time.
         Persistence::WorldSaveService copier;
@@ -2590,9 +2602,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         }
     }
 
-    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
-        !Filesystem::PathSpellingEqual(source_directory, target_directory) && write_chunks &&
-        !prepared_chunks.prepare(state, save_dir, false, &errors))
+    if (retarget && write_chunks && !prepared_chunks.prepare(state, save_dir, false, &errors))
         return false;
     if (prepared_energy.has_value()) {
         if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir);

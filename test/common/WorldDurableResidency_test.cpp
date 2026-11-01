@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "../support/WorldgenTestData.h"
+#include "luminumbra/core/Types.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
@@ -716,6 +717,44 @@ TEST(WorldDurableResidency, EmptyCommittedLookupRefusesAuthority) {
     EXPECT_TRUE(fx.world->restore_authoritative_chunk(coords));
     EXPECT_EQ(loads, 1);
     EXPECT_EQ(fx.world->find_streamed_chunk(coords), nullptr);
+}
+
+TEST(WorldDurableResidency, UnreadableRemeshNeighbourRefusesEditBeforeSdfChange) {
+    DurableFixture fx(/*durable=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    const IVec3 coords(128, 0, 128);
+    const auto target = std::make_shared<Chunk>(coords);
+    target->set_state(ChunkState::Ready);
+    target->sdf_data.assign(std::size_t{17} * 17 * 17, -3.0f);
+    target->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(fx.world->adopt_streamed_chunk(target));
+    const auto sdf_before = target->sdf_data;
+    const auto revision_before = target->voxel_revision();
+    // A 2 m edit at the chunk centre touches only the target; the remesh band spans two
+    // columns on each side, so every durable member below lies outside the edit sphere.
+    std::vector<IVec3> neighbours;
+    for (int y = -512; y <= 512; ++y)
+        neighbours.emplace_back(coords.x + 2, y, coords.z);
+    fx.world->remember_durable_chunks(neighbours);
+    int loads = 0;
+    int faults = 0;
+    fx.world->set_durable_chunk_loader(
+        [&](const IVec3& requested) -> std::shared_ptr<Chunk> {
+            EXPECT_EQ(requested.x, coords.x + 2);
+            ++loads;
+            throw std::runtime_error("unreadable durable payload");
+        },
+        [&](const std::string&) { ++faults; });
+    const Vec3 centre(static_cast<float>(coords.x * Luminumbra::CHUNK_SIZE_X) + 8.0f,
+                      static_cast<float>(coords.y * Luminumbra::CHUNK_SIZE_Y) + 8.0f,
+                      static_cast<float>(coords.z * Luminumbra::CHUNK_SIZE_Z) + 8.0f);
+    EXPECT_EQ(fx.world->EditTerrainVoxel(centre, 2.0f, false, fx.physics), 0);
+    EXPECT_EQ(loads, 1);
+    EXPECT_EQ(faults, 1);
+    EXPECT_EQ(target->sdf_data, sdf_before);
+    EXPECT_EQ(target->voxel_revision(), revision_before);
+    EXPECT_FALSE(target->is_voxel_data_dirty());
+    EXPECT_EQ(fx.world->find_streamed_chunk(coords), target);
 }
 
 TEST(WorldDurableResidency, EditOfParkedChunkUnparksIt) {
