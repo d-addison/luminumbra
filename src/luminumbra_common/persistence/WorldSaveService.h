@@ -60,7 +60,6 @@ public:
     }
 
 private:
-    std::unique_lock<std::recursive_mutex> m_ownership;
     std::filesystem::path m_save_dir;
     SnapshotIndex m_index;
     std::uint64_t m_publication_revision = 0;
@@ -357,14 +356,19 @@ public:
                                     const std::string& bytes,
                                     std::vector<std::string>* errors = nullptr);
 
+    // Best-effort cleanup of abandoned temporary siblings only. Session saves use
+    // this before validating optional authority that can itself be invalid.
+    static void reclaim_file_staging(const std::filesystem::path& destination);
+
     // Retires a neutral optional record and reclaims abandoned staging without
     // creating directories. POSIX flushes the parent even on an already-absent
     // retry. Uses the same synchronization as durable writes.
     static bool remove_file_and_staging(const std::filesystem::path& destination,
                                         std::vector<std::string>* errors = nullptr);
 
-    // Const diagnostic: number of writers currently waiting for process save
-    // ownership. Includes all destinations; does not inspect or mutate the disk.
+    // Const diagnostic: number of operations waiting for process save ownership
+    // or indexed snapshot publication. Includes all destinations; does not inspect or mutate the
+    // disk.
     static std::size_t waiting_save_writers();
 
     // Called after ledger staging and ownership are flushed, before replacement. Returning

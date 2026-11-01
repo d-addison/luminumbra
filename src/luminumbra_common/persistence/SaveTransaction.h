@@ -16,6 +16,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -26,6 +29,32 @@
 namespace Luminumbra::Persistence {
 
 class CreatedWorldArtifacts;
+class TransactionOwnership;
+
+namespace detail {
+// Indexed publication excludes readers until commit/rollback. Reentrant reads and
+// writer-owned reads do not reacquire the shared mutex; readers never take writer ownership.
+class SnapshotReadOwnership {
+public:
+    SnapshotReadOwnership();
+    ~SnapshotReadOwnership();
+    SnapshotReadOwnership(const SnapshotReadOwnership&) = delete;
+    SnapshotReadOwnership& operator=(const SnapshotReadOwnership&) = delete;
+
+private:
+    bool m_locked = false;
+};
+class SnapshotWriteOwnership {
+public:
+    SnapshotWriteOwnership();
+    ~SnapshotWriteOwnership();
+    SnapshotWriteOwnership(const SnapshotWriteOwnership&) = delete;
+    SnapshotWriteOwnership& operator=(const SnapshotWriteOwnership&) = delete;
+
+private:
+    std::unique_lock<std::shared_mutex> m_lock;
+};
+} // namespace detail
 
 enum class MemberClass : std::uint8_t {
     Authoritative,
@@ -202,6 +231,7 @@ private:
     };
     bool write_journal(std::vector<std::string>* errors);
 
+    std::unique_ptr<TransactionOwnership> m_ownership;
     std::filesystem::path m_save_dir;
     std::uint64_t m_tick = 0;
     std::vector<std::array<float, 3>> m_anchors;

@@ -2476,6 +2476,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // through every payload, metadata publication and dirty acknowledgement.
     const Persistence::WorldSaveService::SaveOwnership save_ownership;
     Persistence::WorldSaveService::SaveFactsScope save_facts(save_dir);
+    if (m_energyFieldState)
+        Persistence::WorldSaveService::reclaim_file_staging(save_dir / "aether_state.efs");
     if (!ClockConfigurationCompatible(save_dir) ||
         !Persistence::WorldSaveService::validate_save(save_dir) || !SavedPresetCompatible(save_dir))
         return false;

@@ -6660,8 +6660,11 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk(const IVec3& coo
         if (!m_durable_chunk_loader)
             throw std::runtime_error("durable chunk loader unavailable");
         const auto chunk = m_durable_chunk_loader(coords);
-        if (!chunk || chunk->get_coords() != coords)
-            throw std::runtime_error("expected durable chunk is missing or has wrong identity");
+        if (!chunk || chunk->get_id() != Chunk::calculate_id(coords) ||
+            chunk->get_coords() != coords ||
+            (chunk->sdf_data.empty() && chunk->heightmap_data.empty()))
+            throw std::runtime_error(
+                "expected durable chunk is missing, empty or has wrong identity");
         return chunk;
     } catch (const std::exception& error) {
         m_durable_read_failed = true;
@@ -6817,17 +6820,31 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
     if (m_durable_read_failed)
         return true; // fail-stop: suppress generation even on subsequent requests
     const auto id = Chunk::calculate_id(coords);
-    if (m_streaming_state.chunks.contains(id) || unpark_chunk(id))
+    const auto resident = m_streaming_state.chunks.find(id);
+    if (resident != m_streaming_state.chunks.end() && resident->second &&
+        (!resident->second->sdf_data.empty() || !resident->second->heightmap_data.empty()))
         return true;
+    const auto discard_placeholder = [&] {
+        if (resident == m_streaming_state.chunks.end())
+            return;
+        if (resident->second) {
+            m_activation_index.erase(*resident->second);
+            note_digest_chunk(resident->second, false, false);
+        }
+        m_streaming_state.chunks.erase(resident);
+    };
+    if (m_parked.contains(id)) {
+        discard_placeholder();
+        return unpark_chunk(id);
+    }
     if (!m_durable_chunks.contains(id))
         return false;
     try {
-        if (!m_durable_chunk_loader)
-            throw std::runtime_error("durable chunk loader unavailable");
-        const auto chunk = m_durable_chunk_loader(coords);
-        if (!chunk || chunk->get_id() != id || chunk->get_coords() != coords)
-            throw std::runtime_error("expected durable chunk is missing or has wrong identity");
+        const auto chunk = read_committed_chunk(coords);
+        if (!chunk)
+            return true; // the shared loader has already recorded the fail-stop refusal
         chunk->normalize_for_park();
+        discard_placeholder();
         if (!adopt_streamed_chunk(chunk))
             throw std::runtime_error("duplicate durable chunk adoption");
         // Water resolution is session configuration. Migrate restored truth on the owner

@@ -1548,11 +1548,9 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
                 ++reclaimed;
             continue;
         }
-        std::error_code kind_error;
-        if (!entry.is_regular_file(kind_error) || kind_error)
-            continue;
-        std::error_code remove_error;
-        if (std::filesystem::remove(entry.path(), remove_error) && !remove_error)
+        StagingFile abandoned(entry.path(), StagingFile::Mode::Inspect);
+        StagingIdentity identity{};
+        if (abandoned.identity(identity) && abandoned.remove_bound())
             ++reclaimed;
     }
     return reclaimed;
@@ -2928,6 +2926,48 @@ bool SavedInputFile::is_within_save_root() const {
     return IsSaveDescendant(resolved, root);
 }
 
+namespace {
+std::shared_mutex& SnapshotPublicationMutex() {
+    static std::shared_mutex mutex;
+    return mutex;
+}
+std::size_t& SnapshotReadDepth() {
+    static thread_local std::size_t depth = 0;
+    return depth;
+}
+std::size_t& SnapshotWriteDepth() {
+    static thread_local std::size_t depth = 0;
+    return depth;
+}
+} // namespace
+
+detail::SnapshotReadOwnership::SnapshotReadOwnership() {
+    if (SnapshotReadDepth() == 0 && SnapshotWriteDepth() == 0) {
+        if (!SnapshotPublicationMutex().try_lock_shared()) {
+            const WaitingSaveWriter waiting;
+            SnapshotPublicationMutex().lock_shared();
+        }
+        m_locked = true;
+    }
+    ++SnapshotReadDepth();
+}
+detail::SnapshotReadOwnership::~SnapshotReadOwnership() {
+    --SnapshotReadDepth();
+    if (m_locked)
+        SnapshotPublicationMutex().unlock_shared();
+}
+detail::SnapshotWriteOwnership::SnapshotWriteOwnership()
+    : m_lock(SnapshotPublicationMutex(), std::defer_lock) {
+    if (SnapshotWriteDepth() == 0 && !m_lock.try_lock()) {
+        const WaitingSaveWriter waiting;
+        m_lock.lock();
+    }
+    ++SnapshotWriteDepth();
+}
+detail::SnapshotWriteOwnership::~SnapshotWriteOwnership() {
+    --SnapshotWriteDepth();
+}
+
 WorldSaveService::SaveOwnership::SaveOwnership()
     : m_lock(SaveMutex(), std::defer_lock) {
     if (!m_lock.try_lock()) {
@@ -2995,7 +3035,7 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
         if (calendar)
             metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
         std::string normalized;
-        if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes, normalized, 4)) {
+        if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes - 1, normalized, 4)) {
             AddError(errors,
                      "Saved-input admission refused: normalized metadata exceeds 2 MiB "
                      "compatibility limit.");
@@ -3010,6 +3050,8 @@ bool WorldSaveService::read_save_format(const std::filesystem::path& save_dir,
                                         std::vector<std::string>* errors,
                                         const std::stop_token& stop,
                                         SnapshotIndex* admitted_index) {
+    const detail::SnapshotReadOwnership ownership;
+    SavedJsonFailure json_failure = SavedJsonFailure::None;
     format = {};
     nlohmann::json metadata;
     nlohmann::json manifest;
@@ -3020,12 +3062,14 @@ bool WorldSaveService::read_save_format(const std::filesystem::path& save_dir,
                        metadata,
                        metadata_missing,
                        true,
-                       nullptr,
+                       &json_failure,
                        stop) ||
         (!metadata_missing && !AdmitMetadata(metadata))) {
         AddError(errors,
                  stop.stop_requested() ? "Saved-world validation cancelled."
-                                       : "corrupt or unreadable world metadata");
+                 : json_failure == SavedJsonFailure::Limit
+                     ? "Saved-input admission refused: world metadata compatibility limit."
+                     : "corrupt or unreadable world metadata");
         return false;
     }
     std::int64_t marker = 0;
@@ -3041,11 +3085,13 @@ bool WorldSaveService::read_save_format(const std::filesystem::path& save_dir,
                        manifest,
                        manifest_missing,
                        false,
-                       nullptr,
+                       &json_failure,
                        stop)) {
         AddError(errors,
                  stop.stop_requested() ? "Saved-world validation cancelled."
-                                       : "corrupt or unreadable world manifest");
+                 : json_failure == SavedJsonFailure::Limit
+                     ? "Saved-input admission refused: world manifest compatibility limit."
+                     : "corrupt or unreadable world manifest");
         return false;
     }
     if (!manifest_missing) {
@@ -3159,7 +3205,9 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     TransactionScope scope(save_dir,
                            {"world_info.json"},
                            errors,
-                           (has_clock && !artifacts) || metadata.contains("snapshotFormat"),
+                           metadata.contains("snapshotFormat") ||
+                               (metadata.contains("container_version") &&
+                                metadata.at("container_version") == kIndexedMetadataVersion),
                            artifacts);
     if (!scope.ok())
         return false;
@@ -3245,8 +3293,13 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
-    TransactionScope scope(
-        save_dir, {"world_info.json", "chunks/region/active-regions.arl"}, errors, true, artifacts);
+    TransactionScope scope(save_dir,
+                           {"world_info.json", "chunks/region/active-regions.arl"},
+                           errors,
+                           metadata.contains("snapshotFormat") ||
+                               (metadata.contains("container_version") &&
+                                metadata.at("container_version") == kIndexedMetadataVersion),
+                           artifacts);
     if (!scope.ok())
         return false;
     world::WorldClock previous_clock;
@@ -3622,11 +3675,8 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         const SavedInputFile input(active_regions_path(save_dir));
         has_ledger = has_ledger || !input.missing();
     }
-    TransactionScope scope(save_dir,
-                           {"chunks/region/active-regions.arl"},
-                           errors,
-                           has_ledger && !artifacts,
-                           artifacts);
+    TransactionScope scope(
+        save_dir, {"chunks/region/active-regions.arl"}, errors, false, artifacts);
     if (!scope.ok() || !validate_save(save_dir, errors))
         return false;
     world::WorldClock previous_clock;
@@ -3726,10 +3776,10 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
 
 RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_dir,
                                              bool require_index)
-    : m_ownership(SaveMutex())
-    , m_save_dir(save_dir)
+    : m_save_dir(save_dir)
     , m_publication_revision(PublicationRevision().load(std::memory_order_relaxed))
     , m_require_index(require_index) {
+    const detail::SnapshotReadOwnership ownership;
     if (save_dir.empty())
         return;
     WorldSaveService::SaveFormat format;
@@ -3743,6 +3793,7 @@ RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_d
 
 std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
                                             const RegionDigestInputs& inputs) {
+    const detail::SnapshotReadOwnership ownership;
     const auto revision = PublicationRevision().load(std::memory_order_relaxed);
     if (!m_save_dir.empty() && revision != m_publication_revision) {
         WorldSaveService::SaveFormat format;
@@ -3762,7 +3813,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                                                          world::RegionKey key,
                                                          const RegionDigestInputs& inputs,
                                                          const SnapshotIndex* admitted_index) {
-    const SaveOwnership ownership;
+    const detail::SnapshotReadOwnership ownership;
     ValidateRegionDigestKey(key);
     WorldStreamingState region;
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
@@ -3960,7 +4011,7 @@ bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
 bool WorldSaveService::read_container_records(const std::filesystem::path& region_file,
                                               std::vector<ContainerRecord>& out_records,
                                               std::vector<std::string>* errors) {
-    const SaveOwnership ownership;
+    const detail::SnapshotReadOwnership ownership;
     out_records.clear();
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors, {}, true)) {
@@ -3986,7 +4037,7 @@ bool WorldSaveService::read_container_records(const std::filesystem::path& regio
 bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_file,
                                           std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                           std::vector<std::string>* errors) {
-    const SaveOwnership ownership;
+    const detail::SnapshotReadOwnership ownership;
     out_chunks.clear();
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors, {}, true) ||
@@ -4020,7 +4071,7 @@ bool WorldSaveService::read_authoritative_region_chunks(
     std::vector<std::shared_ptr<Chunk>>& out_chunks,
     std::vector<std::string>* errors,
     const SnapshotIndex* admitted_index) {
-    const SaveOwnership ownership;
+    const detail::SnapshotReadOwnership ownership;
     out_chunks.clear();
     if (min_chunk_x > max_chunk_x || min_chunk_z > max_chunk_z) {
         AddError(errors, "authoritative chunk read bounds are invalid");
@@ -4587,6 +4638,7 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
                                           std::string_view relative_path,
                                           const std::string& bytes,
                                           std::vector<std::string>* errors) {
+    const SaveGuard guard;
     if (!member_path_allowed(relative_path)) {
         AddError(errors, "member path is not allowed: " + std::string(relative_path));
         return false;
@@ -4608,6 +4660,7 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
 bool WorldSaveService::remove_member(const std::filesystem::path& save_dir,
                                      std::string_view relative_path,
                                      std::vector<std::string>* errors) {
+    const SaveGuard guard;
     if (!member_path_allowed(relative_path)) {
         AddError(errors, "member path is not allowed: " + std::string(relative_path));
         return false;
@@ -4837,6 +4890,11 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     return FlushRemovalDirectory(source, errors);
 }
 
+void WorldSaveService::reclaim_file_staging(const std::filesystem::path& destination) {
+    const SaveGuard guard;
+    ReclaimAbandonedStaging(destination);
+}
+
 bool WorldSaveService::remove_file_and_staging(const std::filesystem::path& destination,
                                                std::vector<std::string>* errors) {
     const SaveGuard guard;
@@ -4873,7 +4931,7 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
 
 WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
     const std::filesystem::path& save_dir, const IVec3& coords, bool require_index) {
-    const SaveOwnership ownership;
+    const detail::SnapshotReadOwnership ownership;
     ChunkReadResult result;
     const auto fail = [&result](std::string error) {
         result.status = ChunkReadStatus::Error;
@@ -4948,10 +5006,11 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::unordered_set<ChunkID>* retain_chunks,
                                   std::vector<IVec3>* authoritative_inventory,
                                   std::size_t* decoded_chunk_count) const {
+    const detail::SnapshotReadOwnership ownership;
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     LUMIN_PROFILE_ZONE_N("File world load");
     // Staging lives outside the strict region inventory. Each published file
-    // is read independently; validation never holds a world-wide transaction.
+    // uses its file lock; the snapshot gate excludes partial indexed publication only.
     state.clear();
     if (decoded_chunk_count)
         *decoded_chunk_count = 0;
@@ -5009,6 +5068,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                            stop))
             return reject(json_failure == SavedJsonFailure::Cancelled
                               ? "Saved-world validation cancelled."
+                          : json_failure == SavedJsonFailure::Limit
+                              ? "Saved-input admission refused: world manifest compatibility limit."
                               : "corrupt or unreadable world manifest");
         if (!manifest_missing) {
             const auto manifest_error = CheckManifestValue(manifest);

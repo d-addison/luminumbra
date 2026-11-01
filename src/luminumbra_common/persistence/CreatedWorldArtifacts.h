@@ -1220,7 +1220,19 @@ private:
     }
 
     Artifact untracked_artifact(const std::filesystem::path& path, bool directory) const {
-        if (m_count == 0 || m_count == m_artifacts.size())
+        // The mandatory indexed manifest has its own destination/temporary allowance.
+        // It must not shift exhaustion of the original creation artifact budget.
+        const auto is_manifest = [](const std::filesystem::path& candidate) {
+            const auto name = Filesystem::GenericUtf8PathString(candidate.filename());
+            return name == "world-manifest.json" || name.starts_with("world-manifest.json.tmp.");
+        };
+        std::size_t manifest_entries = 0;
+        for (std::size_t index = 0; index < m_count; ++index)
+            if (is_manifest(m_artifacts[index].path))
+                ++manifest_entries;
+        if (m_count == 0 || m_count == m_artifacts.size() ||
+            (is_manifest(path) ? manifest_entries == kEntriesPerDurableFile
+                               : m_count - manifest_entries == kLegacyCreationArtifactCapacity))
             throw std::runtime_error("Invalid world artifact journal capacity.");
         const auto normalized = std::filesystem::canonical(path.parent_path()) / path.filename();
         bool owned_parent = false;
@@ -1260,6 +1272,8 @@ private:
     static constexpr std::size_t kEntriesPerDurableFile = 2; // Destination and temporary.
     static constexpr std::size_t kCreationArtifactCapacity =
         kCreationDirectories + kCreationDurableFiles * kEntriesPerDurableFile;
+    static constexpr std::size_t kLegacyCreationArtifactCapacity =
+        kCreationArtifactCapacity - kEntriesPerDurableFile;
     static_assert(kCreationArtifactCapacity == 13);
     std::array<Artifact, kCreationArtifactCapacity> m_artifacts{};
     bool m_borrowed_root = false;

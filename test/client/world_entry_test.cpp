@@ -1098,6 +1098,25 @@ TEST_F(WorldEntryFilesystem, UnicodeDurableWriterFailureReportsThePathAndRetains
     EXPECT_FALSE(std::filesystem::exists(save));
 }
 
+TEST_F(WorldEntryFilesystem, ManifestAllowancePreservesOriginalArtifactExhaustion) {
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / "manifest-budget";
+    artifacts.create_root(save);
+    artifacts.create_directory(save / "chunks");
+    artifacts.create_directory(save / "chunks/region");
+    for (unsigned index = 0; index < 8; ++index)
+        artifacts.write_file(save / ("owned-" + std::to_string(index)), "owned");
+    EXPECT_THROW(artifacts.write_file(save / "overflow", "unadmitted"), std::runtime_error);
+    EXPECT_FALSE(std::filesystem::exists(save / "overflow"));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(
+        WorldSaveService::world_manifest_path(save), "manifest", nullptr, &artifacts));
+    EXPECT_THROW(artifacts.reserve_file(save / "world-manifest.json.tmp.extra"),
+                 std::runtime_error);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
 TEST_F(WorldEntryFilesystem, FailedFinalLedgerReservationRollsBackEveryOwnedArtifact) {
     using Luminumbra::Persistence::WorldSaveService;
     CreatedWorldArtifacts artifacts;

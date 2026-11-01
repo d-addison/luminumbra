@@ -1008,6 +1008,25 @@ TEST(WorldSaveService, SharedWritesAndEmptyRemovalReclaimStagingOnEverySave) {
     EXPECT_TRUE(std::filesystem::exists(file / "keep"));
 }
 
+TEST(WorldSaveService, StagingCleanupPreservesLinkedAndNonRegularOccupants) {
+    const TempSaveDir save_dir("staging_bound_cleanup");
+    const auto destination = save_dir.path() / "aether_state.efs";
+    const auto external = save_dir.path() / "retained";
+    const auto linked = save_dir.path() / "aether_state.efs.tmp.linked";
+    const auto directory = save_dir.path() / "aether_state.efs.tmp.directory";
+    const auto partial = save_dir.path() / "aether_state.efs.tmp.partial";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(external, "foreign bytes"));
+    std::filesystem::create_hard_link(external, linked);
+    ASSERT_TRUE(std::filesystem::create_directory(directory));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(partial, "partial bytes"));
+    WorldSaveService::reclaim_file_staging(destination);
+    EXPECT_TRUE(std::filesystem::equivalent(external, linked));
+    EXPECT_EQ(ReadFileBytes(external), "foreign bytes");
+    EXPECT_TRUE(std::filesystem::is_directory(directory));
+    EXPECT_FALSE(std::filesystem::exists(partial));
+    EXPECT_FALSE(std::filesystem::exists(destination));
+}
+
 TEST(WorldSaveService, EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop) {
     const TempSaveDir save_dir("empty_ledger_cleanup");
     const auto ledger_staging = save_dir.path() / "active-regions.arl.tmp.abandoned";

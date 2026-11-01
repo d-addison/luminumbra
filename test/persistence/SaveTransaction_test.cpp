@@ -577,6 +577,31 @@ TEST(SaveTransaction, AbortRefusesForeignCreatedAndReplacedOccupants) {
     }
 }
 
+TEST(SaveTransaction, AbortRefusesChangedPreviousOccupantBytes) {
+    for (const auto* changed : {"bad", "changed previous occupant"}) {
+        SCOPED_TRACE(changed);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        const auto member = save.path() / "world_info.json";
+        {
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+            // Truncate the same object: both its native identity and its name remain unchanged.
+            Put(member, changed);
+            std::vector<std::string> errors;
+            transaction.abort(&errors);
+            EXPECT_FALSE(errors.empty());
+            EXPECT_EQ(Get(member), changed);
+            EXPECT_TRUE(journal_pending(save.path()));
+        }
+        Put(member, "old");
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+        EXPECT_EQ(Tree(save.path()), baseline);
+    }
+}
+
 TEST(SaveTransaction, AbortRefusesSubstitutedJournalAndRecoveryRefusesUnknownDebris) {
     TempSave save, displaced;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));

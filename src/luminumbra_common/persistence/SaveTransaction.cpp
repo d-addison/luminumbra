@@ -33,6 +33,12 @@ namespace fs = std::filesystem;
 
 namespace Luminumbra::Persistence {
 
+class TransactionOwnership {
+private:
+    WorldSaveService::SaveOwnership m_writer;
+    detail::SnapshotWriteOwnership m_snapshot;
+};
+
 namespace {
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
@@ -493,12 +499,51 @@ bool OwnedOccupant(const fs::path& destination,
                    const JournalEntry& entry,
                    ArtifactIdentity& current,
                    bool& missing,
+                   bool& previous_bytes,
                    std::vector<std::string>* errors) {
-    if (!WorldSaveService::artifact_identity(destination, current, missing) ||
-        (!missing && current != entry.previous_identity && current != entry.installed_identity &&
+    previous_bytes = false;
+    const SavedInputFile input(destination);
+    missing = input.missing();
+    if (missing) {
+        current = {};
+        return true;
+    }
+    if (!input.identity(current) ||
+        (current != entry.previous_identity && current != entry.installed_identity &&
          current != entry.incoming_identity && current != entry.restored_identity)) {
         AddError(errors, "snapshot rollback occupant changed: " + entry.path);
         return false;
+    }
+    if (entry.action == "replace") {
+        // Recovery cannot retain pre-crash handles. Verify the prior bytes through the same
+        // handle as the identity, so a recycled native ID cannot bless changed foreign bytes.
+        std::uint64_t length = 0;
+        if (!input.length(length) || length > kMaxUndoBytes) {
+            AddError(errors, "snapshot rollback previous occupant changed: " + entry.path);
+            return false;
+        }
+        // Fixed 64 KiB storage; work is capped by the journal's admitted undo length.
+        std::array<char, kHashBlockBytes> block{};
+        std::uint64_t digest = kFnvOffset;
+        for (std::uint64_t offset = 0; offset < length;) {
+            const auto count =
+                static_cast<std::size_t>(std::min<std::uint64_t>(block.size(), length - offset));
+            if (!input.read_exact(block.data(), count)) {
+                AddError(errors, "snapshot rollback previous occupant unreadable: " + entry.path);
+                return false;
+            }
+            digest = Fnv1aUpdate(digest, block.data(), count);
+            offset += count;
+        }
+        if (!input.at_end()) {
+            AddError(errors, "snapshot rollback previous occupant changed: " + entry.path);
+            return false;
+        }
+        previous_bytes = length == entry.prev_bytes && digest == entry.prev_fnv64;
+        if (current == entry.previous_identity && !previous_bytes) {
+            AddError(errors, "snapshot rollback previous occupant changed: " + entry.path);
+            return false;
+        }
     }
     return true;
 }
@@ -566,24 +611,23 @@ bool RollbackEntries(const fs::path& save_dir,
     for (const auto* entry : order) {
         ArtifactIdentity current{};
         bool missing = false;
-        if (!OwnedOccupant(save_dir / entry->path, *entry, current, missing, errors))
+        bool previous_bytes = false;
+        if (!OwnedOccupant(
+                save_dir / entry->path, *entry, current, missing, previous_bytes, errors))
             return false;
     }
     for (auto* entry : order) {
         const auto destination = save_dir / entry->path;
         ArtifactIdentity current{};
         bool missing = false;
-        if (!OwnedOccupant(destination, *entry, current, missing, errors))
+        bool previous_bytes = false;
+        if (!OwnedOccupant(destination, *entry, current, missing, previous_bytes, errors))
             return false;
         if (entry->action == "create") {
             if (!missing && !WorldSaveService::remove_owned_entry(destination, current, errors))
                 return false;
         } else {
-            std::uint64_t bytes = 0, digest = 0;
-            bool exists = false;
-            if (!hash_file(destination, bytes, digest, exists, errors))
-                return false;
-            if (!exists || bytes != entry->prev_bytes || digest != entry->prev_fnv64) {
+            if (!previous_bytes) {
                 std::string restored;
                 {
                     const SavedInputFile undo(journal_directory(save_dir) / entry->undo);
@@ -982,6 +1026,7 @@ bool journal_pending(const fs::path& save_dir) {
 RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                                         std::vector<std::string>* errors) {
     const WorldSaveService::SaveOwnership ownership;
+    const detail::SnapshotWriteOwnership snapshot;
     try {
         const fs::path journal = journal_directory(save_dir);
         std::error_code ec;
@@ -1151,6 +1196,7 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         return false;
     }
     try {
+        auto ownership = std::make_unique<TransactionOwnership>();
         if (recover_pending_journal(m_save_dir, errors) == RecoveryOutcome::Failed) {
             return false;
         }
@@ -1165,6 +1211,7 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         m_new_generation = m_previous.generation + 1;
         m_txn_id = m_previous.txn_id + 1;
         // From here on, even a directory-create/flush failure needs journal cleanup.
+        m_ownership = std::move(ownership);
         m_state = State::Open;
         std::error_code ec;
         fs::create_directories(journal_directory(m_save_dir) / "undo", ec);
@@ -1615,11 +1662,14 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         }
         report_snapshot_step("commit-point", index_path);
         recover_pending_journal(m_save_dir, errors);
+        m_ownership.reset();
         return true;
     } catch (const std::exception& ex) {
         AddError(errors, std::string("snapshot commit failed: ") + ex.what());
-        if (m_state == State::Committed)
+        if (m_state == State::Committed) {
+            m_ownership.reset();
             return true; // cleanup faults cannot undo a published durable index
+        }
         abort(errors);
         return false;
     }
@@ -1673,6 +1723,7 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
     }
     m_state = State::RolledBack;
     m_committed_actions.clear();
+    m_ownership.reset();
 }
 
 } // namespace Luminumbra::Persistence

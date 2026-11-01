@@ -282,7 +282,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn('if(StagingNameEquals(destination.filename(),"active-regions.arl"))', cleanup)
         self.assertIn('elseif(ReclaimOwnedLedgerStaging(entry.path()))', cleanup)
         self.assertLess(cleanup.index('StagingNameEquals(destination.filename(),"active-regions.arl")'),
-                        cleanup.index('entry.is_regular_file(kind_error)'))
+                        cleanup.index('StagingFileabandoned(entry.path(),StagingFile::Mode::Inspect)'))
+        self.assertIn("abandoned.identity(identity)&&abandoned.remove_bound()", cleanup)
         owned = service[service.index("boolReclaimOwnedLedgerStaging("):service.index("std::filesystem::pathNextLedgerTempPath(")]
         self.assertLess(owned.index("ValidStagingOwnership(staging,payload,record)"),
                         owned.index("payload.remove()"))
@@ -630,7 +631,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for call in ('StagingNameHasPrefix(entry.path().filename(),prefix)',
                      'StagingNameEquals(destination.filename(),"active-regions.arl")',
                      'StagingNameEquals(entry.path().extension(),".owner")'):
-            self.assertLess(cleanup.index(call), cleanup.index("entry.is_regular_file(kind_error)"))
+            self.assertLess(cleanup.index(call),
+                            cleanup.index("StagingFileabandoned(entry.path(),StagingFile::Mode::Inspect)"))
 
     def test_metadata_cleanup_fixture_exercises_validated_clock_bytes(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")

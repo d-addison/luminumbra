@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <latch>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -105,6 +106,39 @@ private:
     const bool m_at_close;
     const unsigned m_occurrence;
     std::stop_source m_stop;
+};
+
+class PauseSavedRead {
+public:
+    explicit PauseSavedRead(const std::filesystem::path& path)
+        : m_path(path) {
+        Active() = this;
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(&Observe);
+    }
+    ~PauseSavedRead() {
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(nullptr);
+        Active() = nullptr;
+    }
+    PauseSavedRead(const PauseSavedRead&) = delete;
+    PauseSavedRead& operator=(const PauseSavedRead&) = delete;
+
+    std::latch opened{1};
+    std::latch release{1};
+
+private:
+    static PauseSavedRead*& Active() {
+        static PauseSavedRead* active = nullptr;
+        return active;
+    }
+    static void Observe(const std::filesystem::path& path, bool opening) {
+        auto* active = Active();
+        if (active && opening && path == active->m_path && active->m_first.exchange(false)) {
+            active->opened.count_down();
+            active->release.wait();
+        }
+    }
+    std::filesystem::path m_path;
+    std::atomic<bool> m_first{true};
 };
 
 std::shared_ptr<Chunk>
@@ -745,6 +779,97 @@ TEST(WorldSaveRegionFormat, IndexedReadersWaitForTheCompleteCommit) {
         }
         EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
     }
+}
+
+TEST(WorldSaveRegionFormat, IndexedReadersWaitForRollbackBeforeReading) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("indexed_read_rollback");
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->set_state(ChunkState::Idle);
+    chunk->sdf_data.assign(17u * 17u * 17u, -1.0f);
+    chunk->mark_voxel_data_dirty();
+    {
+        P::SaveTransaction baseline(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(baseline.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(baseline.commit(nullptr));
+    }
+    P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    chunk->sdf_data.front() = -9.0f;
+    chunk->mark_voxel_data_dirty();
+    ASSERT_EQ(WorldSaveService{}.save_dirty_chunks(state, save.path).regions_written, 1u);
+    std::atomic<bool> finished{false};
+    WorldSaveService::ChunkReadResult result;
+    std::jthread reader([&] {
+        result = WorldSaveService::read_chunk(save.path, {0, 0, 0}, true);
+        finished.store(true, std::memory_order_release);
+    });
+    while (WorldSaveService::waiting_save_writers() == 0 &&
+           !finished.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    EXPECT_FALSE(finished.load(std::memory_order_acquire));
+    EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+    std::vector<std::string> errors;
+    transaction.abort(&errors);
+    reader.join();
+    EXPECT_TRUE(errors.empty());
+    ASSERT_EQ(result.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(result.chunk, nullptr);
+    ASSERT_FALSE(result.chunk->sdf_data.empty());
+    EXPECT_EQ(result.chunk->sdf_data.front(), -1.0f);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
+}
+
+TEST(WorldSaveRegionFormat, IndexedWriterWaitsForAnAlreadyActiveReader) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("indexed_writer_wait");
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->set_state(ChunkState::Idle);
+    chunk->sdf_data.assign(17u * 17u * 17u, -1.0f);
+    chunk->mark_voxel_data_dirty();
+    {
+        P::SaveTransaction baseline(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(baseline.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(baseline.commit(nullptr));
+    }
+    PauseSavedRead pause(WorldSaveService::region_file_path(save.path, 0, 0));
+    WorldSaveService::ChunkReadResult result;
+    std::jthread reader([&] { result = WorldSaveService::read_chunk(save.path, {0, 0, 0}, true); });
+    pause.opened.wait();
+    std::atomic<bool> ownership_acquired{false};
+    std::atomic<bool> begun{false};
+    bool began_ok = false;
+    std::vector<std::string> errors;
+    std::jthread writer([&] {
+        const WorldSaveService::SaveOwnership ownership;
+        ownership_acquired.store(true, std::memory_order_release);
+        P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
+        began_ok = transaction.begin(&errors);
+        begun.store(true, std::memory_order_release);
+        transaction.abort(&errors);
+    });
+    while (WorldSaveService::waiting_save_writers() == 0 && !begun.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    // A reader permits writer ownership (and its joins), but excludes indexed publication.
+    EXPECT_TRUE(ownership_acquired.load(std::memory_order_acquire));
+    EXPECT_FALSE(begun.load(std::memory_order_acquire));
+    EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+    pause.release.count_down();
+    reader.join();
+    writer.join();
+    EXPECT_TRUE(began_ok);
+    EXPECT_TRUE(errors.empty());
+    ASSERT_EQ(result.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(result.chunk, nullptr);
+    ASSERT_FALSE(result.chunk->sdf_data.empty());
+    EXPECT_EQ(result.chunk->sdf_data.front(), -1.0f);
+    EXPECT_FALSE(P::journal_pending(save.path));
+    EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
 }
 
 TEST(WorldSaveRegionFormat, FilteredBootValidatesDistantLatticesAndPublishesInventoryAtomically) {
@@ -1561,6 +1686,13 @@ TEST(WorldSaveRegionFormat, SavedJsonDepthBoundaryCoversMetadataManifestAndPrese
             EXPECT_EQ(WorldSaveService{}.load_world(loaded, world, errors), !over);
             EXPECT_TRUE(loaded.empty());
             EXPECT_EQ(errors.empty(), !over);
+            if (over) {
+                ASSERT_EQ(errors.size(), 1u);
+                EXPECT_NE(errors.front().find("Saved-input admission refused"), std::string::npos);
+            }
+            WorldSaveService::SaveFormat format;
+            errors.clear();
+            EXPECT_EQ(WorldSaveService::read_save_format(world, format, &errors), !over);
             if (over) {
                 ASSERT_EQ(errors.size(), 1u);
                 EXPECT_NE(errors.front().find("Saved-input admission refused"), std::string::npos);

@@ -159,21 +159,27 @@ public:
         }
     }
 
-    // First resident chunk whose SDF is an edited / loaded authority.
-    std::shared_ptr<Chunk> ResidentLoadedChunk() {
+    // Select an actual voxel edit among the settled residents. Loaded or water-authoritative
+    // chunks can be clean; choosing by provenance would not identify the edit under test.
+    std::shared_ptr<Chunk> EditAtSpawnAndFindEdited(int* modified_count = nullptr) {
+        const auto before = world->snapshot_streamed_chunks();
+        std::map<const Chunk*, std::uint32_t> revisions;
+        for (const auto& chunk : before)
+            if (chunk)
+                revisions.emplace(chunk.get(), chunk->voxel_revision());
+        const int modified = world->EditTerrainVoxel(SpawnSurfacePoint(), 3.0f, false, physics);
+        if (modified_count)
+            *modified_count = modified;
+        if (modified <= 0)
+            return nullptr;
         for (const auto& chunk : world->snapshot_streamed_chunks()) {
-            if (chunk && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
+            if (!chunk)
+                continue;
+            const auto previous = revisions.find(chunk.get());
+            if (previous != revisions.end() && chunk->voxel_revision() > previous->second)
                 return chunk;
         }
         return nullptr;
-    }
-
-    // Spawn-surface edit, then the first resident LoadedOrEdited chunk (or null).
-    std::shared_ptr<Chunk> EditAtSpawnAndFindEdited() {
-        const int modified = world->EditTerrainVoxel(SpawnSurfacePoint(), 3.0f, false, physics);
-        if (modified <= 0)
-            return nullptr;
-        return ResidentLoadedChunk();
     }
 
     HeadlessRoot root;
@@ -197,10 +203,9 @@ TEST(WorldDurableResidency, FlagOffEvictionStillErases) {
     ASSERT_TRUE(fx.created) << fx.error;
     fx.Settle(fx.SpawnAnchor(), kSettleIterations);
 
-    const int modified =
-        fx.world->EditTerrainVoxel(fx.SpawnSurfacePoint(), 3.0f, false, fx.physics);
+    int modified = 0;
+    const auto edited = fx.EditAtSpawnAndFindEdited(&modified);
     ASSERT_GT(modified, 0);
-    const auto edited = fx.ResidentLoadedChunk();
     ASSERT_TRUE(edited);
     const IVec3 coords = edited->get_coords();
 
@@ -482,13 +487,120 @@ TEST(WorldDurableResidency, GenerationAndTerrainPreparationRegisterLiveDigestAut
         EXPECT_NE(compare_digest(), edited);
         // Water changes on a previously saved generated chunk also override durable bytes.
         const auto terrain_digest = compare_digest();
-        chunk->water_level_data = {3.0f};
+        chunk->water_depth_mm = {3000};
         chunk->mark_water_state_dirty();
         EXPECT_NE(compare_digest(), terrain_digest);
         fx.world->clear_world(fx.physics);
         EXPECT_TRUE(fx.world->region_digest_inputs(4, 4).live.empty());
         EXPECT_FALSE(fx.world->has_region_members(4, 4));
     }
+}
+
+TEST(WorldDurableResidency, RegionDigestExcludesWaterMirrorsAndDirtyBookkeeping) {
+    namespace P = Luminumbra::Persistence;
+    auto chunk = std::make_shared<Chunk>(IVec3{});
+    chunk->set_state(ChunkState::Idle);
+    chunk->sdf_data.assign(17u * 17u * 17u, -1.0f);
+    chunk->water_depth_mm = {1000};
+    chunk->mark_voxel_data_dirty();
+    const P::RegionDigestInputs inputs{{chunk}, {}, {}};
+    const auto digest = P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs);
+    chunk->water_level_data = {3.0f};
+    chunk->mark_water_state_dirty();
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), digest);
+    chunk->clear_voxel_data_dirty();
+    chunk->clear_water_state_dirty();
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), digest);
+    chunk->water_depth_mm.front() += 1;
+    EXPECT_NE(P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), digest);
+}
+
+TEST(WorldDurableResidency, DurableRestorationReplacesOnlyEmptyPlaceholders) {
+    for (const bool populated : {false, true}) {
+        SCOPED_TRACE(populated);
+        DurableFixture fx(/*durable=*/true);
+        ASSERT_TRUE(fx.created) << fx.error;
+        const IVec3 coords(128, 0, 128);
+        const auto resident = std::make_shared<Chunk>(coords);
+        if (populated)
+            resident->heightmap_data = {7.0f};
+        ASSERT_TRUE(fx.world->adopt_streamed_chunk(resident));
+        const auto saved = std::make_shared<Chunk>(coords);
+        saved->sdf_data.assign(17u * 17u * 17u, -3.0f);
+        saved->mark_sdf_loaded_or_edited();
+        int loads = 0;
+        fx.world->set_durable_chunk_loader(
+            [&](const IVec3& requested) {
+                EXPECT_EQ(requested, coords);
+                ++loads;
+                return saved;
+            },
+            [](const std::string&) { ADD_FAILURE() << "unexpected durable read failure"; });
+        fx.world->remember_durable_chunks({coords});
+        ASSERT_TRUE(fx.world->restore_authoritative_chunk(coords));
+        EXPECT_EQ(loads, populated ? 0 : 1);
+        EXPECT_EQ(fx.world->find_streamed_chunk(coords), populated ? resident : saved);
+        const auto grouped = fx.world->region_digest_inputs(4, 4);
+        ASSERT_EQ(grouped.live.size(), 1u);
+        EXPECT_EQ(grouped.live.front(), populated ? resident : saved);
+    }
+}
+
+TEST(WorldDurableResidency, InvalidDurableRestorationPreservesPlaceholderAndStopsGeneration) {
+    for (const int failure : {0, 1, 2, 3}) {
+        SCOPED_TRACE(failure);
+        DurableFixture fx(/*durable=*/true);
+        ASSERT_TRUE(fx.created) << fx.error;
+        const IVec3 coords(128, 0, 128);
+        const auto placeholder = std::make_shared<Chunk>(coords);
+        ASSERT_TRUE(fx.world->adopt_streamed_chunk(placeholder));
+        int faults = 0;
+        fx.world->set_durable_chunk_loader(
+            [&](const IVec3&) -> std::shared_ptr<Chunk> {
+                if (failure == 0)
+                    return nullptr;
+                if (failure == 1)
+                    throw std::runtime_error("unreadable durable payload");
+                const auto saved =
+                    std::make_shared<Chunk>(failure == 2 ? IVec3(129, 0, 128) : coords);
+                if (failure == 2)
+                    saved->heightmap_data = {7.0f};
+                return saved;
+            },
+            [&](const std::string&) { ++faults; });
+        fx.world->remember_durable_chunks({coords});
+        EXPECT_TRUE(fx.world->restore_authoritative_chunk(coords));
+        EXPECT_EQ(faults, 1);
+        EXPECT_EQ(fx.world->find_streamed_chunk(coords), placeholder);
+        fx.world->dispatch_generation_jobs(std::vector<IVec3>{coords});
+        fx.world->wait_for_streaming_jobs();
+        EXPECT_EQ(fx.world->find_streamed_chunk(coords), placeholder);
+        EXPECT_TRUE(placeholder->sdf_data.empty());
+        EXPECT_EQ(faults, 1);
+    }
+}
+
+TEST(WorldDurableResidency, EmptyCommittedLookupRefusesAuthority) {
+    DurableFixture fx(/*durable=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    const IVec3 coords(128, 0, 128);
+    int loads = 0;
+    int faults = 0;
+    fx.world->set_durable_chunk_loader(
+        [&](const IVec3& requested) {
+            ++loads;
+            return std::make_shared<Chunk>(requested);
+        },
+        [&](const std::string&) { ++faults; });
+    EXPECT_EQ(fx.world->find_authoritative_chunk(coords), nullptr);
+    EXPECT_EQ(loads, 0);
+    fx.world->remember_durable_chunks({coords});
+    EXPECT_EQ(fx.world->find_authoritative_chunk(coords), nullptr);
+    EXPECT_EQ(loads, 1);
+    EXPECT_EQ(faults, 1);
+    EXPECT_TRUE(fx.world->restore_authoritative_chunk(coords));
+    EXPECT_EQ(loads, 1);
+    EXPECT_EQ(fx.world->find_streamed_chunk(coords), nullptr);
 }
 
 TEST(WorldDurableResidency, EditOfParkedChunkUnparksIt) {
