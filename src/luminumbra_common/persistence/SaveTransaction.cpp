@@ -368,8 +368,10 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
             return IsTemporaryName(output, prefix_path, ledger);
         };
         const bool ledger = entry.path == "chunks/region/active-regions.arl";
-        if (!temporary_name(
-                "undo_temporary", fs::path("journal") / entry.undo, entry.undo_temporary) ||
+        if ((!temporary_name(
+                 "undo_temporary", fs::path("journal") / entry.undo, entry.undo_temporary) &&
+             !temporary_name(
+                 "undo_temporary", fs::path(entry.undo).filename(), entry.undo_temporary)) ||
             (!temporary_name("incoming_temporary",
                              fs::path(entry.path).filename(),
                              entry.incoming_temporary,
@@ -380,9 +382,12 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
                              ledger) &&
              !temporary_name(
                  "incoming_temporary", fs::path(entry.path), entry.incoming_temporary, ledger)) ||
-            !temporary_name("restored_temporary",
-                            fs::path("journal") / fs::path(entry.path).filename(),
-                            entry.restored_temporary)) {
+            (!temporary_name("restored_temporary",
+                             fs::path("journal") / fs::path(entry.path).filename(),
+                             entry.restored_temporary) &&
+             !temporary_name("restored_temporary",
+                             fs::path(entry.path).filename(),
+                             entry.restored_temporary))) {
             error = "journal temporary name invalid";
             return false;
         }
@@ -415,11 +420,11 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
     return true;
 }
 
-// Journal v3 is a bounded stream of complete JSON records. Each append durably records
-// ownership intent before publication. A partial record refuses recovery and retains evidence.
+// Only newline-terminated records publish ownership. Writers flush the body before
+// the delimiter; an interrupted tail cannot authorize any member mutation.
 bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& error) {
     out = {};
-    if (bytes.empty() || bytes.size() > kMaxSnapshotIndexBytes || bytes.back() != '\n') {
+    if (bytes.empty() || bytes.size() > kMaxSnapshotIndexBytes) {
         error = "incomplete or oversized journal";
         return false;
     }
@@ -428,8 +433,7 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
     while (!bytes.empty()) {
         const auto end = bytes.find('\n');
         if (end == std::string_view::npos) {
-            error = "incomplete journal record";
-            return false;
+            break; // An unpublished tail follows the last complete ownership record.
         }
         JournalDocument record;
         if (!ParseJournalRecord(bytes.substr(0, end), record, error))
@@ -692,7 +696,7 @@ bool RollbackEntries(const fs::path& save_dir,
             save_dir, document.undo_directory_identity, "rollback-retired", destination);
         const auto restored_stage =
             JournalStage(save_dir, document.undo_directory_identity, "restored", destination);
-        if (!missing && !previous_bytes) {
+        if (!missing && !previous_bytes && entry->rollback_retired_identity != current) {
             entry->rollback_retired_identity = current;
             if (!AppendEntry(save_dir, document, *entry, control, errors))
                 return false;
@@ -733,8 +737,7 @@ bool RollbackEntries(const fs::path& save_dir,
                     }
                 }
                 if (temporary_missing) {
-                    if (!WorldSaveService::prepare_restoration(journal_directory(save_dir) /
-                                                                   destination.filename(),
+                    if (!WorldSaveService::prepare_restoration(save_dir / destination.filename(),
                                                                restored,
                                                                temporary,
                                                                entry->restored_identity,
@@ -765,17 +768,17 @@ bool RollbackEntries(const fs::path& save_dir,
 
 // Inventory and bind every artifact before retirement. A substituted directory/file or unknown
 // leaf refuses cleanup; recursive deletion cannot prove ownership.
-bool FinishJournal(const fs::path& save_dir,
-                   const JournalDocument& document,
-                   const ArtifactIdentity& control,
-                   std::vector<std::string>* errors) {
+bool JournalInventory(const fs::path& save_dir,
+                      const JournalDocument& document,
+                      const ArtifactIdentity& control,
+                      std::map<fs::path, ArtifactIdentity>& files,
+                      std::vector<std::string>* errors) {
     const auto journal = journal_directory(save_dir);
     if (!MatchesIdentity(journal, document.journal_identity, true) ||
         !MatchesIdentity(journal / "undo", document.undo_directory_identity, true)) {
         AddError(errors, "snapshot journal directory ownership changed");
         return false;
     }
-    std::map<fs::path, ArtifactIdentity> files;
     if (control != ArtifactIdentity{})
         files.emplace(journal / "txn.json", control);
     for (const auto& entry : document.entries) {
@@ -830,6 +833,17 @@ bool FinishJournal(const fs::path& save_dir,
             return false;
         }
     }
+    return true;
+}
+
+bool FinishJournal(const fs::path& save_dir,
+                   const JournalDocument& document,
+                   const ArtifactIdentity& control,
+                   std::vector<std::string>* errors) {
+    std::map<fs::path, ArtifactIdentity> files;
+    if (!JournalInventory(save_dir, document, control, files, errors))
+        return false;
+    const auto journal = journal_directory(save_dir);
     for (const auto& [path, identity] : files) {
         if (path == journal / "txn.json" || path == journal / "undo/cleanup.txn.json")
             continue;
@@ -1208,6 +1222,9 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                 }
             }
             if (!missing) {
+                std::map<fs::path, ArtifactIdentity> inventory;
+                if (!JournalInventory(save_dir, retiring, control, inventory, errors))
+                    return RecoveryOutcome::Failed;
                 const auto slot =
                     CleanupStage(save_dir, retiring.undo_directory_identity, txn_path);
                 if (!WorldSaveService::publish_restoration(
@@ -1282,6 +1299,9 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                        ? RecoveryOutcome::DiscardedStale
                        : RecoveryOutcome::Failed;
         }
+        std::map<fs::path, ArtifactIdentity> inventory;
+        if (!JournalInventory(save_dir, document, control, inventory, errors))
+            return RecoveryOutcome::Failed;
         if (!RollbackEntries(save_dir, document, control, errors)) {
             return RecoveryOutcome::Failed;
         }
@@ -1362,7 +1382,17 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         m_ownership = std::move(ownership);
         m_state = State::Open;
         std::error_code ec;
-        fs::create_directories(journal_directory(m_save_dir) / "undo", ec);
+        fs::create_directories(m_save_dir, ec);
+        if (!ec) {
+            fs::create_directory(journal_directory(m_save_dir), ec);
+            if (!ec)
+                report_snapshot_step("crash-journal-created", journal_directory(m_save_dir));
+        }
+        if (!ec) {
+            fs::create_directory(journal_directory(m_save_dir) / "undo", ec);
+            if (!ec)
+                report_snapshot_step("crash-undo-created", journal_directory(m_save_dir) / "undo");
+        }
         if (ec) {
             AddError(errors,
                      "cannot create snapshot journal: " +
@@ -1544,6 +1574,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             }
             const fs::path destination = m_save_dir / rel;
             Entry entry;
+            fs::path undo_temporary;
             entry.path = rel;
             std::string previous;
             bool missing = false;
@@ -1560,11 +1591,8 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             if (!missing) {
                 const std::string undo_name = std::to_string(m_next_undo);
                 fs::path temporary;
-                if (!WorldSaveService::prepare_restoration(undo_directory / undo_name,
-                                                           previous,
-                                                           temporary,
-                                                           entry.undo_identity,
-                                                           errors))
+                if (!WorldSaveService::prepare_restoration(
+                        m_save_dir / undo_name, previous, temporary, entry.undo_identity, errors))
                     return false;
                 ++m_next_undo;
                 entry.action = "replace";
@@ -1573,6 +1601,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
                 entry.undo = "undo/" + undo_name;
                 entry.undo_temporary =
                     Filesystem::GenericUtf8PathString(temporary.lexically_relative(m_save_dir));
+                undo_temporary = std::move(temporary);
             } else {
                 entry.action = "create";
             }
@@ -1587,7 +1616,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             const auto undo_stage =
                 JournalStage(m_save_dir, m_undo_directory_identity, "undo", protected_entry.undo);
             if (!protected_entry.undo.empty() &&
-                !WorldSaveService::publish_restoration(m_save_dir / protected_entry.undo_temporary,
+                !WorldSaveService::publish_restoration(undo_temporary,
                                                        journal_directory(m_save_dir) /
                                                            protected_entry.undo,
                                                        {},
@@ -1627,7 +1656,7 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
             return false;
     }
     for (const auto index : m_changed_entries) {
-        const auto& entry = m_entries[index];
+        auto& entry = m_entries[index];
         JournalEntry copy;
         copy.path = entry.path;
         copy.action = entry.action;
@@ -1649,8 +1678,40 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
                                           {copy},
                                           m_journal_identity,
                                           m_undo_directory_identity);
-        if (!WorldSaveService::append_journal_record(
-                journal_directory(m_save_dir) / "txn.json", record, m_control_identity, errors))
+        // Recovery appends at most retirement plus restoration for each member.
+        // Reserve their largest encodings before admitting any forward mutation.
+        copy.rollback_retired_identity.fill(std::numeric_limits<std::uint64_t>::max());
+        copy.restored_identity.fill(std::numeric_limits<std::uint64_t>::max());
+        copy.installed_identity.fill(std::numeric_limits<std::uint64_t>::max());
+        copy.incoming_identity.fill(std::numeric_limits<std::uint64_t>::max());
+        const auto maximum_counter = std::to_string(std::numeric_limits<std::uint64_t>::max());
+        copy.restored_temporary =
+            Filesystem::GenericUtf8PathString(fs::path(copy.path).filename()) + ".tmp." +
+            maximum_counter + "." + maximum_counter;
+        copy.incoming_temporary = copy.path + ".tmp." + maximum_counter + "." + maximum_counter;
+        if (copy.path == "chunks/region/active-regions.arl")
+            copy.incoming_temporary += ".0123456789abcdef0123456789abcdef";
+        const auto rollback_bytes = 2 * EncodeJournal(m_txn_id,
+                                                      m_previous.generation,
+                                                      m_new_generation,
+                                                      {copy},
+                                                      m_journal_identity,
+                                                      m_undo_directory_identity)
+                                            .size();
+        if (rollback_bytes > entry.rollback_reserve) {
+            const auto additional = rollback_bytes - entry.rollback_reserve;
+            if (additional > kMaxSnapshotIndexBytes - m_rollback_reserve) {
+                AddError(errors, "snapshot journal rollback capacity exhausted");
+                return false;
+            }
+            m_rollback_reserve += additional;
+            entry.rollback_reserve = rollback_bytes;
+        }
+        if (!WorldSaveService::append_journal_record(journal_directory(m_save_dir) / "txn.json",
+                                                     record,
+                                                     m_control_identity,
+                                                     errors,
+                                                     m_rollback_reserve))
             return false;
     }
     m_changed_entries.clear();
@@ -1840,7 +1901,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             m_artifacts
                 ? WorldSaveService::write_file_durably(index_path, encoded, errors, m_artifacts)
                 : WorldSaveService::durable_write_file(
-                      index_path, encoded, errors, journal_directory(m_save_dir) / "snapshot.json");
+                      index_path, encoded, errors, m_save_dir / "snapshot.json");
         if (!published) {
             abort(errors);
             return false;
@@ -1912,8 +1973,11 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
                 if (!error.empty())
                     AddError(errors, error);
             }
-        } else if (RollbackEntries(m_save_dir, document, m_control_identity, errors)) {
-            FinishJournal(m_save_dir, document, m_control_identity, errors);
+        } else {
+            std::map<fs::path, ArtifactIdentity> inventory;
+            if (JournalInventory(m_save_dir, document, m_control_identity, inventory, errors) &&
+                RollbackEntries(m_save_dir, document, m_control_identity, errors))
+                FinishJournal(m_save_dir, document, m_control_identity, errors);
         }
     } catch (const std::exception& ex) {
         AddError(errors, std::string("snapshot rollback failed: ") + ex.what());

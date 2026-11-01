@@ -6824,26 +6824,30 @@ std::vector<std::pair<i32, i32>> SHIELD_WorldSystem::authority_region_keys() con
     std::set<std::pair<i32, i32>> keys;
     for (const auto& [id, region] : m_digest_members) {
         (void)id;
-        for (const auto& [chunk_id, chunk] : region.live) {
-            (void)chunk_id;
-            if (chunk && chunk->needs_authority() && chunk->get_state() != ChunkState::Loading) {
-                int rx = 0, rz = 0;
-                Persistence::WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
-                keys.emplace(rx, rz);
+        std::optional<IVec3> coordinates;
+        if (!region.durable.empty()) {
+            coordinates = region.durable.begin()->second;
+        } else {
+            const auto qualifies = [](const auto& member) {
+                const auto& chunk = member.second;
+                return chunk && chunk->needs_authority() &&
+                       chunk->get_state() != ChunkState::Loading;
+            };
+            const auto live = std::find_if(region.live.begin(), region.live.end(), qualifies);
+            if (live != region.live.end()) {
+                coordinates = live->second->get_coords();
+            } else {
+                const auto parked = std::find_if(
+                    region.parked.begin(), region.parked.end(), [](const auto& member) {
+                        return member.second && member.second->needs_authority();
+                    });
+                if (parked != region.parked.end())
+                    coordinates = parked->second->get_coords();
             }
         }
-        for (const auto& [chunk_id, chunk] : region.parked) {
-            (void)chunk_id;
-            if (chunk && chunk->needs_authority()) {
-                int rx = 0, rz = 0;
-                Persistence::WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
-                keys.emplace(rx, rz);
-            }
-        }
-        for (const auto& [chunk_id, coords] : region.durable) {
-            (void)chunk_id;
+        if (coordinates.has_value()) {
             int rx = 0, rz = 0;
-            Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+            Persistence::WorldSaveService::region_coords_for_chunk(coordinates.value(), rx, rz);
             keys.emplace(rx, rz);
         }
     }
@@ -6979,6 +6983,15 @@ void SHIELD_WorldSystem::sync_water_authority() {
         chunk->mark_dirty_for_save();
         chunk->clear_water_state_dirty();
     };
+    if (!m_durable_residency) {
+        // Explicit synchronization also supports ordinary resident worlds. Their
+        // chunks deliberately do not maintain the enabled-only notification queue.
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            (void)id;
+            promote(chunk);
+        }
+        return;
+    }
     m_water_changes->take(m_pending_water_changes);
     for (const auto id : m_pending_water_changes) {
         ++m_water_authority_input_items;

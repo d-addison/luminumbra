@@ -114,7 +114,7 @@ Valid legacy metadata v2 and manifest v1 saves, including clock/ledger pairs, lo
 LMR1 payload version 2 and the snapshot index schema remain unchanged; older readers refuse the new envelope.
 Previously stripped draft saves cannot be distinguished retroactively from valid legacy saves, and fingerprints do not authenticate history.
 
-Journal v3 binds undo, publication and quarantine identities before either POSIX move; the snapshot index publishes last as the durable commit point.
+Journal v4 binds undo, publication and quarantine identities before either POSIX move; the snapshot index publishes last as the durable commit point.
 Before that point, successful rollback restores the complete previous committed member tree and leaves dirty and revision acknowledgements pending.
 After that point, cleanup failure preserves the new commit and leaves recovery work.
 Failed rollback of any transaction with a previous commit retains the recovery journal and refuses further admission until recovery succeeds.

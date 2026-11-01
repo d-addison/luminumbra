@@ -4521,8 +4521,8 @@
     {
       "id": "indexed.persistence.011",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Journal v3 binds undo, publication and quarantine identities before either POSIX move;",
-      "text": "Journal v3 binds undo, publication and quarantine identities before either POSIX move;"
+      "quote": "Journal v4 binds undo, publication and quarantine identities before either POSIX move;",
+      "text": "Journal v4 binds undo, publication and quarantine identities before either POSIX move;"
     },
     {
       "id": "indexed.persistence.012",

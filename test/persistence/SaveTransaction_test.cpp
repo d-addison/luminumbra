@@ -16,6 +16,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -85,6 +86,7 @@ TEST(SaveTransaction, IndexedEnergyValidationRejectsCanonicalFingerprintOfMalfor
                     return true;
                 });
             ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({"aether_state.efs"}, nullptr));
             ASSERT_TRUE(WorldSaveService::write_member_bytes(dir, "aether_state.efs", bytes));
             ASSERT_TRUE(transaction.commit(nullptr));
         }
@@ -178,6 +180,45 @@ TreeMap Tree(const fs::path& root) {
         out[rel] = Get(it->path());
     }
     return out;
+}
+
+// Unpublished root staging is deliberately outside the strict inventory. Check
+// its exact preservation separately from the authoritative committed tree.
+TreeMap UnregisteredStaging(const fs::path& save) {
+    std::set<std::string> registered;
+    auto bytes = Get(journal_directory(save) / "txn.json");
+    if (bytes.empty())
+        bytes = Get(journal_directory(save) / "undo/cleanup.txn.json");
+    std::string_view remaining(bytes);
+    while (true) {
+        const auto end = remaining.find('\n');
+        if (end == std::string_view::npos)
+            break;
+        const auto record = nlohmann::json::parse(remaining.substr(0, end));
+        for (const auto& entry : record.at("entries"))
+            for (const auto* key : {"undo_temporary", "incoming_temporary", "restored_temporary"})
+                registered.insert(entry.at(key).get<std::string>());
+        remaining.remove_prefix(end + 1);
+    }
+    TreeMap neutral;
+    for (const auto& [name, payload] : Tree(save))
+        if (name.find('/') == std::string::npos && name.find(".tmp.") != std::string::npos &&
+            !registered.contains(name))
+            neutral.emplace(name, payload);
+    return neutral;
+}
+
+TreeMap RecoveredCommittedTree(const fs::path& save, const TreeMap& neutral) {
+    auto tree = Tree(save);
+    for (const auto& [name, payload] : neutral) {
+        const auto found = tree.find(name);
+        EXPECT_NE(found, tree.end()) << name;
+        if (found != tree.end()) {
+            EXPECT_EQ(found->second, payload) << name;
+            tree.erase(found);
+        }
+    }
+    return tree;
 }
 
 void CopyTree(const fs::path& from, const fs::path& to) {
@@ -309,6 +350,22 @@ void CaptureJournalHook(const char* step, const fs::path& /*path*/) {
     }
 }
 
+bool RunInventoryScenario(const fs::path& dir) {
+    SaveTransaction transaction(dir, 5, {}, &RawDigest);
+    return transaction.begin(nullptr) &&
+           transaction.protect({"world_info.json",
+                                "aether_state.efs",
+                                "chunks/region/world-manifest.json",
+                                "chunks/region/plant-entities.json"},
+                               nullptr) &&
+           WorldSaveService::write_member_bytes(dir, "world_info.json", "new metadata") &&
+           WorldSaveService::write_member_bytes(
+               dir, "chunks/region/world-manifest.json", "new manifest") &&
+           WorldSaveService::write_member_bytes(
+               dir, "chunks/region/plant-entities.json", "created") &&
+           WorldSaveService::remove_member(dir, "aether_state.efs") && transaction.commit(nullptr);
+}
+
 #if !defined(_WIN32)
 // Death-test state. Death tests run in forked children (gtest "fast" style), so the parent-side
 // paths are inherited unchanged by the child.
@@ -317,6 +374,7 @@ struct DeathTestState {
     int calls = 0;
     int published_at = 0;
     int last_exit_code = -1;
+    bool include_disk_events = false;
 };
 
 DeathTestState& DeathState() {
@@ -324,13 +382,17 @@ DeathTestState& DeathState() {
     return state;
 }
 
-void KillHook(const char* /*step*/, const fs::path& /*path*/) {
+void KillHook(const char* step, const fs::path& /*path*/) {
+    if (!DeathState().include_disk_events && std::string_view(step).starts_with("crash-"))
+        return;
     if (++DeathState().calls == DeathState().kill_at) {
         std::_Exit(7);
     }
 }
 
 void RecordHook(const char* step, const fs::path& /*path*/) {
+    if (!DeathState().include_disk_events && std::string_view(step).starts_with("crash-"))
+        return;
     ++DeathState().calls;
     if (DeathState().published_at == 0 && std::string_view(step) == "journal-published") {
         DeathState().published_at = DeathState().calls;
@@ -368,6 +430,21 @@ void ChildKilledRecovery(const fs::path& dir, int kill_at) {
     set_snapshot_step_hook_for_testing(&KillHook);
     (void)recover_pending_journal(dir, nullptr);
     std::_Exit(0);
+}
+
+void ChildInventoryScenario(const fs::path& dir, int cut, bool before_index = false) {
+    DeathState().calls = 0;
+    DeathState().kill_at = cut;
+    DeathState().include_disk_events = true;
+    if (before_index) {
+        set_snapshot_step_hook_for_testing(+[](const char* step, const fs::path& path) {
+            if (std::string_view(step) == "before-replace" && path.filename() == "snapshot.json")
+                std::_Exit(7);
+        });
+    } else {
+        set_snapshot_step_hook_for_testing(&KillHook);
+    }
+    std::_Exit(RunInventoryScenario(dir) ? 0 : 9);
 }
 
 // Computes the expected post-commit tree by running the scenario in-process on a copy.
@@ -641,6 +718,7 @@ TEST(SaveTransaction, AbortRefusesSubstitutedJournalAndRecoveryRefusesUnknownDeb
     {
         SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
         ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
         ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "ours"));
         fs::rename(journal_directory(save.path()), displaced.path() / "owned-journal");
         Put(journal_directory(save.path()) / "foreign", "retain");
@@ -1141,6 +1219,276 @@ TEST(SaveTransaction, ProtectedPublicationClosesNamedSourceAndPreservesForeignOc
     }
 }
 
+TEST(SaveTransaction, TornJournalTailsRestoreCompletedOwnershipAndAllowTheNextSave) {
+    for (const std::size_t cut : {1u, 17u, 127u, 511u, 70000u}) {
+        SCOPED_TRACE(cut);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        {
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({"world_info.json", "aether_state.efs"}, nullptr));
+            ASSERT_TRUE(
+                WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            ASSERT_TRUE(
+                WorldSaveService::write_member_bytes(save.path(), "aether_state.efs", "created"));
+            const auto control = journal_directory(save.path()) / "txn.json";
+            const auto complete = Get(control);
+            const auto record = JournalRecords(save.path()).back().dump();
+            const auto tail = cut > record.size() ? std::string(cut, '{') : record.substr(0, cut);
+            Put(control, complete + tail);
+            std::vector<std::string> errors;
+            ASSERT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::RolledBack)
+                << (errors.empty() ? "" : errors.front());
+            EXPECT_EQ(Tree(save.path()), baseline);
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+            transaction.abort(nullptr);
+        }
+        ASSERT_TRUE(CommitOnce(save.path(), 3, {{"world_info.json", "next"}}));
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "next");
+    }
+}
+
+TEST(SaveTransaction, RestorationIdentityBelongsToTheCreatedObjectBeforeClosing) {
+    TempSave save;
+    static fs::path original;
+    static bool substituted = false;
+    original = save.path() / "original";
+    substituted = false;
+    fs::path temporary;
+    WorldSaveService::ArtifactIdentity prepared{};
+    {
+        HookGuard hook(+[](const char* step, const fs::path& path) {
+            if (std::string_view(step) != "crash-staging-written")
+                return;
+            std::error_code error;
+            fs::rename(path, original, error);
+            if (!error) {
+                Put(path, "foreign");
+                substituted = true;
+            }
+        });
+        ASSERT_TRUE(WorldSaveService::prepare_restoration(
+            save.path() / "restore", "ours", temporary, prepared, nullptr));
+    }
+    WorldSaveService::ArtifactIdentity actual{};
+    bool missing = false;
+#if defined(_WIN32)
+    EXPECT_FALSE(substituted); // The still-open creation handle denies delete sharing.
+    ASSERT_TRUE(WorldSaveService::artifact_identity(temporary, actual, missing));
+    EXPECT_FALSE(missing);
+    EXPECT_EQ(prepared, actual);
+    ASSERT_TRUE(WorldSaveService::publish_restoration(
+        temporary, save.path() / "destination", {}, prepared, nullptr));
+    EXPECT_EQ(Get(save.path() / "destination"), "ours");
+#else
+    ASSERT_TRUE(substituted);
+    ASSERT_TRUE(WorldSaveService::artifact_identity(original, actual, missing));
+    EXPECT_FALSE(missing);
+    EXPECT_EQ(prepared, actual);
+    EXPECT_FALSE(WorldSaveService::publish_restoration(
+        temporary, save.path() / "destination", {}, prepared, nullptr));
+    EXPECT_EQ(Get(temporary), "foreign");
+    EXPECT_EQ(Get(original), "ours");
+    EXPECT_FALSE(fs::exists(save.path() / "destination"));
+#endif
+}
+
+TEST(SaveTransaction, CompleteMalformedJournalRecordsAndForeignArtifactsRefuseBeforeRollback) {
+    for (const int fault : {0, 1, 2}) {
+        SCOPED_TRACE(fault);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        const auto control = journal_directory(save.path()) / "txn.json";
+        const auto complete = Get(control);
+        const auto foreign = journal_directory(save.path()) / "undo" /
+                             (fault == 1 ? "foreign" : "incoming.world_info.json");
+        if (fault == 0)
+            Put(control, complete + "{partial}\n");
+        else
+            Put(foreign, "retain foreign bytes");
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+        if (fault == 0)
+            Put(control, complete);
+        else
+            ASSERT_TRUE(fs::remove(foreign));
+        transaction.abort(nullptr);
+        EXPECT_FALSE(journal_pending(save.path()));
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
+    }
+}
+
+TEST(SaveTransaction, TornStaleJournalTailKeepsTheCommittedGeneration) {
+    TempSave save, side;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    JournalCapture().source = journal_directory(save.path());
+    JournalCapture().target = side.path() / "retained";
+    {
+        HookGuard hook(&CaptureJournalHook);
+        ASSERT_TRUE(CommitOnce(save.path(), 2, {{"world_info.json", "committed"}}));
+    }
+    const auto committed = Tree(save.path());
+    fs::rename(JournalCapture().target, journal_directory(save.path()));
+    const auto control = journal_directory(save.path()) / "txn.json";
+    Put(control, Get(control) + "{unpublished");
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::DiscardedStale);
+    EXPECT_EQ(Tree(save.path()), committed);
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+}
+
+TEST(SaveTransaction, JournalAppendRefusesInvalidRecordsAndForeignControlWithoutMutation) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    const auto control = journal_directory(save.path()) / "txn.json";
+    WorldSaveService::ArtifactIdentity identity{};
+    bool missing = false;
+    ASSERT_TRUE(WorldSaveService::artifact_identity(control, identity, missing));
+    ASSERT_FALSE(missing);
+    for (const auto& invalid : {std::string{},
+                                std::string("unterminated"),
+                                std::string(kMaxSnapshotIndexBytes, 'x') + "\n"}) {
+        const auto before = Tree(save.path());
+        EXPECT_FALSE(WorldSaveService::append_journal_record(control, invalid, identity, nullptr));
+        EXPECT_EQ(Tree(save.path()), before);
+    }
+    auto foreign = identity;
+    ++foreign[0];
+    const auto before = Tree(save.path());
+    EXPECT_FALSE(WorldSaveService::append_journal_record(control, "{}\n", foreign, nullptr));
+    EXPECT_EQ(Tree(save.path()), before);
+    for (const auto reserve : {kMaxSnapshotIndexBytes, kMaxSnapshotIndexBytes + 1}) {
+        EXPECT_FALSE(
+            WorldSaveService::append_journal_record(control, "{}\n", identity, nullptr, reserve));
+        EXPECT_EQ(Tree(save.path()), before);
+    }
+    for (const std::string_view state : {"empty", "partial", "directory", "missing"}) {
+        SCOPED_TRACE(state);
+        const auto retained = save.path() / "retained-control";
+        fs::rename(control, retained);
+        auto candidate = identity;
+        if (state == "empty" || state == "partial") {
+            Put(control, state == "empty" ? "" : "{unpublished");
+            ASSERT_TRUE(WorldSaveService::artifact_identity(control, candidate, missing));
+            ASSERT_FALSE(missing);
+        } else if (state == "directory") {
+            ASSERT_TRUE(fs::create_directory(control));
+        }
+        const auto evidence = Tree(save.path());
+        EXPECT_FALSE(WorldSaveService::append_journal_record(control, "{}\n", candidate, nullptr));
+        EXPECT_EQ(Tree(save.path()), evidence);
+        EXPECT_EQ(fs::exists(control), state != "missing");
+        EXPECT_EQ(fs::is_directory(control), state == "directory");
+        if (state != "missing") {
+            ASSERT_TRUE(fs::remove(control));
+        }
+        fs::rename(retained, control);
+    }
+}
+
+TEST(SaveTransaction, FullForwardJournalRetainsRollbackCapacity) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    {
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        const auto control = journal_directory(save.path()) / "txn.json";
+        WorldSaveService::ArtifactIdentity identity{};
+        bool missing = false;
+        ASSERT_TRUE(WorldSaveService::artifact_identity(control, identity, missing));
+        ASSERT_FALSE(missing);
+        // A valid whitespace-padded duplicate reaches the byte boundary without
+        // thousands of synchronous writes. Subsequent ordinary writes consume it.
+        const auto encoded = JournalRecords(save.path()).back().dump() + "\n";
+        constexpr std::size_t headroom = 16384;
+        const auto padding = kMaxSnapshotIndexBytes - headroom - Get(control).size();
+        ASSERT_GT(padding, encoded.size());
+        const auto record = std::string(padding - encoded.size(), ' ') + encoded;
+        ASSERT_TRUE(
+            WorldSaveService::append_journal_record(control, record, identity, nullptr, headroom));
+        bool refused = false;
+        for (int attempt = 0; attempt < 32 && !refused; ++attempt)
+            refused = !WorldSaveService::write_member_bytes(
+                save.path(), "world_info.json", "payload " + std::to_string(attempt));
+        ASSERT_TRUE(refused);
+        EXPECT_LE(Get(control).size(), kMaxSnapshotIndexBytes);
+        const auto neutral = UnregisteredStaging(save.path());
+        std::vector<std::string> errors;
+        ASSERT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::RolledBack)
+            << (errors.empty() ? "" : errors.front());
+        EXPECT_EQ(RecoveredCommittedTree(save.path(), neutral), baseline);
+        transaction.abort(nullptr);
+    }
+    ASSERT_TRUE(CommitOnce(save.path(), 3, {{"world_info.json", "next"}}));
+}
+
+TEST(SaveTransaction, RepeatedRecoveryReusesPublishedRetirementAndRestoration) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    std::string published;
+    for (int interruption = 0; interruption < 8; ++interruption) {
+        SCOPED_TRACE(interruption);
+        {
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (std::string_view(step) == "before-replace")
+                    throw std::runtime_error("restoration interrupted");
+            });
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        }
+        const auto bytes = Get(journal_directory(save.path()) / "txn.json");
+        if (interruption == 0)
+            published = bytes;
+        else
+            EXPECT_EQ(bytes, published);
+    }
+    ASSERT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), baseline);
+}
+
+TEST(SaveTransaction, RecoveryCanResumeAfterTailTruncationBodyFlushAndDelimiterPublication) {
+    for (const std::string_view event :
+         {"crash-record-tail-truncated", "crash-record-body-flushed", "crash-record-published"}) {
+        SCOPED_TRACE(event);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        const auto control = journal_directory(save.path()) / "txn.json";
+        Put(control, Get(control) + "{unpublished");
+        {
+            static std::string_view selected;
+            selected = event;
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (step == selected)
+                    throw std::runtime_error("journal recovery interrupted");
+            });
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        }
+        ASSERT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+    }
+}
+
 TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
     TempSave save;
     Put(journal_directory(save.path()) / "txn.json", "garbage");
@@ -1186,6 +1534,26 @@ TEST(SaveTransaction, RecoveryRestoresRetiringControlAndRefusesInvalidRetiringEv
             EXPECT_EQ(Tree(save.path()), baseline);
         }
     }
+}
+
+TEST(SaveTransaction, RetiringControlRefusesForeignInventoryWithoutRepublishing) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    const auto journal = journal_directory(save.path());
+    fs::rename(journal / "txn.json", journal / "undo/cleanup.txn.json");
+    Put(journal / "foreign", "retain foreign bytes");
+    const auto evidence = Tree(save.path());
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    EXPECT_EQ(Tree(save.path()), evidence);
+    ASSERT_TRUE(fs::remove(journal / "foreign"));
+    ASSERT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), baseline);
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
 }
 
 TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
@@ -1296,6 +1664,78 @@ TEST(SaveTransactionDeathTest, EveryJournaledPublicationMoveRecoversThePreviousC
         EXPECT_EQ(Tree(save.path()), before);
         EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
     }
+}
+
+TEST(SaveTransactionDeathTest, EveryDiskTransitionRecoversAndAllowsTheNextSave) {
+    ::testing::GTEST_FLAG(death_test_style) = "fast";
+    for (const bool initial : {false, true}) {
+        SCOPED_TRACE(initial);
+        TempSave base, final;
+        if (!initial) {
+            ASSERT_TRUE(CommitOnce(base.path(),
+                                   1,
+                                   {{"world_info.json", "old metadata"},
+                                    {"aether_state.efs", "old energy"},
+                                    {"chunks/region/world-manifest.json", "old manifest"}}));
+        }
+        const auto baseline = Tree(base.path());
+        CopyTree(base.path(), final.path());
+        ASSERT_TRUE(RunInventoryScenario(final.path()));
+        const auto finished_tree = Tree(final.path());
+        bool complete = false;
+        for (int cut = 1; cut <= 256 && !complete; ++cut) {
+            SCOPED_TRACE(cut);
+            TempSave work;
+            CopyTree(base.path(), work.path());
+            EXPECT_EXIT(ChildInventoryScenario(work.path(), cut), KilledOrFinished, "");
+            ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7);
+            const auto neutral = UnregisteredStaging(work.path());
+            std::vector<std::string> errors;
+            ASSERT_NE(recover_pending_journal(work.path(), &errors), RecoveryOutcome::Failed)
+                << (errors.empty() ? "" : errors.front());
+            const auto recovered = RecoveredCommittedTree(work.path(), neutral);
+            EXPECT_TRUE(recovered == baseline || recovered == finished_tree);
+            EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+            ASSERT_TRUE(CommitOnce(work.path(), 6, {{"world_info.json", "next"}}));
+            complete = DeathState().last_exit_code == 0;
+        }
+        EXPECT_TRUE(complete);
+    }
+}
+
+TEST(SaveTransactionDeathTest, EveryRecoveryDiskTransitionRestoresThePreviousCommit) {
+    ::testing::GTEST_FLAG(death_test_style) = "fast";
+    TempSave base;
+    ASSERT_TRUE(CommitOnce(base.path(),
+                           1,
+                           {{"world_info.json", "old metadata"},
+                            {"aether_state.efs", "old energy"},
+                            {"chunks/region/world-manifest.json", "old manifest"}}));
+    const auto baseline = Tree(base.path());
+    bool complete = false;
+    for (int cut = 1; cut <= 256 && !complete; ++cut) {
+        SCOPED_TRACE(cut);
+        TempSave work;
+        CopyTree(base.path(), work.path());
+        EXPECT_EXIT(ChildInventoryScenario(work.path(), 0, true), ::testing::ExitedWithCode(7), "");
+        EXPECT_EXIT(
+            {
+                DeathState().include_disk_events = true;
+                ChildKilledRecovery(work.path(), cut);
+            },
+            KilledOrFinished,
+            "");
+        ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7);
+        const auto neutral = UnregisteredStaging(work.path());
+        std::vector<std::string> errors;
+        ASSERT_NE(recover_pending_journal(work.path(), &errors), RecoveryOutcome::Failed)
+            << (errors.empty() ? "" : errors.front());
+        EXPECT_EQ(RecoveredCommittedTree(work.path(), neutral), baseline);
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+        ASSERT_TRUE(CommitOnce(work.path(), 6, {{"world_info.json", "next"}}));
+        complete = DeathState().last_exit_code == 0;
+    }
+    EXPECT_TRUE(complete);
 }
 
 TEST(SaveTransactionDeathTest, KillAtEveryStepRecoversToBaselineOrFinal) {
@@ -1412,13 +1852,16 @@ namespace {
 struct WindowsInterruptionState {
     int cut = 0;
     int calls = 0;
+    bool include_disk_events = false;
 };
 WindowsInterruptionState& WindowsInterruption() {
     static WindowsInterruptionState state;
     return state;
 }
-void WindowsKillHook(const char*, const fs::path&) {
+void WindowsKillHook(const char* step, const fs::path&) {
     auto& state = WindowsInterruption();
+    if (!state.include_disk_events && std::string_view(step).starts_with("crash-"))
+        return;
     if (++state.calls == state.cut)
         std::_Exit(7);
 }
@@ -1448,7 +1891,8 @@ bool WindowsScenario(const fs::path& dir) {
            txn.commit(nullptr);
 }
 
-std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery) {
+std::optional<DWORD>
+WindowsTxnChild(const fs::path& dir, int cut, bool recovery, bool disk_events = false) {
     std::wstring executable(32768, L'\0');
     const DWORD count =
         ::GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
@@ -1458,11 +1902,13 @@ std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery
     const auto previous_dir = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DIR");
     const auto previous_cut = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT");
     const auto previous_mode = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_RECOVER");
+    const auto previous_disk = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DISK");
     const auto cut_text = std::to_wstring(cut);
     const bool configured =
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DIR", dir.c_str()) &&
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_CUT", cut_text.c_str()) &&
-        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER", recovery ? L"1" : L"0");
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER", recovery ? L"1" : L"0") &&
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DISK", disk_events ? L"1" : L"0");
     std::wstring command = L"\"" + executable +
                            L"\" --gtest_filter=SaveTransaction.WindowsInterruptionChild "
                            L"--gtest_color=no";
@@ -1485,6 +1931,8 @@ std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery
                               previous_cut.empty() ? nullptr : previous_cut.c_str());
     ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER",
                               previous_mode.empty() ? nullptr : previous_mode.c_str());
+    ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DISK",
+                              previous_disk.empty() ? nullptr : previous_disk.c_str());
     if (!started)
         return std::nullopt;
     const DWORD waited = ::WaitForSingleObject(process.hProcess, 30000);
@@ -1522,11 +1970,67 @@ TEST(SaveTransaction, WindowsInterruptionChild) {
     auto& state = WindowsInterruption();
     state.cut = std::stoi(WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT"));
     state.calls = 0;
+    state.include_disk_events = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DISK") == L"1";
     set_snapshot_step_hook_for_testing(&WindowsKillHook);
     if (WindowsTestEnv(L"LUM_TXN_TEST_CHILD_RECOVER") == L"1")
         std::_Exit(recover_pending_journal(fs::path(dir), nullptr) == RecoveryOutcome::Failed ? 9
                                                                                               : 0);
-    std::_Exit(WindowsScenario(fs::path(dir)) ? 0 : 9);
+    std::_Exit((state.include_disk_events ? RunInventoryScenario(fs::path(dir))
+                                          : WindowsScenario(fs::path(dir)))
+                   ? 0
+                   : 9);
+}
+
+TEST(SaveTransaction, WindowsEveryDiskTransitionPreservesCommitAndNeutralStaging) {
+    TempSave base, final, work;
+    ASSERT_TRUE(CommitOnce(base.path(),
+                           1,
+                           {{"world_info.json", "old metadata"},
+                            {"aether_state.efs", "old energy"},
+                            {"chunks/region/world-manifest.json", "old manifest"}}));
+    const auto baseline = Tree(base.path());
+    CopyTree(base.path(), final.path());
+    ASSERT_TRUE(RunInventoryScenario(final.path()));
+    const auto finished = Tree(final.path());
+    bool complete = false;
+    int rollback_cut = 0;
+    for (int cut = 1; cut <= 256 && !complete; ++cut) {
+        SCOPED_TRACE(cut);
+        CopyTree(base.path(), work.path());
+        const auto exit_code = WindowsTxnChild(work.path(), cut, false, true);
+        ASSERT_TRUE(exit_code.has_value());
+        ASSERT_TRUE(exit_code.value_or(9) == 0 || exit_code.value_or(9) == 7);
+        if (rollback_cut == 0 && Get(work.path() / "world_info.json") == "new metadata" &&
+            Get(snapshot_index_path(work.path())) == baseline.at(kSnapshotIndexRelativePath))
+            rollback_cut = cut;
+        const auto neutral = UnregisteredStaging(work.path());
+        std::vector<std::string> errors;
+        ASSERT_NE(recover_pending_journal(work.path(), &errors), RecoveryOutcome::Failed)
+            << (errors.empty() ? "" : errors.front());
+        const auto recovered = RecoveredCommittedTree(work.path(), neutral);
+        EXPECT_TRUE(recovered == baseline || recovered == finished);
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+        ASSERT_TRUE(CommitOnce(work.path(), 6, {{"world_info.json", "next"}}));
+        complete = exit_code.value_or(9) == 0;
+    }
+    ASSERT_TRUE(complete);
+    ASSERT_GT(rollback_cut, 0);
+    complete = false;
+    for (int cut = 1; cut <= 256 && !complete; ++cut) {
+        SCOPED_TRACE(cut);
+        CopyTree(base.path(), work.path());
+        const auto interrupted = WindowsTxnChild(work.path(), rollback_cut, false, true);
+        ASSERT_EQ(interrupted.value_or(9), 7u);
+        const auto exit_code = WindowsTxnChild(work.path(), cut, true, true);
+        ASSERT_TRUE(exit_code.has_value());
+        ASSERT_TRUE(exit_code.value_or(9) == 0 || exit_code.value_or(9) == 7);
+        const auto neutral = UnregisteredStaging(work.path());
+        ASSERT_NE(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(RecoveredCommittedTree(work.path(), neutral), baseline);
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+        complete = exit_code.value_or(9) == 0;
+    }
+    EXPECT_TRUE(complete);
 }
 
 TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) {

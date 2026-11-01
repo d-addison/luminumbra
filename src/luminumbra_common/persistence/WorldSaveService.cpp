@@ -1630,7 +1630,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             const std::string& bytes,
                             std::filesystem::path& out_temp,
                             std::vector<std::string>* errors,
-                            CreatedWorldArtifacts* artifacts = nullptr) {
+                            CreatedWorldArtifacts* artifacts = nullptr,
+                            WorldSaveService::ArtifactIdentity* identity = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save write");
     HANDLE file = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 128; ++attempt) {
@@ -1638,7 +1639,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         if (artifacts)
             artifacts->reserve_file(out_temp);
         file = ::CreateFileW(out_temp.c_str(),
-                             GENERIC_WRITE,
+                             GENERIC_WRITE | FILE_READ_ATTRIBUTES,
                              artifacts ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : 0,
                              nullptr,
                              CREATE_NEW,
@@ -1648,6 +1649,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             try {
                 if (artifacts)
                     artifacts->file_created(out_temp, file);
+                report_snapshot_step("crash-staging-created", out_temp);
             } catch (...) {
                 ::CloseHandle(file);
                 throw;
@@ -1693,6 +1695,12 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             return false;
         }
         offset += written;
+        try {
+            report_snapshot_step("crash-staging-written", out_temp);
+        } catch (...) {
+            ::CloseHandle(file);
+            throw;
+        }
     }
 
     if (!::FlushFileBuffers(file)) {
@@ -1704,6 +1712,18 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                      Filesystem::GenericUtf8PathString(out_temp) + ": " +
                      WindowsErrorMessage(error));
         return false;
+    }
+    if (identity) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!::GetFileInformationByHandle(file, &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) !=
+                0 ||
+            (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0)) {
+            ::CloseHandle(file);
+            AddError(errors, "cannot identify created snapshot staging file");
+            return false;
+        }
+        *identity = {info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow};
     }
     if (!::CloseHandle(file)) {
         const DWORD error = ::GetLastError();
@@ -1811,7 +1831,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             const std::string& bytes,
                             std::filesystem::path& out_temp,
                             std::vector<std::string>* errors,
-                            CreatedWorldArtifacts* artifacts = nullptr) {
+                            CreatedWorldArtifacts* artifacts = nullptr,
+                            WorldSaveService::ArtifactIdentity* identity = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save write");
     int file = -1;
     for (int attempt = 0; attempt < 128; ++attempt) {
@@ -1823,6 +1844,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             try {
                 if (artifacts)
                     artifacts->file_created(out_temp, file);
+                report_snapshot_step("crash-staging-created", out_temp);
             } catch (...) {
                 ::close(file);
                 throw;
@@ -1867,6 +1889,12 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             return false;
         }
         offset += static_cast<std::size_t>(written);
+        try {
+            report_snapshot_step("crash-staging-written", out_temp);
+        } catch (...) {
+            ::close(file);
+            throw;
+        }
     }
 
     while (::fsync(file) != 0) {
@@ -1880,6 +1908,16 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                  "failed to durably flush temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
         return false;
+    }
+    if (identity) {
+        struct stat info {};
+        if (::fstat(file, &info) != 0 || !S_ISREG(info.st_mode) || info.st_ino == 0) {
+            ::close(file);
+            AddError(errors, "cannot identify created snapshot staging file");
+            return false;
+        }
+        *identity = {
+            static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino), 0};
     }
     if (::close(file) != 0) {
         const int error = errno;
@@ -4274,13 +4312,13 @@ bool WorldSaveService::durable_write_file(const std::filesystem::path& destinati
                                           const std::filesystem::path& staging,
                                           ArtifactIdentity* published_identity) {
     std::filesystem::path temp;
-    if (!WriteDurableRegionTemp(staging.empty() ? destination : staging, bytes, temp, errors))
+    if (!WriteDurableRegionTemp(staging.empty() ? destination : staging,
+                                bytes,
+                                temp,
+                                errors,
+                                nullptr,
+                                published_identity))
         return false;
-    if (published_identity) {
-        bool missing = false;
-        if (!artifact_identity(temp, *published_identity, missing) || missing)
-            return false;
-    }
     if (!ReplaceMember(temp, destination, errors)) {
         RemoveTemporaryFile(temp);
         return false;
@@ -4291,16 +4329,70 @@ bool WorldSaveService::durable_write_file(const std::filesystem::path& destinati
 bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
                                              const std::string& record,
                                              ArtifactIdentity& expected,
-                                             std::vector<std::string>* errors) {
+                                             std::vector<std::string>* errors,
+                                             std::size_t rollback_reserve) {
     const SaveOwnership ownership;
+    if (record.empty() || record.back() != '\n' || rollback_reserve > kMaxSnapshotIndexBytes ||
+        record.size() > kMaxSnapshotIndexBytes - rollback_reserve) {
+        AddError(errors, "invalid snapshot journal record");
+        return false;
+    }
+    if (expected == ArtifactIdentity{}) {
+        // The initial header has no published prefix to fall back to. Stage it
+        // in neutral root staging and publish only the complete, flushed file.
+        std::filesystem::path temporary;
+        ArtifactIdentity identity{};
+        if (!prepare_restoration(path.parent_path().parent_path() / path.filename(),
+                                 record,
+                                 temporary,
+                                 identity,
+                                 errors))
+            return false;
+        report_snapshot_step("crash-control-staged", temporary);
+        ArtifactIdentity staging_directory{};
+        bool missing = false;
+        if (!artifact_identity(temporary.parent_path(), staging_directory, missing, true) ||
+            missing)
+            return false;
+        const BoundPublicationStage stage{
+            .directory = temporary.parent_path(),
+            .name = temporary.filename(),
+            .directory_identity = staging_directory,
+            .report = +[](const char* step, const std::filesystem::path& target) {
+                report_snapshot_step(std::string_view(step) == "publication-quarantined"
+                                         ? "crash-control-bound"
+                                         : step,
+                                     target);
+            }};
+        expected = identity;
+        bool installed = false;
+        {
+            const auto publication = LockPublication(path);
+            StagingFile source(temporary, StagingFile::Mode::Inspect);
+            StagingIdentity actual{};
+            installed = source.identity(actual) &&
+                        std::equal(identity.begin(), identity.end(), actual.begin()) &&
+                        source.publish_bound(path, &stage);
+        }
+        if (!installed) {
+            AddError(errors, "cannot publish initial snapshot journal");
+            return false;
+        }
+        const bool flushed = durable_flush_directory(path.parent_path(), errors) &&
+                             durable_flush_directory(temporary.parent_path(), errors);
+        if (flushed)
+            report_snapshot_step("crash-control-published", path);
+        return flushed;
+    }
     const auto publish = LockPublication(path);
-    const bool create = expected == ArtifactIdentity{};
+    // Fixed 64 KiB tail buffer; both existing bytes and appends share the 16 MiB bound.
+    std::array<char, 65536> tail{};
 #if defined(_WIN32)
     const HANDLE file = ::CreateFileW(path.c_str(),
-                                      GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+                                      GENERIC_READ | GENERIC_WRITE | FILE_READ_ATTRIBUTES,
                                       FILE_SHARE_READ,
                                       nullptr,
-                                      create ? CREATE_NEW : OPEN_EXISTING,
+                                      OPEN_EXISTING,
                                       FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
                                       nullptr);
     if (file == INVALID_HANDLE_VALUE) {
@@ -4315,26 +4407,42 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
         ::GetFileSizeEx(file, &length) && length.QuadPart >= 0;
     const ArtifactIdentity actual{
         info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow};
-    ok = ok && (actual[1] != 0 || actual[2] != 0) && (create || actual == expected);
-    const auto size = ok ? static_cast<std::uint64_t>(length.QuadPart) : kMaxSnapshotIndexBytes;
-    LARGE_INTEGER end{};
-    ok = ok && record.size() <= kMaxSnapshotIndexBytes &&
-         size <= kMaxSnapshotIndexBytes - record.size() &&
-         ::SetFilePointerEx(file, end, nullptr, FILE_END);
-    std::size_t offset = 0;
-    while (ok && offset < record.size()) {
-        DWORD written = 0;
-        const auto count = static_cast<DWORD>(std::min<std::size_t>(65536, record.size() - offset));
-        ok = ::WriteFile(file, record.data() + offset, count, &written, nullptr) && written != 0;
-        offset += written;
-    }
-    ok = ok && ::FlushFileBuffers(file);
-    const bool closed = ::CloseHandle(file) != 0;
+    ok = ok && (actual[1] != 0 || actual[2] != 0) && actual == expected;
+    const auto size =
+        ok ? static_cast<std::uint64_t>(length.QuadPart) : kMaxSnapshotIndexBytes + 1ull;
+    const auto seek = [&](std::uint64_t offset) {
+        LARGE_INTEGER position{};
+        position.QuadPart = static_cast<LONGLONG>(offset);
+        return ::SetFilePointerEx(file, position, nullptr, FILE_BEGIN) != 0;
+    };
+    const auto read_tail = [&](std::uint64_t offset, std::size_t count) {
+        DWORD received = 0;
+        return seek(offset) &&
+               ::ReadFile(file, tail.data(), static_cast<DWORD>(count), &received, nullptr) &&
+               received == count;
+    };
+    const auto truncate_tail = [&](std::uint64_t offset) {
+        return seek(offset) && ::SetEndOfFile(file);
+    };
+    const auto write_bytes = [&](const char* bytes, std::size_t count) {
+        std::size_t offset = 0;
+        while (offset < count) {
+            DWORD written = 0;
+            const auto requested = static_cast<DWORD>(std::min<std::size_t>(65536, count - offset));
+            if (!::WriteFile(file, bytes + offset, requested, &written, nullptr) || written == 0)
+                return false;
+            offset += written;
+        }
+        return true;
+    };
+    const auto flush = [&]() {
+        return ::FlushFileBuffers(file) != 0;
+    };
+    const auto close = [&]() {
+        return ::CloseHandle(file) != 0;
+    };
 #else
-    const int file = ::open(path.c_str(),
-                            O_WRONLY | O_APPEND | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC |
-                                (create ? O_CREAT | O_EXCL : 0),
-                            0600);
+    const int file = ::open(path.c_str(), O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (file < 0) {
         AddError(errors, "cannot open owned snapshot journal");
         return false;
@@ -4344,35 +4452,104 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
         ::fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= 0 && info.st_ino != 0;
     const ArtifactIdentity actual{
         static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino), 0};
-    ok = ok && (create || actual == expected);
-    const auto size = ok ? static_cast<std::uint64_t>(info.st_size) : kMaxSnapshotIndexBytes;
-    ok = ok && record.size() <= kMaxSnapshotIndexBytes &&
-         size <= kMaxSnapshotIndexBytes - record.size();
-    std::size_t offset = 0;
-    while (ok && offset < record.size()) {
-        const auto count = ::write(
-            file, record.data() + offset, std::min<std::size_t>(65536, record.size() - offset));
-        if (count < 0 && errno == EINTR)
-            continue;
-        ok = count > 0;
-        if (ok)
-            offset += static_cast<std::size_t>(count);
-    }
-    int flushed = -1;
-    if (ok) {
+    ok = ok && actual == expected;
+    const auto size = ok ? static_cast<std::uint64_t>(info.st_size) : kMaxSnapshotIndexBytes + 1ull;
+    const auto read_tail = [&](std::uint64_t offset, std::size_t count) {
+        std::size_t received = 0;
+        while (received < count) {
+            const auto result = ::pread(file,
+                                        tail.data() + received,
+                                        count - received,
+                                        static_cast<off_t>(offset + received));
+            if (result < 0 && errno == EINTR)
+                continue;
+            if (result <= 0)
+                return false;
+            received += static_cast<std::size_t>(result);
+        }
+        return true;
+    };
+    const auto truncate_tail = [&](std::uint64_t offset) {
+        return ::ftruncate(file, static_cast<off_t>(offset)) == 0;
+    };
+    const auto seek = [&](std::uint64_t offset) {
+        return ::lseek(file, static_cast<off_t>(offset), SEEK_SET) >= 0;
+    };
+    const auto write_bytes = [&](const char* bytes, std::size_t count) {
+        std::size_t offset = 0;
+        while (offset < count) {
+            const auto written =
+                ::write(file, bytes + offset, std::min<std::size_t>(65536, count - offset));
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written <= 0)
+                return false;
+            offset += static_cast<std::size_t>(written);
+        }
+        return true;
+    };
+    const auto flush = [&]() {
+        int result = -1;
         do {
-            flushed = ::fsync(file);
-        } while (flushed != 0 && errno == EINTR);
-    }
-    ok = ok && flushed == 0;
-    const bool closed = ::close(file) == 0;
+            result = ::fsync(file);
+        } while (result != 0 && errno == EINTR);
+        return result == 0;
+    };
+    const auto close = [&]() {
+        return ::close(file) == 0;
+    };
 #endif
+    const auto report = [&](const char* step) {
+        try {
+            report_snapshot_step(step, path);
+        } catch (...) {
+            close();
+            throw;
+        }
+    };
+    ok = ok && size <= kMaxSnapshotIndexBytes;
+    std::uint64_t published = 0;
+    if (ok && size != 0) {
+        ok = read_tail(size - 1, 1);
+        if (ok && tail.front() == '\n')
+            published = size;
+    }
+    for (std::uint64_t end = size; ok && end != 0 && published == 0;) {
+        const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(end, tail.size()));
+        const auto begin = end - count;
+        ok = read_tail(begin, count);
+        if (ok) {
+            for (auto position = count; position != 0; --position) {
+                if (tail[position - 1] == '\n') {
+                    published = begin + position;
+                    break;
+                }
+            }
+        }
+        end = begin;
+    }
+    // Never append past an unpublished tail, including during interrupted rollback.
+    ok = ok && published != 0 && rollback_reserve <= kMaxSnapshotIndexBytes - published &&
+         record.size() <= kMaxSnapshotIndexBytes - published - rollback_reserve;
+    if (ok && published != size) {
+        ok = truncate_tail(published);
+        if (ok)
+            report("crash-record-tail-truncated");
+    }
+    ok = ok && seek(published);
+    // Publish the delimiter only after the body is durable. A torn write can
+    // therefore discard only this record, whose mutation has not started.
+    ok = ok && write_bytes(record.data(), record.size() - 1) && flush();
+    if (ok)
+        report("crash-record-body-flushed");
+    ok = ok && write_bytes("\n", 1) && flush();
+    const bool closed = close();
     if (!ok || !closed) {
         AddError(errors, "snapshot journal append failed or exceeded control byte limit");
         return false;
     }
-    expected = actual;
-    return !create || durable_flush_directory(path.parent_path(), errors);
+    report_snapshot_step("crash-record-published", path);
+    return true;
 }
 
 bool WorldSaveService::artifact_identity(const std::filesystem::path& path,
@@ -4410,9 +4587,12 @@ bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
                  "snapshot artifact ownership changed: " + Filesystem::GenericUtf8PathString(path));
         return false;
     }
-    return durable_flush_directory(path.parent_path(), errors) &&
-           (!stage || stage->directory == path.parent_path() ||
-            durable_flush_directory(stage->directory, errors));
+    const bool flushed = durable_flush_directory(path.parent_path(), errors) &&
+                         (!stage || stage->directory == path.parent_path() ||
+                          durable_flush_directory(stage->directory, errors));
+    if (flushed)
+        report_snapshot_step("crash-artifact-removed", path);
+    return flushed;
 }
 
 bool WorldSaveService::prepare_restoration(const std::filesystem::path& staging,
@@ -4420,9 +4600,7 @@ bool WorldSaveService::prepare_restoration(const std::filesystem::path& staging,
                                            std::filesystem::path& temp,
                                            ArtifactIdentity& identity,
                                            std::vector<std::string>* errors) {
-    bool missing = false;
-    return WriteDurableRegionTemp(staging, bytes, temp, errors) &&
-           artifact_identity(temp, identity, missing) && !missing;
+    return WriteDurableRegionTemp(staging, bytes, temp, errors, nullptr, &identity);
 }
 
 bool WorldSaveService::publish_restoration(const std::filesystem::path& temp,
@@ -4690,16 +4868,17 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
         return false;
     }
     const std::string relative(relative_path);
+    if (SaveTransaction::active_for(save_dir) &&
+        !SaveTransaction::check_publication_target(save_dir / relative, errors))
+        return false;
     TransactionScope scope(save_dir, {relative}, errors);
     if (!scope.ok())
         return false;
     const std::filesystem::path destination = save_dir / relative;
     std::error_code ec;
     std::filesystem::create_directories(destination.parent_path(), ec);
-    // A killed transactional writer leaves its temporary under the journal,
-    // where recovery can retire it without claiming unknown strict-inventory files.
-    const auto staging =
-        scope.engaged() ? journal_directory(save_dir) / destination.filename() : destination;
+    // Before registration, staging must be outside every strict save inventory.
+    const auto staging = scope.engaged() ? save_dir / destination.filename() : destination;
     return durable_write_file(destination, bytes, errors, staging) && scope.commit(errors);
 }
 
@@ -4712,6 +4891,9 @@ bool WorldSaveService::remove_member(const std::filesystem::path& save_dir,
         return false;
     }
     const std::string relative(relative_path);
+    if (SaveTransaction::active_for(save_dir) &&
+        !SaveTransaction::check_publication_target(save_dir / relative, errors))
+        return false;
     TransactionScope scope(save_dir, {relative}, errors);
     if (!scope.ok())
         return false;

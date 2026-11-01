@@ -201,7 +201,8 @@ private:
 inline HANDLE WindowsPublishWithoutReplacement(HANDLE file,
                                                const std::filesystem::path& source,
                                                const std::filesystem::path& destination,
-                                               DWORD access) {
+                                               DWORD access,
+                                               const BoundPublicationStage* stage = nullptr) {
     WindowsPublicationHandle original(file);
     const WindowsPublicationHandle parent(
         ::CreateFileW(destination.parent_path().empty() ? L"." : destination.parent_path().c_str(),
@@ -249,6 +250,8 @@ inline HANDLE WindowsPublishWithoutReplacement(HANDLE file,
             std::system_category(),
             "Exclusive world publication requires supported same-volume hard links");
 
+    if (stage && stage->report)
+        stage->report("crash-publication-linked", destination);
     // The source's denied delete sharing protects the newly created link until
     // it is opened. This handle names that link, rather than the source link.
     // It cannot request DELETE while the original denies delete sharing.
@@ -301,6 +304,8 @@ inline HANDLE WindowsPublishWithoutReplacement(HANDLE file,
         // identity without keeping this named source link alive.
         original.reset();
         source_retired = true;
+        if (stage && stage->report)
+            stage->report("crash-publication-source-retired", destination);
         const auto deleting = ::ReOpenFile(
             linked.get(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT);
         if (deleting == INVALID_HANDLE_VALUE)
@@ -494,8 +499,7 @@ public:
             std::filesystem::exists(std::filesystem::symlink_status(destination)))
             throw std::runtime_error("Publication source or vacant destination changed.");
 #if defined(_WIN32)
-        (void)stage;
-        bound.publish_windows(from, to);
+        bound.publish_windows(from, to, stage);
 #else
         bound.publish_posix(from, to, stage);
 #endif
@@ -873,7 +877,9 @@ private:
         return parent;
     }
 
-    void publish_windows(const Artifact& source, Artifact& target) {
+    void publish_windows(const Artifact& source,
+                         Artifact& target,
+                         const BoundPublicationStage* stage = nullptr) {
         const auto parent = bind_publication_parent(target.path.parent_path());
         // Keep both named parents fixed until publication and name inspection
         // complete, including when the reserved source is in another directory.
@@ -899,7 +905,7 @@ private:
                                      Filesystem::GenericUtf8PathString(source.path));
         try {
             const ScopedFile published(Detail::WindowsPublishWithoutReplacement(
-                bound.release(), source.path, destination, FILE_READ_ATTRIBUTES | DELETE));
+                bound.release(), source.path, destination, FILE_READ_ATTRIBUTES | DELETE, stage));
         } catch (const Detail::WindowsPublicationRecoveryError& error) {
             // A verified alias created by this call is safe to retain for
             // rollback even when source retirement or recovery failed. This
@@ -1167,6 +1173,8 @@ private:
         if (identity_from(owned.get()) != *artifact.identity)
             throw std::runtime_error("World artifact changed identity: " +
                                      Filesystem::GenericUtf8PathString(artifact.path));
+        if (stage && stage->report)
+            stage->report("crash-retirement-bound", artifact.path);
         FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
         if (!::SetFileInformationByHandle(
                 owned.get(), FileDispositionInfo, &disposition, sizeof(disposition)))

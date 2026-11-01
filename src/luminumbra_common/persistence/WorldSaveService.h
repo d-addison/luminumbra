@@ -390,11 +390,13 @@ public:
                                    std::array<std::uint64_t, 3>* published_identity = nullptr);
     using ArtifactIdentity = std::array<std::uint64_t, 3>;
     // Versioned journal records append through one verified handle; total control bytes stay
-    // within kMaxSnapshotIndexBytes. Empty expected identity requests exclusive creation.
+    // within kMaxSnapshotIndexBytes, retaining rollback_reserve bytes for recovery.
+    // Empty expected identity requests exclusive creation.
     static bool append_journal_record(const std::filesystem::path& path,
                                       const std::string& record,
                                       ArtifactIdentity& identity,
-                                      std::vector<std::string>* errors);
+                                      std::vector<std::string>* errors,
+                                      std::size_t rollback_reserve = 0);
     // Recovery operations require the recorded object, including at the destructive operation.
     static bool artifact_identity(const std::filesystem::path& path,
                                   ArtifactIdentity& identity,
@@ -436,7 +438,8 @@ public:
                               std::string& error);
     // Durable single-member writers for flag-on GameSession members (plants, energy). They join the
     // active transaction for save_dir, else run an implicit one when the directory is indexed, else
-    // just replace the file durably. relative_path must satisfy member_path_allowed.
+    // just replace the file durably. An outer transaction must already protect the member.
+    // relative_path must satisfy member_path_allowed.
     static bool write_member_bytes(const std::filesystem::path& save_dir,
                                    std::string_view relative_path,
                                    const std::string& bytes,

@@ -2835,6 +2835,14 @@ entt::entity ClockTestCreature(entt::registry& registry) {
     return creature;
 }
 
+void CommitImportedClockMetadata(const fs::path& save, const std::string& bytes) {
+    P::SaveTransaction imported(save, 0, {}, &P::WorldSaveService::member_digest);
+    ASSERT_TRUE(imported.begin(nullptr));
+    ASSERT_TRUE(imported.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(P::WorldSaveService::write_member_bytes(save, "world_info.json", bytes));
+    ASSERT_TRUE(imported.commit(nullptr));
+}
+
 TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -2855,13 +2863,7 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     metadata["calendar"] = {{"dayLengthTicks", calendar.dayLengthTicks},
                             {"daysPerYear", calendar.daysPerYear}};
     const auto imported_bytes = metadata.dump();
-    {
-        P::SaveTransaction imported(save, 0, {}, &P::WorldSaveService::member_digest);
-        ASSERT_TRUE(imported.begin(nullptr));
-        ASSERT_TRUE(
-            P::WorldSaveService::write_member_bytes(save, "world_info.json", imported_bytes));
-        ASSERT_TRUE(imported.commit(nullptr));
-    }
+    ASSERT_NO_FATAL_FAILURE(CommitImportedClockMetadata(save, imported_bytes));
     ASSERT_TRUE(original.LoadWorldStateFrom(save));
     ASSERT_TRUE(control.LoadWorldStateFrom(save));
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), imported_bytes);
@@ -2997,6 +2999,8 @@ void CheckCommittedSnapshotReloadAndSave(const HeadlessRoot& root,
         {
             P::SaveTransaction staged(save, tick, {}, &P::WorldSaveService::member_digest);
             ASSERT_TRUE(staged.begin(nullptr));
+            ASSERT_TRUE(
+                staged.protect({"world_info.json", "chunks/region/active-regions.arl"}, nullptr));
             ASSERT_TRUE(
                 P::WorldSaveService::write_member_bytes(save, "world_info.json", metadata_bytes));
             ASSERT_TRUE(P::WorldSaveService::write_member_bytes(
@@ -5748,39 +5752,66 @@ TEST(GameSessionHeadlessWorldTest,
 }
 
 TEST(GameSessionHeadlessWorldTest, SnapshotPendingJournalIsRolledBackAtOpen) {
-    const HeadlessRoot root;
-    JobSystem jobs;
-    jobs.startup(1);
-    GameSession owner;
-    EnableSnapshotSession(owner, root, jobs);
-    ASSERT_TRUE(owner.CreateWorld("Pending journal", "1337", "default"));
-    ASSERT_TRUE(owner.SaveWorldState());
-    const auto save = owner.GetWorldSaveDir();
-    const auto worldId = owner.GetMetadata().worldId;
-    const auto info_bytes = ReadClockTestFile(save / "world_info.json");
-    // Retain the actual interrupted journal objects: copied files have different ownership.
-    const auto side = root.path() / "interrupted-journal";
-    {
-        P::SaveTransaction txn(save, 0, {}, &P::WorldSaveService::member_digest);
-        ASSERT_TRUE(txn.begin(nullptr));
-        ASSERT_TRUE(txn.protect({"world_info.json"}, nullptr));
-        auto info = nlohmann::json::parse(info_bytes);
-        info["name"] = "half written";
-        ASSERT_TRUE(P::WorldSaveService::save_metadata(info.dump(2), save));
-        fs::rename(P::journal_directory(save), side);
-        txn.abort(nullptr); // Refuses the displaced journal and retains recovery evidence.
+    for (const bool torn_tail : {false, true}) {
+        SCOPED_TRACE(torn_tail);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession owner;
+        EnableSnapshotSession(owner, root, jobs);
+        ASSERT_TRUE(owner.CreateWorld("Pending journal", "1337", "default"));
+        ASSERT_TRUE(owner.SaveWorldState());
+        const auto save = owner.GetWorldSaveDir();
+        const auto worldId = owner.GetMetadata().worldId;
+        const auto info_bytes = ReadClockTestFile(save / "world_info.json");
+        // Retain the actual interrupted journal objects: copied files have different ownership.
+        const auto side = root.path() / "interrupted-journal";
+        {
+            P::SaveTransaction txn(save, 0, {}, &P::WorldSaveService::member_digest);
+            ASSERT_TRUE(txn.begin(nullptr));
+            ASSERT_TRUE(txn.protect({"world_info.json"}, nullptr));
+            auto info = nlohmann::json::parse(info_bytes);
+            info["name"] = "half written";
+            ASSERT_TRUE(P::WorldSaveService::save_metadata(info.dump(2), save));
+            fs::rename(P::journal_directory(save), side);
+            txn.abort(nullptr); // Refuses the displaced journal and retains recovery evidence.
+        }
+        ASSERT_FALSE(P::journal_pending(save));
+        fs::rename(side, P::journal_directory(save));
+        if (torn_tail) {
+            std::ofstream journal(P::journal_directory(save) / "txn.json",
+                                  std::ios::binary | std::ios::app);
+            journal << "{\"unpublished\":";
+            journal.close();
+            ASSERT_TRUE(journal.good());
+        }
+        const auto neutral = save / "0.tmp.1.2";
+        {
+            std::ofstream staging(neutral, std::ios::binary);
+            staging << "unregistered partial staging";
+            staging.close();
+            ASSERT_TRUE(staging.good());
+        }
+        // Final empty-container retirement may leave either of these neutral
+        // directory states after its control record has already been removed.
+        const auto empty_retirement = save / ".world-rollback-interrupted";
+        ASSERT_TRUE(fs::create_directories(empty_retirement / "artifact"));
+        const auto entry = Luminumbra::Persistence::InspectSavedWorld(root.path(), worldId);
+        EXPECT_TRUE(entry.pending_recovery);
+        EXPECT_TRUE(entry.error.empty());
+        EXPECT_TRUE(P::journal_pending(save));
+        GameSession reopened;
+        EnableSnapshotSession(reopened, root, jobs);
+        ASSERT_TRUE(reopened.LoadWorld(worldId));
+        EXPECT_FALSE(fs::exists(P::journal_directory(save)));
+        EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), info_bytes);
+        EXPECT_EQ(ReadClockTestFile(neutral), "unregistered partial staging");
+        EXPECT_TRUE(fs::is_empty(empty_retirement / "artifact"));
+        ASSERT_TRUE(fs::remove(empty_retirement / "artifact"));
+        ASSERT_TRUE(reopened.SaveWorldState());
+        EXPECT_TRUE(fs::is_empty(empty_retirement));
+        EXPECT_EQ(ReadClockTestFile(neutral), "unregistered partial staging");
     }
-    ASSERT_FALSE(P::journal_pending(save));
-    fs::rename(side, P::journal_directory(save));
-    const auto entry = Luminumbra::Persistence::InspectSavedWorld(root.path(), worldId);
-    EXPECT_TRUE(entry.pending_recovery);
-    EXPECT_TRUE(entry.error.empty());
-    EXPECT_TRUE(P::journal_pending(save));
-    GameSession reopened;
-    EnableSnapshotSession(reopened, root, jobs);
-    ASSERT_TRUE(reopened.LoadWorld(worldId));
-    EXPECT_FALSE(fs::exists(P::journal_directory(save)));
-    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), info_bytes);
 }
 
 TEST(GameSessionHeadlessWorldTest, SnapshotSaveDecodesTheWorldAtMostOnce) {
@@ -6023,6 +6054,19 @@ void FreezeRegionalWaterFixture(RegionalWaterScenario& scenario,
     EXPECT_EQ(frozen_record.frozen_digest,
               P::WorldSaveService::region_simulation_digest(
                   {}, water_region, P::RegionDigestInputs{{chunk}, {}, {}}));
+    const auto* world = session.GetWorldSystem();
+    const auto before_projection = world->region_digest_input_items();
+    for (const auto& [rx, rz] : world->authority_region_keys()) {
+        const auto record = session.GetActiveRegionLedger().records().find({rx, rz});
+        if (record == session.GetActiveRegionLedger().records().end() ||
+            record->second.state != RegionState::Frozen)
+            (void)world->region_digest_inputs(rx, rz);
+    }
+    const auto active_inputs = world->region_digest_input_items() - before_projection;
+    const auto before_hash = world->region_digest_input_items();
+    const auto hash = session.ComputeChunkStateHash();
+    EXPECT_EQ(world->region_digest_input_items() - before_hash, active_inputs);
+    EXPECT_EQ(session.ComputeChunkStateHash(), hash);
 }
 
 void PersistRegionalWaterBeforeRetention(GameSession& session,

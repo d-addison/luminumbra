@@ -916,7 +916,8 @@ int Restore(int from, const char* source, int to, const char* destination) {
     const auto resolved_destination = ResolveAt(to, destination);
     if (!BeforePublish(ResolveAt(from, source), resolved_destination))
         return -1;
-    if (active && !active->restore_occupant.empty() && !active->restore_blocked) {
+    if (active && std::string(source) == "artifact" && resolved_destination == active->target &&
+        !active->restore_occupant.empty() && !active->restore_blocked) {
         active->restore_blocked = true;
         std::filesystem::rename(active->restore_occupant, active->target);
     }

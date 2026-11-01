@@ -29,7 +29,14 @@ bool PublishIndexedSave(const std::filesystem::path& directory,
                                                  previous.tick,
                                                  previous.anchors,
                                                  &Persistence::WorldSaveService::member_digest);
-        if (!transaction.begin(errors) || !write() ||
+        if (!transaction.begin(errors) ||
+            !transaction.protect({"world_info.json",
+                                  "aether_state.efs",
+                                  "chunks/region/active-regions.arl",
+                                  "chunks/region/world-manifest.json",
+                                  "chunks/region/plant-entities.json"},
+                                 errors) ||
+            !write() ||
             !Persistence::WorldSaveService::finalize_indexed_envelope(directory, errors) ||
             !transaction.commit(errors))
             return false;

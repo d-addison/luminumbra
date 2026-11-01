@@ -2047,13 +2047,16 @@ std::string GameSession::ComputeChunkStateHash() {
         Persistence::RegionDigestOperation operation(directory, m_regionRequiresIndex);
         for (const auto& [rx, rz] : keys) {
             const RegionKey key{rx, rz};
-            auto inputs = m_worldSystem->region_digest_inputs(rx, rz);
-            inputs.require_index = m_regionRequiresIndex;
             const auto record = m_activeRegionLedger.records().find(key);
-            const auto digest = record != m_activeRegionLedger.records().end() &&
-                                        record->second.state == RegionState::Frozen
-                                    ? record->second.frozen_digest
-                                    : operation.digest(key, inputs);
+            std::uint64_t digest = 0;
+            if (record != m_activeRegionLedger.records().end() &&
+                record->second.state == RegionState::Frozen) {
+                digest = record->second.frozen_digest;
+            } else {
+                auto inputs = m_worldSystem->region_digest_inputs(rx, rz);
+                inputs.require_index = m_regionRequiresIndex;
+                digest = operation.digest(key, inputs);
+            }
             projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
                           std::to_string(digest) + ";";
         }
@@ -2591,6 +2594,11 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         !Filesystem::PathSpellingEqual(source_directory, target_directory) && write_chunks &&
         !prepared_chunks.prepare(state, save_dir, false, &errors))
         return false;
+    if (prepared_energy.has_value()) {
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir);
+            transaction && !transaction->protect({"aether_state.efs"}, &errors))
+            return false;
+    }
     bool ok = true;
     if (write_chunks)
         ok = prepared_chunks.publish(&errors);

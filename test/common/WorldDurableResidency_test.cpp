@@ -616,6 +616,12 @@ TEST(WorldDurableResidency, DurableSchedulerPrefixRespectsZeroAndPartialHeadroom
             },
             [](const std::string&) { ADD_FAILURE() << "unexpected durable read failure"; });
         fx.world->update(fx.session->GetRegistry(), {Vec3(0, 8, 0)}, nullptr);
+        const auto interval = fx.world->get_last_streaming_budget_stats().update_interval_frames;
+        // Admission is measured on the scheduled activation pass, not an intervening frame.
+        for (int frame = 1; frame < interval &&
+                            fx.world->get_last_streaming_budget_stats().generation_candidates == 0;
+             ++frame)
+            fx.world->update(fx.session->GetRegistry(), {Vec3(0, 8, 0)}, nullptr);
         const auto& stats = fx.world->get_last_streaming_budget_stats();
         ASSERT_GT(static_cast<std::size_t>(stats.generation_budget), headroom);
         ASSERT_GT(stats.generation_candidates, headroom);

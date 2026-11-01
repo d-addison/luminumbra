@@ -80,7 +80,7 @@ struct SnapshotIndex {
 };
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
-inline constexpr const char* kJournalSchema = "luminumbra.journal.v3";
+inline constexpr const char* kJournalSchema = "luminumbra.journal.v4";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
@@ -233,6 +233,7 @@ private:
         std::string undo_temporary;
         std::string incoming_temporary;
         std::string restored_temporary;
+        std::size_t rollback_reserve = 0;
         std::shared_ptr<const void> previous_retention;
         std::shared_ptr<const void> installed_retention;
         std::shared_ptr<const void> incoming_retention;
@@ -250,6 +251,7 @@ private:
     std::uint64_t m_txn_id = 0;
     std::uint64_t m_new_generation = 0;
     std::vector<Entry> m_entries;
+    std::size_t m_rollback_reserve = 0;
     std::unordered_set<std::string> m_protected;
     std::unordered_map<std::string, std::size_t> m_entry_indices;
     std::vector<std::size_t> m_changed_entries;
