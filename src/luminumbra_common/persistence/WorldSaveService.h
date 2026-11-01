@@ -428,6 +428,8 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+    // Number of lod-0 chunk record payload decodes since process start.
+    static std::uint64_t chunk_record_decode_count_for_testing();
 
     // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
     // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0

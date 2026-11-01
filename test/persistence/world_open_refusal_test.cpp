@@ -2382,6 +2382,42 @@ INSTANTIATE_TEST_SUITE_P(RegionModesWritersAndSavePaths,
                          CompleteSaveFailure,
                          testing::Combine(testing::Values(0, 1, 2), testing::Range(0, 14)));
 
+TEST_F(WorldOpenRefusal, FailedScheduledAutosaveRetriesAfterFixedTickBackoff) {
+    constexpr std::uint64_t kInterval = 100;
+    static_assert(Server::kAutosaveRetryTicks > 1 && Server::kAutosaveRetryTicks < kInterval);
+    auto config = SnapshotRunnerConfig(RootString(), true);
+    config.autosave_interval_ticks = kInterval;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, true));
+    auto* session = runner.Session();
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+    const auto save_dir = session->GetWorldSaveDir();
+    const double dt = session->GetSimulationClock().fixed_dt();
+    while ((session->GetSimulationTickCount() + 1) % kInterval != 0)
+        ASSERT_EQ(session->TickSimulation(dt), 1u);
+    const std::uint64_t boundary = session->GetSimulationTickCount() + 1;
+
+    SiblingWriteFailure failure;
+    ASSERT_NO_FATAL_FAILURE(failure.Arm(save_dir, true));
+    auto tick_report = runner.RunFixedTicks(1);
+    EXPECT_TRUE(failure.reached());
+    failure.Reset();
+    EXPECT_EQ(tick_report.autosave_passes, 0u);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+
+    tick_report = runner.RunFixedTicks(Server::kAutosaveRetryTicks - 1);
+    EXPECT_EQ(tick_report.autosave_passes, 0u);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    tick_report = runner.RunFixedTicks(1);
+    EXPECT_EQ(tick_report.autosave_passes, 1u);
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(Persistence::InspectSavedWorld(root, session->GetMetadata().worldId).clock.tick(),
+              boundary + Server::kAutosaveRetryTicks);
+    EXPECT_TRUE(WorldSaveService::validate_save(save_dir));
+    runner.Shutdown();
+}
+
 TEST_F(WorldOpenRefusal, IndexedFlagOffFinalMetadataFailureRollsBackEnergyAndEmptyPlants) {
     for (const bool remove_energy : {false, true}) {
         SCOPED_TRACE(remove_energy);

@@ -29,6 +29,8 @@
 namespace Luminumbra::Server {
 
 inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
+// A failed scheduled autosave is retried after this many ticks, not at the next interval.
+inline constexpr std::uint64_t kAutosaveRetryTicks = 30;
 
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
@@ -304,6 +306,8 @@ private:
     std::string ComputeAvailabilityDigest();
     bool m_booted = false;
     bool m_shutdown = false;
+    // Ticks until a failed scheduled autosave is retried; 0 when none is pending.
+    std::uint64_t m_autosave_retry_countdown = 0;
     BootSettleStats m_boot_settle; //  settle-exit stats (see getter)
 };
 

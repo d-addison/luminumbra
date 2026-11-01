@@ -5837,6 +5837,90 @@ TEST(GameSessionHeadlessWorldTest, SnapshotSaveDecodesTheWorldAtMostOnce) {
     EXPECT_LE(after - before, std::uint64_t{1});
 }
 
+TEST(GameSessionHeadlessWorldTest, UnchangedSnapshotSaveDoesNotReparseCommittedChunkRecords) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Admitted records", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    ASSERT_FALSE(chunk->is_voxel_data_dirty());
+    // Validation still reads and digests every member file; only the payload
+    // parse of record bytes already admitted is not repeated.
+    const auto before = P::WorldSaveService::chunk_record_decode_count_for_testing();
+    ASSERT_TRUE(owner.SaveWorldState());
+    EXPECT_EQ(P::WorldSaveService::chunk_record_decode_count_for_testing(), before);
+    const auto restored = P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), {0, 0, 0}, true);
+    ASSERT_EQ(restored.status, P::WorldSaveService::ChunkReadStatus::Found);
+    EXPECT_GT(P::WorldSaveService::chunk_record_decode_count_for_testing(), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, LegacyEvolvedWaterOnGeneratedChunkSurvivesRegionsUpgrade) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    owner.SetActiveRegionsEnabled(false);
+    owner.SetRootPath(root.root_string());
+    owner.SetJobSystem(&jobs);
+    owner.SetWaterHighResEnabled(false);
+    ASSERT_TRUE(owner.CreateWorld("Legacy water", "1337", "default"));
+    const Luminumbra::IVec3 distant(1280, 0, -1280);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(distant);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->water_depth_mm.assign(64, 123);
+    chunk->water_bed_mm.assign(64, 0);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->has_water_sim.store(true);
+    chunk->mark_water_state_dirty();
+    chunk->mark_dirty_for_save();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto worldId = owner.GetMetadata().worldId;
+    ASSERT_FALSE(P::snapshot_index_exists(save));
+    const auto evolved = chunk->water_depth_mm;
+    {
+        // The legacy record carries the water but not the edited flag.
+        Luminumbra::WorldStreamingState state;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::WorldSaveService{}.load_world(state, save, errors));
+        const auto legacy = state.find_chunk(distant);
+        ASSERT_NE(legacy, nullptr);
+        EXPECT_EQ(legacy->sdf_provenance(), Luminumbra::ChunkSdfProvenance::GeneratedCurrentParams);
+        EXPECT_FALSE(legacy->has_water_authority());
+        EXPECT_EQ(legacy->water_depth_mm, evolved);
+    }
+    GameSession upgraded;
+    EnableSnapshotSession(upgraded, root, jobs);
+    ASSERT_TRUE(upgraded.LoadWorld(worldId));
+    const auto adopted = upgraded.GetWorldSystem()->find_streamed_chunk(distant);
+    ASSERT_NE(adopted, nullptr);
+    EXPECT_TRUE(adopted->has_water_authority());
+    EXPECT_EQ(adopted->water_depth_mm, evolved);
+    ASSERT_TRUE(upgraded.SaveWorldState());
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    const auto indexed = P::WorldSaveService::read_chunk(save, distant, true);
+    ASSERT_EQ(indexed.status, P::WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(indexed.chunk, nullptr);
+    EXPECT_TRUE(indexed.chunk->has_water_authority());
+    EXPECT_EQ(indexed.chunk->water_depth_mm, evolved);
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(worldId));
+    ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk(distant));
+    const auto restored = reopened.GetWorldSystem()->find_streamed_chunk(distant);
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->has_water_authority());
+    EXPECT_EQ(restored->water_depth_mm, evolved);
+}
+
 TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAndFaultsOnLoss) {
     const HeadlessRoot root;
     JobSystem jobs;

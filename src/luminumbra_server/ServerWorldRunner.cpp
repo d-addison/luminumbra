@@ -785,15 +785,24 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             m_session->ActiveRegionsEnabled()) {
             autosave_interval = kDefaultActiveRegionsAutosaveTicks;
         }
-        if (autosave_interval > 0 && simulation_tick > 0 &&
-            (simulation_tick % autosave_interval) == 0) {
+        bool autosave_due = autosave_interval > 0 && simulation_tick > 0 &&
+                            (simulation_tick % autosave_interval) == 0;
+        if (m_autosave_retry_countdown > 0) {
+            m_autosave_retry_countdown -= 1;
+            if (m_autosave_retry_countdown == 0)
+                autosave_due = autosave_interval > 0;
+        }
+        if (autosave_due) {
             // Synchronous host-thread save. Snapshot/shutdown run between RunFixedTicks calls.
             world::WorldStateSaveReport save_report;
             if (m_session->SaveWorldState(&save_report)) {
+                m_autosave_retry_countdown = 0;
                 report.autosave_passes += 1;
                 if (save_report.saved && save_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
                 }
+            } else {
+                m_autosave_retry_countdown = kAutosaveRetryTicks;
             }
         }
 
@@ -801,6 +810,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         if (m_session->PersistenceSaveRequested()) {
             world::WorldStateSaveReport pressure_report;
             if (m_session->SaveWorldState(&pressure_report)) {
+                m_autosave_retry_countdown = 0;
                 report.autosave_passes += 1;
                 if (pressure_report.saved && pressure_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;

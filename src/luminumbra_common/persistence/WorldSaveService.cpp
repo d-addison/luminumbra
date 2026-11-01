@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -56,6 +57,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -2482,9 +2484,15 @@ std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk) {
     return SerializeWorldStreamingStateSnapshotJson(single);
 }
 
+std::atomic<std::uint64_t>& ChunkRecordDecodeCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
                                          std::vector<std::string>* errors) {
+    ChunkRecordDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -2522,6 +2530,171 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
         chunks.front()->mark_sdf_generated_current_params();
     }
     return chunks.front();
+}
+
+constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+
+void Sha256Compress(std::array<std::uint32_t, 8>& state,
+                    const std::array<unsigned char, 64>& block) {
+    std::array<std::uint32_t, 64> words{};
+    for (std::size_t i = 0; i < 16; ++i)
+        for (std::size_t byte = 0; byte < 4; ++byte)
+            words[i] = (words[i] << 8) | block[i * 4 + byte];
+    for (std::size_t i = 16; i < words.size(); ++i) {
+        const auto x = words[i - 15], y = words[i - 2];
+        words[i] = words[i - 16] + (std::rotr(x, 7) ^ std::rotr(x, 18) ^ (x >> 3)) + words[i - 7] +
+                   (std::rotr(y, 17) ^ std::rotr(y, 19) ^ (y >> 10));
+    }
+    auto work = state;
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        const auto a = work[0], b = work[1], c = work[2], e = work[4], f = work[5], g = work[6];
+        const auto first = work[7] + (std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25)) +
+                           ((e & f) ^ (~e & g)) + kSha256RoundConstants[i] + words[i];
+        const auto second =
+            (std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        for (std::size_t j = 7; j > 0; --j)
+            work[j] = work[j - 1];
+        work[4] += first;
+        work[0] = first + second;
+    }
+    for (std::size_t i = 0; i < state.size(); ++i)
+        state[i] += work[i];
+}
+
+std::array<std::uint32_t, 8> Sha256(std::string_view bytes) {
+    std::array<std::uint32_t, 8> state = {0x6a09e667,
+                                          0xbb67ae85,
+                                          0x3c6ef372,
+                                          0xa54ff53a,
+                                          0x510e527f,
+                                          0x9b05688c,
+                                          0x1f83d9ab,
+                                          0x5be0cd19};
+    std::array<unsigned char, 64> block{};
+    const auto bit_count = static_cast<std::uint64_t>(bytes.size()) * 8;
+    while (bytes.size() >= block.size()) {
+        std::copy_n(bytes.begin(), block.size(), block.begin());
+        Sha256Compress(state, block);
+        bytes.remove_prefix(block.size());
+    }
+    block.fill(0);
+    std::copy(bytes.begin(), bytes.end(), block.begin());
+    block[bytes.size()] = 0x80;
+    if (bytes.size() >= 56) {
+        Sha256Compress(state, block);
+        block.fill(0);
+    }
+    for (std::size_t i = 0; i < 8; ++i)
+        block[63 - i] = static_cast<unsigned char>(bit_count >> (i * 8));
+    Sha256Compress(state, block);
+    return state;
+}
+
+// What admission of one lod-0 record established. DecodeChunkRecord is a pure
+// function of the record header and payload bytes, so these facts hold for any
+// later record with the same header and payload digest.
+struct ChunkRecordFacts {
+    IVec3 coords{0};
+    bool lattice_ok = false;
+    bool loaded_or_edited = false;
+};
+
+struct ChunkRecordKey {
+    std::uint64_t id = 0;
+    std::uint8_t lod_level = 0;
+    std::uint8_t flags = 0;
+    std::uint32_t uncompressed_size = 0;
+    std::array<std::uint32_t, 8> payload_sha256{};
+    friend bool operator==(const ChunkRecordKey&, const ChunkRecordKey&) = default;
+};
+
+struct ChunkRecordKeyHash {
+    std::size_t operator()(const ChunkRecordKey& key) const noexcept {
+        return static_cast<std::size_t>(
+            ((static_cast<std::uint64_t>(key.payload_sha256[0]) << 32) | key.payload_sha256[1]) ^
+            key.id);
+    }
+};
+
+class AdmittedChunkRecords {
+public:
+    std::optional<ChunkRecordFacts> find(const ChunkRecordKey& key) {
+        const std::lock_guard lock(m_mutex);
+        const auto found = m_facts.find(key);
+        if (found == m_facts.end())
+            return std::nullopt;
+        return found->second;
+    }
+    void remember(const ChunkRecordKey& key, const ChunkRecordFacts& facts) {
+        const std::lock_guard lock(m_mutex);
+        if (m_facts.size() >= kMaxRecords)
+            m_facts.clear();
+        m_facts.insert_or_assign(key, facts);
+    }
+
+private:
+    static constexpr std::size_t kMaxRecords = 65536;
+    std::mutex m_mutex;
+    std::unordered_map<ChunkRecordKey, ChunkRecordFacts, ChunkRecordKeyHash> m_facts;
+};
+
+AdmittedChunkRecords& AdmittedChunkRecordCache() {
+    static AdmittedChunkRecords cache;
+    return cache;
+}
+
+// Admits one lod-0 record. Callers that keep the chunk get a fresh decode;
+// otherwise a record whose exact bytes were admitted before is not re-parsed.
+bool AdmitChunkRecord(const RegionRecord& record,
+                      const std::filesystem::path& path,
+                      std::vector<std::string>* errors,
+                      ChunkRecordFacts& facts,
+                      std::shared_ptr<Chunk>* decoded) {
+    const ChunkRecordKey key{record.id,
+                             record.lod_level,
+                             record.flags,
+                             record.uncompressed_size,
+                             Sha256(record.compressed_payload)};
+    if (!decoded) {
+        if (const auto admitted = AdmittedChunkRecordCache().find(key)) {
+            facts = *admitted;
+            return true;
+        }
+    }
+    auto chunk = DecodeChunkRecord(record, path, errors);
+    if (!chunk)
+        return false;
+    constexpr std::size_t kLattice =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    facts = ChunkRecordFacts{chunk->get_coords(),
+                             chunk->sdf_data.empty() || chunk->sdf_data.size() == kLattice,
+                             chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited};
+    AdmittedChunkRecordCache().remember(key, facts);
+    if (decoded)
+        *decoded = std::move(chunk);
+    return true;
+}
+
+// Legacy containers predate water authority, so evolved water on a generated
+// chunk was saved without the edited flag. Keep that water instead of
+// regenerating it; the chunk stays save-dirty until an indexed save records it.
+bool PromoteLegacyWaterRecord(Chunk& chunk, const RegionRecord& record) {
+    if ((record.flags & kRecordFlagEdited) != 0u || chunk.has_water_authority())
+        return false;
+    if ((record.flags & kRecordFlagWaterPresent) == 0u &&
+        !chunk.has_water_sim.load(std::memory_order_acquire))
+        return false;
+    chunk.set_water_authority();
+    chunk.mark_sdf_generated_current_params();
+    return true;
 }
 
 std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
@@ -4261,6 +4434,10 @@ std::uint64_t WorldSaveService::decode_count_for_testing() {
     return DecodeCounter().load(std::memory_order_acquire);
 }
 
+std::uint64_t WorldSaveService::chunk_record_decode_count_for_testing() {
+    return ChunkRecordDecodeCounter().load(std::memory_order_acquire);
+}
+
 bool WorldSaveService::durable_flush_directory(const std::filesystem::path& directory,
                                                std::vector<std::string>* errors) {
 #if defined(_WIN32)
@@ -4702,20 +4879,18 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
             for (const RegionRecord& record : records) {
                 if (record.lod_level == 0) {
-                    const auto chunk = DecodeChunkRecord(record, path, &diagnostics);
-                    if (!chunk) {
+                    ChunkRecordFacts facts;
+                    if (!AdmitChunkRecord(record, path, &diagnostics, facts, nullptr)) {
                         error = first_error("corrupt chunk record");
                         return false;
                     }
-                    constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                     (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-                    if (!chunk->sdf_data.empty() && chunk->sdf_data.size() != kLattice) {
+                    if (!facts.lattice_ok) {
                         error = "corrupt world chunk SDF lattice";
                         return false;
                     }
                     int chunk_rx = 0;
                     int chunk_rz = 0;
-                    region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
+                    region_coords_for_chunk(facts.coords, chunk_rx, chunk_rz);
                     if (chunk_rx != rx || chunk_rz != rz) {
                         error = "corrupt chunk region identity";
                         return false;
@@ -5194,6 +5369,8 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
                 (!result.chunk->sdf_data.empty() && result.chunk->sdf_data.size() != kLattice))
                 return fail(errors.empty() ? "corrupt exact chunk identity or SDF lattice"
                                            : errors.front());
+            if (!format.indexed)
+                PromoteLegacyWaterRecord(*result.chunk, record);
             result.chunk->normalize_for_park();
             result.status = ChunkReadStatus::Found;
             return result;
@@ -5387,6 +5564,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         }
         std::map<std::string, MemberDigest> region_digests;
         std::set<ChunkID> decoded_ids;
+        const bool promote_legacy_water = !indexed && authoritative_inventory != nullptr;
         std::sort(region_files.begin(), region_files.end());
         for (const auto& path : region_files) {
             if (stop.stop_requested())
@@ -5407,26 +5585,33 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (stop.stop_requested())
                     return reject("Saved-world validation cancelled.");
                 if (record.lod_level == 0) {
-                    const auto chunk = DecodeChunkRecord(record, path, &errors);
-                    if (!chunk)
+                    // A decoded record carries its own id (DecodeChunkRecord checks it).
+                    const bool retain = !retain_chunks || retain_chunks->contains(record.id);
+                    std::shared_ptr<Chunk> chunk;
+                    ChunkRecordFacts facts;
+                    if (!AdmitChunkRecord(record,
+                                          path,
+                                          &errors,
+                                          facts,
+                                          retain || promote_legacy_water ? &chunk : nullptr))
                         return reject("");
-                    constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                     (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-                    if ((indexed || authoritative_inventory) && !chunk->sdf_data.empty() &&
-                        chunk->sdf_data.size() != kLattice)
+                    // Promoted chunks are adopted so the upgrade save records their authority.
+                    const bool promoted =
+                        promote_legacy_water && PromoteLegacyWaterRecord(*chunk, record);
+                    if (promoted)
+                        facts.loaded_or_edited = true;
+                    if ((indexed || authoritative_inventory) && !facts.lattice_ok)
                         return reject("corrupt world chunk SDF lattice");
                     int chunk_rx = 0, chunk_rz = 0;
-                    region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
-                    if (chunk_rx != rx || chunk_rz != rz ||
-                        !decoded_ids.insert(chunk->get_id()).second)
+                    region_coords_for_chunk(facts.coords, chunk_rx, chunk_rz);
+                    if (chunk_rx != rx || chunk_rz != rz || !decoded_ids.insert(record.id).second)
                         return reject("corrupt chunk region identity or duplicate id: " +
                                       Filesystem::GenericUtf8PathString(path));
-                    if (authoritative_inventory &&
-                        chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
-                        authoritative_inventory->push_back(chunk->get_coords());
+                    if (authoritative_inventory && facts.loaded_or_edited)
+                        authoritative_inventory->push_back(facts.coords);
                     if (decoded_chunk_count)
                         ++*decoded_chunk_count;
-                    if (!retain_chunks || retain_chunks->contains(chunk->get_id()))
+                    if (retain || promoted)
                         state.insert_chunk(chunk);
                 } else {
                     const auto tier = static_cast<World::FarLodTier>(record.lod_level);
