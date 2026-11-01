@@ -206,7 +206,7 @@ std::vector<Vec2> Vec2ArrayFromJson(const nlohmann::json& values) {
 }
 
 nlohmann::json WaterStateToJson(const Chunk& chunk) {
-    return nlohmann::json{
+    nlohmann::json state{
         {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
         {"water_mesh_generated", chunk.water_mesh_generated.load(std::memory_order_acquire)},
         {"current_water_resolution",
@@ -215,6 +215,11 @@ nlohmann::json WaterStateToJson(const Chunk& chunk) {
         {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
         {"ticks_below_threshold", chunk.ticks_below_threshold},
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks}};
+    // Only indexed water authority needs this distinction. Legacy snapshots keep
+    // their exact encoding, including the absence of this field.
+    if (chunk.has_water_authority())
+        state["terrain_authoritative"] = chunk.has_terrain_authority();
+    return state;
 }
 
 nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
@@ -397,6 +402,15 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     // A raw snapshot is loaded authority. Region containers subsequently restore their
     // explicit edited flag, allowing pristine cache records to remain regenerable.
     chunk.mark_sdf_loaded_or_edited();
+    if (water_state.contains("terrain_authoritative")) {
+        if (!water_state.at("terrain_authoritative").is_boolean())
+            throw std::invalid_argument("Water terrain authority must be a boolean");
+        chunk.set_water_authority();
+        if (!water_state.at("terrain_authoritative").get<bool>()) {
+            chunk.mark_sdf_generated_current_params();
+            chunk.clear_voxel_data_dirty();
+        }
+    }
 }
 
 std::string StableDump(const nlohmann::json& value) {
@@ -650,6 +664,10 @@ void ValidateWaterStateObject(const nlohmann::json& chunk, std::vector<std::stri
     }
 
     const nlohmann::json& water_state = chunk.at("water_state");
+    if (water_state.contains("terrain_authoritative") &&
+        !water_state.at("terrain_authoritative").is_boolean()) {
+        errors.push_back("water_state.terrain_authoritative must be a boolean");
+    }
     for (const char* field : {"has_water_sim", "water_mesh_generated", "is_water_sleeping"}) {
         if (!water_state.contains(field) || !water_state.at(field).is_boolean()) {
             errors.push_back(std::string("water_state.") + field + " must be a boolean");
@@ -992,9 +1010,15 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
         contents.push_back(
             {{"chunk_id", chunk->get_id()},
              {"coords", IVec3ToJson(chunk->get_coords())},
-             {"sdf_data", chunk->sdf_data},
-             {"heightmap_data", chunk->heightmap_data},
-             {"material_data", chunk->material_data},
+             {"sdf_data",
+              chunk->has_terrain_authority() ? nlohmann::json(chunk->sdf_data)
+                                             : nlohmann::json::array()},
+             {"heightmap_data",
+              chunk->has_terrain_authority() ? nlohmann::json(chunk->heightmap_data)
+                                             : nlohmann::json::array()},
+             {"material_data",
+              chunk->has_terrain_authority() ? nlohmann::json(chunk->material_data)
+                                             : nlohmann::json::array()},
              {"water_depth_mm", chunk->water_depth_mm},
              {"water_bed_mm", chunk->water_bed_mm},
              {"water_edge_flux", chunk->water_edge_flux},

@@ -30,6 +30,7 @@ namespace Luminumbra::Persistence {
 
 class CreatedWorldArtifacts;
 class TransactionOwnership;
+struct BoundPublicationStage;
 
 namespace detail {
 // Indexed publication excludes readers until commit/rollback. Reentrant reads and
@@ -79,7 +80,7 @@ struct SnapshotIndex {
 };
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
-inline constexpr const char* kJournalSchema = "luminumbra.journal.v2";
+inline constexpr const char* kJournalSchema = "luminumbra.journal.v3";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
@@ -180,6 +181,9 @@ public:
     static bool publication_identity(const std::filesystem::path& destination,
                                      std::array<std::uint64_t, 3>& expected,
                                      std::array<std::uint64_t, 3>& incoming);
+    static bool publication_stages(const std::filesystem::path& destination,
+                                   BoundPublicationStage& source,
+                                   BoundPublicationStage& retired);
     static bool check_publication_target(const std::filesystem::path& destination,
                                          std::vector<std::string>* errors);
     // Commits: validates and re-hashes every protected member via digest_fn, publishes the new
@@ -225,9 +229,13 @@ private:
         std::array<std::uint64_t, 3> incoming_identity{};
         std::array<std::uint64_t, 3> restored_identity{};
         std::array<std::uint64_t, 3> undo_identity{};
+        std::array<std::uint64_t, 3> rollback_retired_identity{};
         std::string undo_temporary;
         std::string incoming_temporary;
         std::string restored_temporary;
+        std::shared_ptr<const void> previous_retention;
+        std::shared_ptr<const void> installed_retention;
+        std::shared_ptr<const void> incoming_retention;
     };
     bool write_journal(std::vector<std::string>* errors);
 
@@ -255,7 +263,8 @@ private:
 
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",
 // "after-retire", "after-replace", "before-delete", "after-delete", "commit-point",
-// "journal-unlinked", "before-rollback", "rollback-entry").
+// "journal-unlinked", "before-rollback", "rollback-entry", "publication-quarantined",
+// "retirement-quarantined").
 using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
 void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
 void report_snapshot_step(const char* step, const std::filesystem::path& path);

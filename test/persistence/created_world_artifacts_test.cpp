@@ -1791,6 +1791,46 @@ TEST_F(CreatedWorldCleanup, ExclusiveFilePublicationMovesBytesAndRetainsRollback
     }
 }
 
+#if !defined(_WIN32)
+TEST_F(CreatedWorldCleanup, BoundPublicationStageRefusesInvalidNamesAndDirectoryIdentities) {
+    const auto source = Root() / "source";
+    const auto destination = Root() / "destination";
+    const auto slots = Root() / "slots";
+    ASSERT_TRUE(std::filesystem::create_directory(slots));
+    Write(source, "owned");
+    Write(slots / "occupied", "foreign");
+    struct stat info {};
+    ASSERT_EQ(::stat(slots.c_str(), &info), 0);
+    const std::array<std::uint64_t, 3> identity{
+        static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino), 0};
+    const int descriptor = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+    ASSERT_GE(descriptor, 0);
+    for (const auto* name : {"", ".", "..", "../escape", "nested/name", "occupied"}) {
+        SCOPED_TRACE(name);
+        const Luminumbra::Persistence::BoundPublicationStage stage{
+            .directory = slots, .name = name, .directory_identity = identity, .report = nullptr};
+        EXPECT_THROW(
+            CreatedWorldArtifacts::publish_bound_file(source, destination, descriptor, &stage),
+            std::runtime_error);
+        EXPECT_EQ(Read(source), "owned");
+        EXPECT_FALSE(std::filesystem::exists(destination));
+        EXPECT_EQ(Read(slots / "occupied"), "foreign");
+    }
+    for (const auto& directory : {slots, source, Root() / "absent"}) {
+        const Luminumbra::Persistence::BoundPublicationStage stage{.directory = directory,
+                                                                   .name = "incoming",
+                                                                   .directory_identity = {},
+                                                                   .report = nullptr};
+        EXPECT_THROW(
+            CreatedWorldArtifacts::publish_bound_file(source, destination, descriptor, &stage),
+            std::runtime_error);
+        EXPECT_EQ(Read(source), "owned");
+        EXPECT_FALSE(std::filesystem::exists(destination));
+    }
+    EXPECT_EQ(::close(descriptor), 0);
+}
+#endif
+
 TEST_F(CreatedWorldCleanup, FileAppearingAfterPublicationValidationIsNeverOverwritten) {
     CreatedWorldArtifacts artifacts;
     const auto save = Root() / "created-world";

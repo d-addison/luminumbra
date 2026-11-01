@@ -1002,9 +1002,7 @@ public:
         std::size_t blocked_dirty = 0; // dirty authoritative chunks kept resident by the byte limit
         bool save_requested = false;
     };
-    void set_durable_residency(bool on) {
-        m_durable_residency = on;
-    }
+    void set_durable_residency(bool on);
     bool durable_residency() const {
         return m_durable_residency;
     }
@@ -1050,6 +1048,13 @@ public:
     // Const deterministic work diagnostic: number of regional input entries copied.
     u64 region_digest_input_items() const {
         return m_region_digest_input_items;
+    }
+    u64 region_digest_membership_updates() const {
+        return m_digest_membership_revision;
+    }
+    // Cumulative queued inputs visited by water authority synchronization.
+    u64 water_authority_input_items() const {
+        return m_water_authority_input_items;
     }
 
     bool restore_authoritative_chunk(const IVec3& coords);
@@ -1202,6 +1207,9 @@ private:
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
+    std::shared_ptr<ChunkWaterChanges> m_water_changes = std::make_shared<ChunkWaterChanges>();
+    std::vector<ChunkID> m_pending_water_changes;
+    u64 m_water_authority_input_items = 0;
     std::size_t m_parked_bytes_limit = static_cast<std::size_t>(256) * 1024u * 1024u;
     bool m_persistence_save_requested = false;
     std::int64_t m_persistence_tick = -1;

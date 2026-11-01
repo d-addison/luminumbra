@@ -4049,14 +4049,16 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         for (std::size_t i = 0; i < generation_limit && candidate != to_create.end();
              ++i, ++candidate)
             prefix.push_back(*candidate);
+        std::size_t restored = 0;
         for (const auto& item : prefix) {
+            if (restored + generate_now.size() >= headroom)
+                break;
             if (m_durable_residency && restore_authoritative_chunk(item.coords)) {
                 if (m_durable_read_failed)
                     return false;
+                ++restored;
                 continue;
             }
-            if (generate_now.size() >= headroom)
-                break;
             generate_now.push_back({item.coords, generation_step(item.coords)});
             if (item.surface)
                 ++m_last_streaming_budget_stats.surface_generation_scheduled;
@@ -6348,6 +6350,17 @@ void SHIELD_WorldSystem::set_seed(int seed) {
 void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     wait_for_streaming_jobs();
 
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        chunk->bind_water_changes(nullptr);
+    }
+    for (const auto& [id, parked] : m_parked) {
+        (void)id;
+        parked.chunk->bind_water_changes(nullptr);
+    }
+    m_water_changes->take(m_pending_water_changes);
+    m_pending_water_changes.clear();
+
     if (physics_system) {
         for (const auto& [id, chunk] : m_streaming_state.chunks) {
             physics_system->remove_chunk_collision(id);
@@ -6714,11 +6727,44 @@ u64 SHIELD_WorldSystem::digest_region_id(i32 rx, i32 rz) {
     return (static_cast<u64>(static_cast<u32>(rx)) << 32u) | static_cast<u32>(rz);
 }
 
+void SHIELD_WorldSystem::set_durable_residency(bool on) {
+    if (m_durable_residency == on)
+        return;
+    wait_for_streaming_jobs();
+    m_durable_residency = on;
+    m_digest_members.clear();
+    ++m_digest_membership_revision;
+    // A mode transition inventories each existing item once. Ordinary flag-off
+    // streaming never allocates or maintains the regional membership index.
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        chunk->bind_water_changes(on ? m_water_changes : nullptr);
+        note_digest_chunk(chunk, false, true);
+    }
+    for (const auto& [id, parked] : m_parked) {
+        (void)id;
+        parked.chunk->bind_water_changes(on ? m_water_changes : nullptr);
+        note_digest_chunk(parked.chunk, true, true);
+    }
+    if (!on) {
+        m_water_changes->take(m_pending_water_changes);
+        m_pending_water_changes.clear();
+        return;
+    }
+    for (const auto& [id, coords] : m_durable_chunks) {
+        int rx = 0, rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+        m_digest_members[digest_region_id(rx, rz)].durable.emplace(id, coords);
+    }
+}
+
 void SHIELD_WorldSystem::note_digest_chunk(const std::shared_ptr<Chunk>& chunk,
                                            bool parked,
                                            bool present) {
-    if (!chunk)
+    if (!m_durable_residency || !chunk)
         return;
+    if (present)
+        chunk->bind_water_changes(m_water_changes);
     int rx = 0, rz = 0;
     Persistence::WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
     const auto key = digest_region_id(rx, rz);
@@ -6726,13 +6772,24 @@ void SHIELD_WorldSystem::note_digest_chunk(const std::shared_ptr<Chunk>& chunk,
     if (present) {
         auto& members = m_digest_members[key];
         auto& chunks = parked ? members.parked : members.live;
+        const auto existing = chunks.find(chunk->get_id());
+        if (existing != chunks.end() && existing->second == chunk)
+            return;
         chunks.insert_or_assign(chunk->get_id(), chunk);
     } else if (region != m_digest_members.end()) {
         auto& chunks = parked ? region->second.parked : region->second.live;
-        chunks.erase(chunk->get_id());
+        if (chunks.erase(chunk->get_id()) == 0)
+            return;
+        const auto live = region->second.live.find(chunk->get_id());
+        const auto parked_chunk = region->second.parked.find(chunk->get_id());
+        if ((live == region->second.live.end() || live->second != chunk) &&
+            (parked_chunk == region->second.parked.end() || parked_chunk->second != chunk))
+            chunk->bind_water_changes(nullptr);
         if (region->second.live.empty() && region->second.parked.empty() &&
             region->second.durable.empty())
             m_digest_members.erase(region);
+    } else {
+        return;
     }
     ++m_digest_membership_revision;
 }
@@ -6796,7 +6853,8 @@ std::vector<std::pair<i32, i32>> SHIELD_WorldSystem::authority_region_keys() con
 void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coords) {
     for (const auto& coord : coords) {
         const auto id = Chunk::calculate_id(coord);
-        m_durable_chunks.insert_or_assign(id, coord);
+        if (!m_durable_chunks.emplace(id, coord).second || !m_durable_residency)
+            continue;
         int rx = 0, rz = 0;
         Persistence::WorldSaveService::region_coords_for_chunk(coord, rx, rz);
         m_digest_members[digest_region_id(rx, rz)].durable.insert_or_assign(id, coord);
@@ -6887,9 +6945,9 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
     }
     std::shared_ptr<Luminumbra::Chunk> chunk = std::move(it->second.chunk);
     m_parked_bytes = m_parked_bytes >= it->second.bytes ? m_parked_bytes - it->second.bytes : 0u;
-    note_digest_chunk(chunk, true, false);
-    m_parked.erase(it);
     if (m_streaming_state.chunks.find(id) != m_streaming_state.chunks.end()) {
+        note_digest_chunk(chunk, true, false);
+        m_parked.erase(it);
         LUMINUMBRA_CORE_ERROR("unpark_chunk: id {} is both parked and resident; keeping resident",
                               id);
         return true;
@@ -6899,33 +6957,41 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
         chunk->set_state(Luminumbra::ChunkState::Idle);
         m_activation_index.insert(chunk);
         note_digest_chunk(chunk, false, true);
-        m_streaming_state.chunks.emplace(id, std::move(chunk));
+        m_streaming_state.chunks.emplace(id, chunk);
         ++m_dirty_generation;
     }
+    note_digest_chunk(chunk, true, false);
+    m_parked.erase(it);
     return true;
 }
 
 void SHIELD_WorldSystem::sync_water_authority() {
     const auto promote = [this](const std::shared_ptr<Luminumbra::Chunk>& chunk) {
+        if (chunk)
+            chunk->acknowledge_water_change();
         if (!chunk || !chunk->is_water_state_dirty()) {
             return;
         }
-        chunk->set_water_authority();
         if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited) {
-            chunk->mark_sdf_loaded_or_edited();
             bump_far_lod_authority_revision(chunk->get_coords());
         }
+        chunk->set_water_authority();
         chunk->mark_dirty_for_save();
         chunk->clear_water_state_dirty();
     };
-    for (const auto& [id, chunk] : m_streaming_state.chunks) {
-        (void)id;
-        promote(chunk);
+    m_water_changes->take(m_pending_water_changes);
+    for (const auto id : m_pending_water_changes) {
+        ++m_water_authority_input_items;
+        const auto live = m_streaming_state.chunks.find(id);
+        if (live != m_streaming_state.chunks.end()) {
+            promote(live->second);
+            continue;
+        }
+        const auto parked = m_parked.find(id);
+        if (parked != m_parked.end())
+            promote(parked->second.chunk);
     }
-    for (const auto& [id, parked] : m_parked) {
-        (void)id;
-        promote(parked.chunk);
-    }
+    m_pending_water_changes.clear();
 }
 
 bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::Chunk>& chunk) {
@@ -6955,9 +7021,8 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     }
     if (m_durable_residency && chunk->has_water_sim.load(std::memory_order_acquire) &&
         chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
-        // The water-authority bit is not serialized. A saved authoritative record that carries
-        // water simulation state conservatively stays authoritative so a later terrain backfill
-        // cannot make it regenerable (and evictable) again.
+        // Saved terrain authority that also carries water remains sticky across backfills.
+        // Water-only records already restore their separate authority from water_state.
         chunk->set_water_authority();
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;

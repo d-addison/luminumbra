@@ -2535,8 +2535,8 @@
     {
       "id": "ar.file.091",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, SDF, heightmap, materials, integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state.",
-      "text": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, SDF, heightmap, materials, integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state."
+      "quote": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, authoritative terrain (SDF, heightmap and materials, distinguished from generated terrain by the persisted `terrain_authoritative` boolean in indexed `water_state`), integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state.",
+      "text": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, authoritative terrain (SDF, heightmap and materials, distinguished from generated terrain by the persisted `terrain_authoritative` boolean in indexed `water_state`), integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state."
     },
     {
       "id": "ar.file.092",
@@ -4521,8 +4521,8 @@
     {
       "id": "indexed.persistence.011",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Undo and publication identities are journaled before replacement;",
-      "text": "Undo and publication identities are journaled before replacement;"
+      "quote": "Journal v3 binds undo, publication and quarantine identities before either POSIX move;",
+      "text": "Journal v3 binds undo, publication and quarantine identities before either POSIX move;"
     },
     {
       "id": "indexed.persistence.012",
@@ -4581,8 +4581,8 @@
     {
       "id": "indexed.persistence.021",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read.",
-      "text": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read."
+      "quote": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks.",
+      "text": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks."
     }
   ],
   "exclusions": [

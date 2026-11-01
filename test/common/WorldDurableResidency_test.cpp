@@ -25,6 +25,7 @@
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -243,6 +244,14 @@ TEST(WorldDurableResidency, EditedChunkParksAndReturnsIdentically) {
         EXPECT_FALSE(parked->has_collision.load());
         EXPECT_EQ(parked->current_lod.load(), -1);
     }
+
+    fx.world->sync_water_authority();
+    const auto water_inputs = fx.world->water_authority_input_items();
+    edited->mark_water_state_dirty();
+    ASSERT_TRUE(fx.world->unpark_chunk(edited->get_id()));
+    fx.world->sync_water_authority();
+    EXPECT_EQ(fx.world->water_authority_input_items() - water_inputs, 1u);
+    EXPECT_TRUE(edited->has_water_authority());
 
     fx.Settle(fx.SpawnAnchor(), kReturnIterations);
     EXPECT_EQ(fx.world->find_streamed_chunk(coords), edited);
@@ -515,6 +524,106 @@ TEST(WorldDurableResidency, RegionDigestExcludesWaterMirrorsAndDirtyBookkeeping)
     EXPECT_NE(P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), digest);
 }
 
+TEST(WorldDurableResidency, GeneratedWaterAuthoritySurvivesLodPromotionAndPersistence) {
+    namespace P = Luminumbra::Persistence;
+    const auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    chunk->set_state(ChunkState::Ready);
+    chunk->heightmap_data.assign(17u * 17u, 8.0f);
+    chunk->water_depth_mm = {12};
+    chunk->water_bed_mm = {8000};
+    chunk->water_edge_flux = {0, 0};
+    chunk->mark_sdf_generated_current_params();
+    chunk->set_water_authority();
+    chunk->clear_voxel_data_dirty();
+    Luminumbra::WorldStreamingState state;
+    state.insert_chunk(chunk);
+    const auto hash = P::ComputeRegionContentHash(state);
+    const auto revision = chunk->voxel_revision();
+    chunk->sdf_data.assign(17u * 17u * 17u, 3.0f);
+    chunk->material_data.assign(17u * 17u * 17u, 1u);
+    chunk->mark_sdf_generated_current_params();
+    chunk->clear_voxel_data_dirty_after_generation();
+    EXPECT_GT(chunk->voxel_revision(), revision);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_FALSE(chunk->has_terrain_authority());
+    EXPECT_EQ(P::ComputeRegionContentHash(state), hash);
+    auto bytes = P::SerializeWorldStreamingStateSnapshotJson(state);
+    Luminumbra::WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(bytes, loaded, errors));
+    EXPECT_EQ(P::ComputeRegionContentHash(loaded), hash);
+    const auto restored = loaded.snapshot_chunks().front();
+    EXPECT_TRUE(restored->has_water_authority());
+    EXPECT_FALSE(restored->has_terrain_authority());
+    restored->sdf_data.front() = -2.0f;
+    restored->mark_voxel_data_dirty();
+    EXPECT_NE(P::ComputeRegionContentHash(loaded), hash);
+    auto invalid = nlohmann::json::parse(bytes);
+    invalid["chunks"][0]["water_state"]["terrain_authoritative"] = "unknown";
+    EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(invalid.dump(), loaded, errors));
+}
+
+TEST(WorldDurableResidency, FlagOffMembershipIsInertAndEnablingInventoriesExistingChunksOnce) {
+    DurableFixture fx(/*durable=*/false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    const auto before = fx.world->region_digest_membership_updates();
+    const auto chunk = std::make_shared<Chunk>(IVec3(128, 0, 128));
+    chunk->set_state(ChunkState::Ready);
+    chunk->heightmap_data = {3.0f};
+    ASSERT_TRUE(fx.world->adopt_streamed_chunk(chunk));
+    EXPECT_EQ(fx.world->region_digest_membership_updates(), before);
+    fx.world->set_durable_residency(true);
+    EXPECT_EQ(fx.world->region_digest_inputs(4, 4).live, std::vector{chunk});
+    const auto enabled = fx.world->region_digest_membership_updates();
+    fx.world->set_durable_residency(true);
+    EXPECT_EQ(fx.world->region_digest_membership_updates(), enabled);
+    fx.world->remember_durable_chunks({chunk->get_coords()});
+    const auto remembered = fx.world->region_digest_membership_updates();
+    fx.world->remember_durable_chunks({chunk->get_coords()});
+    EXPECT_EQ(fx.world->region_digest_membership_updates(), remembered);
+    fx.world->set_durable_residency(false);
+    EXPECT_TRUE(fx.world->region_digest_inputs(4, 4).live.empty());
+}
+
+TEST(WorldDurableResidency, DurableSchedulerPrefixRespectsZeroAndPartialHeadroom) {
+    for (const std::size_t headroom : {0u, 1u}) {
+        SCOPED_TRACE(headroom);
+        DurableFixture fx(/*durable=*/true);
+        ASSERT_TRUE(fx.created) << fx.error;
+        fx.world->clear_world(fx.physics);
+        constexpr std::size_t cap = 8192; // Shipping resident admission limit.
+        ASSERT_GT(cap, headroom);
+        for (std::size_t i = 0; i < cap - headroom; ++i) {
+            const auto chunk = std::make_shared<Chunk>(IVec3(1000 + static_cast<int>(i), 0, 0));
+            // Loading placeholders do not schedule meshes or colliders in this admission test.
+            chunk->set_state(ChunkState::Loading);
+            ASSERT_TRUE(fx.world->adopt_streamed_chunk(chunk));
+        }
+        std::vector<IVec3> durable;
+        for (int z = -16; z <= 16; ++z)
+            for (int x = -16; x <= 16; ++x)
+                for (int y = -16; y <= 16; ++y)
+                    durable.emplace_back(x, y, z);
+        fx.world->remember_durable_chunks(durable);
+        std::size_t loads = 0;
+        fx.world->set_durable_chunk_loader(
+            [&](const IVec3& coords) {
+                ++loads;
+                const auto chunk = std::make_shared<Chunk>(coords);
+                chunk->heightmap_data = {8.0f};
+                chunk->mark_sdf_loaded_or_edited();
+                return chunk;
+            },
+            [](const std::string&) { ADD_FAILURE() << "unexpected durable read failure"; });
+        fx.world->update(fx.session->GetRegistry(), {Vec3(0, 8, 0)}, nullptr);
+        const auto& stats = fx.world->get_last_streaming_budget_stats();
+        ASSERT_GT(static_cast<std::size_t>(stats.generation_budget), headroom);
+        ASSERT_GT(stats.generation_candidates, headroom);
+        EXPECT_EQ(loads, headroom);
+        EXPECT_LE(stats.active_chunks_after, cap);
+    }
+}
+
 TEST(WorldDurableResidency, DurableRestorationReplacesOnlyEmptyPlaceholders) {
     for (const bool populated : {false, true}) {
         SCOPED_TRACE(populated);
@@ -713,6 +822,29 @@ TEST(WorldDurableResidency, SyncWaterAuthorityPromotesWaterDirtyChunk) {
     // A backfill must not acknowledge the unsaved water obligation carried by the dirty bit.
     generated->clear_voxel_data_dirty_after_generation();
     EXPECT_TRUE(generated->is_voxel_data_dirty());
+}
+
+TEST(WorldDurableResidency, WaterAuthoritySynchronizationVisitsOnlyDirtyInputs) {
+    DurableFixture fx(/*durable=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.world->sync_water_authority();
+    const auto before = fx.world->water_authority_input_items();
+    const auto chunk = std::make_shared<Chunk>(IVec3(128, 0, 128));
+    chunk->heightmap_data = {3.0f};
+    chunk->mark_water_state_dirty(); // A pre-adoption mutation must also be enrolled.
+    ASSERT_TRUE(fx.world->adopt_streamed_chunk(chunk));
+    for (int i = 0; i < 100; ++i)
+        chunk->mark_water_state_dirty();
+    fx.world->sync_water_authority();
+    EXPECT_EQ(fx.world->water_authority_input_items() - before, 1u);
+    EXPECT_TRUE(chunk->has_water_authority());
+    EXPECT_FALSE(chunk->is_water_state_dirty());
+    fx.world->sync_water_authority();
+    EXPECT_EQ(fx.world->water_authority_input_items() - before, 1u);
+    fx.world->clear_world(fx.physics);
+    chunk->mark_water_state_dirty(); // Detached chunks cannot enqueue work in the old world.
+    fx.world->sync_water_authority();
+    EXPECT_EQ(fx.world->water_authority_input_items() - before, 1u);
 }
 
 TEST(WorldDurableResidency, ChunkNormalizeForParkDropsRenderBuffers) {

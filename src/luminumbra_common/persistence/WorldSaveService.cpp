@@ -220,6 +220,29 @@ SavedInputFile::~SavedInputFile() {
     }
 }
 
+std::shared_ptr<const void> SavedInputFile::retain_identity() const {
+    std::array<std::uint64_t, 3> checked{};
+    if (!identity(checked))
+        return {};
+#if defined(_WIN32)
+    const auto retained = CreatedWorldArtifacts::retain_file_identity(m_handle);
+    return std::shared_ptr<const void>(new HANDLE(retained), [](const void* pointer) {
+        const auto* handle = static_cast<const HANDLE*>(pointer);
+        ::CloseHandle(*handle);
+        delete handle;
+    });
+#else
+    const auto retained = ::fcntl(m_descriptor, F_DUPFD_CLOEXEC, 0);
+    if (retained < 0)
+        return {};
+    return std::shared_ptr<const void>(new int(retained), [](const void* pointer) {
+        const auto* descriptor = static_cast<const int*>(pointer);
+        ::close(*descriptor);
+        delete descriptor;
+    });
+#endif
+}
+
 namespace {
 
 std::shared_mutex& ClockPairPublicationMutex() {
@@ -985,11 +1008,12 @@ public:
         m_artifacts = &artifacts;
     }
 
-    bool remove(unsigned links = 1) {
+    bool remove(unsigned links = 1, const BoundPublicationStage* stage = nullptr) {
         StagingIdentity held{};
         if (!identity(held, false, links) || !matches_name(links))
             return false;
 #if defined(_WIN32)
+        (void)stage;
         // Reopen only for delete access, verify against the retained identity,
         // then disposition targets that handle even if the name is substituted.
         const HANDLE retiring =
@@ -1023,7 +1047,7 @@ public:
         return finished && closed;
 #else
         try {
-            CreatedWorldArtifacts::remove_bound_entry(m_path, m_descriptor, false);
+            CreatedWorldArtifacts::remove_bound_entry(m_path, m_descriptor, false, stage);
             return finish_removal();
         } catch (const std::exception&) {
             return false;
@@ -1031,15 +1055,16 @@ public:
 #endif
     }
 
-    bool publish_bound(const std::filesystem::path& destination) {
+    bool publish_bound(const std::filesystem::path& destination,
+                       const BoundPublicationStage* stage = nullptr) {
         try {
 #if defined(_WIN32)
             // Exclusive publication reopens the named source without delete sharing.
             // Keep only an attributes-only, open-by-ID handle across that reopen.
             retain_publication_identity();
-            CreatedWorldArtifacts::publish_bound_file(m_path, destination, m_handle);
+            CreatedWorldArtifacts::publish_bound_file(m_path, destination, m_handle, stage);
 #else
-            CreatedWorldArtifacts::publish_bound_file(m_path, destination, m_descriptor);
+            CreatedWorldArtifacts::publish_bound_file(m_path, destination, m_descriptor, stage);
 #endif
             return true;
         } catch (const std::exception&) {
@@ -1047,12 +1072,12 @@ public:
         }
     }
 
-    bool remove_bound(bool directory = false) {
+    bool remove_bound(bool directory = false, const BoundPublicationStage* stage = nullptr) {
         try {
 #if defined(_WIN32)
-            CreatedWorldArtifacts::remove_bound_entry(m_path, m_handle, directory);
+            CreatedWorldArtifacts::remove_bound_entry(m_path, m_handle, directory, stage);
 #else
-            CreatedWorldArtifacts::remove_bound_entry(m_path, m_descriptor, directory);
+            CreatedWorldArtifacts::remove_bound_entry(m_path, m_descriptor, directory, stage);
 #endif
             return close();
         } catch (const std::exception&) {
@@ -1560,7 +1585,15 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
                             const std::filesystem::path& destination,
                             const std::array<std::uint64_t, 3>& expected,
                             const std::array<std::uint64_t, 3>& incoming,
-                            std::vector<std::string>* errors) {
+                            std::vector<std::string>* errors,
+                            const BoundPublicationStage* source_stage = nullptr,
+                            const BoundPublicationStage* retired_stage = nullptr) {
+    BoundPublicationStage source_slot, retired_slot;
+    if (!source_stage &&
+        SaveTransaction::publication_stages(destination, source_slot, retired_slot)) {
+        source_stage = &source_slot;
+        retired_stage = &retired_slot;
+    }
     StagingFile source(temp, StagingFile::Mode::Inspect);
     StagingIdentity source_identity{};
     if (!source.identity(source_identity) ||
@@ -1573,17 +1606,18 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
         StagingIdentity actual{};
         if (!current.identity(actual) ||
             !std::equal(expected.begin(), expected.end(), actual.begin()) ||
-            !current.remove_bound()) {
+            !current.remove_bound(false, retired_stage)) {
             AddError(errors, "snapshot publication occupant changed");
             return false;
         }
         report_snapshot_step("after-retire", destination);
     }
-    if (!source.publish_bound(destination)) {
+    if (!source.publish_bound(destination, source_stage)) {
         AddError(errors, "cannot exclusively publish protected snapshot member");
         return false;
     }
-    return true;
+    return !source_stage ||
+           WorldSaveService::durable_flush_directory(source_stage->directory, errors);
 }
 
 #if defined(_WIN32)
@@ -2444,9 +2478,9 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
     }
     // Save-dirty is transient, but the container's sticky edited flag is the
     // durable authority bit. Pristine cached chunks stay regenerable.
-    if ((record.flags & kRecordFlagEdited) != 0u) {
+    if ((record.flags & kRecordFlagEdited) != 0u && !chunks.front()->has_water_authority()) {
         chunks.front()->mark_sdf_loaded_or_edited();
-    } else {
+    } else if ((record.flags & kRecordFlagEdited) == 0u) {
         chunks.front()->mark_sdf_generated_current_params();
     }
     return chunks.front();
@@ -3035,7 +3069,8 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
         if (calendar)
             metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
         std::string normalized;
-        if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes - 1, normalized, 4)) {
+        if (!BoundedJsonDump(
+                metadata, SavedInputLimits::kMetadataBytes - 1, normalized, 4, false)) {
             AddError(errors,
                      "Saved-input admission refused: normalized metadata exceeds 2 MiB "
                      "compatibility limit.");
@@ -3147,7 +3182,7 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
             metadata["container_version"] = kIndexedMetadataVersion;
             metadata["snapshotFormat"] = 1;
             std::string bytes;
-            if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes - 1, bytes, 4) ||
+            if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes - 1, bytes, 4, false) ||
                 !transaction->protect({"world_info.json"}, errors) ||
                 !write_file_durably(save_dir / "world_info.json", bytes + "\n", errors, artifacts))
                 return false;
@@ -4362,19 +4397,22 @@ bool WorldSaveService::artifact_identity(const std::filesystem::path& path,
 bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
                                           const ArtifactIdentity& expected,
                                           std::vector<std::string>* errors,
-                                          bool directory) {
+                                          bool directory,
+                                          const BoundPublicationStage* stage) {
     const SaveOwnership ownership;
     const auto publish = LockPublication(path);
     StagingFile bound(path, directory ? StagingFile::Mode::Directory : StagingFile::Mode::Inspect);
     StagingIdentity identity{};
     if (!bound.identity(identity, directory, std::numeric_limits<unsigned>::max()) ||
         !std::equal(expected.begin(), expected.end(), identity.begin()) ||
-        !bound.remove_bound(directory)) {
+        !bound.remove_bound(directory, stage)) {
         AddError(errors,
                  "snapshot artifact ownership changed: " + Filesystem::GenericUtf8PathString(path));
         return false;
     }
-    return durable_flush_directory(path.parent_path(), errors);
+    return durable_flush_directory(path.parent_path(), errors) &&
+           (!stage || stage->directory == path.parent_path() ||
+            durable_flush_directory(stage->directory, errors));
 }
 
 bool WorldSaveService::prepare_restoration(const std::filesystem::path& staging,
@@ -4391,13 +4429,16 @@ bool WorldSaveService::publish_restoration(const std::filesystem::path& temp,
                                            const std::filesystem::path& destination,
                                            const ArtifactIdentity& expected,
                                            const ArtifactIdentity& incoming,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           const BoundPublicationStage* source_stage,
+                                           const BoundPublicationStage* retired_stage) {
     const SaveOwnership ownership;
     report_snapshot_step("before-replace", destination);
     PublicationRevision().fetch_add(1, std::memory_order_relaxed);
     {
         const auto publication = LockPublication(destination);
-        if (!PublishProtectedMember(temp, destination, expected, incoming, errors))
+        if (!PublishProtectedMember(
+                temp, destination, expected, incoming, errors, source_stage, retired_stage))
             return false;
     }
     if (!durable_flush_directory(destination.parent_path(), errors) ||
@@ -4436,12 +4477,17 @@ bool WorldSaveService::durable_remove(const std::filesystem::path& path,
         ActiveFacts()->invalidate_presence_facts();
     // Windows dispositions target the verified handle; POSIX uses a retained-parent
     // quarantine and restores a substituted entry instead of unlinking it.
-    if (!retained.remove()) {
+    BoundPublicationStage unused_stage, retired_stage;
+    const auto* stage = SaveTransaction::publication_stages(path, unused_stage, retired_stage)
+                            ? &retired_stage
+                            : nullptr;
+    if (!retained.remove(1, stage)) {
         AddError(errors, "cannot retire removed payload identity");
         return false;
     }
     const auto parent = path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
-    if (!durable_flush_directory(parent, errors))
+    if (!durable_flush_directory(parent, errors) ||
+        (stage && !durable_flush_directory(stage->directory, errors)))
         return false;
     report_snapshot_step("after-delete", path);
     return true;

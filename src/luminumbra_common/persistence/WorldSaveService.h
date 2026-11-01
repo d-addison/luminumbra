@@ -26,6 +26,7 @@ struct EntityRegistrySnapshot;
 namespace Luminumbra::Persistence {
 
 class CreatedWorldArtifacts;
+struct BoundPublicationStage;
 
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
@@ -402,7 +403,8 @@ public:
     static bool remove_owned_entry(const std::filesystem::path& path,
                                    const ArtifactIdentity& identity,
                                    std::vector<std::string>* errors,
-                                   bool directory = false);
+                                   bool directory = false,
+                                   const BoundPublicationStage* stage = nullptr);
     static bool prepare_restoration(const std::filesystem::path& staging,
                                     const std::string& bytes,
                                     std::filesystem::path& temp,
@@ -412,7 +414,9 @@ public:
                                     const std::filesystem::path& destination,
                                     const ArtifactIdentity& expected,
                                     const ArtifactIdentity& incoming,
-                                    std::vector<std::string>* errors);
+                                    std::vector<std::string>* errors,
+                                    const BoundPublicationStage* source_stage = nullptr,
+                                    const BoundPublicationStage* retired_stage = nullptr);
     // Unlinks `path` when it exists (a missing file is success) and flushes the parent directory.
     // Fires "before-delete"/"after-delete".
     static bool durable_remove(const std::filesystem::path& path,

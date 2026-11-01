@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -62,6 +63,10 @@ public:
     SavedInputFile& operator=(const SavedInputFile&) = delete;
 
     ~SavedInputFile();
+
+    // Keep the native object alive without retaining this reader's publication
+    // stripe. Prevents native identity reuse during a transaction's replacements.
+    [[nodiscard]] std::shared_ptr<const void> retain_identity() const;
 
     [[nodiscard]] bool missing() const {
         return m_missing;

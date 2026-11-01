@@ -117,7 +117,8 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertIn("retained_payload->retain_publication_identity()", replacing)
         self.assertIn("StagingFile retained(path, StagingFile::Mode::Inspect)", removing)
         self.assertIn("SaveTransaction::check_publication_target(path, errors)", removing)
-        self.assertIn("retained.remove()", removing)
+        self.assertIn("retained.remove(1, stage)", removing)
+        self.assertIn("SaveTransaction::publication_stages(path, unused_stage, retired_stage)", removing)
         bound_removal = body(self.journal, "void remove_owned(").split("#else", 1)[0]
         self.assertLess(bound_removal.index("identity_from(owned.get())"),
                         bound_removal.index("FileDispositionInfo"))
@@ -206,15 +207,35 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
 
     def test_posix_publication_verifies_the_quarantined_entry_before_descriptor_relative_move(self):
         self.assertIn("publish_posix(source, target);", body(self.journal, "void publish_file("))
-        publication = body(self.journal, "void publish_posix(")
+        publication = re.sub(r"\s+", " ", body(self.journal, "void publish_posix("))
         self.assertLess(publication.index("const Quarantine quarantine("),
                         publication.index("::fstatat("))
         self.assertLess(publication.index("moved != source.identity"),
-                        publication.index('container.get(), "artifact", target_parent.get()'))
-        self.assertIn('source_parent.get(), source_name.c_str(), container.get(), "artifact"',
+                        re.sub(r"\s+", " ", publication).index(
+                            'quarantine.directory(), quarantine.entry(), target_parent.get()'))
+        self.assertIn('source_parent.get(), source_name.c_str(), quarantine.directory(), quarantine.entry()',
                       re.sub(r"\s+", " ", publication))
-        self.assertIn("restore_quarantined(", publication)
+        self.assertIn('quarantine.entry(), source_parent.get(), source_name.c_str()',
+                      re.sub(r"\s+", " ", publication))
         self.assertNotIn("AT_FDCWD", publication)
+
+    def test_indexed_moves_bind_recorded_quarantine_slots_before_publication(self):
+        transaction = (PERSISTENCE / "SaveTransaction.cpp").read_text(encoding="utf-8")
+        quarantine = body(self.journal, "explicit Quarantine(")
+        self.assertIn("stage->directory_identity !=", quarantine)
+        self.assertIn("identity_from(m_container.get())", quarantine)
+        self.assertIn("O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC", quarantine)
+        prepare = body(transaction, "bool SaveTransaction::prepare_publication(")
+        self.assertLess(prepare.index("input.identity(entry->incoming_identity)"),
+                        prepare.index("transaction->write_journal(errors)"))
+        stages = body(transaction, "bool SaveTransaction::publication_stages(")
+        self.assertIn('"incoming", destination', stages)
+        self.assertIn('"retired", destination', stages)
+        self.assertIn('journal / "undo/cleanup.txn.json"', transaction)
+        native = (ROOT / "test/persistence/SaveTransaction_test.cpp").read_text(encoding="utf-8")
+        for regression in ("EveryJournaledPublicationMoveRecoversThePreviousCommit",
+                           "RecoveryRefusesUnknownAndSubstitutedPublicationSlots"):
+            self.assertIn(regression, native)
 
     def test_journal_and_durable_writer_never_convert_native_paths_through_the_code_page(self):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")

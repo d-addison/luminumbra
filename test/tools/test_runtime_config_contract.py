@@ -117,9 +117,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", publish)
         self.assertNotIn("std::rename(", publish)
         publication = journal[journal.index("voidpublish_posix("):journal.index("voidcreate_owned_directory(")]
-        self.assertIn("::fstatat(container.get(),\"artifact\",&info,AT_SYMLINK_NOFOLLOW)", publication)
+        self.assertIn("::fstatat(quarantine.directory(),quarantine.entry(),&info,AT_SYMLINK_NOFOLLOW)", publication)
         self.assertIn("moved!=source.identity", publication)
-        self.assertIn("container.get(),\"artifact\",target_parent.get(),target_name.c_str()", publication)
+        self.assertIn("quarantine.directory(),quarantine.entry(),target_parent.get(),target_name.c_str()", publication)
         self.assertIn("Detail::RenameWithoutReplacement(", publication)
         self.assertIn("m_published&&!m_committed", publish)
         self.assertIn("::SetFileInformationByHandle(m_handle,FileDispositionInfo,", publish)
@@ -464,7 +464,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                         retention.index("constboolretired=close()"))
         self.assertIn("m_handle=retained;if(!retired)throwstd::runtime_error(", retention)
         record = service[service.index("voidrecord_artifact(CreatedWorldArtifacts&artifacts)"):
-                         service.index("boolremove(unsignedlinks=1)")]
+                         service.index("boolremove(unsignedlinks=1,constBoundPublicationStage*stage=nullptr)")]
         self.assertLess(record.index("retain_publication_identity()"),
                         record.index("artifacts.record_staged_file(m_path,m_handle)"))
         self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
@@ -569,7 +569,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", native)
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", native)
         self.assertIn("ReadFileIdentity(path,named)", native)
-        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_path,m_descriptor,false)", native)
+        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_path,m_descriptor,false,stage)", native)
         self.assertIn("info.nNumberOfLinks>links", native)
         self.assertIn("info.st_nlink>links", native)
 

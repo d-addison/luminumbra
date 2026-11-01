@@ -2580,7 +2580,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                 break;
             }
         }
-        if (!copied || !copier.save_world(state, save_dir, &copy_errors)) {
+        if (!copied) {
             for (const auto& error : copy_errors)
                 LUMINUMBRA_CORE_ERROR("World save-as failed: {}", error);
             return false;

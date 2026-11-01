@@ -44,6 +44,15 @@
 
 namespace Luminumbra::Persistence {
 
+// A transaction records this vacant slot and the expected payload identity before
+// a move. The containing directory is already owned and durably journaled.
+struct BoundPublicationStage {
+    std::filesystem::path directory;
+    std::filesystem::path name;
+    std::array<std::uint64_t, 3> directory_identity{};
+    void (*report)(const char*, const std::filesystem::path&) = nullptr;
+};
+
 #if defined(_WIN32)
 namespace Detail {
 class WindowsPublicationHandle {
@@ -449,22 +458,25 @@ public:
 
     // Delete only the object already bound by the caller. POSIX quarantines and checks the
     // moved object before unlink; Windows disposition acts on the verified native handle.
-    static void
-    remove_bound_entry(const std::filesystem::path& path, NativeFile file, bool directory) {
+    static void remove_bound_entry(const std::filesystem::path& path,
+                                   NativeFile file,
+                                   bool directory,
+                                   const BoundPublicationStage* stage = nullptr) {
         CreatedWorldArtifacts bound;
         bound.bind_existing_root(path.parent_path());
         Artifact artifact{.path = path,
                           .directory = directory,
                           .identity = identity_from(file),
                           .retained = duplicate_file(file)};
-        bound.remove_owned(artifact);
+        bound.remove_owned(artifact, stage);
     }
 
     // Publish the caller's bound source only into a vacant destination. Parents and source
     // identity are checked by the same platform implementation as initial creation.
     static void publish_bound_file(const std::filesystem::path& source,
                                    const std::filesystem::path& destination,
-                                   NativeFile file) {
+                                   NativeFile file,
+                                   const BoundPublicationStage* stage = nullptr) {
         CreatedWorldArtifacts bound;
         bound.bind_existing_root(source.parent_path());
         if (destination.parent_path() != source.parent_path()) {
@@ -482,9 +494,10 @@ public:
             std::filesystem::exists(std::filesystem::symlink_status(destination)))
             throw std::runtime_error("Publication source or vacant destination changed.");
 #if defined(_WIN32)
+        (void)stage;
         bound.publish_windows(from, to);
 #else
-        bound.publish_posix(from, to);
+        bound.publish_posix(from, to, stage);
 #endif
     }
 
@@ -899,7 +912,9 @@ private:
 #endif
 
 #if !defined(_WIN32)
-    void publish_posix(const Artifact& source, const Artifact& target) {
+    void publish_posix(const Artifact& source,
+                       const Artifact& target,
+                       const BoundPublicationStage* stage = nullptr) {
         const ScopedFile source_parent(::open(source.path.parent_path().c_str(),
                                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
         const ScopedFile target_parent(::open(target.path.parent_path().c_str(),
@@ -913,37 +928,46 @@ private:
         // Bind the entry in a private, single-entry directory before checking
         // its ID. Publication then uses that same entry and bound directories,
         // rather than looking up the public source pathname a second time.
-        const Quarantine quarantine(source_parent.get());
-        const ScopedFile container(::openat(source_parent.get(),
-                                            quarantine.name().c_str(),
-                                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-        if (container.get() < 0)
-            throw std::system_error(
-                errno, std::generic_category(), "Could not bind publication stage");
+        const Quarantine quarantine(source_parent.get(), stage);
         const auto source_name = source.path.filename();
         const auto target_name = target.path.filename();
-        if (Detail::RenameWithoutReplacement(
-                source_parent.get(), source_name.c_str(), container.get(), "artifact") != 0)
+        const bool already_staged =
+            stage && source_name == stage->name &&
+            identity_from(source_parent.get()) == identity_from(quarantine.directory());
+        if (!already_staged && Detail::RenameWithoutReplacement(source_parent.get(),
+                                                                source_name.c_str(),
+                                                                quarantine.directory(),
+                                                                quarantine.entry()) != 0)
             throw std::system_error(
                 errno, std::generic_category(), "Could not bind world artifact for publication");
         try {
+            if (stage && stage->report)
+                stage->report("publication-quarantined", target.path);
             struct stat info {};
-            if (::fstatat(container.get(), "artifact", &info, AT_SYMLINK_NOFOLLOW) != 0)
+            if (::fstatat(quarantine.directory(), quarantine.entry(), &info, AT_SYMLINK_NOFOLLOW) !=
+                0)
                 throw std::system_error(
                     errno, std::generic_category(), "Could not identify publication stage");
             const Identity moved{.device = info.st_dev, .inode = info.st_ino};
             if (!S_ISREG(info.st_mode) || moved != source.identity)
                 throw std::runtime_error("World artifact changed identity: " +
                                          Filesystem::GenericUtf8PathString(source.path));
-            if (Detail::RenameWithoutReplacement(
-                    container.get(), "artifact", target_parent.get(), target_name.c_str()) != 0)
+            if (Detail::RenameWithoutReplacement(quarantine.directory(),
+                                                 quarantine.entry(),
+                                                 target_parent.get(),
+                                                 target_name.c_str()) != 0)
                 throw std::system_error(
                     errno, std::generic_category(), "Could not exclusively publish world artifact");
         } catch (const std::exception& error) {
-            if (restore_quarantined(container.get(), source_parent.get(), source_name.c_str()) != 0)
+            if (!already_staged && Detail::RenameWithoutReplacement(quarantine.directory(),
+                                                                    quarantine.entry(),
+                                                                    source_parent.get(),
+                                                                    source_name.c_str()) != 0)
                 throw std::runtime_error(std::string(error.what()) + "; retained in quarantine: " +
                                          Filesystem::GenericUtf8PathString(
-                                             source.path.parent_path() / quarantine.name()));
+                                             stage
+                                                 ? stage->directory / stage->name
+                                                 : source.path.parent_path() / quarantine.name()));
             throw;
         }
     }
@@ -1051,17 +1075,26 @@ private:
     }
 
 #if !defined(_WIN32)
-    // Restoring a quarantined entry must not overwrite a second replacement.
-    static int restore_quarantined(int from, int to, const char* name) {
-        return Detail::RenameWithoutReplacement(from, "artifact", to, name);
-    }
-#endif
-
-#if !defined(_WIN32)
     class Quarantine {
     public:
-        explicit Quarantine(int parent)
+        explicit Quarantine(int parent, const BoundPublicationStage* stage = nullptr)
             : m_parent(parent) {
+            if (stage) {
+                m_container = ScopedFile(::open(stage->directory.c_str(),
+                                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+                if (m_container.get() < 0)
+                    throw std::runtime_error("Cannot bind journal publication stage.");
+                const auto identity = identity_from(m_container.get());
+                if (stage->directory_identity !=
+                        std::array<std::uint64_t, 3>{static_cast<std::uint64_t>(identity.device),
+                                                     static_cast<std::uint64_t>(identity.inode),
+                                                     0} ||
+                    stage->name.empty() || stage->name == "." || stage->name == ".." ||
+                    stage->name != stage->name.filename())
+                    throw std::runtime_error("Journal publication stage identity changed.");
+                m_entry = stage->name.native();
+                return;
+            }
             static std::atomic<std::uint64_t> sequence{0};
             // Bound collision retries; each private container holds just one entry.
             for (unsigned attempt = 0; attempt < 128; ++attempt) {
@@ -1069,6 +1102,10 @@ private:
                                  std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
                 if (::mkdirat(m_parent, candidate.c_str(), S_IRWXU) == 0) {
                     m_name = std::move(candidate);
+                    m_container = ScopedFile(::openat(
+                        m_parent, m_name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+                    if (m_container.get() < 0)
+                        throw std::runtime_error("Cannot bind artifact quarantine.");
                     return;
                 }
                 if (errno != EEXIST)
@@ -1080,25 +1117,36 @@ private:
         ~Quarantine() {
             // Only an empty container is removed. A failed restore retains
             // its entry for recovery, never recursively deletes it.
-            ::unlinkat(m_parent, m_name.c_str(), AT_REMOVEDIR);
+            if (!m_name.empty())
+                ::unlinkat(m_parent, m_name.c_str(), AT_REMOVEDIR);
         }
         Quarantine(const Quarantine&) = delete;
         Quarantine& operator=(const Quarantine&) = delete;
         const std::string& name() const {
             return m_name;
         }
+        int directory() const {
+            return m_container.get();
+        }
+        const char* entry() const {
+            return m_entry.c_str();
+        }
 
     private:
         int m_parent;
         std::string m_name{};
+        std::string m_entry{"artifact"};
+        ScopedFile m_container;
     };
 #endif
 
-    void remove_owned(const Artifact& artifact) const {
+    void remove_owned(const Artifact& artifact,
+                      const BoundPublicationStage* stage = nullptr) const {
         if (!artifact.identity)
             throw std::runtime_error("Unowned world artifact: " +
                                      Filesystem::GenericUtf8PathString(artifact.path));
 #if defined(_WIN32)
+        (void)stage;
         // Do not request DELETE_ON_CLOSE before checking the opened object's ID.
         const ScopedFile owned(
             ::CreateFileW(artifact.path.c_str(),
@@ -1138,34 +1186,40 @@ private:
                                          Filesystem::GenericUtf8PathString(candidate.path));
         }
 
-        const Quarantine quarantine(parent.get());
-        const ScopedFile container(::openat(parent.get(),
-                                            quarantine.name().c_str(),
-                                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-        if (container.get() < 0)
-            throw std::system_error(
-                errno, std::generic_category(), "Could not open world artifact quarantine");
+        const Quarantine quarantine(parent.get(), stage);
         const auto name = artifact.path.filename();
-        if (::renameat(parent.get(), name.c_str(), container.get(), "artifact") != 0) {
+        const bool already_staged =
+            stage && name == stage->name &&
+            identity_from(parent.get()) == identity_from(quarantine.directory());
+        if (!already_staged &&
+            Detail::RenameWithoutReplacement(
+                parent.get(), name.c_str(), quarantine.directory(), quarantine.entry()) != 0) {
             if (errno == ENOENT)
                 return;
             throw std::system_error(
                 errno, std::generic_category(), "Could not quarantine world artifact");
         }
         try {
+            if (stage && stage->report)
+                stage->report("retirement-quarantined", artifact.path);
             struct stat info {};
-            if (::fstatat(container.get(), "artifact", &info, AT_SYMLINK_NOFOLLOW) != 0)
+            if (::fstatat(quarantine.directory(), quarantine.entry(), &info, AT_SYMLINK_NOFOLLOW) !=
+                0)
                 throw std::system_error(
                     errno, std::generic_category(), "Could not inspect quarantined artifact");
             const Identity moved{.device = info.st_dev, .inode = info.st_ino};
             if (moved != *artifact.identity)
                 throw std::runtime_error("World artifact changed identity: " +
                                          Filesystem::GenericUtf8PathString(artifact.path));
-            if (::unlinkat(container.get(), "artifact", artifact.directory ? AT_REMOVEDIR : 0) != 0)
+            if (::unlinkat(quarantine.directory(),
+                           quarantine.entry(),
+                           artifact.directory ? AT_REMOVEDIR : 0) != 0)
                 throw std::system_error(
                     errno, std::generic_category(), "Could not remove quarantined artifact");
         } catch (const std::exception& error) {
-            if (restore_quarantined(container.get(), parent.get(), name.c_str()) != 0)
+            if (!already_staged &&
+                Detail::RenameWithoutReplacement(
+                    quarantine.directory(), quarantine.entry(), parent.get(), name.c_str()) != 0)
                 throw std::runtime_error(std::string(error.what()) + "; retained in quarantine: " +
                                          Filesystem::GenericUtf8PathString(
                                              artifact.path.parent_path() / quarantine.name()));

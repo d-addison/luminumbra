@@ -2351,6 +2351,9 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
     nlohmann::json metadata = {{"container_version", 2}};
     Luminumbra::world::WorldClock(123, {12000, 4}).write_metadata(metadata);
+    // This fixture exercises indexed validation; clock metadata alone remains legacy.
+    metadata["container_version"] = WorldSaveService::kIndexedMetadataVersion;
+    metadata["snapshotFormat"] = 1;
     const auto valid = metadata.dump(4) + "\n";
     ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
     EXPECT_EQ(read(), valid);
@@ -2373,7 +2376,7 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     PopulateFixtureWorld(state);
     EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
     EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path()));
-    // Clock-bearing metadata is an enabled indexed snapshot, so its region directory
+    // This fixture uses an enabled indexed snapshot, so its region directory
     // already exists. Refusal must preserve the published index, not remove that directory.
     std::ifstream index_after_file(index_path, std::ios::binary);
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>{index_after_file}, {}), index_before);

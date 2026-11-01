@@ -114,7 +114,7 @@ Valid legacy metadata v2 and manifest v1 saves, including clock/ledger pairs, lo
 LMR1 payload version 2 and the snapshot index schema remain unchanged; older readers refuse the new envelope.
 Previously stripped draft saves cannot be distinguished retroactively from valid legacy saves, and fingerprints do not authenticate history.
 
-Undo and publication identities are journaled before replacement; the snapshot index publishes last as the durable commit point.
+Journal v3 binds undo, publication and quarantine identities before either POSIX move; the snapshot index publishes last as the durable commit point.
 Before that point, successful rollback restores the complete previous committed member tree and leaves dirty and revision acknowledgements pending.
 After that point, cleanup failure preserves the new commit and leaves recovery work.
 Failed rollback of any transaction with a previous commit retains the recovery journal and refuses further admission until recovery succeeds.
@@ -122,7 +122,7 @@ Creation alone may retire its journal before artifact rollback, because no previ
 Rollback and journal retirement refuse foreign occupants and unknown contents; Windows checks the bound handle at deletion and POSIX verifies a quarantined entry before unlinking it.
 Journal control records are limited to 16 MiB and snapshot membership to 1,048,576 entries, with overflow-safe admission before allocation.
 Client periodic and pressure saves use the same entry, digest and capture-content refusal gate as exit saves.
-Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read.
+Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks.
 
 Clock/ledger pair saves are synchronous and serialize with all persistence writers in
 the process. The client calls them during world creation, its main-thread pause-menu
@@ -269,7 +269,9 @@ edited records contribute in every serialized lifecycle state, including
 `Loading`. Durable pristine records are regenerable caches and never contribute.
 Residency and save history cannot change the result. The provider uses a dedicated
 `region_content_v2` projection in chunk-id order: identity,
-SDF, heightmap, materials, integer water depth/bed/flux, water initialization,
+authoritative terrain (SDF, heightmap and materials, distinguished from generated
+terrain by the persisted `terrain_authoritative` boolean in indexed `water_state`),
+integer water depth/bed/flux, water initialization,
 resolution and solver sleep/threshold state. Lifecycle state/state_value,
 collider flags, render meshes/bookkeeping, transient dirtiness, far render
 records, compression and container envelopes are excluded. Legacy hashing and

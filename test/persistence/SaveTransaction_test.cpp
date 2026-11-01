@@ -548,6 +548,38 @@ TEST(SaveTransaction, AbortRestoresPreviousBytesAndRemovesCreatedMembers) {
     EXPECT_FALSE(journal_pending(save.path()));
 }
 
+TEST(SaveTransaction, AbsoluteTransactionProtectsEquivalentRelativeWriterPaths) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto before = Tree(save.path());
+    const auto relative = fs::relative(save.path(), fs::current_path());
+    ASSERT_TRUE(relative.is_relative());
+    SaveTransaction transaction(fs::absolute(save.path()), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json", "aether_state.efs"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(relative, "world_info.json", "first"));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(relative, "world_info.json", "second"));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(relative, "aether_state.efs", "created"));
+    transaction.abort(nullptr);
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, UnprotectedMemberAndEscapingPublicationRefuseWithoutMutation) {
+    TempSave save, outside;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({}, nullptr));
+    const auto before = Tree(save.path());
+    EXPECT_FALSE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    std::vector<std::string> errors;
+    EXPECT_FALSE(
+        SaveTransaction::prepare_publication(outside.path() / "world_info.json", {}, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(Tree(save.path()), before);
+}
+
 TEST(SaveTransaction, AbortRefusesForeignCreatedAndReplacedOccupants) {
     for (const bool replacing : {false, true}) {
         SCOPED_TRACE(replacing);
@@ -936,6 +968,28 @@ TEST(SaveTransaction, CreationIndexPublicationRetainsIdentitiesForRollback) {
     }
 }
 
+TEST(SaveTransaction, RecoveryRefusesUnknownAndSubstitutedPublicationSlots) {
+    for (const bool unknown : {false, true}) {
+        SCOPED_TRACE(unknown);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        const auto slot = journal_directory(save.path()) / "undo" /
+                          (unknown ? "unrecognized" : "incoming.world_info.json");
+        Put(slot, "foreign");
+        const auto evidence = Tree(save.path());
+        std::vector<std::string> errors;
+        EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Tree(save.path()), evidence);
+        ASSERT_TRUE(fs::remove(slot));
+        transaction.abort(nullptr);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
 TEST(SaveTransaction, RecoveryDiscardsStaleJournalWhenIndexAlreadyCommitted) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "v0"}}));
@@ -1095,6 +1149,45 @@ TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
     EXPECT_FALSE(errors.empty());
 }
 
+TEST(SaveTransaction, RecoveryRestoresRetiringControlAndRefusesInvalidRetiringEvidence) {
+    for (const auto* input : {"valid", "empty", "partial", "unknown", "directory"}) {
+        SCOPED_TRACE(input);
+        TempSave save, retained;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        const auto control = journal_directory(save.path()) / "txn.json";
+        const auto slot = journal_directory(save.path()) / "undo/cleanup.txn.json";
+        const auto saved_control = retained.path() / "control";
+        if (std::string_view(input) == "valid") {
+            fs::rename(control, slot);
+            EXPECT_EQ(
+                recover_pending_journal(fs::relative(save.path(), fs::current_path()), nullptr),
+                RecoveryOutcome::RolledBack);
+            EXPECT_EQ(Tree(save.path()), baseline);
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+        } else {
+            fs::rename(control, saved_control);
+            if (std::string_view(input) == "directory")
+                ASSERT_TRUE(fs::create_directory(slot));
+            else
+                Put(slot,
+                    std::string_view(input) == "empty"     ? ""
+                    : std::string_view(input) == "partial" ? "{"
+                                                           : R"({"schema":"unknown"})");
+            const auto evidence = Tree(save.path());
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            EXPECT_EQ(Tree(save.path()), evidence);
+            ASSERT_TRUE(fs::remove(slot));
+            fs::rename(saved_control, control);
+            transaction.abort(nullptr);
+            EXPECT_EQ(Tree(save.path()), baseline);
+        }
+    }
+}
+
 TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
     TempSave save;
     fs::create_directories(journal_directory(save.path()));
@@ -1168,6 +1261,42 @@ TEST(SaveTransaction, InitialIndexRefusesNonFileMemberWithoutPublishingPartialIn
 }
 
 #if !defined(_WIN32)
+
+TEST(SaveTransactionDeathTest, EveryJournaledPublicationMoveRecoversThePreviousCommit) {
+    ::testing::GTEST_FLAG(death_test_style) = "fast";
+    for (const std::string_view step : {"before-replace",
+                                        "retirement-quarantined",
+                                        "after-retire",
+                                        "publication-quarantined",
+                                        "after-replace"}) {
+        SCOPED_TRACE(step);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto before = Tree(save.path());
+        EXPECT_EXIT(
+            {
+                SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+                if (!transaction.begin(nullptr) ||
+                    !transaction.protect({"world_info.json"}, nullptr))
+                    std::_Exit(9);
+                // The selected event is local to this member, after its journal append.
+                static std::string_view selected = step;
+                set_snapshot_step_hook_for_testing(+[](const char* event, const fs::path& path) {
+                    if (path.filename() == "world_info.json" && event == selected)
+                        std::_Exit(7);
+                });
+                (void)WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new");
+                std::_Exit(9);
+            },
+            ::testing::ExitedWithCode(7),
+            "");
+        std::vector<std::string> errors;
+        ASSERT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::RolledBack)
+            << (errors.empty() ? "" : errors.front());
+        EXPECT_EQ(Tree(save.path()), before);
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+    }
+}
 
 TEST(SaveTransactionDeathTest, KillAtEveryStepRecoversToBaselineOrFinal) {
     // Fork-style death tests: the child inherits the parent's directories, so the paths computed
