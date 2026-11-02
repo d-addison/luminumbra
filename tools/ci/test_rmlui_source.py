@@ -1314,6 +1314,39 @@ class DeliveryRefusals(unittest.TestCase):
             self.assertEqual(final_scans, 1)
         self.assertEqual(target.read_bytes(), b"object")
 
+    def test_git_zero_link_working_tree_entry_is_live_only(self):
+        root = self.w.root.parent
+        target = root / "source"
+        target.write_bytes(b"source")
+        inventory, lstat = M.inventory, os.lstat
+        for transient in (True, False):
+            live_scans = final_scans = 0
+            def scan(candidate, **kwargs):
+                nonlocal live_scans, final_scans
+                live = kwargs.get("live_git", False)
+                if live:
+                    live_scans += 1
+                else:
+                    final_scans += 1
+                def inspect(path, *args, **stat_kwargs):
+                    info = lstat(path, *args, **stat_kwargs)
+                    if Path(path) == target and (live or not transient):
+                        return StatFields(info, st_nlink=0)
+                    return info
+                with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    result = inventory(candidate, **kwargs)
+                self.assertEqual(set(result), set() if live else {"source"})
+                return result
+            with self.subTest(transient=transient), mock.patch.object(M, "inventory", side_effect=scan):
+                if transient:
+                    self.assertTrue(M.git(root, "--version").startswith(b"git version"))
+                else:
+                    with self.assertRaisesRegex(M.Refusal, r"nonordinary source entry: source mode=0o[0-7]+ nlink=0"):
+                        M.git(root, "--version")
+            self.assertGreaterEqual(live_scans, 1)
+            self.assertEqual(final_scans, 1)
+        self.assertEqual(target.read_bytes(), b"source")
+
     def test_live_git_inventory_link_counts_are_scoped_to_ordinary_admin_files(self):
         cases = (("source", (1,)), ("nested/.git/object", (1,)),
                  (".git-object", (1,)), (".git/objects/xx/tmp_obj_1", (0, 1, 2)))
@@ -1343,6 +1376,10 @@ class DeliveryRefusals(unittest.TestCase):
                             if field.startswith("st_") and field != "st_nlink":
                                 self.assertEqual(getattr(actual[name], field), getattr(native, field), field)
                         self.assertEqual(actual[name].st_nlink, links)
+                    elif links == 0 and not reparse and not name.startswith(".git/"):
+                        with mock.patch.object(M, "STORAGE_BYTES", 0):
+                            actual = M.inventory(root, live_git=True)
+                        self.assertEqual(set(actual), set())
                     else:
                         expected = f"nonordinary source entry: {name} mode={oct(real_lstat(path).st_mode)} nlink={links}"
                         with self.assertRaises(M.Refusal) as refused:

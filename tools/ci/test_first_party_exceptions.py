@@ -52,6 +52,22 @@ def ninja_path():
 
 
 class FirstPartyExceptionsTests(unittest.TestCase):
+    def test_large_test_objects_use_source_local_msvc_options(self):
+        source = (ROOT / 'test/CMakeLists.txt').read_text(encoding='utf-8')
+        source = re.sub(r'#[^\n]*', '', source)
+        blocks = re.findall(r'if\(MSVC\)\s*(.*?)\s*endif\(\)', source, re.DOTALL)
+        expected = {'common/GameSessionHeadlessWorld_test.cpp',
+                    'rendering/render_smoke_test.cpp'}
+        protected = set()
+        for block in blocks:
+            for match in re.finditer(
+                    r'set_source_files_properties\(\s*(.*?)\s+PROPERTIES\s+'
+                    r'COMPILE_OPTIONS\s+"/bigobj"\s*\)', block, re.DOTALL):
+                protected.update(match[1].split())
+        self.assertEqual(protected, expected)
+        # The option must not invalidate every test object's compiler cache.
+        self.assertNotRegex(source, r'target_compile_options\([^)]*/bigobj')
+
     def configure(self, *, msvc=True, warnings=True, testing=True, flags='/Z7', config='Release'):
         cmake = shutil.which('cmake')
         self.assertIsNotNone(cmake, 'CMake is required')
