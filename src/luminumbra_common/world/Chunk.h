@@ -164,7 +164,8 @@ public:
 
     // --- Durable water state (S3 durable residency) ---
     // Water fields (depth/flux/bed/sleep bookkeeping) are persisted evolution state. Every writer
-    // that changes them calls mark_water_state_dirty(). The bit is flag independent and
+    // that changes depth, flux or bed calls mark_water_state_dirty(); sleep bookkeeping marks only
+    // chunks that already need authority. The bit is flag independent and
     // unobservable unless SHIELD_WorldSystem::sync_water_authority() consumes it (only called when
     // sim.active_regions is on).
     void mark_water_state_dirty() {

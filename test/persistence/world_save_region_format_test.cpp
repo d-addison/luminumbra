@@ -686,6 +686,78 @@ TEST(WorldSaveRegionFormat, ExactIndexedReadDistinguishesAbsentFromLostOrCorrupt
               WorldSaveService::ChunkReadStatus::Error);
 }
 
+TEST(WorldSaveRegionFormat, ChunkReadBatchVerifiesEachRegionOnceUntilAPublication) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("batched_exact_reads");
+    WorldStreamingState state;
+    for (int x = 0; x != 2; ++x) {
+        const auto chunk = state.get_or_create_chunk({x, 0, 0});
+        chunk->set_state(ChunkState::Idle);
+        chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -1.0f - static_cast<float>(x));
+        chunk->mark_voxel_data_dirty();
+    }
+    {
+        P::SaveTransaction baseline(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(baseline.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(baseline.commit(nullptr));
+    }
+    static std::filesystem::path counted;
+    static int region_opens = 0;
+    counted = WorldSaveService::region_file_path(save.path, 0, 0);
+    struct StopCounting {
+        ~StopCounting() {
+            P::detail::set_file_read_observer_for_testing(nullptr);
+        }
+    } const stop_counting;
+    P::detail::set_file_read_observer_for_testing(
+        +[](const std::filesystem::path& path, bool opening) {
+            if (opening && path == counted)
+                ++region_opens;
+        });
+    const auto read_front = [&save](int x, float expected) {
+        const auto opens = region_opens;
+        const auto result = WorldSaveService::read_chunk(save.path, {x, 0, 0}, true);
+        EXPECT_EQ(result.status, WorldSaveService::ChunkReadStatus::Found);
+        if (result.chunk && !result.chunk->sdf_data.empty()) {
+            EXPECT_EQ(result.chunk->sdf_data.front(), expected);
+        }
+        return region_opens - opens;
+    };
+    {
+        const WorldSaveService::ChunkReadBatch batch;
+        EXPECT_EQ(read_front(0, -1.0f), 1);
+        EXPECT_EQ(read_front(1, -2.0f), 0);
+        {
+            const WorldSaveService::ChunkReadBatch nested;
+            EXPECT_EQ(read_front(0, -1.0f), 0);
+        }
+        EXPECT_EQ(read_front(1, -2.0f), 0);
+        // A commit on this thread replaces verified members; the next read re-admits them.
+        const auto first = state.get_or_create_chunk({0, 0, 0});
+        first->sdf_data.front() = -9.0f;
+        first->mark_voxel_data_dirty();
+        {
+            P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_EQ(WorldSaveService{}.save_dirty_chunks(state, save.path).regions_written, 1u);
+            ASSERT_TRUE(transaction.commit(nullptr));
+        }
+        EXPECT_EQ(read_front(0, -9.0f), 1);
+        EXPECT_EQ(read_front(1, -2.0f), 0);
+    }
+    std::ofstream(counted, std::ios::binary | std::ios::trunc) << "invalid";
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {0, 0, 0}, true).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    const WorldSaveService::ChunkReadBatch tampered;
+    for (int x = 0; x != 2; ++x) {
+        const auto opens = region_opens;
+        EXPECT_EQ(WorldSaveService::read_chunk(save.path, {x, 0, 0}, true).status,
+                  WorldSaveService::ChunkReadStatus::Error);
+        EXPECT_EQ(region_opens - opens, 1);
+    }
+}
+
 TEST(WorldSaveRegionFormat, IndexedCommitRefusesMalformedLatticeWithoutAcknowledgement) {
     namespace P = Luminumbra::Persistence;
     TempSaveDir save("indexed_lattice");

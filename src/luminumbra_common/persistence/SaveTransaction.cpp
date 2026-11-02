@@ -657,6 +657,55 @@ bool VerifyRetiredIndexUndo(const fs::path& save_dir,
     return true;
 }
 
+// Windows publication links the destination before retiring the source name, so an
+// interruption can leave a recorded temporary (or its cleanup slot) as a second name of the
+// occupant. Retire only those recorded names; any other link refuses before mutation.
+bool RetirePublicationAliases(const fs::path& save_dir,
+                              const JournalDocument& document,
+                              const JournalEntry& entry,
+                              const fs::path& destination,
+                              const ArtifactIdentity& current,
+                              bool retire,
+                              std::vector<std::string>* errors) {
+    if (entry.action != "replace" || current == ArtifactIdentity{})
+        return true;
+    std::vector<std::pair<fs::path, BoundPublicationStage>> aliases;
+    for (const auto& [name, identity] :
+         {std::pair{entry.incoming_temporary, entry.incoming_identity},
+          std::pair{entry.restored_temporary, entry.restored_identity}}) {
+        if (name.empty() || identity != current)
+            continue;
+        const auto temporary = save_dir / name;
+        const auto slot = CleanupStage(save_dir, document.undo_directory_identity, temporary);
+        for (const auto& candidate : {temporary, slot.directory / slot.name}) {
+            ArtifactIdentity actual{};
+            bool missing = false;
+            if (!WorldSaveService::artifact_identity(candidate, actual, missing)) {
+                AddError(errors, "snapshot publication alias unreadable: " + entry.path);
+                return false;
+            }
+            if (!missing && actual == current)
+                aliases.emplace_back(candidate, slot);
+        }
+    }
+    if (aliases.empty())
+        return true;
+    ArtifactIdentity occupant{};
+    bool missing = false;
+    if (!WorldSaveService::artifact_identity(
+            destination, occupant, missing, false, static_cast<unsigned>(aliases.size() + 1)) ||
+        missing || occupant != current) {
+        AddError(errors, "foreign snapshot publication alias: " + entry.path);
+        return false;
+    }
+    if (!retire)
+        return true;
+    for (const auto& [alias, slot] : aliases)
+        if (!WorldSaveService::remove_owned_entry(alias, current, errors, false, &slot))
+            return false;
+    return true;
+}
+
 // Undo is replayable: the identity of a restoration is itself journaled before publication.
 // Never overwrite an occupant merely because its bytes differ from the old commit.
 bool RollbackEntries(const fs::path& save_dir,
@@ -682,7 +731,9 @@ bool RollbackEntries(const fs::path& save_dir,
         bool missing = false;
         bool previous_bytes = false;
         if (!OwnedOccupant(
-                save_dir / entry->path, *entry, current, missing, previous_bytes, errors))
+                save_dir / entry->path, *entry, current, missing, previous_bytes, errors) ||
+            !RetirePublicationAliases(
+                save_dir, document, *entry, save_dir / entry->path, current, false, errors))
             return false;
     }
     for (auto* entry : order) {
@@ -690,7 +741,9 @@ bool RollbackEntries(const fs::path& save_dir,
         ArtifactIdentity current{};
         bool missing = false;
         bool previous_bytes = false;
-        if (!OwnedOccupant(destination, *entry, current, missing, previous_bytes, errors))
+        if (!OwnedOccupant(destination, *entry, current, missing, previous_bytes, errors) ||
+            !RetirePublicationAliases(
+                save_dir, document, *entry, destination, current, true, errors))
             return false;
         const auto retired_stage = JournalStage(
             save_dir, document.undo_directory_identity, "rollback-retired", destination);

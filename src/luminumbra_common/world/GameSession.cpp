@@ -2915,7 +2915,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;
         m_regionRequiresIndex = saved.requires_index;
-        m_worldSystem->remember_durable_chunks(saved.durable_inventory);
+        m_worldSystem->replace_durable_chunks(saved.durable_inventory);
         m_regionSchedule = {};
         m_regionWork.clear();
         m_regionFault.reset();

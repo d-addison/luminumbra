@@ -1250,6 +1250,55 @@ TEST(SaveTransaction, TornJournalTailsRestoreCompletedOwnershipAndAllowTheNextSa
     }
 }
 
+TEST(SaveTransaction, RecoveryRetiresTheRecordedPublicationAliasAndRefusesForeignLinks) {
+    for (const bool foreign : {false, true}) {
+        SCOPED_TRACE(foreign);
+        const TempSave save;
+        const TempSave elsewhere;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        const auto member = save.path() / "world_info.json";
+        {
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+            ASSERT_TRUE(
+                WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            std::string incoming;
+            for (const auto& entry : JournalRecords(save.path()).back().at("entries"))
+                if (entry.at("path") == "world_info.json")
+                    incoming = entry.at("incoming_temporary").get<std::string>();
+            ASSERT_FALSE(incoming.empty());
+            const auto alias = save.path() / incoming;
+            ASSERT_FALSE(fs::exists(alias));
+            // An interruption between linking the destination and retiring the source name
+            // leaves the recorded temporary as a second name of the installed member.
+            fs::create_hard_link(member, alias);
+            if (foreign) {
+                const auto unknown = elsewhere.path() / "foreign-link";
+                fs::create_hard_link(member, unknown);
+                const auto evidence = Tree(save.path());
+                std::vector<std::string> errors;
+                EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+                EXPECT_FALSE(errors.empty());
+                EXPECT_EQ(Tree(save.path()), evidence);
+                EXPECT_EQ(fs::hard_link_count(member), 3u);
+                ASSERT_TRUE(fs::remove(unknown));
+            }
+            std::vector<std::string> errors;
+            ASSERT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::RolledBack)
+                << (errors.empty() ? "" : errors.front());
+            EXPECT_EQ(Tree(save.path()), baseline);
+            EXPECT_FALSE(fs::exists(alias));
+            EXPECT_EQ(fs::hard_link_count(member), 1u);
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+            transaction.abort(nullptr);
+        }
+        ASSERT_TRUE(CommitOnce(save.path(), 3, {{"world_info.json", "next"}}));
+        EXPECT_EQ(Get(member), "next");
+    }
+}
+
 TEST(SaveTransaction, RestorationIdentityBelongsToTheCreatedObjectBeforeClosing) {
     TempSave save;
     static fs::path original;

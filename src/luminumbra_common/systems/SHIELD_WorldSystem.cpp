@@ -3783,6 +3783,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     if (anchors.empty() || m_durable_read_failed) {
         return false; // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
     }
+    // Restorations in one pass share each verified region file.
+    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
     // Per-anchor chunk coordinates (the wanted-set is the UNION of each anchor's disc;
     // eviction below keeps a chunk if it is in range of ANY anchor). One anchor ->
     // identical to the historical single-anchor path.
@@ -4287,6 +4289,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                                                 int surface_radius,
                                                 int collision_radius,
                                                 int render_lod0_radius) {
+    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
     // Preserve the direct API's historical negative-to-zero normalization.
     const int radius = std::max(0, surface_radius);
     const int collision_range = std::max(0, collision_radius);
@@ -5042,6 +5045,7 @@ void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
 }
 
 bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m) {
+    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
     if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > 16.0f ||
         !std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z) ||
         std::abs(world_pos.x) > 32000.0f || std::abs(world_pos.y) > 32000.0f ||
@@ -5120,6 +5124,7 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                          float radius_m,
                                          bool fill,
                                          PhysicsSystem* physics_system) {
+    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
     // The edit must fit its subsequent synchronous remesh before touching SDF.
     constexpr float max_edit_radius =
         static_cast<float>((World::kMaxSurfaceRadius - 2) * CHUNK_SIZE_X);
@@ -5830,6 +5835,7 @@ SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     const std::vector<ChunkGenerationRequest>& chunks_to_generate) {
+    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
     if (m_durable_read_failed)
         return {};
     // dispatch APPENDS a batch to the lane FIFO (the old
@@ -6876,6 +6882,21 @@ void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coord
         m_digest_members[digest_region_id(rx, rz)].durable.insert_or_assign(id, coord);
         ++m_digest_membership_revision;
     }
+}
+
+void SHIELD_WorldSystem::replace_durable_chunks(const std::vector<IVec3>& coords) {
+    if (!m_durable_chunks.empty() && m_durable_residency) {
+        for (auto region = m_digest_members.begin(); region != m_digest_members.end();) {
+            region->second.durable.clear();
+            if (region->second.live.empty() && region->second.parked.empty())
+                region = m_digest_members.erase(region);
+            else
+                ++region;
+        }
+        ++m_digest_membership_revision;
+    }
+    m_durable_chunks.clear();
+    remember_durable_chunks(coords);
 }
 
 std::vector<IVec3> SHIELD_WorldSystem::durable_chunk_inventory() const {

@@ -285,6 +285,13 @@ int PositiveMod(int value, int divisor) {
     return result < 0 ? result + divisor : result;
 }
 
+// Sleep flags and the calm counter are saved only with water that is already durable.
+// They never make regenerable water authoritative.
+void MarkWaterBookkeeping(Chunk& chunk) {
+    if (chunk.needs_authority())
+        chunk.mark_water_state_dirty();
+}
+
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
 // is ). Injects deterministic river sources, runs flux -> K outflow-clamp -> symmetric apply on
 // the int32 depth/bed/edge_flux, applies the sea/edge sink + evaporation, and regenerates the float
@@ -1174,7 +1181,7 @@ void WaterSystem::update(entt::registry& registry,
     }
     for (Chunk* chunk : chunks_to_wake) {
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
-        chunk->mark_water_state_dirty();
+        MarkWaterBookkeeping(*chunk);
     }
 
     // Bound per-tick work to MAX_WATER_CELLS_PER_TICK. Medium retains its historical flat rotating
@@ -1451,7 +1458,7 @@ void WaterSystem::update(entt::registry& registry,
         }
         if (chunk->ticks_below_threshold != previous_counter ||
             chunk->is_water_sleeping.load(std::memory_order_relaxed) != was_sleeping)
-            chunk->mark_water_state_dirty();
+            MarkWaterBookkeeping(*chunk);
         if (m_sim_resolution != static_cast<int>(WaterDetailLevel::Medium)) {
             m_water_activity_cache[chunk->get_id()] = WaterActivityScore(*chunk);
         }

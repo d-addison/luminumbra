@@ -2142,6 +2142,8 @@ public:
     NewFilePublication(const NewFilePublication&) = delete;
     NewFilePublication& operator=(const NewFilePublication&) = delete;
     ~NewFilePublication() {
+        if (m_published && !m_committed)
+            PublicationRevision().fetch_add(1, std::memory_order_relaxed);
 #if defined(_WIN32)
         if (m_handle != INVALID_HANDLE_VALUE) {
             if (m_published && !m_committed) {
@@ -2171,6 +2173,7 @@ public:
         const auto publish = LockPublication(m_destination);
         if (!AllowPublication(m_destination, false, errors))
             return false;
+        PublicationRevision().fetch_add(1, std::memory_order_relaxed);
 #if defined(_WIN32)
         // Keep the created destination link bound; rollback targets its handle, never a
         // replacement file found by looking up the destination a second time.
@@ -4790,12 +4793,13 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
 bool WorldSaveService::artifact_identity(const std::filesystem::path& path,
                                          ArtifactIdentity& result,
                                          bool& missing,
-                                         bool directory) {
+                                         bool directory,
+                                         unsigned max_links) {
     result = {};
     missing = false;
     StagingFile bound(path, directory ? StagingFile::Mode::Directory : StagingFile::Mode::Inspect);
     StagingIdentity identity{};
-    if (bound.identity(identity, directory, std::numeric_limits<unsigned>::max())) {
+    if (bound.identity(identity, directory, max_links)) {
         std::copy_n(identity.begin(), result.size(), result.begin());
         return true;
     }
@@ -4813,6 +4817,7 @@ bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
                                           const BoundPublicationStage* stage) {
     const SaveOwnership ownership;
     const auto publish = LockPublication(path);
+    PublicationRevision().fetch_add(1, std::memory_order_relaxed);
     StagingFile bound(path, directory ? StagingFile::Mode::Directory : StagingFile::Mode::Inspect);
     StagingIdentity identity{};
     if (!bound.identity(identity, directory, std::numeric_limits<unsigned>::max()) ||
@@ -5300,8 +5305,10 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
         if (!WriteFileDurably(destination, bytes, destination, errors, &published_identity)) {
             // A final directory-flush failure may follow replacement. Restore a
             // separate hard-link entry so retry can still recognize the alias.
-            if (!backup.empty() && MatchesFileIdentity(destination, published_identity))
+            if (!backup.empty() && MatchesFileIdentity(destination, published_identity)) {
+                PublicationRevision().fetch_add(1, std::memory_order_relaxed);
                 ReplaceRegionFileAtomically(backup, destination, errors);
+            }
             return false;
         }
         // Case and directory aliases still name the replacement entry. Separate
@@ -5315,8 +5322,10 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
         if (SameFileIdentity(remaining_source, published_identity))
             return true;
         if (!std::filesystem::remove(source, error) || error) {
-            if (!backup.empty() && MatchesFileIdentity(destination, published_identity))
+            if (!backup.empty() && MatchesFileIdentity(destination, published_identity)) {
+                PublicationRevision().fetch_add(1, std::memory_order_relaxed);
                 ReplaceRegionFileAtomically(backup, destination, errors);
+            }
             AddError(errors, "cannot remove rename source: " + error.message());
             return false;
         }
@@ -5390,9 +5399,53 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
     return prepared.prepare(state, save_dir, false, errors) && prepared.publish(errors);
 }
 
+namespace {
+struct ChunkReadCache {
+    struct Admission {
+        WorldSaveService::SaveFormat format;
+        SnapshotIndex index;
+    };
+    static constexpr std::size_t kMaxRegions = 16;
+
+    std::uint64_t revision = PublicationRevision().load(std::memory_order_relaxed);
+    std::map<std::filesystem::path, Admission> admissions;
+    std::map<std::filesystem::path, std::vector<RegionRecord>> regions;
+};
+
+// Any publication may change an index or region file; drop everything verified before it.
+void RefreshChunkReadCache(ChunkReadCache& cache) {
+    const auto current = PublicationRevision().load(std::memory_order_relaxed);
+    if (current == cache.revision)
+        return;
+    cache.admissions.clear();
+    cache.regions.clear();
+    cache.revision = current;
+}
+
+std::optional<ChunkReadCache>& ActiveChunkReadCache() {
+    static thread_local std::optional<ChunkReadCache> active;
+    return active;
+}
+} // namespace
+
+WorldSaveService::ChunkReadBatch::ChunkReadBatch() {
+    if (ActiveChunkReadCache())
+        return;
+    ActiveChunkReadCache().emplace();
+    m_owner = true;
+}
+
+WorldSaveService::ChunkReadBatch::~ChunkReadBatch() {
+    if (m_owner)
+        ActiveChunkReadCache().reset();
+}
+
 WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
     const std::filesystem::path& save_dir, const IVec3& coords, bool require_index) {
     const detail::SnapshotReadOwnership ownership;
+    auto& batch = ActiveChunkReadCache();
+    if (batch)
+        RefreshChunkReadCache(*batch);
     ChunkReadResult result;
     const auto fail = [&result](std::string error) {
         result.status = ChunkReadStatus::Error;
@@ -5405,19 +5458,42 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         region_coords_for_chunk(coords, rx, rz);
         const auto path = region_file_path(save_dir, rx, rz);
         std::vector<std::string> errors;
-        SnapshotIndex index;
-        SaveFormat format;
-        if (!read_save_format(save_dir, format, &errors, {}, &index))
-            return fail(errors.empty() ? "corrupt snapshot index" : errors.front());
-        if (require_index && !format.indexed)
+        ChunkReadCache::Admission read_admission;
+        const ChunkReadCache::Admission* admission = nullptr;
+        if (batch) {
+            if (const auto cached = batch->admissions.find(save_dir);
+                cached != batch->admissions.end())
+                admission = &cached->second;
+        }
+        if (!admission) {
+            if (!read_save_format(
+                    save_dir, read_admission.format, &errors, {}, &read_admission.index))
+                return fail(errors.empty() ? "corrupt snapshot index" : errors.front());
+            admission =
+                batch
+                    ? &batch->admissions.emplace(save_dir, std::move(read_admission)).first->second
+                    : &read_admission;
+        }
+        if (require_index && !admission->format.indexed)
             return fail("inconsistent snapshot: index missing");
-        std::vector<RegionRecord> records;
-        if (!ReadRegionFile(path, records, &errors, {}, true))
-            return fail(errors.empty() ? "unreadable chunk region" : errors.front());
-        if (!VerifyRegionMembership(path, records, &errors, &index))
-            return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
+        std::vector<RegionRecord> read_records;
+        const std::vector<RegionRecord>* records = nullptr;
+        if (batch) {
+            if (const auto cached = batch->regions.find(path); cached != batch->regions.end())
+                records = &cached->second;
+        }
+        if (!records) {
+            if (!ReadRegionFile(path, read_records, &errors, {}, true))
+                return fail(errors.empty() ? "unreadable chunk region" : errors.front());
+            if (!VerifyRegionMembership(path, read_records, &errors, &admission->index))
+                return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
+            if (batch && batch->regions.size() >= ChunkReadCache::kMaxRegions)
+                batch->regions.erase(batch->regions.begin());
+            records = batch ? &batch->regions.emplace(path, std::move(read_records)).first->second
+                            : &read_records;
+        }
         const auto id = Chunk::calculate_id(coords);
-        for (const auto& record : records) {
+        for (const auto& record : *records) {
             if (record.lod_level != 0 || record.id != id)
                 continue;
             result.chunk = DecodeChunkRecord(record, path, &errors);
@@ -5427,7 +5503,7 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
                 (!result.chunk->sdf_data.empty() && result.chunk->sdf_data.size() != kLattice))
                 return fail(errors.empty() ? "corrupt exact chunk identity or SDF lattice"
                                            : errors.front());
-            if (!format.indexed)
+            if (!admission->format.indexed)
                 PromoteLegacyWaterRecord(*result.chunk, record);
             result.chunk->normalize_for_park();
             result.status = ChunkReadStatus::Found;

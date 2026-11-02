@@ -6570,6 +6570,45 @@ TEST(GameSessionHeadlessWorldTest, CanonicalSaveAfterAlternateLoadWritesCleanRes
     EXPECT_FALSE(reopened.GetRegionSchedulerFault());
 }
 
+TEST(GameSessionHeadlessWorldTest, LoadingAnotherSnapshotReplacesTheDurableInventory) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const Luminumbra::IVec3 distant(1280, 0, -1280);
+    const auto alternate = root.path() / "inventory-without-distant";
+    GameSession owner, adopter, control;
+    for (auto* s : {&owner, &adopter, &control})
+        EnableSnapshotSession(*s, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Inventory replacement", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldStateTo(alternate));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(distant);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    ASSERT_EQ(P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), distant, true).status,
+              P::WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_EQ(P::WorldSaveService::read_chunk(alternate, distant, true).status,
+              P::WorldSaveService::ChunkReadStatus::Absent);
+
+    ASSERT_TRUE(control.CreateTransientWorld("Control", "1337", "default"));
+    ASSERT_TRUE(control.LoadWorldStateFrom(alternate)) << control.GetWorldOpenError();
+    ASSERT_TRUE(adopter.LoadWorld(owner.GetMetadata().worldId)) << adopter.GetWorldOpenError();
+    const auto canonical = adopter.GetWorldSystem()->durable_chunk_inventory();
+    ASSERT_NE(std::find(canonical.begin(), canonical.end(), distant), canonical.end());
+    ASSERT_FALSE(adopter.GetWorldSystem()->region_digest_inputs(40, -40).durable.empty());
+
+    ASSERT_TRUE(adopter.LoadWorldStateFrom(alternate)) << adopter.GetWorldOpenError();
+    auto* world = adopter.GetWorldSystem();
+    const auto adopted = world->durable_chunk_inventory();
+    EXPECT_EQ(adopted, control.GetWorldSystem()->durable_chunk_inventory());
+    EXPECT_EQ(std::find(adopted.begin(), adopted.end(), distant), adopted.end());
+    EXPECT_TRUE(world->region_digest_inputs(40, -40).durable.empty());
+    // A member only the previous snapshot held is not expected authority of the adopted one.
+    EXPECT_FALSE(world->restore_authoritative_chunk(distant));
+    EXPECT_FALSE(adopter.GetRegionSchedulerFault().has_value());
+}
+
 TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -6590,6 +6629,61 @@ TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved)
     ASSERT_EQ(restored.status, P::WorldSaveService::ChunkReadStatus::Found);
     ASSERT_NE(restored.chunk, nullptr);
     EXPECT_EQ(restored.chunk->water_depth_mm, chunk->water_depth_mm);
+}
+
+TEST(GameSessionHeadlessWorldTest, ExitSaveSkipsSimulatedButUnchangedWater) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const Luminumbra::IVec3 coords(0, 0, 0);
+    for (const bool changed : {false, true}) {
+        SCOPED_TRACE(changed);
+        RegionalWaterScenario scenario;
+        auto& session = scenario.session;
+        EnableSnapshotSession(session, root, jobs);
+        ASSERT_TRUE(
+            session.CreateWorld(changed ? "Changed water" : "Idle water", "1337", "default"));
+        auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+        chunk->mark_sdf_generated_current_params();
+        chunk->is_water_sleeping.store(true);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        scenario.water_chunks.emplace(chunk->get_id(), chunk);
+        auto* water = session.GetWaterSystem();
+        water->update(session.GetRegistry(), scenario.water_chunks);
+        ASSERT_EQ(chunk->water_depth_mm.size(), 64u);
+        // Dry water at rest: every step keeps depth and flux and only advances the calm counter.
+        chunk->water_bed_mm.assign(64, 4000);
+        chunk->water_depth_mm.assign(64, 0);
+        chunk->water_edge_flux.assign(128, 0);
+        chunk->is_water_sleeping.store(false);
+        const auto revision = chunk->water_revision();
+        for (int tick = 0; tick < 130; ++tick)
+            water->update(session.GetRegistry(), scenario.water_chunks);
+        EXPECT_EQ(chunk->ticks_below_threshold, 120);
+        EXPECT_TRUE(chunk->is_water_sleeping.load());
+        EXPECT_EQ(chunk->water_revision(), revision);
+        EXPECT_FALSE(chunk->needs_authority());
+        if (changed)
+            water->apply_displacement(Luminumbra::Vec3(8.0f, 0.0f, 8.0f), 4.0f);
+
+        Luminumbra::world::WorldStateSaveReport report;
+        ASSERT_TRUE(session.SaveWorldState(&report));
+        EXPECT_EQ(report.chunks_dirty, changed ? 1u : 0u);
+        EXPECT_EQ(chunk->has_water_authority(), changed);
+        const auto durable =
+            P::WorldSaveService::read_chunk(session.GetWorldSaveDir(), coords, true);
+        if (!changed) {
+            EXPECT_NE(durable.status, P::WorldSaveService::ChunkReadStatus::Found);
+            continue;
+        }
+        ASSERT_EQ(durable.status, P::WorldSaveService::ChunkReadStatus::Found) << durable.error;
+        ASSERT_NE(durable.chunk, nullptr);
+        EXPECT_EQ(durable.chunk->water_depth_mm, chunk->water_depth_mm);
+        EXPECT_EQ(durable.chunk->ticks_below_threshold, chunk->ticks_below_threshold);
+        EXPECT_EQ(durable.chunk->is_water_sleeping.load(), chunk->is_water_sleeping.load());
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, JoinedLedgerWriterDoesNotRetainCallerLocalReference) {

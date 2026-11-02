@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -278,6 +279,20 @@ public:
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
                                       const IVec3& coords,
                                       bool require_index = false);
+    // While alive, read_chunk calls on this thread admit each index and verify each region
+    // file once, until any publication changes the snapshot. Nested batches share the outer.
+    class ChunkReadBatch {
+    public:
+        ChunkReadBatch();
+        ~ChunkReadBatch();
+        ChunkReadBatch(const ChunkReadBatch&) = delete;
+        ChunkReadBatch& operator=(const ChunkReadBatch&) = delete;
+        ChunkReadBatch(ChunkReadBatch&&) = delete;
+        ChunkReadBatch& operator=(ChunkReadBatch&&) = delete;
+
+    private:
+        bool m_owner = false;
+    };
     // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
     // or saturated revision retains its dirty obligation.
     static std::function<void()>
@@ -398,10 +413,12 @@ public:
                                       std::vector<std::string>* errors,
                                       std::size_t rollback_reserve = 0);
     // Recovery operations require the recorded object, including at the destructive operation.
+    // A file with more than max_links names is reported as neither identified nor missing.
     static bool artifact_identity(const std::filesystem::path& path,
                                   ArtifactIdentity& identity,
                                   bool& missing,
-                                  bool directory = false);
+                                  bool directory = false,
+                                  unsigned max_links = std::numeric_limits<unsigned>::max());
     static bool remove_owned_entry(const std::filesystem::path& path,
                                    const ArtifactIdentity& identity,
                                    std::vector<std::string>* errors,

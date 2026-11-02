@@ -1044,6 +1044,8 @@ public:
     void set_durable_chunk_loader(std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
                                   std::function<void(std::string)> fault);
     void remember_durable_chunks(const std::vector<IVec3>& coords);
+    // Adopting another snapshot replaces the committed inventory instead of extending it.
+    void replace_durable_chunks(const std::vector<IVec3>& coords);
     std::vector<IVec3> durable_chunk_inventory() const;
     // Owner-thread membership is maintained at adoption/parking/eviction, never rebuilt per probe.
     Persistence::RegionDigestInputs region_digest_inputs(i32 rx, i32 rz) const;
